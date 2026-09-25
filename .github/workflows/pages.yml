@@ -1,0 +1,45 @@
+# FUTURE TEST DEPLOYMENT ONLY. Nothing runs merely because this file is uploaded.
+# Enable Pages with GitHub Actions and manually run this workflow when approved.
+name: Publish Jarc Database
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jarc-database-pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Read this repository
+        uses: actions/checkout@v6
+      # Only the generated browser files are exposed as website content.
+      - name: Check prepared files
+        # Fail before publishing if development files were uploaded by mistake.
+        run: |
+          test -f site/index.html
+          test -f site/.nojekyll
+          test -f site/assets/BoardModel.js
+          test -f site/assets/AppController.js
+          if grep -Eq 'src/main|\.tsx?(["?])' site/index.html; then exit 1; fi
+          if find site -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.map' \) | grep -q .; then exit 1; fi
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload the prepared test website
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - name: Publish when manually requested
+        id: deployment
+        uses: actions/deploy-pages@v4
