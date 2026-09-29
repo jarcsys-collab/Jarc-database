@@ -1,0 +1,50 @@
+/* Discoverable board controls, with equal visibility in both themes. */
+.view-tabs>button{font-size:13px;padding:12px 14px;gap:8px}
+.view-tabs>button.active{background:var(--accent-soft);font-weight:650;border-radius:8px 8px 0 0}
+.view-tabs .icon,.tool-button .icon{width:17px;height:17px}
+.tool-button{font-size:12px;min-height:38px;padding:8px 12px;border:1px solid var(--line-strong);background:var(--surface);border-radius:8px;gap:7px}
+.tool-button:hover{border-color:var(--accent);background:var(--accent-soft)}
+.search-field,.select-control{height:38px;border-color:var(--line-strong);border-radius:8px}
+.search-field input,.select-control select,.compact-primary{font-size:13px}
+.compact-primary{min-height:38px;border-radius:8px}
+.group-title{font-size:13px;font-weight:600;padding:12px 0}
+.group-title small{font-size:12px;padding:1px 7px;background:var(--surface-2);border-radius:20px}
+.table-guidance{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:0 0 10px}
+.table-guidance>div{display:flex;flex-wrap:wrap;gap:8px 20px}
+.table-guidance span{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
+.table-guidance .icon{width:16px;height:16px}
+.table-guidance .button{color:var(--text);border-color:var(--line-strong);border-radius:8px}
+.table-wrap{border-color:var(--line-strong);border-radius:12px;scrollbar-width:auto;scrollbar-color:var(--line-strong) var(--surface-2)}
+.editable-table th{height:50px;color:var(--text);font-weight:650}
+.column-header-inline{gap:8px;padding-right:6px}
+.column-header-inline input{font-size:12px;font-weight:650;color:var(--text)}
+.column-header-inline button{opacity:1;color:var(--muted);width:28px;height:28px;flex-shrink:0;align-items:center;justify-content:center;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface)}
+.column-header-inline button:hover{color:var(--text);border-color:var(--accent)}
+.column-header-inline .icon{width:15px;height:15px}
+.column-resizer:after{content:"";position:absolute;right:2px;top:16px;bottom:16px;width:2px;border-radius:2px;background:var(--line-strong)}
+.editable-table td{height:56px;color:var(--text)}
+.editable-table .inline-editor{font-size:13px;min-height:34px;padding:6px 8px;border-radius:6px;color:var(--text)}
+.editable-table select.inline-editor{border-color:var(--line);background-color:var(--surface-2);cursor:pointer}
+.editable-table .inline-notes{line-height:1.5}
+.editable-table .row-drag-handle{opacity:1;color:var(--muted);width:24px;height:34px;border-radius:5px}
+.editable-table .row-drag-handle:hover{color:var(--accent);background:var(--accent-soft)}
+.editable-table .row-select-cell{padding-left:30px;min-width:66px}
+.editable-table .row-actions,.editable-table .actions-col{position:sticky;right:0;min-width:136px;width:136px;z-index:5;border-left:1px solid var(--line-strong);box-shadow:-6px 0 12px -9px #0007;background:var(--surface);text-align:center}
+.editable-table .actions-col{z-index:7;background:var(--surface-2);font-size:12px}
+.editable-table tr:hover .row-actions{background:var(--surface-2)}
+.editable-table tr.is-selected .row-actions{background:var(--accent-soft)}
+.row-open-button,.row-more-button{display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;min-height:34px;color:var(--text);border:1px solid var(--line-strong);border-radius:7px;background:var(--surface);font-size:12px}
+.row-open-button{padding:5px 9px;gap:5px;margin-right:5px;font-weight:600}
+.row-open-button .icon{width:14px;height:14px}
+.row-more-button{width:32px;padding:4px}
+.row-open-button:hover,.row-more-button:hover{background:var(--accent-soft);border-color:var(--accent)}
+.quick-add-row button{font-size:13px;font-weight:600;color:var(--text);padding:8px 12px;border:1px dashed var(--line-strong);border-radius:7px}
+.editable-table .status-editor,.editable-table .priority-editor{font-weight:600}
+.editable-table .status-editor[data-value="In Progress"]{color:light-dark(#1758a3,#a8cdff);background-color:light-dark(#e8f1ff,#22374f);border-color:light-dark(#b7d2f4,#3d5a7e)}
+.editable-table .status-editor:is([data-value="Completed"],[data-value="Clear"]){color:light-dark(#146344,#9ce6c5);background-color:light-dark(#e2f4eb,#1c3c30);border-color:light-dark(#a9d9c2,#37634e)}
+.editable-table .status-editor:is([data-value="Review"],[data-value="Waiting"]),.editable-table .priority-editor[data-value="Medium"]{color:light-dark(#785009,#f2cf8b);background-color:light-dark(#fff3d9,#40341e);border-color:light-dark(#e5cd96,#6b5630)}
+.editable-table .priority-editor:is([data-value="High"],[data-value="Critical"]){color:light-dark(#a33146,#ffb2c0);background-color:light-dark(#ffebef,#442831);border-color:light-dark(#edb9c4,#75414c)}
+.editable-table select option{background:var(--surface);color:var(--text)}
+html[data-density=compact] .editable-table td{height:42px}
+html[data-density=compact] .editable-table .inline-editor{min-height:30px;padding-top:3px;padding-bottom:3px}
+@media(max-width:1000px){.tool-left,.tool-right{flex-wrap:wrap}.table-guidance{align-items:flex-start}.table-guidance>div{gap:6px}.table-guidance span{font-size:11px}.table-guidance .button{flex-shrink:0}}
