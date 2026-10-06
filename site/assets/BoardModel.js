@@ -162,6 +162,8 @@ class BoardModel {
     this.snapshot("Board creation undone");
     const keys=template==="blank"?["serial"]:template==="inventory"?["serial","group","owner","received","invoice","dueDate","status","notes"]:["serial","group","owner","dueDate","status","priority","notes"];
     const board={id:"board-"+crypto.randomUUID(),name:name.trim()||"Untitled board",description,icon:"D",records:[],activity:[],createdAt:new Date().toISOString(),groups:["New","Working","Done"],savedViews:[],columns:this.defaultColumns.filter(c=>keys.includes(c.key)).map(c=>({...c,visible:true,required:c.key==="serial",defaultValue:"",options:[]}))};
+    // A blank board starts with only its primary column, labelled "Item". The key stays "serial" for compatibility.
+    if(template==="blank")board.columns[0].label="Item";
     this.workspace.boards.push(board); this.openBoard(board.id); this.log("Board created"); this.save(); return board;
   }
 
