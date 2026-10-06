@@ -677,3 +677,79 @@ body.nav-collapsed .workspace-switch { padding: 7px 0; }
   .section-heading h2 { font-size: var(--fs-md); }
   .notification-button { width: 32px; height: 32px; }
 }
+
+/* 12. Columns & table shell (Stage 3)
+   -------------------------------------------------------------------------- */
+/* Header: type glyph, name, one menu button; the resize handle stays on the edge. */
+.column-header { display: flex; align-items: center; gap: 7px; min-width: 0; padding-right: 6px; }
+.column-type-glyph { display: inline-flex; color: var(--faint); }
+.column-type-glyph .icon { width: 14px; height: 14px; }
+.column-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); font-weight: 650; color: var(--text); }
+.column-menu-button { display: inline-grid; place-items: center; flex-shrink: 0; width: 26px; height: 26px; border-radius: var(--radius-sm); color: var(--muted); opacity: 0; transition: opacity .12s, background .12s; }
+.column-menu-button .icon { width: 16px; height: 16px; }
+th:hover .column-menu-button, th:focus-within .column-menu-button, .column-menu-button[aria-expanded=true] { opacity: 1; }
+.column-menu-button:hover { background: var(--pressed); color: var(--text); }
+@media (hover: none) { .column-menu-button { opacity: .8; } }
+
+/* "+" column after the last data column. */
+/* It soaks up spare table width so the "+" sits right after the last column. */
+.editable-table .add-column-col { width: 100%; min-width: 56px; padding: 0 12px; text-align: left; }
+.editable-table th.add-column-col { background: var(--surface-2); }
+.add-column-button { display: inline-grid; place-items: center; width: 32px; height: 32px; border: 1px dashed var(--line-strong); border-radius: var(--radius-md); color: var(--muted); background: transparent; }
+.add-column-button .icon { width: 16px; height: 16px; }
+.add-column-button:hover { color: var(--accent-text); border-color: var(--accent); border-style: solid; background: var(--selected); }
+
+/* Inline add-record row; with zero records it carries a quiet note instead of a big empty screen. */
+.quick-add-row td { height: auto; padding-top: 10px; padding-bottom: 10px; }
+.quick-add-row button { display: inline-flex; align-items: center; gap: 6px; }
+.empty-table-note { margin-left: 12px; font-size: var(--fs-sm); color: var(--faint); }
+.table-wrap.is-empty { margin-top: 4px; }
+
+/* Column type chooser */
+.column-chooser { width: min(640px, 100%); }
+.column-chooser .modal-head { margin-bottom: 16px; }
+.column-chooser .eyebrow .icon { width: 13px; height: 13px; vertical-align: -2px; margin-right: 2px; }
+.chooser-search { display: flex; align-items: center; gap: 10px; height: var(--control-h-lg); padding: 0 12px; margin-bottom: 16px; border: 1px solid var(--line-strong); border-radius: var(--radius-md); background: var(--surface); color: var(--faint); }
+.chooser-search .icon { width: 16px; height: 16px; }
+.chooser-search input { flex: 1; min-width: 0; border: 0; padding: 0; background: transparent; outline: none; font-size: var(--fs-md); }
+.chooser-search input:focus-visible { box-shadow: none; }
+.chooser-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+.chooser-groups { display: grid; gap: 14px; max-height: min(56vh, 520px); overflow: auto; padding: 2px; }
+.chooser-group h3 { margin: 0 0 6px 2px; font-size: var(--fs-xs); font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--faint); }
+.chooser-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.chooser-option { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 8px 10px; text-align: left; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); min-width: 0; }
+.chooser-option:hover { background: var(--surface-2); border-color: var(--line-strong); }
+.chooser-option > span:last-child { display: grid; min-width: 0; }
+.chooser-option strong { font-size: var(--fs-base); font-weight: 600; color: var(--text); }
+.chooser-option strong em { font-style: normal; font-size: 10px; font-weight: 600; margin-left: 6px; padding: 1px 6px; border-radius: var(--radius-pill); background: var(--selected); color: var(--accent-text); vertical-align: 1px; }
+.chooser-option small { font-size: var(--fs-xs); color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chooser-option.is-current, .chooser-option.is-current:disabled { opacity: 1; border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); background: var(--selected); cursor: default; }
+.chooser-icon { display: grid; place-items: center; flex-shrink: 0; width: 30px; height: 30px; border-radius: 7px; background: var(--surface-2); color: var(--accent-text); }
+.chooser-icon .icon { width: 16px; height: 16px; }
+.chooser-empty, .chooser-note { margin: 4px 2px 0; font-size: var(--fs-sm); color: var(--faint); }
+.chooser-note { margin-top: 14px; }
+
+/* Column menu */
+.column-menu-popover { width: 248px; }
+.popover > button:disabled { opacity: .5; cursor: not-allowed; }
+.popover > button:disabled:hover { background: transparent; }
+.menu-reason { margin-left: auto; font-size: var(--fs-xs); color: var(--faint); white-space: nowrap; }
+.popover-copy { margin: 0; padding: 0 10px 8px; font-size: var(--fs-sm); color: var(--muted); line-height: 1.5; }
+.group-help-popover { width: 270px; }
+
+/* Option editor */
+.option-list { display: grid; gap: 6px; margin-bottom: 8px; max-height: 45vh; overflow: auto; padding: 2px; }
+.option-row { display: flex; align-items: center; gap: 8px; }
+.option-row input { flex: 1; min-width: 0; }
+.option-usage { width: 76px; flex-shrink: 0; text-align: right; font-size: var(--fs-xs); color: var(--faint); white-space: nowrap; }
+.add-option-button { padding-left: 8px; }
+
+.field-note { margin-left: 6px; font-weight: 500; color: var(--faint); }
+
+@media (max-width: 620px) {
+  /* On phones the record-actions column scrolls with the table instead of covering the data. */
+  .editable-table .row-actions, .editable-table .actions-col { position: static; box-shadow: none; }
+  .chooser-grid { grid-template-columns: 1fr; }
+  .chooser-groups { max-height: 52vh; }
+  .option-usage { width: 60px; }
+}

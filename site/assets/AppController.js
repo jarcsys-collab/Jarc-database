@@ -85,7 +85,7 @@ class AppController {
     if (action === "confirm-delete-records") this.deleteRecords(target.dataset.payload.split(",").map(Number));
     if (action === "clear-selection") { this.model.selected.clear(); this.update(); }
     if(action==="sort")this.view.showSort(this.model);
-    if (action === "group") { this.model.grouped = !this.model.grouped; this.model.activeSavedViewId=null; this.update(); }
+    if (action === "group") { if(!this.model.groupColumn){this.togglePanel("group-help",()=>this.view.showGroupHelp());return;} this.model.grouped = !this.model.grouped; this.model.activeSavedViewId=null; this.update(); }
     if (action === "clear-filters") { this.model.resetMainView(); this.update(); }
     if (action === "toggle-favorite") { this.model.toggleFavorite(this.model.currentBoardId); this.update(); this.view.toast(this.model.board.favorite?"Board added to favorites":"Board removed from favorites"); }
     if (action === "edit-description") this.view.showDescription(this.model);
@@ -99,8 +99,26 @@ class AppController {
     if (action === "column-editor") this.togglePanel(`column-${target.dataset.key}`,()=>this.view.showColumnEditor(this.model,target.dataset.key));
     if (action === "move-column") { const moved=this.model.moveColumn(target.dataset.key,target.dataset.direction); this.view.showColumnEditor(this.model,target.dataset.key); this.markPanel(`column-${target.dataset.key}`); this.view.toast(moved?"Column moved":"The primary record column stays first"); }
     if (action === "duplicate-column") { const copy=this.model.duplicateColumn(target.dataset.key); this.view.closeOverlay(); this.update(); if(copy)this.view.toast("Column duplicated"); }
-    if (action === "request-delete-column") { const column=this.model.board.columns.find((item)=>item.key===target.dataset.key); this.view.showConfirm("Delete column?",`${column.label} and all values in it will be removed.`,"confirm-delete-column",target.dataset.key); }
-    if (action === "confirm-delete-column") { this.model.deleteColumn(target.dataset.payload); this.view.closeOverlay(); this.update(); this.view.toast("Column deleted"); }
+    if (action === "request-delete-column") {
+      // Empty columns delete straight away (with Undo); columns holding data ask first and say how much.
+      const column=this.model.board.columns.find((item)=>item.key===target.dataset.key); if(!column||column.key==="serial")return;
+      const used=this.model.columnUsage(column.key);
+      if(!used){this.model.deleteColumn(column.key);this.view.closeOverlay();this.update();this.view.toast(`${column.label} column deleted`,true);}
+      else this.view.showConfirm(`Delete "${column.label}"?`,`This column contains data in ${used} record${used===1?"":"s"}. Deleting it will remove those values.`,"confirm-delete-column",column.key,"Delete column");
+    }
+    if (action === "confirm-delete-column") { this.model.deleteColumn(target.dataset.payload); this.view.closeOverlay(); this.update(); this.view.toast("Column deleted",true); }
+    if (action === "column-menu") this.togglePanel(`column-menu-${target.dataset.key}`,()=>this.view.showColumnMenu(this.model,target.dataset.key));
+    if (action === "choose-column-type") { this.view.showColumnNameStep(this.model,target.dataset.type); this.selectOverlayInput('[name="label"]'); }
+    if (action === "rename-column") { this.view.showRenameColumn(this.model,target.dataset.key); this.selectOverlayInput('[name="label"]'); }
+    if (action === "change-column-type") this.view.showColumnChooser(this.model,{mode:"change",key:target.dataset.key});
+    if (action === "choose-new-type") this.changeColumnType(target.dataset.key,target.dataset.type);
+    if (action === "confirm-change-type") { const [key,type]=target.dataset.payload.split("|"); this.changeColumnType(key,type,true); }
+    if (action === "edit-column-options") this.view.showOptionEditor(this.model,target.dataset.key);
+    if (action === "add-option-row") { const list=target.closest("form").querySelector(".option-list"); list.insertAdjacentHTML("beforeend",this.view.optionRow()); list.lastElementChild.querySelector("input").focus(); }
+    if (action === "remove-option-row") { const row=target.closest(".option-row"), next=row.nextElementSibling||row.previousElementSibling; row.remove(); (next?.querySelector("input")||this.root.querySelector('[data-action="add-option-row"]'))?.focus(); }
+    if (action === "confirm-column-options") this.applyColumnOptions(true);
+    if (action === "hide-column") { const column=this.model.board.columns.find((item)=>item.key===target.dataset.key); if(column&&this.model.setColumnVisible(column.key,false)){this.view.closeOverlay();this.update();this.view.toast(`${column.label} hidden · show it again from Columns`,true);} }
+    if (action === "add-group-column") { const column=this.model.addColumn({label:this.model.uniqueColumnLabel("Group"),type:"group"}); if(column){this.model.grouped=true;this.view.closeOverlay();this.update();this.view.toast("Group column added",true);} }
     if (action === "saved-views") this.togglePanel("views",()=>this.view.showSavedViews(this.model));
     if (action === "set-view") { this.model.setView(target.dataset.view); this.model.showArchived=false; this.update(); }
     if (action === "density-menu") this.togglePanel("density",()=>this.view.showDensityMenu(this.model));
@@ -162,6 +180,12 @@ class AppController {
   onInput(event) {
     if (event.target.dataset.action === "workspace-search") { const term=event.target.value.toLowerCase(); document.querySelectorAll(".workspace-list > button").forEach((button)=>{button.hidden=!button.textContent.toLowerCase().includes(term);}); return; }
     if (event.target.dataset.action === "command-search") { this.view.showCommandPalette(this.model,event.target.value); return; }
+    if (event.target.dataset.action === "column-type-search") {
+      const term=event.target.value.trim().toLowerCase(), modal=event.target.closest(".column-chooser"), options=[...modal.querySelectorAll(".chooser-option")];
+      options.forEach((b)=>{b.hidden=Boolean(term)&&!b.dataset.search.includes(term);});
+      modal.querySelectorAll(".chooser-group").forEach((g)=>{g.hidden=![...g.querySelectorAll(".chooser-option")].some((b)=>!b.hidden);});
+      modal.querySelector(".chooser-empty").hidden=options.some((b)=>!b.hidden); return;
+    }
     if (event.target.dataset.action !== "search") return;
     const cursor=event.target.selectionStart; this.model.query=event.target.value; this.model.activeSavedViewId=null; this.update();
     const input=document.querySelector('[data-action="search"]'); input?.focus(); input?.setSelectionRange(cursor,cursor);
@@ -209,6 +233,9 @@ class AppController {
     if (action === "invite-form") { if(this.model.addMember(data)){this.view.closeOverlay();this.update();this.view.toast("Member added");}else this.view.showMessage("Member not added","Use a unique email address."); }
     if (action === "global-search-form") this.globalSearch(data.term);
     if (action === "add-group-form") { if (this.model.addGroup(data.name)) { this.view.showGroupManager(this.model); this.view.toast("Group added"); } else this.view.showMessage("Group not added","Use a unique, non-empty group name."); }
+    if (action === "create-column-form") { const column=this.model.addColumn({label:data.label,type:data.type,options:data.options||""}); if(column){this.view.closeOverlay();this.update();this.root.querySelector(`th[data-column-key="${column.key}"]`)?.scrollIntoView({block:"nearest",inline:"nearest"});this.view.toast(`${column.label} column added`,true);} }
+    if (action === "rename-column-form") { if(this.model.renameColumn(data.key,data.label)){this.view.closeOverlay();this.update();this.view.toast("Column renamed",true);} }
+    if (action === "column-options-form") { this.pendingOptions={key:data.key,items:[...event.target.querySelectorAll(".option-row input")].map((input)=>({from:input.dataset.from||null,to:input.value}))}; this.applyColumnOptions(); }
     if (action === "add-column-form") { const column=this.model.addColumn({ ...data, required:Boolean(data.required) }); if(column){this.view.closeOverlay();this.update();this.view.toast(`${column.label} column added`);} }
     if (action === "edit-column-form") { this.model.renameColumn(data.key,data.label); this.model.updateColumnConfig({[data.key]:{visible:data.key==="serial"?true:Boolean(data.visible),required:data.key==="serial"?true:Boolean(data.required),connection:data.connection||"",defaultValue:data.defaultValue||"",options:String(data.options||"").split(",").map((item)=>item.trim()).filter(Boolean)}}); this.view.closeOverlay(); this.update(); this.view.toast("Column updated"); }
     if (action === "save-view-form") { if (this.model.saveView(data.name)) { this.view.closeOverlay(); this.update(); this.view.toast("View saved"); } }
@@ -226,6 +253,7 @@ class AppController {
     if(!this.auth.authenticated)return;
     if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="k"){event.preventDefault();this.view.showCommandPalette(this.model);return;}
     if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="b"&&!editing){event.preventDefault();this.toggleSidebar();return;}
+    if(event.target.dataset?.action==="column-type-search"&&event.key==="Enter"){event.preventDefault();event.target.closest(".column-chooser")?.querySelector(".chooser-option:not([hidden]):not(:disabled)")?.click();return;}
     if(event.key==="Escape"){
       event.preventDefault();
       if(["cell-edit","board-title-inline","column-label-inline"].includes(event.target.dataset.action)){event.target.value=event.target.dataset.beforeEdit??event.target.defaultValue;event.target.blur();return;}
@@ -395,5 +423,24 @@ class AppController {
     requestAnimationFrame(()=>{const focus=panel.querySelector('[autofocus]')||panel.querySelector('input:not([type="hidden"]),select,textarea')||panel.querySelector('button');focus?.focus();});
   }
   guard(action){try{action();}catch(error){this.view.showMessage("Action could not be completed",error.message);}}
+  selectOverlayInput(selector){requestAnimationFrame(()=>{const input=this.root.querySelector(`#overlay-root ${selector}`);input?.focus();input?.select();});}
+  // Change a column's type. Values that can't be kept are only cleared after an explicit confirmation.
+  changeColumnType(key,type,confirmed=false){
+    const column=this.model.board.columns.find((c)=>c.key===key), meta=this.model.columnType(type); if(!column||!meta)return;
+    if(column.key==="serial"){this.view.showMessage("Type not changed","The primary column always stays text.");return;}
+    const impact=this.model.typeChangeImpact(key,type);
+    if(impact&&!confirmed){this.view.showConfirm(`Change "${column.label}" to ${meta.label}?`,`${impact} record${impact===1?" has a value":"s have values"} that can't be stored as ${meta.label}. ${impact===1?"It":"They"} will be cleared. You can undo this right afterwards.`,"confirm-change-type",`${key}|${type}`,"Change type");return;}
+    const label=column.label, result=this.model.changeColumnType(key,type); this.view.closeOverlay(); this.update();
+    if(result)this.view.toast(`${label} is now ${meta.label}${result.cleared?` · ${result.cleared} value${result.cleared===1?"":"s"} cleared`:""}`,true);
+  }
+  // Save edited options. Removing options that records still use needs confirmation; renames carry values along.
+  applyColumnOptions(confirmed=false){
+    const pending=this.pendingOptions; if(!pending)return;
+    const plan=this.model.optionsEditPlan(pending.key,pending.items);
+    if(!plan||!plan.options.length){this.view.showMessage("Options not saved","Keep at least one option.");return;}
+    if(plan.affected&&!confirmed){const used=plan.removed.filter((o)=>this.model.rows.some((r)=>r[pending.key]===o));this.view.showConfirm("Remove options in use?",`${plan.affected} record${plan.affected===1?" uses":"s use"} ${used.length===1?`"${used[0]}"`:"the removed options"}. Those values will be cleared. You can undo this right afterwards.`,"confirm-column-options","","Remove options");return;}
+    const result=this.model.editColumnOptions(pending.key,pending.items); this.pendingOptions=null; this.view.closeOverlay(); this.update();
+    if(result)this.view.toast(`Options updated${result.cleared?` · ${result.cleared} value${result.cleared===1?"":"s"} cleared`:""}`,true);
+  }
 }
 try { new AppController(document.querySelector("#app")); } catch(error) { const root=document.querySelector("#app");root.textContent=error.message;root.setAttribute("role","alert"); }
