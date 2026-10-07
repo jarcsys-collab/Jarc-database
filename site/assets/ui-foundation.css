@@ -748,8 +748,112 @@ th:hover .column-menu-button, th:focus-within .column-menu-button, .column-menu-
 
 @media (max-width: 620px) {
   /* On phones the record-actions column scrolls with the table instead of covering the data. */
-  .editable-table .row-actions, .editable-table .actions-col { position: static; box-shadow: none; }
+  /* right:auto unpins it horizontally but keeps it positioned (a containing block for its hidden label). */
+  .editable-table .row-actions, .editable-table .actions-col { right: auto; box-shadow: none; }
   .chooser-grid { grid-template-columns: 1fr; }
   .chooser-groups { max-height: 52vh; }
   .option-usage { width: 60px; }
+}
+/* 13. Table interaction (Stage 4)
+   -------------------------------------------------------------------------- */
+/* Rows target ~42px (comfortable) / ~34px (compact). */
+.editable-table td { height: 42px; padding: 3px 4px; color: var(--text); vertical-align: middle; }
+html[data-density=compact] .editable-table td { height: 34px; padding-top: 1px; padding-bottom: 1px; }
+.editable-table th { height: 40px; }
+.editable-table td.cell { position: relative; }
+/* Keep focused/scrolled-to cells clear of the pinned Item column (left) and the actions column (right). */
+.table-wrap { scroll-padding-inline: 250px 90px; }
+html[data-sticky-column=off] .table-wrap { scroll-padding-inline-start: 70px; }
+
+/* Read mode: each cell is a full-size button that shows the value. */
+.cell-display { display: flex; align-items: center; width: 100%; min-height: 34px; padding: 4px 8px; gap: 8px; border-radius: var(--radius-sm); text-align: left; color: var(--text); font-size: var(--fs-base); cursor: text; overflow: hidden; }
+html[data-density=compact] .cell-display { min-height: 28px; padding-top: 2px; padding-bottom: 2px; }
+.cell-display:hover { background: var(--hover); }
+.cell-display:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; background: var(--selected); }
+.cell[data-type=status] .cell-display, .cell[data-type=priority] .cell-display, .cell[data-type=dropdown] .cell-display,
+.cell[data-type=group] .cell-display, .cell[data-type=owner] .cell-display, .cell[data-type=checkbox] .cell-display { cursor: pointer; }
+.cell-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editable-table td[data-column-key=serial] .cell-text { font-weight: 600; }
+.cell.is-number .cell-display { justify-content: flex-end; }
+.cell-number { font-variant-numeric: tabular-nums; }
+.cell-empty { color: var(--faint); font-size: var(--fs-sm); }
+.cell-link { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--accent-text); background: var(--surface); opacity: 0; }
+.cell-link .icon { width: 14px; height: 14px; }
+.cell:hover .cell-link, .cell:focus-within .cell-link { opacity: 1; }
+.cell-link:hover { background: var(--selected); }
+.cell-link:focus-visible { opacity: 1; outline: 2px solid var(--focus); outline-offset: 1px; }
+@media (hover: none) { .cell-link { opacity: 1; } }
+
+/* Pills (status, priority, dropdown, group). Colour is paired with the text label. */
+.pill { --tone: #64748b; display: inline-flex; align-items: center; max-width: 100%; height: 24px; padding: 0 10px; border-radius: var(--radius-pill); font-size: var(--fs-sm); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border: 1px solid color-mix(in srgb, var(--tone) 40%, transparent); background: color-mix(in srgb, var(--tone) 18%, var(--surface)); color: color-mix(in srgb, var(--tone) 62%, var(--text)); }
+.pill[data-tone=blue] { --tone: #3b82f6; } .pill[data-tone=green] { --tone: #1f9d61; } .pill[data-tone=amber] { --tone: #c7900f; }
+.pill[data-tone=red] { --tone: #e5484d; } .pill[data-tone=orange] { --tone: #ea6c1b; } .pill[data-tone=purple] { --tone: #8e4ec6; }
+.pill[data-tone=pink] { --tone: #d6409f; } .pill[data-tone=teal] { --tone: #12a594; } .pill[data-tone=slate] { --tone: #64748b; } .pill[data-tone=gray] { --tone: #8b8d98; }
+
+/* People */
+.person { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+.person-avatar { display: inline-grid; place-items: center; flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%; font-size: 10px; font-weight: 700; color: #fff; background: var(--accent-strong); }
+.person-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Checkbox */
+.cell-check { display: inline-grid; place-items: center; width: 18px; height: 18px; border: 1.5px solid var(--line-strong); border-radius: 5px; color: #fff; }
+.cell-check.is-checked { background: var(--accent-strong); border-color: var(--accent-strong); }
+.cell-check .icon { width: 13px; height: 13px; stroke-width: 3; }
+
+/* Edit mode: one cell at a time. */
+.cell.is-editing { padding: 2px; }
+.cell-input { width: 100%; min-height: 34px; padding: 5px 8px; font-size: var(--fs-base); border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--surface); box-shadow: 0 0 0 3px var(--ring); }
+.cell-input:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+textarea.cell-input { resize: vertical; min-height: 64px; position: relative; z-index: 4; }
+.draft-row td { background: color-mix(in srgb, var(--accent) 5%, var(--surface)); }
+
+/* Cell option popover */
+.cell-options-popover { width: 230px; max-height: min(360px, calc(100dvh - 24px)); }
+.cell-options-popover > button { justify-content: space-between; min-height: 36px; }
+.cell-options-popover > button.is-selected { background: var(--selected); }
+.option-check { display: inline-flex; color: var(--accent-text); }
+.option-check .icon { width: 15px; height: 15px; }
+
+/* Row actions: compact, shown on hover/focus; always visible on touch screens. */
+.editable-table .row-actions, .editable-table .actions-col { min-width: 78px; width: 78px; padding: 0 6px; }
+.editable-table .row-actions { white-space: nowrap; }
+.editable-table .row-action { display: inline-grid; place-items: center; width: 30px; height: 30px; min-height: 30px; padding: 0; margin: 0 1px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--muted); opacity: 0; transition: opacity .12s; }
+.editable-table .row-action .icon { width: 16px; height: 16px; }
+.editable-table .row-action:hover { background: var(--pressed); color: var(--text); }
+.editable-table tr:hover .row-action, .editable-table tr:focus-within .row-action, .editable-table .row-action:focus-visible { opacity: 1; }
+@media (hover: none) { .editable-table .row-action { opacity: 1; } }
+
+/* Column header: drag to reorder, sort and filter indicators. */
+.editable-table th.is-movable .column-header { cursor: grab; }
+.is-col-dragging, .is-col-dragging * { cursor: grabbing !important; user-select: none !important; }
+th.col-dragging { opacity: .55; }
+th.col-drop-before { box-shadow: inset 3px 0 0 var(--accent); }
+th.col-drop-after { box-shadow: inset -3px 0 0 var(--accent); }
+.column-indicator { display: inline-flex; color: var(--accent-text); }
+.column-indicator .icon { width: 13px; height: 13px; }
+.menu-separator { height: 1px; margin: 5px -5px; background: var(--line); }
+
+/* Hidden columns panel */
+.hidden-columns { margin: 0 0 16px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-2); }
+.hidden-columns-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.hidden-columns-head h3 { margin: 0; font-size: var(--fs-sm); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.hidden-columns-head small { margin-left: 4px; }
+.hidden-column-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); }
+.hidden-column-row > span { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.hidden-column-row .icon { width: 15px; height: 15px; color: var(--faint); }
+.hidden-column-row small { color: var(--faint); }
+.hidden-column-row .button { min-height: 30px; }
+
+/* Column filter dialog */
+.filter-values { display: grid; gap: 6px; margin: 0 0 4px; padding: 0; border: 0; max-height: 45vh; overflow: auto; }
+.filter-values legend { margin-bottom: 8px; font-size: var(--fs-sm); color: var(--muted); }
+.filter-values .checkbox-field { display: flex; align-items: center; gap: 10px; min-height: 32px; cursor: pointer; }
+
+@media (max-width: 620px) {
+  .cell-display { min-height: 38px; }
+  /* Small screens are usually touch: keep row and column actions visible without hover. */
+  .editable-table .row-action { width: 34px; height: 34px; opacity: 1; }
+  .table-wrap { scroll-padding-inline: 190px 0; }
+  .column-menu-button { opacity: .85; }
+  .editable-table .row-actions, .editable-table .actions-col { min-width: 84px; width: 84px; }
 }

@@ -36,7 +36,7 @@ class BoardModel {
     this.currentView = saved.currentView || "table";
     this.query = "";
     this.status = "All";
-    this.sortDirection = "desc"; this.sortKey = ""; this.quickFilter = "all";
+    this.sortDirection = "desc"; this.sortKey = ""; this.quickFilter = "all"; this.columnFilter = null;
     this.grouped = false;
     this.selected = new Set();
     this.history = [];
@@ -130,6 +130,7 @@ class BoardModel {
       .filter((row) => this.showArchived ? row.archived : !row.archived)
       .filter((row) => this.status === "All" || !this.statusColumn || row[this.statusColumn.key] === this.status)
       .filter((row) => this.matchesQuickFilter(row))
+      .filter((row) => this.matchesColumnFilter(row))
       .filter((row) => !query || Object.values(row).some((value) => String(value || "").toLowerCase().includes(query)))
       .sort((a, b) => { if(Boolean(a.pinned)!==Boolean(b.pinned))return a.pinned?-1:1; if(this.manualSort)return this.rows.indexOf(a)-this.rows.indexOf(b); const key=this.sortKey || this.sortColumn?.key; if(!key)return this.rows.indexOf(a)-this.rows.indexOf(b); return this.sortDirection === "desc" ? String(b[key]??"").localeCompare(String(a[key]??""),undefined,{numeric:true}) : String(a[key]??"").localeCompare(String(b[key]??""),undefined,{numeric:true}); });
   }
@@ -225,7 +226,7 @@ class BoardModel {
   updateColumnConfig(config) { this.snapshot("Column settings undone"); Object.entries(config).forEach(([key, value]) => { const column=this.board.columns.find((item)=>item.key===key); if(column)Object.assign(column,value); }); this.save(); }
   saveView(name) { const clean = name.trim(); if (!clean) return false; const view={ id: Date.now(), name: clean, status: this.status, query: this.query, grouped: this.grouped, sortDirection: this.sortDirection, view:this.currentView, visibleColumns:this.board.columns.filter(c=>c.visible!==false).map(c=>c.key), density:this.settings.density, sortKey:this.sortKey,quickFilter:this.quickFilter,showArchived:this.showArchived,columnOrder:this.board.columns.map(c=>c.key),columnWidths:Object.fromEntries(this.board.columns.map(c=>[c.key,c.width])) }; this.board.savedViews.push(view); this.activeSavedViewId=view.id; this.save(); return true; }
   applyView(id) { const view = this.board.savedViews.find((item) => item.id === Number(id)); if (!view) return; Object.assign(this, { status: view.status, query: view.query, grouped: view.grouped, sortDirection: view.sortDirection }); if(view.view)this.currentView=view.view; if(view.visibleColumns){this.board.columns.forEach(c=>c.visible=view.visibleColumns.includes(c.key));} if(view.density)this.settings.density=view.density; this.sortKey=view.sortKey||"";this.quickFilter=view.quickFilter||"all";this.showArchived=Boolean(view.showArchived);if(view.columnOrder)this.board.columns.sort((a,b)=>{const ai=view.columnOrder.indexOf(a.key),bi=view.columnOrder.indexOf(b.key);return (ai<0?999:ai)-(bi<0?999:bi);});if(view.columnWidths)this.board.columns.forEach(c=>c.width=view.columnWidths[c.key]||c.width);this.manualSort=false; this.activeSavedViewId=view.id;this.save(); }
-  resetMainView() { this.sortKey="";this.quickFilter="all";this.query=""; this.status="All"; this.grouped=false; this.sortDirection="desc"; this.activeSavedViewId=null; this.showArchived=false; this.manualSort=Boolean(this.board?.manualOrder); }
+  resetMainView() { this.sortKey="";this.quickFilter="all";this.columnFilter=null;this.query=""; this.status="All"; this.grouped=false; this.sortDirection="desc"; this.activeSavedViewId=null; this.showArchived=false; this.manualSort=Boolean(this.board?.manualOrder); }
   deleteView(id) { this.board.savedViews = this.board.savedViews.filter((view) => view.id !== Number(id)); if(this.activeSavedViewId===Number(id))this.resetMainView(); this.save(); }
   toggleRow(id) { this.selected.has(id) ? this.selected.delete(id) : this.selected.add(id); }
   log(text) { if (!this.board) return; const at = new Date().toISOString(); this.board.updatedAt=at; this.board.activity.unshift({ id: Date.now(), text, at }); this.board.activity = this.board.activity.slice(0, 80); if(!this.settings.muteActivity)this.notifications.unshift({ id: Date.now() + 1, text, boardId: this.board.id, workspaceId: this.workspace.id, at, read: false }); this.notifications = this.notifications.slice(0,50); }
@@ -340,6 +341,34 @@ class BoardModel {
     plan.column.options=plan.options;
     this.log(`Updated ${plan.column.label} options`);this.save();
     return {cleared:plan.affected};
+  }
+  // Basic per-column filter: {key, op, value}. Session state only, like the status filter and search.
+  matchesColumnFilter(row){
+    const filter=this.columnFilter, column=filter&&this.board?.columns.find((c)=>c.key===filter.key); if(!column)return true;
+    const value=row[column.key], text=String(value??"").trim(), wanted=filter.value;
+    switch(filter.op){
+      case "in": return (Array.isArray(wanted)?wanted:[wanted]).includes(text);
+      case "checked": return Boolean(value)===true;
+      case "unchecked": return !value;
+      case "contains": return text.toLowerCase().includes(String(wanted||"").toLowerCase());
+      case "equals": return text.toLowerCase()===String(wanted||"").trim().toLowerCase();
+      case "eq": return this.hasValue(value)&&Number(text)===Number(wanted);
+      case "gt": return this.hasValue(value)&&Number(text)>Number(wanted);
+      case "lt": return this.hasValue(value)&&Number(text)<Number(wanted);
+      case "on": return text===wanted;
+      case "before": return this.hasValue(value)&&text<wanted;
+      case "after": return this.hasValue(value)&&text>wanted;
+      case "empty": return !this.hasValue(value);
+      case "not-empty": return this.hasValue(value);
+      default: return true;
+    }
+  }
+  // Drag-to-reorder: only columns[] order changes; the primary column always stays first.
+  moveColumnTo(key,targetKey,position="before"){
+    const cols=this.board.columns, from=cols.findIndex((c)=>c.key===key), target=cols.findIndex((c)=>c.key===targetKey);
+    if(key==="serial"||from<0||target<0||key===targetKey)return false;
+    let to=target+(position==="after"?1:0); if(from<to)to-=1; to=Math.max(1,to); if(to===from)return false;
+    this.snapshot("Column reorder undone"); const [column]=cols.splice(from,1); cols.splice(to,0,column); this.save(); return true;
   }
   setColumnVisible(key,visible){if(key==="serial"&&!visible)return false;const column=this.board.columns.find((c)=>c.key===key);if(!column)return false;this.updateColumnConfig({[key]:{visible:Boolean(visible)}});return true;}
 
