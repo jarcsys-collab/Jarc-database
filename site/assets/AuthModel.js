@@ -4,17 +4,18 @@
 // Replace with server-side authentication (planned: Microsoft Entra ID via the backend) before production use.
 // Do not add further credentials, secrets or environment variables here.
 class AuthModel {
-  constructor() {
+  constructor(storage = window.jarcStorage) {
+    this.storage = storage; // per-device preferences + temporary session values via StorageService (Stage 6)
     this.username = "medtek";
     this.password = "123";
     this.error = "";
-    this.failedAttempts = Number(sessionStorage.getItem("medtek-failed-attempts") || 0);
-    this.lockedUntil = Number(sessionStorage.getItem("medtek-locked-until") || 0);
-    this.rememberedUsername = localStorage.getItem("medtek-remembered-username") || "";
-    this.lastLogin = localStorage.getItem("medtek-last-login") || "";
-    this.lockedScreen = sessionStorage.getItem("medtek-screen-locked") === "1";
-    this.authenticated = !this.lockedScreen && (localStorage.getItem("medtek-auth-session") === "active" || sessionStorage.getItem("medtek-auth-session") === "active");
-    this.lastActivity = Number(sessionStorage.getItem("medtek-last-activity") || Date.now());
+    this.failedAttempts = Number(this.storage.getSessionValue("failedAttempts") || 0);
+    this.lockedUntil = Number(this.storage.getSessionValue("lockedUntil") || 0);
+    this.rememberedUsername = this.storage.getPreference("rememberedUsername") || "";
+    this.lastLogin = this.storage.getPreference("lastLogin") || "";
+    this.lockedScreen = this.storage.getSessionValue("screenLocked") === "1";
+    this.authenticated = !this.lockedScreen && (this.storage.getPreference("persistentSignIn") === "active" || this.storage.getSessionValue("signIn") === "active");
+    this.lastActivity = Number(this.storage.getSessionValue("lastActivity") || Date.now());
     this.timeoutMinutes = 30;
   }
 
@@ -29,32 +30,32 @@ class AuthModel {
       this.error = "";
       this.failedAttempts = 0;
       this.lockedUntil = 0;
-      sessionStorage.removeItem("medtek-screen-locked");
-      sessionStorage.setItem("medtek-failed-attempts", "0");
-      sessionStorage.removeItem("medtek-locked-until");
+      this.storage.removeSessionValue("screenLocked");
+      this.storage.setSessionValue("failedAttempts", "0");
+      this.storage.removeSessionValue("lockedUntil");
       if (rememberSession) {
-        localStorage.setItem("medtek-auth-session", "active");
-        sessionStorage.removeItem("medtek-auth-session");
+        this.storage.setPreference("persistentSignIn", "active");
+        this.storage.removeSessionValue("signIn");
       } else {
-        sessionStorage.setItem("medtek-auth-session", "active");
-        localStorage.removeItem("medtek-auth-session");
+        this.storage.setSessionValue("signIn", "active");
+        this.storage.removePreference("persistentSignIn");
       }
-      rememberUsername ? localStorage.setItem("medtek-remembered-username", username) : localStorage.removeItem("medtek-remembered-username");
+      rememberUsername ? this.storage.setPreference("rememberedUsername", username) : this.storage.removePreference("rememberedUsername");
       this.rememberedUsername = rememberUsername ? username : "";
       this.lastLogin = new Date().toISOString();
-      localStorage.setItem("medtek-last-login", this.lastLogin);
+      this.storage.setPreference("lastLogin", this.lastLogin);
       this.touch();
       return true;
     }
     this.failedAttempts += 1;
-    sessionStorage.setItem("medtek-failed-attempts", String(this.failedAttempts));
+    this.storage.setSessionValue("failedAttempts", String(this.failedAttempts));
     const remaining = Math.max(0, 5 - this.failedAttempts);
     this.error = `Username or password is incorrect. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`;
     if (this.failedAttempts >= 5) {
       this.lockedUntil = Date.now() + 30000;
-      sessionStorage.setItem("medtek-locked-until", String(this.lockedUntil));
+      this.storage.setSessionValue("lockedUntil", String(this.lockedUntil));
       this.failedAttempts = 0;
-      sessionStorage.setItem("medtek-failed-attempts", "0");
+      this.storage.setSessionValue("failedAttempts", "0");
       this.error = "Sign-in paused for 30 seconds after repeated attempts.";
     }
     return false;
@@ -63,7 +64,7 @@ class AuthModel {
   touch() {
     if (!this.authenticated) return;
     this.lastActivity = Date.now();
-    sessionStorage.setItem("medtek-last-activity", String(this.lastActivity));
+    this.storage.setSessionValue("lastActivity", String(this.lastActivity));
   }
 
   checkTimeout() {
@@ -77,16 +78,16 @@ class AuthModel {
     this.authenticated = false;
     this.lockedScreen = true;
     this.error = message;
-    sessionStorage.setItem("medtek-screen-locked", "1");
+    this.storage.setSessionValue("screenLocked", "1");
   }
 
   logout() {
     this.authenticated = false;
     this.lockedScreen = false;
     this.error = "";
-    localStorage.removeItem("medtek-auth-session");
-    sessionStorage.removeItem("medtek-auth-session");
-    sessionStorage.removeItem("medtek-screen-locked");
+    this.storage.removePreference("persistentSignIn");
+    this.storage.removeSessionValue("signIn");
+    this.storage.removeSessionValue("screenLocked");
   }
 
   get lockSeconds() { return Math.max(0, Math.ceil((this.lockedUntil - Date.now()) / 1000)); }

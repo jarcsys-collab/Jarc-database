@@ -31,8 +31,8 @@ class AppController {
     root.addEventListener("pointerout",()=>{clearTimeout(this.tooltipTimer);document.querySelector('.ui-tooltip')?.remove();});
     this.overlayObserver=new MutationObserver(()=>this.enhanceOverlay());this.overlayObserver.observe(root,{childList:true,subtree:true});
     const originalClose=this.view.closeOverlay.bind(this.view);this.view.closeOverlay=()=>{originalClose();this.boardMenuWorkspace=null;this.root.querySelector(".app-shell")?.removeAttribute("inert");this.overlayReturnFocus?.focus?.();this.overlayReturnFocus=null;};
-    if (localStorage.getItem("jarc-nav-collapsed")==="1") document.body.classList.add("nav-collapsed");
-    if (localStorage.getItem("jarc-workspace-collapsed")==="1") document.body.classList.add("workspace-section-collapsed");
+    if (window.jarcStorage.getPreference("navCollapsed")==="1") document.body.classList.add("nav-collapsed");
+    if (window.jarcStorage.getPreference("workspaceSectionCollapsed")==="1") document.body.classList.add("workspace-section-collapsed");
   }
   update() { this.auth.authenticated ? this.view.render(this.model) : this.view.renderLogin(this.auth,this.model); this.saveFeedback(); }
   togglePanel(name, opener) { const root=document.querySelector("#overlay-root"); if(root?.dataset.open===name){this.view.closeOverlay();return false;} opener(); const next=document.querySelector("#overlay-root"); if(next)next.dataset.open=name; return true; }
@@ -43,7 +43,7 @@ class AppController {
     const action = target.dataset.action;
     if(action==="login-theme-choice"){this.model.updateSetting("theme",target.dataset.theme);this.view.applyDisplay(this.model);this.root.querySelectorAll('[data-action="login-theme-choice"]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.theme===target.dataset.theme)));return;}
     this.lastTrigger=target;
-    if(action==="retry-save"){this.model.save();this.saveFeedback();return;}
+    if(action==="retry-save"){this.model.save({op:"saveState",reason:"retry"});this.saveFeedback();return;}
     if(action==="dismiss-hint"){this.model.updateSetting("dismissedHint",true);this.update();return;}
     if(action==="toggle-home-archived"){this.model.updateSetting("homeArchived",!this.model.settings.homeArchived);this.update();return;}
     if(action==="home-create-record"||action==="home-import"){this.chooseBoardAction(action==="home-import"?"import":"record");return;}
@@ -63,8 +63,8 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
     if (action === "open-board") { this.view.closeOverlay();this.model.openBoard(target.dataset.id); this.update(); }
     if (action === "open-record-board") { this.model.openBoard(target.dataset.board,target.dataset.workspace); this.update(); }
     if (action === "toggle-nav") document.querySelector("#sidebar").classList.toggle("open");
-    if (action === "collapse-nav") { document.body.classList.toggle("nav-collapsed"); localStorage.setItem("jarc-nav-collapsed",document.body.classList.contains("nav-collapsed")?"1":"0"); }
-    if (action === "toggle-workspace-section") { document.body.classList.toggle("workspace-section-collapsed"); localStorage.setItem("jarc-workspace-collapsed",document.body.classList.contains("workspace-section-collapsed")?"1":"0"); }
+    if (action === "collapse-nav") { document.body.classList.toggle("nav-collapsed"); window.jarcStorage.setPreference("navCollapsed",document.body.classList.contains("nav-collapsed")?"1":"0"); }
+    if (action === "toggle-workspace-section") { document.body.classList.toggle("workspace-section-collapsed"); window.jarcStorage.setPreference("workspaceSectionCollapsed",document.body.classList.contains("workspace-section-collapsed")?"1":"0"); }
     if (action === "workspace-menu") this.togglePanel("workspace",()=>this.view.showWorkspaceMenu(this.model));
     if (action === "create-workspace") this.view.showWorkspaceForm();
     if (action === "record-menu") this.togglePanel(`record-${target.dataset.id}`,()=>this.view.showRecordMenu(this.model.rows.find((row)=>row.id===Number(target.dataset.id))));
@@ -164,7 +164,7 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
     if (action === "mark-notifications") { this.model.markAllNotificationsRead(); this.view.showNotifications(this.model); this.markPanel("notifications"); }
     if (action === "clear-notifications") this.view.showConfirm("Clear notifications?","This removes every notification from your local inbox.","confirm-clear-notifications");
     if (action === "confirm-clear-notifications") { this.model.clearNotifications(); this.view.closeOverlay(); this.update(); }
-    if (action === "open-notification") { const item=this.model.notifications.find((note)=>note.boardId===target.dataset.board && note.workspaceId===target.dataset.workspace && !note.read); if(item)item.read=true; this.model.save(); this.model.openBoard(target.dataset.board,target.dataset.workspace); this.view.closeOverlay(); this.update(); }
+    if (action === "open-notification") { const item=this.model.notifications.find((note)=>note.boardId===target.dataset.board && note.workspaceId===target.dataset.workspace && !note.read); if(item)item.read=true; this.model.save({op:"updateUserState"}); this.model.openBoard(target.dataset.board,target.dataset.workspace); this.view.closeOverlay(); this.update(); }
     if (action === "command-palette") this.view.showCommandPalette(this.model);
     if (action === "palette-workspace") { this.model.switchWorkspace(target.dataset.id); this.view.closeOverlay(); this.update(); }
     if (action === "palette-board") { this.model.openBoard(target.dataset.id,target.dataset.workspace); this.view.closeOverlay(); this.update(); }
@@ -222,10 +222,10 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
       const signedIn=this.auth.login(data.username,data.password,Boolean(data.rememberSession),Boolean(data.rememberUsername));
       if(signedIn)this.model.syncUsername(data.username);this.update();return;
     }
-    if(action==="sort-form"){this.model.sortKey=data.key;this.model.sortDirection=data.direction;this.model.manualSort=false;this.model.board.manualOrder=false;this.model.save();this.model.activeSavedViewId=null;this.update();return;}
+    if(action==="sort-form"){this.model.sortKey=data.key;this.model.sortDirection=data.direction;this.model.manualSort=false;this.model.board.manualOrder=false;this.model.save({op:"updateBoard",boardId:this.model.board.id});this.model.activeSavedViewId=null;this.update();return;}
     if(action==="confirm-import-form"){const result=this.model.importRows(this.pendingImport,data);this.pendingImport=null;this.update();this.view.toast(result.valid.length+" records imported"+(result.issues.length?" · "+result.issues.length+" skipped":""),true);return;}
     if (action === "record-form") { const edit=Boolean(data.id); this.model.board.columns.filter((column)=>column.type==="checkbox").forEach((column)=>{data[column.key]=Boolean(data[column.key]);}); this.model.upsert(data); this.view.closeOverlay(); this.update(); this.view.toast(edit?"Record updated":"Record added"); }
-    if (action === "board-form") { if(data.id){this.model.renameBoard(data.id,data.name);const b=this.model.workspace.boards.find(b=>b.id===data.id);b.description=data.description;this.model.save();}else{this.model.currentWorkspaceId=data.workspace;this.model.createBoard(data.name,data.description,data.template);} this.view.closeOverlay(); this.update(); this.view.toast(data.id?"Board renamed":"Board created"); }
+    if (action === "board-form") { if(data.id){this.model.renameBoard(data.id,data.name);const b=this.model.workspace.boards.find(b=>b.id===data.id);b.description=data.description;this.model.save({op:"updateBoard",boardId:data.id});}else{this.model.currentWorkspaceId=data.workspace;this.model.createBoard(data.name,data.description,data.template);} this.view.closeOverlay(); this.update(); this.view.toast(data.id?"Board renamed":"Board created"); }
     if (action === "invite-form") { if(this.model.addMember(data)){this.view.closeOverlay();this.update();this.view.toast("Member added");}else this.view.showMessage("Member not added","Use a unique email address."); }
     if (action === "global-search-form") this.globalSearch(data.term);
     if (action === "add-group-form") { if (this.model.addGroup(data.name)) { this.view.showGroupManager(this.model); this.view.toast("Group added"); } else this.view.showMessage("Group not added","Use a unique, non-empty group name."); }
@@ -353,12 +353,12 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
     const boards=this.model.workspaces.filter(w=>!w.archived).flatMap(w=>w.boards.filter(b=>!b.archived).map(b=>({...b,workspaceId:w.id,workspaceName:w.name})));
     this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>${action==="import"?"Import into a board":"Create a record in…"}</h2>${this.view.closeButton()}</div><div class="choice-list">${boards.map(b=>`<button data-action="choose-board-action" data-mode="${this.view.attr(action)}" data-id="${this.view.attr(b.id)}" data-workspace="${this.view.attr(b.workspaceId)}">${icon("board")}<span><strong>${this.view.escape(b.name)}</strong><small>${this.view.escape(b.workspaceName)}</small></span></button>`).join("")||'<p>Create a board first to add records.</p><button data-action="new-board" class="button primary">Create board</button>'}</div></div>`);
   }
-  toggleSidebar(){document.body.classList.toggle("nav-collapsed");localStorage.setItem("jarc-nav-collapsed",document.body.classList.contains("nav-collapsed")?"1":"0");}
+  toggleSidebar(){document.body.classList.toggle("nav-collapsed");window.jarcStorage.setPreference("navCollapsed",document.body.classList.contains("nav-collapsed")?"1":"0");}
   saveFeedback(){
     const button=this.root.querySelector(".save-state");if(!button)return;
     const state=this.model.saveState||"saved";button.classList.toggle("save-error",state==="error");
     button.innerHTML=state==="error"?"Couldn't save · Retry":state==="saving"?"Saving…":`<i></i> ${navigator.onLine?"Saved locally":"Offline · saved locally"}`;
-    if(state==="error"&&!this.saveErrorNotified){this.saveErrorNotified=true;this.view.toast(this.model.saveError==="quota"?"Browser storage is full — your latest changes are not saved. Export a backup from Settings → Data.":"Changes couldn't be saved in this browser. Export a backup from Settings → Data, then use Retry.");}
+    if(state==="error"&&!this.saveErrorNotified){this.saveErrorNotified=true;this.view.toast(this.model.saveError===StorageError.CODES.QUOTA?"Browser storage is full — your latest changes are not saved. Export a backup from Settings → Data.":"Changes couldn't be saved in this browser. Export a backup from Settings → Data, then use Retry.");}
     if(state==="saved")this.saveErrorNotified=false;
   }
   onContextMenu(event){
@@ -582,7 +582,7 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
   }
 }
 try { new AppController(document.querySelector("#app")); } catch(error) {
-  const root=document.querySelector("#app"); let raw=null; try { raw=localStorage.getItem("jarc-database-data"); } catch {}
+  const root=document.querySelector("#app"); let raw=null; try { raw=window.jarcStorage.readRawState(); } catch {}
   root.innerHTML='<main class="startup-error" role="alert"><h1>JARC couldn\'t open your saved data</h1><p class="startup-error-message"></p><p>Nothing has been deleted. Download a copy of the stored data before trying anything else.</p><div class="startup-error-actions"><button type="button" class="button primary" data-recover="download">Download stored data</button><button type="button" class="button secondary" data-recover="reload">Try again</button><button type="button" class="button danger" data-recover="reset">Clear stored data…</button></div></main>';
   root.querySelector(".startup-error-message").textContent=error.message;
   if(!raw)root.querySelector('[data-recover="download"]').disabled=true;
@@ -590,6 +590,6 @@ try { new AppController(document.querySelector("#app")); } catch(error) {
     const action=event.target.closest("[data-recover]")?.dataset.recover;
     if(action==="download"&&raw){const url=URL.createObjectURL(new Blob([raw],{type:"application/json"})),link=document.createElement("a");link.href=url;link.download="jarc-stored-data-"+new Date().toISOString().slice(0,10)+".json";link.click();setTimeout(()=>URL.revokeObjectURL(url),500);}
     if(action==="reload")location.reload();
-    if(action==="reset"&&confirm("Permanently delete the stored JARC data in this browser? Download it first if you might need it."))try{localStorage.removeItem("jarc-database-data");location.reload();}catch{}
+    if(action==="reset"&&confirm("Permanently delete the stored JARC data in this browser? Download it first if you might need it."))try{window.jarcStorage.clearState();location.reload();}catch{}
   });
 }

@@ -2,7 +2,8 @@
 const IMPORT_LIMITS = Object.freeze({ rows: 5000, fields: 200, cellLength: 10000 });
 
 class BoardModel {
-  constructor() {
+  constructor(storage = window.jarcStorage) {
+    this.storage = storage; // StorageService (Stage 6): the only path to persistence
     const saved = this.readStorage();
     this.workspaces = saved.workspaces || this.defaultWorkspaces();
     this.defaultColumns = [
@@ -72,28 +73,28 @@ class BoardModel {
     ];
   }
 
+  // Loads shared data + per-user state through StorageService. Throws StorageError (INVALID_DATA / STORAGE_UNAVAILABLE),
+  // which the startup recovery screen shows; nothing is deleted or overwritten.
   readStorage() {
-    const current = localStorage.getItem("jarc-database-data");
-    const legacyKey = ["medtek", "database", String.fromCharCode(118,57)].join("-");
-    const raw = current || localStorage.getItem(legacyKey);
-    if (!raw) return {};
-    try {
-      const data = JSON.parse(raw);
-      if (!data || !Array.isArray(data.workspaces) || !data.workspaces.length) throw Error("Invalid workspace data");
-      if (!current) localStorage.setItem("jarc-database-data", raw);
-      return data;
-    } catch (error) {
-      throw new Error("Your saved data could not be read. It has been left unchanged. Export the browser storage or restore a valid backup before continuing.");
-    }
+    const { data, user } = this.storage.loadState();
+    return { ...(user || {}), ...(data || {}) };
   }
 
-  save() {
+  // What gets persisted, split into shared application data and per-user state (see StorageService).
+  toStorageState() {
+    return {
+      data: { workspaces: this.workspaces, members: this.members },
+      user: { currentWorkspaceId: this.currentWorkspaceId, currentBoardId: this.currentBoardId, currentView: this.currentView, screen: this.screen, settings: this.settings, profile: this.profile, notifications: this.notifications, recentBoards: this.recentBoards, recentRecords: this.recentRecords, recentCommands: this.recentCommands }
+    };
+  }
+
+  // Every change is committed as a named operation (createRecord, updateColumns, ...). The local adapter saves the
+  // whole state; a future API adapter can send just that operation. saveError holds a StorageError code.
+  save(change = { op: "saveState" }) {
     this.saveState = "saving";
     window.dispatchEvent(new CustomEvent("jarc-save", {detail:"saving"}));
-    try {
-      localStorage.setItem("jarc-database-data", JSON.stringify({workspaces:this.workspaces,currentWorkspaceId:this.currentWorkspaceId,currentBoardId:this.currentBoardId,currentView:this.currentView,screen:this.screen,settings:this.settings,profile:this.profile,notifications:this.notifications,recentBoards:this.recentBoards,members:this.members,recentRecords:this.recentRecords,recentCommands:this.recentCommands}));
-      this.saveState = "saved"; this.saveError = "";
-    } catch (error) { this.saveState = "error"; this.saveError = error?.name === "QuotaExceededError" || /quota/i.test(String(error?.message)) ? "quota" : "blocked"; }
+    const result = this.storage.commit(change, this.toStorageState());
+    this.saveState = result.ok ? "saved" : "error"; this.saveError = result.ok ? "" : result.code;
     window.dispatchEvent(new CustomEvent("jarc-save", {detail:this.saveState}));
     return this.saveState === "saved";
   }
@@ -138,7 +139,7 @@ class BoardModel {
       .sort((a, b) => { if(Boolean(a.pinned)!==Boolean(b.pinned))return a.pinned?-1:1; if(this.manualSort)return this.rows.indexOf(a)-this.rows.indexOf(b); const key=this.sortKey || this.sortColumn?.key; if(!key)return this.rows.indexOf(a)-this.rows.indexOf(b); return this.sortDirection === "desc" ? String(b[key]??"").localeCompare(String(a[key]??""),undefined,{numeric:true}) : String(a[key]??"").localeCompare(String(b[key]??""),undefined,{numeric:true}); });
   }
 
-  openScreen(screen) { this.screen = screen; this.selected.clear(); this.save(); }
+  openScreen(screen) { this.screen = screen; this.selected.clear(); this.save({op:"updateUserState"}); }
   openBoard(boardId, workspaceId = this.currentWorkspaceId) {
     const space = this.workspaces.find(w=>w.id===workspaceId);
     const board = space?.boards.find(b=>b.id===boardId);
@@ -147,27 +148,27 @@ class BoardModel {
     this.currentView=board.lastView || "table"; this.resetMainView(); this.selected.clear();
     board.openCount=(board.openCount||0)+1;
     this.recentBoards=[{boardId,workspaceId,openedAt:new Date().toISOString()},...this.recentBoards.filter(r=>r.boardId!==boardId||r.workspaceId!==workspaceId)].slice(0,10);
-    this.save();
+    this.save({op:"updateUserState",boardId,workspaceId});
   }
 
-  switchWorkspace(id) { const space = this.workspaces.find((item) => item.id === id); if (!space) return; this.currentWorkspaceId = id; this.currentBoardId = space.boards[0]?.id || ""; this.screen = "home"; this.save(); }
+  switchWorkspace(id) { const space = this.workspaces.find((item) => item.id === id); if (!space) return; this.currentWorkspaceId = id; this.currentBoardId = space.boards[0]?.id || ""; this.screen = "home"; this.save({op:"updateUserState",workspaceId:id}); }
   createWorkspace({name,color="#0f9489",icon="W",description=""}) {
     const clean=String(name||"").trim(); if(!clean)return null;
     const workspace={id:"workspace-"+crypto.randomUUID(),name:clean,color,icon:String(icon||clean[0]).slice(0,2),description,boards:[],createdAt:new Date().toISOString()};
-    this.snapshot("Workspace creation undone"); this.workspaces.push(workspace); this.currentWorkspaceId=workspace.id; this.currentBoardId=""; this.screen="home"; this.save(); return workspace;
+    this.snapshot("Workspace creation undone"); this.workspaces.push(workspace); this.currentWorkspaceId=workspace.id; this.currentBoardId=""; this.screen="home"; this.save({op:"createWorkspace",workspaceId:workspace.id}); return workspace;
   }
 
-  setView(view) { if(["table","list","kanban","calendar"].includes(view)){ this.currentView=view; if(this.board)this.board.lastView=view; this.save(); } }
-  updateWorkspace(id, values) { const space=this.workspaces.find((item)=>item.id===id); if(!space)return false; this.snapshot("Workspace update undone"); if(values.name?.trim())space.name=values.name.trim(); if(values.icon!=null)space.icon=String(values.icon||space.name[0]).slice(0,2); if(values.color)space.color=values.color; if(values.description!=null)space.description=String(values.description); this.save(); return true; }
-  moveWorkspace(id, direction) { const index=this.workspaces.findIndex((item)=>item.id===id), target=index+(direction==="up"?-1:1); if(index<0||target<0||target>=this.workspaces.length)return false; this.snapshot("Workspace reorder undone"); [this.workspaces[index],this.workspaces[target]]=[this.workspaces[target],this.workspaces[index]]; this.save(); return true; }
-  deleteWorkspace(id) { if(!this.workspaces.find(w=>w.id===id)?.archived && this.workspaces.filter(w=>!w.archived).length<=1)throw new Error("Keep at least one active workspace."); if(this.workspaces.length<=1)throw new Error("Keep at least one workspace."); const index=this.workspaces.findIndex((item)=>item.id===id); if(index<0)return; this.snapshot("Workspace deletion undone"); this.workspaces.splice(index,1); if(this.currentWorkspaceId===id){ const next=this.workspaces.find(w=>!w.archived)||this.workspaces[0];this.currentWorkspaceId=next.id; this.currentBoardId=next.boards[0]?.id||""; this.screen="home"; } this.save(); }
-  moveBoardToWorkspace(boardId,targetWorkspaceId) { const source=this.workspace; const idx=source.boards.findIndex((b)=>b.id===boardId); const target=this.workspaces.find((w)=>w.id===targetWorkspaceId); if(idx<0||!target||target.id===source.id)return false; this.snapshot("Board move undone"); const [board]=source.boards.splice(idx,1); target.boards.push(board); if(this.currentBoardId===boardId){this.currentWorkspaceId=target.id;} this.save(); return true; }
-  archiveBoard(boardId, archived=true) { const board=this.workspace.boards.find((b)=>b.id===boardId); if(!board)return; this.snapshot("Board archive undone"); board.archived=archived; this.save(); }
-  addMember({email,role="Editor"}) { const clean=String(email||"").trim(); if(!clean)return false; if(this.members.some((m)=>m.email.toLowerCase()===clean.toLowerCase()))return false; this.members.push({id:`member-${Date.now()}`,name:clean.split("@")[0],email:clean,role,status:"Local contact"}); this.save(); return true; }
-  removeMember(id) { this.members=this.members.filter((m)=>m.id!==id); this.save(); }
+  setView(view) { if(["table","list","kanban","calendar"].includes(view)){ this.currentView=view; if(this.board)this.board.lastView=view; this.save({op:"updateUserState",boardId:this.board?.id}); } }
+  updateWorkspace(id, values) { const space=this.workspaces.find((item)=>item.id===id); if(!space)return false; this.snapshot("Workspace update undone"); if(values.name?.trim())space.name=values.name.trim(); if(values.icon!=null)space.icon=String(values.icon||space.name[0]).slice(0,2); if(values.color)space.color=values.color; if(values.description!=null)space.description=String(values.description); this.save({op:"updateWorkspace",workspaceId:id}); return true; }
+  moveWorkspace(id, direction) { const index=this.workspaces.findIndex((item)=>item.id===id), target=index+(direction==="up"?-1:1); if(index<0||target<0||target>=this.workspaces.length)return false; this.snapshot("Workspace reorder undone"); [this.workspaces[index],this.workspaces[target]]=[this.workspaces[target],this.workspaces[index]]; this.save({op:"updateWorkspace",workspaceId:id,fields:["order"]}); return true; }
+  deleteWorkspace(id) { if(!this.workspaces.find(w=>w.id===id)?.archived && this.workspaces.filter(w=>!w.archived).length<=1)throw new Error("Keep at least one active workspace."); if(this.workspaces.length<=1)throw new Error("Keep at least one workspace."); const index=this.workspaces.findIndex((item)=>item.id===id); if(index<0)return; this.snapshot("Workspace deletion undone"); this.workspaces.splice(index,1); if(this.currentWorkspaceId===id){ const next=this.workspaces.find(w=>!w.archived)||this.workspaces[0];this.currentWorkspaceId=next.id; this.currentBoardId=next.boards[0]?.id||""; this.screen="home"; } this.save({op:"deleteWorkspace",workspaceId:id}); }
+  moveBoardToWorkspace(boardId,targetWorkspaceId) { const source=this.workspace; const idx=source.boards.findIndex((b)=>b.id===boardId); const target=this.workspaces.find((w)=>w.id===targetWorkspaceId); if(idx<0||!target||target.id===source.id)return false; this.snapshot("Board move undone"); const [board]=source.boards.splice(idx,1); target.boards.push(board); if(this.currentBoardId===boardId){this.currentWorkspaceId=target.id;} this.save({op:"updateBoard",boardId,workspaceId:target.id,fromWorkspaceId:source.id}); return true; }
+  archiveBoard(boardId, archived=true) { const board=this.workspace.boards.find((b)=>b.id===boardId); if(!board)return; this.snapshot("Board archive undone"); board.archived=archived; this.save({op:"updateBoard",boardId}); }
+  addMember({email,role="Editor"}) { const clean=String(email||"").trim(); if(!clean)return false; if(this.members.some((m)=>m.email.toLowerCase()===clean.toLowerCase()))return false; this.members.push({id:`member-${Date.now()}`,name:clean.split("@")[0],email:clean,role,status:"Local contact"}); this.save({op:"updateMembers"}); return true; }
+  removeMember(id) { this.members=this.members.filter((m)=>m.id!==id); this.save({op:"updateMembers"}); }
 
   snapshot(label) { this.history.push({ label, workspaces: JSON.stringify(this.workspaces), currentWorkspaceId: this.currentWorkspaceId, currentBoardId: this.currentBoardId, manualSort:this.manualSort, sortKey:this.sortKey, sortDirection:this.sortDirection }); this.history = this.history.slice(-30); }
-  undo() { const entry = this.history.pop(); if (!entry) return "Nothing to undo"; this.workspaces = JSON.parse(entry.workspaces); this.currentWorkspaceId = entry.currentWorkspaceId; this.currentBoardId = entry.currentBoardId; this.normalizeBoards(); this.manualSort=entry.manualSort??Boolean(this.board?.manualOrder); this.sortKey=entry.sortKey??this.sortKey;this.sortDirection=entry.sortDirection??this.sortDirection; this.save(); return entry.label; }
+  undo() { const entry = this.history.pop(); if (!entry) return "Nothing to undo"; this.workspaces = JSON.parse(entry.workspaces); this.currentWorkspaceId = entry.currentWorkspaceId; this.currentBoardId = entry.currentBoardId; this.normalizeBoards(); this.manualSort=entry.manualSort??Boolean(this.board?.manualOrder); this.sortKey=entry.sortKey??this.sortKey;this.sortDirection=entry.sortDirection??this.sortDirection; this.save({op:"replaceAll",reason:"undo"}); return entry.label; }
 
   createBoard(name="Untitled board", description="", template="blank") {
     this.snapshot("Board creation undone");
@@ -175,14 +176,14 @@ class BoardModel {
     const board={id:"board-"+crypto.randomUUID(),name:name.trim()||"Untitled board",description,icon:"D",records:[],activity:[],createdAt:new Date().toISOString(),groups:["New","Working","Done"],savedViews:[],columns:this.defaultColumns.filter(c=>keys.includes(c.key)).map(c=>({...c,visible:true,required:c.key==="serial",defaultValue:"",options:[]}))};
     // A blank board starts with only its primary column, labelled "Item". The key stays "serial" for compatibility.
     if(template==="blank")board.columns[0].label="Item";
-    this.workspace.boards.push(board); this.openBoard(board.id); this.log("Board created"); this.save(); return board;
+    this.workspace.boards.push(board); this.openBoard(board.id); this.log("Board created"); this.save({op:"createBoard",boardId:board.id,workspaceId:this.workspace.id}); return board;
   }
 
-  renameBoard(id, name) { const board = this.workspace.boards.find((item) => item.id === id); if (board && name.trim()) { this.snapshot("Board rename undone"); board.name = name.trim(); this.log("Board renamed"); this.save(); } }
-  duplicateBoard(id) { const source = this.workspace.boards.find((item) => item.id === id); if (!source) return; this.snapshot("Board duplication undone"); const copy = JSON.parse(JSON.stringify(source)); copy.id = `board-${Date.now()}`; copy.name = `${source.name} copy`; copy.activity = [{ id: Date.now(), text: `Duplicated from ${source.name}`, at: new Date().toISOString() }]; this.workspace.boards.push(copy); this.openBoard(copy.id); this.save(); }
+  renameBoard(id, name) { const board = this.workspace.boards.find((item) => item.id === id); if (board && name.trim()) { this.snapshot("Board rename undone"); board.name = name.trim(); this.log("Board renamed"); this.save({op:"updateBoard",boardId:id}); } }
+  duplicateBoard(id) { const source = this.workspace.boards.find((item) => item.id === id); if (!source) return; this.snapshot("Board duplication undone"); const copy = JSON.parse(JSON.stringify(source)); copy.id = `board-${Date.now()}`; copy.name = `${source.name} copy`; copy.activity = [{ id: Date.now(), text: `Duplicated from ${source.name}`, at: new Date().toISOString() }]; this.workspace.boards.push(copy); this.openBoard(copy.id); this.save({op:"createBoard",boardId:copy.id,workspaceId:this.workspace.id}); }
   deleteBoard(id) {
     this.snapshot("Board deletion undone"); this.workspace.boards=this.workspace.boards.filter(b=>b.id!==id);
-    if(this.currentBoardId===id){this.currentBoardId=this.workspace.boards.find(b=>!b.archived)?.id||"";this.screen="home";} this.save();
+    if(this.currentBoardId===id){this.currentBoardId=this.workspace.boards.find(b=>!b.archived)?.id||"";this.screen="home";} this.save({op:"deleteBoard",boardId:id,workspaceId:this.workspace.id});
   }
 
   upsert(record) {
@@ -194,15 +195,15 @@ class BoardModel {
     this.board.columns.forEach((column)=>{ if(clean[column.key] === undefined) clean[column.key]=column.type==="checkbox"?false:column.defaultValue; });
     const index = this.rows.findIndex((row) => row.id === id);
     if (index >= 0) this.rows[index] = clean; else this.rows.unshift(clean);
-    this.log(index >= 0 ? `Updated ${clean.serial}` : `Added ${clean.serial}`); this.save(); return clean;
+    this.log(index >= 0 ? `Updated ${clean.serial}` : `Added ${clean.serial}`); this.save({op:index>=0?"updateRecord":"createRecord",boardId:this.board.id,recordId:id}); return clean;
   }
-  updateCell(id, field, value) { const column = this.board.columns.find((item) => item.key === field); const row = this.rows.find((item) => item.id === Number(id)); if (!column || !row) return; if (column.required && !String(value).trim()) return; this.snapshot(`${column.label} change undone`); row[field] = column.type === "checkbox" ? Boolean(value) : String(value); this.recordActivity(row, `Changed ${column.label}`); this.log(`Updated ${column.label} on ${row.serial}`); this.save(); }
-  moveRecord(id, updates) { const row = this.rows.find((item) => item.id === Number(id)); if (!row) return; this.snapshot("Record move undone"); Object.assign(row, updates); this.log(`Moved ${row.serial} to ${updates.status || updates.group}`); this.save(); }
-  remove(ids) { this.snapshot("Record deletion undone"); const removeIds = new Set(ids.map(Number)); const names = this.rows.filter((row) => removeIds.has(row.id)).map((row) => row.serial); this.board.records = this.rows.filter((row) => !removeIds.has(row.id)); removeIds.forEach((id) => this.selected.delete(id)); this.log(`Deleted ${names.join(", ")}`); this.save(); }
-  duplicateRecord(id) { const source = this.rows.find((row) => row.id === Number(id)); if (!source) return false; this.snapshot("Item duplication undone"); const copy = { ...source, id: Date.now()*1000+Math.floor(Math.random()*1000), serial: `${source.serial} copy`, archived:false }; this.rows.unshift(copy); this.manualSort=true; this.log(`Duplicated ${source.serial}`); this.save(); return copy.id; }
-  quickAdd() { this.snapshot("Quick add undone"); const id = this.nextRecordId(); const row={id,archived:false,pinned:false}; this.board.columns.forEach((column)=>{ if(column.type==="checkbox")row[column.key]=false; else if(column.type==="group")row[column.key]=column.defaultValue||this.board.groups[0]; else if(column.type==="status")row[column.key]=column.defaultValue||column.options[0]||"Review"; else if(column.type==="owner")row[column.key]=column.defaultValue||"Unassigned"; else if(column.type==="priority")row[column.key]=column.defaultValue||"Medium"; else row[column.key]=column.defaultValue; }); const used=new Set(this.rows.map((item)=>String(item.serial||"").toLowerCase())); let number=this.board.nextItemNumber||1,name=number===1?"New item":`New item ${number}`; while(used.has(name.toLowerCase())){number+=1;name=`New item ${number}`;} this.board.nextItemNumber=number+1; row.serial=name; this.rows.unshift(row); this.showArchived=false; this.manualSort=true; this.log(`Added ${name}`); this.save(); return id; }
-  togglePin(id) { const row=this.rows.find((item)=>item.id===Number(id)); if(!row)return; this.snapshot("Pin change undone"); row.pinned=!row.pinned; this.log(`${row.pinned?"Pinned":"Unpinned"} ${row.serial}`); this.save(); }
-  archiveItem(id, archived=true) { const row=this.rows.find((item)=>item.id===Number(id)); if(!row)return; this.snapshot(archived?"Archive undone":"Restore undone"); row.archived=archived; this.recordActivity(row,archived?"Record archived":"Record restored"); this.selected.delete(row.id); this.log(`${archived?"Archived":"Restored"} ${row.serial}`); this.save(); }
+  updateCell(id, field, value) { const column = this.board.columns.find((item) => item.key === field); const row = this.rows.find((item) => item.id === Number(id)); if (!column || !row) return; if (column.required && !String(value).trim()) return; this.snapshot(`${column.label} change undone`); row[field] = column.type === "checkbox" ? Boolean(value) : String(value); this.recordActivity(row, `Changed ${column.label}`); this.log(`Updated ${column.label} on ${row.serial}`); this.save({op:"updateRecord",boardId:this.board.id,recordId:row.id,fields:[field]}); }
+  moveRecord(id, updates) { const row = this.rows.find((item) => item.id === Number(id)); if (!row) return; this.snapshot("Record move undone"); Object.assign(row, updates); this.log(`Moved ${row.serial} to ${updates.status || updates.group}`); this.save({op:"updateRecord",boardId:this.board.id,recordId:row.id,fields:Object.keys(updates)}); }
+  remove(ids) { this.snapshot("Record deletion undone"); const removeIds = new Set(ids.map(Number)); const names = this.rows.filter((row) => removeIds.has(row.id)).map((row) => row.serial); this.board.records = this.rows.filter((row) => !removeIds.has(row.id)); removeIds.forEach((id) => this.selected.delete(id)); this.log(`Deleted ${names.join(", ")}`); this.save({op:"deleteRecords",boardId:this.board.id,recordIds:[...removeIds]}); }
+  duplicateRecord(id) { const source = this.rows.find((row) => row.id === Number(id)); if (!source) return false; this.snapshot("Item duplication undone"); const copy = { ...source, id: Date.now()*1000+Math.floor(Math.random()*1000), serial: `${source.serial} copy`, archived:false }; this.rows.unshift(copy); this.manualSort=true; this.log(`Duplicated ${source.serial}`); this.save({op:"createRecord",boardId:this.board.id,recordId:copy.id}); return copy.id; }
+  quickAdd() { this.snapshot("Quick add undone"); const id = this.nextRecordId(); const row={id,archived:false,pinned:false}; this.board.columns.forEach((column)=>{ if(column.type==="checkbox")row[column.key]=false; else if(column.type==="group")row[column.key]=column.defaultValue||this.board.groups[0]; else if(column.type==="status")row[column.key]=column.defaultValue||column.options[0]||"Review"; else if(column.type==="owner")row[column.key]=column.defaultValue||"Unassigned"; else if(column.type==="priority")row[column.key]=column.defaultValue||"Medium"; else row[column.key]=column.defaultValue; }); const used=new Set(this.rows.map((item)=>String(item.serial||"").toLowerCase())); let number=this.board.nextItemNumber||1,name=number===1?"New item":`New item ${number}`; while(used.has(name.toLowerCase())){number+=1;name=`New item ${number}`;} this.board.nextItemNumber=number+1; row.serial=name; this.rows.unshift(row); this.showArchived=false; this.manualSort=true; this.log(`Added ${name}`); this.save({op:"createRecord",boardId:this.board.id,recordId:id}); return id; }
+  togglePin(id) { const row=this.rows.find((item)=>item.id===Number(id)); if(!row)return; this.snapshot("Pin change undone"); row.pinned=!row.pinned; this.log(`${row.pinned?"Pinned":"Unpinned"} ${row.serial}`); this.save({op:"updateRecord",boardId:this.board.id,recordId:row.id,fields:["pinned"]}); }
+  archiveItem(id, archived=true) { const row=this.rows.find((item)=>item.id===Number(id)); if(!row)return; this.snapshot(archived?"Archive undone":"Restore undone"); row.archived=archived; this.recordActivity(row,archived?"Record archived":"Record restored"); this.selected.delete(row.id); this.log(`${archived?"Archived":"Restored"} ${row.serial}`); this.save({op:"updateRecord",boardId:this.board.id,recordId:row.id,fields:["archived"]}); }
   reorderRecord(id,targetId,position="before") {
     const visible=this.visibleRows, source=visible.find(r=>r.id===Number(id)), target=visible.find(r=>r.id===Number(targetId));
     if(!source||!target||source===target||!["before","after"].includes(position))return false;
@@ -215,38 +216,38 @@ class BoardModel {
     const ids=new Set(visible.map(r=>r.id));let index=0;
     this.board.records=this.rows.map(r=>ids.has(r.id)?reordered[index++]:r);
     this.manualSort=true;this.board.manualOrder=true;this.activeSavedViewId=null;
-    this.save();return true;
+    this.save({op:"reorderRecords",boardId:this.board.id});return true;
   }
 
-  addGroup(name) { const clean = name.trim(); if (!clean || this.board.groups.includes(clean)) return false; this.snapshot("Group creation undone"); this.board.groups.push(clean); this.log(`Created group ${clean}`); this.save(); return true; }
-  renameGroup(oldName, newName) { const clean = newName.trim(); if (!clean || this.board.groups.includes(clean)) return false; this.snapshot("Group rename undone"); this.board.groups = this.board.groups.map((name) => name === oldName ? clean : name); if(this.groupColumn)this.rows.forEach((row) => { if (row[this.groupColumn.key] === oldName) row[this.groupColumn.key] = clean; }); this.log(`Renamed group ${oldName} to ${clean}`); this.save(); return true; }
-  deleteGroup(name, moveTo) { if (this.board.groups.length <= 1) return false; this.snapshot("Group deletion undone"); if(this.groupColumn)this.rows.forEach((row) => { if (row[this.groupColumn.key] === name) row[this.groupColumn.key] = moveTo; }); this.board.groups = this.board.groups.filter((group) => group !== name); this.log(`Deleted group ${name}`); this.save(); return true; }
-  addColumn({ label, type, required = false, defaultValue = "", options = "" }) { const clean=String(label||"").trim(); if(!clean||!this.columnTypes.some((item)=>item.type===type))return false; this.snapshot("Column creation undone"); const key=`custom_${Date.now()}_${Math.random().toString(36).slice(2,8)}`; let optionList=[...new Set((Array.isArray(options)?options:String(options).split(",")).map((item)=>String(item).trim()).filter(Boolean))]; if(!optionList.length)optionList=this.newColumnOptions(type); const column={ key, label:clean, type, visible:true, connection:"", required:Boolean(required), defaultValue:String(defaultValue||""), options:optionList }; this.board.columns.push(column); this.rows.forEach((row)=>{row[key]=column.type==="checkbox"?false:column.defaultValue;}); this.log(`Added ${clean} column`); this.save(); return column; }
-  renameColumn(key, label) { const column=this.board.columns.find((item)=>item.key===key); const clean=String(label||"").trim(); if(!column||!clean)return false; this.snapshot("Column rename undone"); column.label=clean; this.log(`Renamed column to ${clean}`); this.save(); return true; }
-  deleteColumn(key) { if(key==="serial")return false; const index=this.board.columns.findIndex((item)=>item.key===key); if(index<0)return false; this.snapshot("Column deletion undone"); const [column]=this.board.columns.splice(index,1); this.rows.forEach((row)=>{delete row[key];}); this.log(`Deleted ${column.label} column`); this.save(); return true; }
-  moveColumn(key, direction) { const index=this.board.columns.findIndex((item)=>item.key===key); const target=index+(direction==="left"?-1:1); if(key==="serial"||index<0||target<1||target>=this.board.columns.length)return false; this.snapshot("Column reorder undone"); [this.board.columns[index],this.board.columns[target]]=[this.board.columns[target],this.board.columns[index]]; this.save(); return true; }
-  duplicateColumn(key) { const source=this.board.columns.find((item)=>item.key===key); if(!source)return false; this.snapshot("Column duplication undone"); const copy={...source,key:`custom_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,label:`${source.label} copy`,required:false,options:[...source.options]}; this.board.columns.splice(this.board.columns.indexOf(source)+1,0,copy); this.rows.forEach((row)=>{row[copy.key]=row[source.key]??copy.defaultValue;}); this.log(`Duplicated ${source.label} column`); this.save(); return copy; }
-  updateColumnConfig(config) { this.snapshot("Column settings undone"); Object.entries(config).forEach(([key, value]) => { const column=this.board.columns.find((item)=>item.key===key); if(column)Object.assign(column,value); }); this.save(); }
-  saveView(name) { const clean = name.trim(); if (!clean) return false; const view={ id: Date.now(), name: clean, status: this.status, query: this.query, grouped: this.grouped, sortDirection: this.sortDirection, view:this.currentView, visibleColumns:this.board.columns.filter(c=>c.visible!==false).map(c=>c.key), density:this.settings.density, sortKey:this.sortKey,quickFilter:this.quickFilter,showArchived:this.showArchived,columnOrder:this.board.columns.map(c=>c.key),columnWidths:Object.fromEntries(this.board.columns.map(c=>[c.key,c.width])) }; this.board.savedViews.push(view); this.activeSavedViewId=view.id; this.save(); return true; }
-  applyView(id) { const view = this.board.savedViews.find((item) => item.id === Number(id)); if (!view) return; Object.assign(this, { status: view.status, query: view.query, grouped: view.grouped, sortDirection: view.sortDirection }); if(view.view)this.currentView=view.view; if(view.visibleColumns){this.board.columns.forEach(c=>c.visible=view.visibleColumns.includes(c.key));} if(view.density)this.settings.density=view.density; this.sortKey=view.sortKey||"";this.quickFilter=view.quickFilter||"all";this.showArchived=Boolean(view.showArchived);if(view.columnOrder)this.board.columns.sort((a,b)=>{const ai=view.columnOrder.indexOf(a.key),bi=view.columnOrder.indexOf(b.key);return (ai<0?999:ai)-(bi<0?999:bi);});if(view.columnWidths)this.board.columns.forEach(c=>c.width=view.columnWidths[c.key]||c.width);this.manualSort=false; this.activeSavedViewId=view.id;this.save(); }
+  addGroup(name) { const clean = name.trim(); if (!clean || this.board.groups.includes(clean)) return false; this.snapshot("Group creation undone"); this.board.groups.push(clean); this.log(`Created group ${clean}`); this.save({op:"updateGroups",boardId:this.board.id}); return true; }
+  renameGroup(oldName, newName) { const clean = newName.trim(); if (!clean || this.board.groups.includes(clean)) return false; this.snapshot("Group rename undone"); this.board.groups = this.board.groups.map((name) => name === oldName ? clean : name); if(this.groupColumn)this.rows.forEach((row) => { if (row[this.groupColumn.key] === oldName) row[this.groupColumn.key] = clean; }); this.log(`Renamed group ${oldName} to ${clean}`); this.save({op:"updateGroups",boardId:this.board.id,affectsRecords:true}); return true; }
+  deleteGroup(name, moveTo) { if (this.board.groups.length <= 1) return false; this.snapshot("Group deletion undone"); if(this.groupColumn)this.rows.forEach((row) => { if (row[this.groupColumn.key] === name) row[this.groupColumn.key] = moveTo; }); this.board.groups = this.board.groups.filter((group) => group !== name); this.log(`Deleted group ${name}`); this.save({op:"updateGroups",boardId:this.board.id,affectsRecords:true}); return true; }
+  addColumn({ label, type, required = false, defaultValue = "", options = "" }) { const clean=String(label||"").trim(); if(!clean||!this.columnTypes.some((item)=>item.type===type))return false; this.snapshot("Column creation undone"); const key=`custom_${Date.now()}_${Math.random().toString(36).slice(2,8)}`; let optionList=[...new Set((Array.isArray(options)?options:String(options).split(",")).map((item)=>String(item).trim()).filter(Boolean))]; if(!optionList.length)optionList=this.newColumnOptions(type); const column={ key, label:clean, type, visible:true, connection:"", required:Boolean(required), defaultValue:String(defaultValue||""), options:optionList }; this.board.columns.push(column); this.rows.forEach((row)=>{row[key]=column.type==="checkbox"?false:column.defaultValue;}); this.log(`Added ${clean} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,affectsRecords:true}); return column; }
+  renameColumn(key, label) { const column=this.board.columns.find((item)=>item.key===key); const clean=String(label||"").trim(); if(!column||!clean)return false; this.snapshot("Column rename undone"); column.label=clean; this.log(`Renamed column to ${clean}`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key}); return true; }
+  deleteColumn(key) { if(key==="serial")return false; const index=this.board.columns.findIndex((item)=>item.key===key); if(index<0)return false; this.snapshot("Column deletion undone"); const [column]=this.board.columns.splice(index,1); this.rows.forEach((row)=>{delete row[key];}); this.log(`Deleted ${column.label} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,affectsRecords:true}); return true; }
+  moveColumn(key, direction) { const index=this.board.columns.findIndex((item)=>item.key===key); const target=index+(direction==="left"?-1:1); if(key==="serial"||index<0||target<1||target>=this.board.columns.length)return false; this.snapshot("Column reorder undone"); [this.board.columns[index],this.board.columns[target]]=[this.board.columns[target],this.board.columns[index]]; this.save({op:"updateColumns",boardId:this.board.id,columnKey:key}); return true; }
+  duplicateColumn(key) { const source=this.board.columns.find((item)=>item.key===key); if(!source)return false; this.snapshot("Column duplication undone"); const copy={...source,key:`custom_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,label:`${source.label} copy`,required:false,options:[...source.options]}; this.board.columns.splice(this.board.columns.indexOf(source)+1,0,copy); this.rows.forEach((row)=>{row[copy.key]=row[source.key]??copy.defaultValue;}); this.log(`Duplicated ${source.label} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:copy.key,affectsRecords:true}); return copy; }
+  updateColumnConfig(config) { this.snapshot("Column settings undone"); Object.entries(config).forEach(([key, value]) => { const column=this.board.columns.find((item)=>item.key===key); if(column)Object.assign(column,value); }); this.save({op:"updateColumns",boardId:this.board.id,columnKeys:Object.keys(config)}); }
+  saveView(name) { const clean = name.trim(); if (!clean) return false; const view={ id: Date.now(), name: clean, status: this.status, query: this.query, grouped: this.grouped, sortDirection: this.sortDirection, view:this.currentView, visibleColumns:this.board.columns.filter(c=>c.visible!==false).map(c=>c.key), density:this.settings.density, sortKey:this.sortKey,quickFilter:this.quickFilter,showArchived:this.showArchived,columnOrder:this.board.columns.map(c=>c.key),columnWidths:Object.fromEntries(this.board.columns.map(c=>[c.key,c.width])) }; this.board.savedViews.push(view); this.activeSavedViewId=view.id; this.save({op:"updateViews",boardId:this.board.id}); return true; }
+  applyView(id) { const view = this.board.savedViews.find((item) => item.id === Number(id)); if (!view) return; Object.assign(this, { status: view.status, query: view.query, grouped: view.grouped, sortDirection: view.sortDirection }); if(view.view)this.currentView=view.view; if(view.visibleColumns){this.board.columns.forEach(c=>c.visible=view.visibleColumns.includes(c.key));} if(view.density)this.settings.density=view.density; this.sortKey=view.sortKey||"";this.quickFilter=view.quickFilter||"all";this.showArchived=Boolean(view.showArchived);if(view.columnOrder)this.board.columns.sort((a,b)=>{const ai=view.columnOrder.indexOf(a.key),bi=view.columnOrder.indexOf(b.key);return (ai<0?999:ai)-(bi<0?999:bi);});if(view.columnWidths)this.board.columns.forEach(c=>c.width=view.columnWidths[c.key]||c.width);this.manualSort=false; this.activeSavedViewId=view.id;this.save({op:"updateColumns",boardId:this.board.id,viewId:view.id}); }
   resetMainView() { this.sortKey="";this.quickFilter="all";this.columnFilter=null;this.query=""; this.status="All"; this.grouped=false; this.sortDirection="desc"; this.activeSavedViewId=null; this.showArchived=false; this.manualSort=Boolean(this.board?.manualOrder); }
-  deleteView(id) { this.board.savedViews = this.board.savedViews.filter((view) => view.id !== Number(id)); if(this.activeSavedViewId===Number(id))this.resetMainView(); this.save(); }
+  deleteView(id) { this.board.savedViews = this.board.savedViews.filter((view) => view.id !== Number(id)); if(this.activeSavedViewId===Number(id))this.resetMainView(); this.save({op:"updateViews",boardId:this.board.id}); }
   toggleRow(id) { this.selected.has(id) ? this.selected.delete(id) : this.selected.add(id); }
   log(text) { if (!this.board) return; const at = new Date().toISOString(); this.board.updatedAt=at; this.board.activity.unshift({ id: Date.now(), text, at }); this.board.activity = this.board.activity.slice(0, 80); if(!this.settings.muteActivity)this.notifications.unshift({ id: Date.now() + 1, text, boardId: this.board.id, workspaceId: this.workspace.id, at, read: false }); this.notifications = this.notifications.slice(0,50); }
-  updateSetting(key, value) { this.settings[key] = value; this.save(); }
-  updateProfile(values) { Object.assign(this.profile, values); const parts=this.profile.name.trim().split(/\s+/); this.profile.initials=(parts[0]?.[0] || "U") + (parts[1]?.[0] || ""); this.profile.initials=this.profile.initials.toUpperCase(); this.save(); }
-  syncUsername(username) { const name=String(username || "medtek").trim().toLowerCase(); this.profile.name=name; this.profile.initials=(name[0] || "M").toUpperCase(); this.save(); }
-  setAvatar(dataUrl) { this.profile.avatar = dataUrl; this.save(); }
-  toggleFavorite(boardId, workspaceId = this.currentWorkspaceId) { const space=this.workspaces.find((item)=>item.id===workspaceId); const board=space?.boards.find((item)=>item.id===boardId); if (!board) return; board.favorite=!board.favorite; this.save(); }
-  updateBoardDescription(value) { this.board.description=String(value).trim(); this.log("Updated the board description"); this.save(); }
-  markAllNotificationsRead() { this.notifications.forEach((item)=>{item.read=true;}); this.save(); }
-  clearNotifications() { this.notifications=[]; this.save(); }
-  bulkUpdate(ids, field, value) { const targets=new Set(ids.map(Number)); this.snapshot(`Bulk ${field} change undone`); this.rows.forEach((row)=>{ if(targets.has(row.id)){row[field]=value;this.recordActivity(row,"Changed "+field);} }); this.log(`Updated ${field} on ${targets.size} records`); this.save(); }
+  updateSetting(key, value) { this.settings[key] = value; this.save({op:"updateUserState"}); }
+  updateProfile(values) { Object.assign(this.profile, values); const parts=this.profile.name.trim().split(/\s+/); this.profile.initials=(parts[0]?.[0] || "U") + (parts[1]?.[0] || ""); this.profile.initials=this.profile.initials.toUpperCase(); this.save({op:"updateUserState"}); }
+  syncUsername(username) { const name=String(username || "medtek").trim().toLowerCase(); this.profile.name=name; this.profile.initials=(name[0] || "M").toUpperCase(); this.save({op:"updateUserState"}); }
+  setAvatar(dataUrl) { this.profile.avatar = dataUrl; this.save({op:"updateUserState"}); }
+  toggleFavorite(boardId, workspaceId = this.currentWorkspaceId) { const space=this.workspaces.find((item)=>item.id===workspaceId); const board=space?.boards.find((item)=>item.id===boardId); if (!board) return; board.favorite=!board.favorite; this.save({op:"updateUserState",boardId}); }
+  updateBoardDescription(value) { this.board.description=String(value).trim(); this.log("Updated the board description"); this.save({op:"updateBoard",boardId:this.board.id}); }
+  markAllNotificationsRead() { this.notifications.forEach((item)=>{item.read=true;}); this.save({op:"updateUserState"}); }
+  clearNotifications() { this.notifications=[]; this.save({op:"updateUserState"}); }
+  bulkUpdate(ids, field, value) { const targets=new Set(ids.map(Number)); this.snapshot(`Bulk ${field} change undone`); this.rows.forEach((row)=>{ if(targets.has(row.id)){row[field]=value;this.recordActivity(row,"Changed "+field);} }); this.log(`Updated ${field} on ${targets.size} records`); this.save({op:"updateRecords",boardId:this.board.id,recordIds:[...targets],fields:[field]}); }
   createBackup() { return JSON.parse(JSON.stringify({version:11,exportedAt:new Date().toISOString(),workspaces:this.workspaces,currentWorkspaceId:this.currentWorkspaceId,currentBoardId:this.currentBoardId,settings:this.settings,profile:this.profile,notifications:this.notifications,recentBoards:this.recentBoards,recentRecords:this.recentRecords,recentCommands:this.recentCommands,members:this.members})); }
 
   restoreBackup(data) {
     this.validateBackup(data); // throws a readable reason; nothing is applied unless the whole backup is valid
-    this.snapshot("Backup restore undone");this.workspaces=JSON.parse(JSON.stringify(data.workspaces));this.currentWorkspaceId=data.currentWorkspaceId||this.workspaces[0].id;this.currentBoardId=data.currentBoardId||this.workspaces[0].boards[0]?.id||"";this.settings={...this.settings,...data.settings};this.profile={...this.profile,...data.profile};this.notifications=data.notifications||[];this.recentBoards=data.recentBoards||[];this.recentRecords=data.recentRecords||[];this.recentCommands=data.recentCommands||[];this.members=data.members||this.members;this.normalizeBoards();this.screen="home";this.save();
+    this.snapshot("Backup restore undone");this.workspaces=JSON.parse(JSON.stringify(data.workspaces));this.currentWorkspaceId=data.currentWorkspaceId||this.workspaces[0].id;this.currentBoardId=data.currentBoardId||this.workspaces[0].boards[0]?.id||"";this.settings={...this.settings,...data.settings};this.profile={...this.profile,...data.profile};this.notifications=data.notifications||[];this.recentBoards=data.recentBoards||[];this.recentRecords=data.recentRecords||[];this.recentCommands=data.recentCommands||[];this.members=data.members||this.members;this.normalizeBoards();this.screen="home";this.save({op:"replaceAll",reason:"restore"});
   }
 
   importRows(rows, mapping=null) {
@@ -254,7 +255,7 @@ class BoardModel {
     const result=this.validateImport(rows,mapping); if(!result.valid.length)throw Error("No valid records to import. Map a non-empty record name.");
     this.snapshot("Import undone");
     const at=new Date().toISOString(); result.valid.forEach(row=>this.rows.push({...row,id:this.nextRecordId(),createdAt:at,updatedAt:at}));
-    this.log("Imported "+result.valid.length+" records");this.save();return result;
+    this.log("Imported "+result.valid.length+" records");this.save({op:"createRecords",boardId:this.board.id,count:result.valid.length});return result;
   }
   validateImport(rows, mapping=null) {
     const valid=[],issues=[];
@@ -279,11 +280,11 @@ class BoardModel {
     return true;
   }
   isDueSoon(row,key="dueDate"){const value=row[key];if(!value)return false;const days=(new Date(value+"T00:00:00")-new Date(new Date().toDateString()))/86400000;return days>=0&&days<=7&&!row.archived&&!row.boardArchived&&!row.workspaceArchived;}
-  archiveWorkspace(id,archived=true){const w=this.workspaces.find(w=>w.id===id);if(!w)return; if(archived&&this.workspaces.filter(w=>!w.archived).length<2)throw Error("Keep at least one active workspace.");this.snapshot("Workspace archive undone");w.archived=archived;if(archived&&this.currentWorkspaceId===id)this.switchWorkspace(this.workspaces.find(w=>!w.archived).id);this.save();}
-  moveRecordToBoard(id,boardId){const row=this.rows.find(r=>r.id===Number(id));const target=this.workspaces.flatMap(w=>w.boards).find(b=>b.id===boardId);if(!row||!target||target===this.board)return false;this.snapshot("Record move undone");this.board.columns.forEach(c=>{if(!target.columns.some(t=>t.key===c.key))target.columns.push(JSON.parse(JSON.stringify(c)));});if(target.records.some(r=>r.id===row.id))row.id=this.nextRecordId();target.records.push(row);this.board.records=this.rows.filter(r=>r!==row);this.recordActivity(row,"Moved to "+target.name);this.log("Moved record to "+target.name);this.save();return true;}
-  rememberRecord(row){this.recentRecords=[{id:row.id,boardId:this.board.id,workspaceId:this.workspace.id},...this.recentRecords.filter(r=>r.id!==row.id||r.boardId!==this.board.id)].slice(0,8);this.save();}
-  rememberCommand(command){this.recentCommands=[command,...this.recentCommands.filter(c=>c!==command)].slice(0,5);this.save();}
-  resizeColumn(key,width){const column=this.board.columns.find(c=>c.key===key);if(column){column.width=Math.max(100,Math.min(600,width));this.save();}}
+  archiveWorkspace(id,archived=true){const w=this.workspaces.find(w=>w.id===id);if(!w)return; if(archived&&this.workspaces.filter(w=>!w.archived).length<2)throw Error("Keep at least one active workspace.");this.snapshot("Workspace archive undone");w.archived=archived;if(archived&&this.currentWorkspaceId===id)this.switchWorkspace(this.workspaces.find(w=>!w.archived).id);this.save({op:"updateWorkspace",workspaceId:id,fields:["archived"]});}
+  moveRecordToBoard(id,boardId){const row=this.rows.find(r=>r.id===Number(id));const target=this.workspaces.flatMap(w=>w.boards).find(b=>b.id===boardId);if(!row||!target||target===this.board)return false;this.snapshot("Record move undone");this.board.columns.forEach(c=>{if(!target.columns.some(t=>t.key===c.key))target.columns.push(JSON.parse(JSON.stringify(c)));});if(target.records.some(r=>r.id===row.id))row.id=this.nextRecordId();target.records.push(row);this.board.records=this.rows.filter(r=>r!==row);this.recordActivity(row,"Moved to "+target.name);this.log("Moved record to "+target.name);this.save({op:"moveRecord",boardId:this.board.id,targetBoardId:boardId,recordId:row.id});return true;}
+  rememberRecord(row){this.recentRecords=[{id:row.id,boardId:this.board.id,workspaceId:this.workspace.id},...this.recentRecords.filter(r=>r.id!==row.id||r.boardId!==this.board.id)].slice(0,8);this.save({op:"updateUserState"});}
+  rememberCommand(command){this.recentCommands=[command,...this.recentCommands.filter(c=>c!==command)].slice(0,5);this.save({op:"updateUserState"});}
+  resizeColumn(key,width){const column=this.board.columns.find(c=>c.key===key);if(column){column.width=Math.max(100,Math.min(600,width));this.save({op:"updateColumns",boardId:this.board.id,columnKey:key});}}
 
   // --- Backup validation (Stage 5). Checks the whole file before anything is applied and explains the first problem.
   // Accepts the current backup format (version 11) and older backups without a version or without board columns.
@@ -414,7 +415,7 @@ class BoardModel {
     if(!this.valueFits(column.defaultValue,type))column.defaultValue="";
     const from=this.columnType(column.type)?.label||column.type;
     column.type=type;
-    this.log(`Changed ${column.label} from ${from} to ${this.columnType(type).label}`);this.save();
+    this.log(`Changed ${column.label} from ${from} to ${this.columnType(type).label}`);this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,affectsRecords:true});
     return {cleared};
   }
 
@@ -434,7 +435,7 @@ class BoardModel {
     this.rows.forEach((row)=>{const value=row[key];if(plan.renames[value]!==undefined)row[key]=plan.renames[value];else if(plan.removed.includes(value))row[key]="";});
     if(plan.renames[plan.column.defaultValue]!==undefined)plan.column.defaultValue=plan.renames[plan.column.defaultValue];else if(plan.removed.includes(plan.column.defaultValue))plan.column.defaultValue="";
     plan.column.options=plan.options;
-    this.log(`Updated ${plan.column.label} options`);this.save();
+    this.log(`Updated ${plan.column.label} options`);this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,affectsRecords:true});
     return {cleared:plan.affected};
   }
   // Basic per-column filter: {key, op, value}. Session state only, like the status filter and search.
@@ -463,7 +464,7 @@ class BoardModel {
     const cols=this.board.columns, from=cols.findIndex((c)=>c.key===key), target=cols.findIndex((c)=>c.key===targetKey);
     if(key==="serial"||from<0||target<0||key===targetKey)return false;
     let to=target+(position==="after"?1:0); if(from<to)to-=1; to=Math.max(1,to); if(to===from)return false;
-    this.snapshot("Column reorder undone"); const [column]=cols.splice(from,1); cols.splice(to,0,column); this.save(); return true;
+    this.snapshot("Column reorder undone"); const [column]=cols.splice(from,1); cols.splice(to,0,column); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key}); return true;
   }
   setColumnVisible(key,visible){if(key==="serial"&&!visible)return false;const column=this.board.columns.find((c)=>c.key===key);if(!column)return false;this.updateColumnConfig({[key]:{visible:Boolean(visible)}});return true;}
 
