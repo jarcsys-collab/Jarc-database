@@ -51,8 +51,10 @@ class AppController {
     if(action==="favorite-board"){this.view.closeOverlay();this.model.toggleFavorite(target.dataset.id);this.update();return;}
     if(action==="remove-filter"){this.model[target.dataset.key]=target.dataset.key==="status"?"All":target.dataset.key==="quickFilter"?"all":"";this.model.activeSavedViewId=null;this.update();return;}
     if(action==="archive-workspace"){this.model.archiveWorkspace(target.dataset.id,target.dataset.archived==="1");this.update();this.view.showSettings(this.model,"workspace");return;}
-    if(action==="restore-backup"){this.model.restoreBackup(this.pendingBackup);this.pendingBackup=null;this.update();this.view.toast("Backup restored");return;}
-    if(action==="move-record-board"){this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>Move record to…</h2>${this.view.closeButton()}</div><p>Existing field values and missing columns will be preserved.</p><div class="choice-list">${this.model.workspaces.filter(w=>!w.archived).flatMap(w=>w.boards.filter(b=>!b.archived&&b.id!==this.model.board.id).map(b=>`<button data-action="confirm-move-record" data-id="${target.dataset.id}" data-board="${b.id}">${this.view.escape(w.name)} / ${this.view.escape(b.name)}</button>`)).join("")||"<p>Create another board first.</p>"}</div></div>`);return;}
+    if(action==="restore-backup"){const backup=this.pendingBackup;this.pendingBackup=null;try{this.model.restoreBackup(backup);}catch(error){this.view.showMessage("Backup not restored",`${error.message}
+
+Your current data was not changed.`);return;}this.update();this.view.toast(this.model.saveState==="error"?"Backup restored for this session only — it could not be saved in this browser":"Backup restored",true);return;}
+    if(action==="move-record-board"){this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>Move record to…</h2>${this.view.closeButton()}</div><p>Existing field values and missing columns will be preserved.</p><div class="choice-list">${this.model.workspaces.filter(w=>!w.archived).flatMap(w=>w.boards.filter(b=>!b.archived&&b.id!==this.model.board.id).map(b=>`<button data-action="confirm-move-record" data-id="${this.view.attr(target.dataset.id)}" data-board="${this.view.attr(b.id)}">${this.view.escape(w.name)} / ${this.view.escape(b.name)}</button>`)).join("")||"<p>Create another board first.</p>"}</div></div>`);return;}
     if(action==="confirm-move-record"){this.model.moveRecordToBoard(target.dataset.id,target.dataset.board);this.update();this.view.toast("Record moved");return;}
     if(action==="adjacent-record"){const list=this.model.visibleRows;const index=list.findIndex(r=>r.id===Number(target.dataset.id));const row=list[(index+Number(target.dataset.direction)+list.length)%list.length];if(row)this.view.showRecordForm(this.model,row);return;}
     if(["rename-board","duplicate-board","delete-board","archive-board","move-board","favorite-board","open-board"].includes(action)&&this.boardMenuWorkspace){this.model.currentWorkspaceId=this.boardMenuWorkspace;this.boardMenuWorkspace=null;}
@@ -67,22 +69,18 @@ class AppController {
     if (action === "create-workspace") this.view.showWorkspaceForm();
     if (action === "record-menu") this.togglePanel(`record-${target.dataset.id}`,()=>this.view.showRecordMenu(this.model.rows.find((row)=>row.id===Number(target.dataset.id))));
     if (action === "switch-workspace") { this.model.switchWorkspace(target.dataset.id); this.view.closeOverlay(); this.update(); }
-    if (action === "more-menu") this.togglePanel("more",()=>this.view.showMore());
     if(action==="board-menu"){this.boardMenuWorkspace=target.dataset.workspace||this.model.currentWorkspaceId;const ws=this.model.workspaces.find(w=>w.id===this.boardMenuWorkspace);this.togglePanel(`board-${target.dataset.id}`,()=>this.view.showBoardMenu(ws.boards.find(b=>b.id===target.dataset.id)));}
     if (action === "new-board") this.view.showBoardForm(null);
-    if (action === "rename-current-board") this.view.showBoardForm(this.model.board);
     if (action === "rename-board") this.view.showBoardForm(this.model.workspace.boards.find((board) => board.id === target.dataset.id));
     if (action === "duplicate-board") { this.model.duplicateBoard(target.dataset.id); this.view.closeOverlay(); this.update(); this.view.toast("Board duplicated"); }
     if (action === "delete-board") this.view.showConfirm("Delete board?","The board and its records will be removed. You can still use Undo afterward.","confirm-delete-board",target.dataset.id);
     if (action === "confirm-delete-board") this.deleteBoard(target.dataset.payload);
-    if (action === "main-view") { this.model.resetMainView(); this.update(); }
     if (action === "archived-view") { this.model.showArchived=true; this.model.activeSavedViewId=null; this.model.selected.clear(); this.update(); }
-    if (["open-form","new-item","quick-add"].includes(action)) this.view.showRecordForm(this.model);
+    if (["open-form","new-item"].includes(action)) this.view.showRecordForm(this.model);
     if (action === "edit") this.view.showRecordForm(this.model,this.model.rows.find((row)=>row.id===Number(target.dataset.id)));
     if (action === "duplicate-record") { const id=this.model.duplicateRecord(target.dataset.id); this.update(); if(id)this.focusItem(id); this.view.toast("Item duplicated"); }
     if (action === "pin-item") { this.model.togglePin(target.dataset.id); this.update(); this.view.toast("Pin updated"); }
     if (action === "archive-item") { const row=this.model.rows.find((item)=>item.id===Number(target.dataset.id)); const archive=!row.archived; this.model.archiveItem(target.dataset.id,archive); this.update(); this.view.toast(archive?"Record archived":"Record restored",true); }
-    if (action === "copy-item") this.copyItem(target.dataset.id);
     if (action === "delete") this.requestDeleteRecords([Number(target.dataset.id)]);
     if (action === "delete-selected") this.requestDeleteRecords([...this.model.selected]);
     if (action === "confirm-delete-records") this.deleteRecords(target.dataset.payload.split(",").map(Number));
@@ -139,11 +137,6 @@ class AppController {
     if (action === "view-overflow") this.togglePanel("view-overflow",()=>this.view.showViewOverflow(this.model));
     if (action === "apply-saved-view") { this.model.applyView(target.dataset.id); this.view.closeOverlay(); this.update(); }
     if (action === "delete-saved-view") { this.model.deleteView(target.dataset.id); this.view.showSavedViews(this.model); }
-    if (action === "quick-status") this.view.showQuickChoice("Change status",["Review","Defective","Clear"],"apply-status",target.dataset.id);
-    if (action === "apply-status") this.applyMove(target.dataset.id,{status:target.dataset.value});
-    if (action === "quick-group") this.view.showQuickChoice("Move to group",["New","Working","Done"],"apply-group",target.dataset.id);
-    if (action === "apply-group") this.applyMove(target.dataset.id,{group:target.dataset.value});
-    if (action === "move-status") this.applyMove(target.dataset.id,{status:target.dataset.status});
     if (action === "bulk-status") this.view.showQuickChoice("Set selected status",this.model.statusColumn.options.length?this.model.statusColumn.options:["Review","Defective","Clear"],"apply-bulk-status","");
     if (action === "apply-bulk-status") { this.model.bulkUpdate([...this.model.selected],this.model.statusColumn.key,target.dataset.value); this.model.selected.clear(); this.view.closeOverlay(); this.update(); this.view.toast("Selected records updated"); }
     if (action === "bulk-owner") this.view.showQuickChoice("Assign selected records",[...new Set([this.model.profile.initials,...this.model.members.map(m=>m.name),"Unassigned"])],"apply-bulk-owner","");
@@ -178,13 +171,12 @@ class AppController {
     if (action === "palette-record") { this.model.openBoard(target.dataset.board,target.dataset.workspace); const row=this.model.rows.find(r=>r.id===Number(target.dataset.id)); this.update(); this.view.showRecordForm(this.model,row); }
     if (action === "run-command") this.runCommand(target.dataset.command);
     if (action === "global-search") this.view.showGlobalSearch();
-    if(action==="move-board"){const choices=this.model.workspaces.filter(w=>w.id!==this.model.currentWorkspaceId&&!w.archived);this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>Move board to workspace</h2>${this.view.closeButton()}</div><div class="choice-list">${choices.map(w=>`<button data-action="apply-move-board" data-id="${target.dataset.id}" data-workspace="${w.id}">${this.view.escape(w.name)}</button>`).join("")||"<p>Create another workspace to move this board.</p>"}</div></div>`);}
+    if(action==="move-board"){const choices=this.model.workspaces.filter(w=>w.id!==this.model.currentWorkspaceId&&!w.archived);this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>Move board to workspace</h2>${this.view.closeButton()}</div><div class="choice-list">${choices.map(w=>`<button data-action="apply-move-board" data-id="${this.view.attr(target.dataset.id)}" data-workspace="${this.view.attr(w.id)}">${this.view.escape(w.name)}</button>`).join("")||"<p>Create another workspace to move this board.</p>"}</div></div>`);}
     if (action === "apply-move-board") { const ws=this.model.workspaces.find(w=>w.id===target.dataset.workspace); if(ws){this.model.moveBoardToWorkspace(target.dataset.id,ws.id);this.view.closeOverlay();this.update();this.view.toast("Board moved");} }
     if (action === "archive-board") { this.model.archiveBoard(target.dataset.id,!this.model.workspace.boards.find(b=>b.id===target.dataset.id)?.archived); this.view.closeOverlay();this.update();this.view.toast("Board archive updated"); }
     if(action==="shortcuts")this.view.showShortcuts();
     if (action === "import") this.view.showImport(this.model);
     if (action === "choose-import-file") document.querySelector("#import-file").click();
-    if (action === "move-workspace") { const moved=this.model.moveWorkspace(target.dataset.id,target.dataset.direction); this.view.showSettings(this.model,"workspace"); if(moved)this.view.toast("Workspace reordered"); }
     if (action === "export") this.exportCsv();
     if (action === "export-backup") this.exportBackup();
     if (action === "close-overlay" && (event.target === target || target.closest("button"))) this.view.closeOverlay();
@@ -215,16 +207,7 @@ class AppController {
     if (action === "density") { this.model.updateSetting("density",event.target.checked?"compact":"comfortable"); document.documentElement.dataset.density=this.model.settings.density; }
     if (action === "setting") { this.model.updateSetting(event.target.dataset.key,event.target.checked); this.update(); this.view.showSettings(this.model); }
     if (action === "setting-select") { const key=event.target.dataset.key; const value=["density","fontSize"].includes(key)?event.target.value.toLowerCase():event.target.value; this.model.updateSetting(key,value); this.update(); this.view.showSettings(this.model,this.model.settings.settingsSection); }
-    if (action === "accent-color") { this.model.updateSetting("accentColor",event.target.value); this.view.applyDisplay(this.model); }
-    if(action==="cell-edit"){
-      const field=event.target, value=field.type==="checkbox"?field.checked:field.value;
-      if(field.type!=="checkbox"&&value===field.dataset.beforeEdit)return;
-      if(!field.checkValidity()){field.reportValidity();field.value=field.dataset.beforeEdit||"";return;}
-      this.model.updateCell(field.dataset.id,field.dataset.field,value);field.dataset.beforeEdit=field.value;field.dataset.value=String(value);
-      this.saveFeedback();
-    }
     if (action === "board-title-inline") { this.model.renameBoard(this.model.currentBoardId,event.target.value); this.update(); this.view.toast("Board name saved"); }
-    if (action === "column-label-inline") { this.model.renameColumn(event.target.dataset.key,event.target.value); this.update(); this.view.toast("Column name saved"); }
     if (action === "import-file") this.importData(event.target.files[0]);
     if (action === "avatar-file") this.loadAvatar(event.target.files[0]);
   }
@@ -254,15 +237,14 @@ class AppController {
       else this.model.columnFilter={key,op,value:noValue?"":value};
       this.model.activeSavedViewId=null; this.view.closeOverlay(); this.update(); return;
     }
-    if (action === "create-column-form") { const column=this.model.addColumn({label:data.label,type:data.type,options:data.options||""}); if(column){this.view.closeOverlay();this.update();this.root.querySelector(`th[data-column-key="${column.key}"]`)?.scrollIntoView({block:"nearest",inline:"nearest"});this.view.toast(`${column.label} column added`,true);} }
+    if (action === "create-column-form") { const column=this.model.addColumn({label:data.label,type:data.type,options:data.options||""}); if(column){this.view.closeOverlay();this.update();this.root.querySelector(`th[data-column-key="${CSS.escape(column.key)}"]`)?.scrollIntoView({block:"nearest",inline:"nearest"});this.view.toast(`${column.label} column added`,true);} }
     if (action === "rename-column-form") { if(this.model.renameColumn(data.key,data.label)){this.view.closeOverlay();this.update();this.view.toast("Column renamed",true);} }
     if (action === "column-options-form") { this.pendingOptions={key:data.key,items:[...event.target.querySelectorAll(".option-row input")].map((input)=>({from:input.dataset.from||null,to:input.value}))}; this.applyColumnOptions(); }
-    if (action === "add-column-form") { const column=this.model.addColumn({ ...data, required:Boolean(data.required) }); if(column){this.view.closeOverlay();this.update();this.view.toast(`${column.label} column added`);} }
     if (action === "edit-column-form") { this.model.renameColumn(data.key,data.label); this.model.updateColumnConfig({[data.key]:{visible:data.key==="serial"?true:Boolean(data.visible),required:data.key==="serial"?true:Boolean(data.required),connection:data.connection||"",defaultValue:data.defaultValue||"",options:String(data.options||"").split(",").map((item)=>item.trim()).filter(Boolean)}}); this.view.closeOverlay(); this.update(); this.view.toast("Column updated"); }
     if (action === "save-view-form") { if (this.model.saveView(data.name)) { this.view.closeOverlay(); this.update(); this.view.toast("View saved"); } }
     if (action === "profile-form") { data.name=this.auth.username; this.model.updateProfile(data); this.view.closeOverlay(); this.update(); this.view.toast("Profile updated"); }
     if (action === "description-form") { this.model.updateBoardDescription(data.description); this.view.closeOverlay(); this.update(); this.view.toast("Description saved"); }
-    if(action==="paste-import-form"){this.pendingImport=this.parseCsv(data.text);this.view.showImportPreview(this.model,this.pendingImport);return;}
+    if(action==="paste-import-form"){if(String(data.text||"").length>10*1024*1024){this.view.showMessage("Import not ready","Pasted text is larger than 10 MB. Split it into smaller imports.");return;}try{const rows=this.parseCsv(data.text);this.model.assertImportable(rows);this.pendingImport=rows;this.view.showImportPreview(this.model,rows);}catch(error){this.view.showMessage("Import not ready",error.message);}return;}
     if (action === "workspace-settings-form") { this.model.updateWorkspace(this.model.currentWorkspaceId,data); this.update();this.view.showSettings(this.model,"workspace"); this.view.toast("Workspace updated"); }
   }
   onKeydown(event) {
@@ -280,7 +262,7 @@ class AppController {
     if(event.target.dataset?.action==="column-type-search"&&event.key==="Enter"){event.preventDefault();event.target.closest(".column-chooser")?.querySelector(".chooser-option:not([hidden]):not(:disabled)")?.click();return;}
     if(event.key==="Escape"){
       event.preventDefault();
-      if(["cell-edit","board-title-inline","column-label-inline"].includes(event.target.dataset.action)){event.target.value=event.target.dataset.beforeEdit??event.target.defaultValue;event.target.blur();return;}
+      if(event.target.dataset.action==="board-title-inline"){event.target.value=event.target.dataset.beforeEdit??event.target.defaultValue;event.target.blur();return;}
       this.view.closeOverlay();document.querySelector("#sidebar")?.classList.remove("open");return;
     }
     const root=document.querySelector("#overlay-root");
@@ -303,11 +285,7 @@ class AppController {
       }return;
     }
     if(event.target.dataset.action==="resize-column"&&["ArrowLeft","ArrowRight"].includes(event.key)){event.preventDefault();const c=this.model.board.columns.find(c=>c.key===event.target.dataset.key);this.model.resizeColumn(c.key,(c.width||180)+(event.key==="ArrowRight"?20:-20));this.update();return;}
-    if(event.target.dataset.action==="cell-edit"){
-      if(event.key==="Enter"){event.preventDefault();event.target.blur();}
-      if(event.altKey&&["ArrowUp","ArrowDown"].includes(event.key)){event.preventDefault();const cells=[...this.root.querySelectorAll('[data-action="cell-edit"]')].filter(e=>e.dataset.field===event.target.dataset.field);const next=cells[cells.indexOf(event.target)+(event.key==="ArrowDown"?1:-1)];event.target.blur();next?.focus();}return;
-    }
-    if(["board-title-inline","column-label-inline"].includes(event.target.dataset.action)&&event.key==="Enter"){event.preventDefault();event.target.blur();return;}
+    if(event.target.dataset.action==="board-title-inline"&&event.key==="Enter"){event.preventDefault();event.target.blur();return;}
     if(!editing&&!event.ctrlKey&&!event.metaKey&&!event.altKey){
       if(event.key==="/"){event.preventDefault();if(this.model.screen==="board")document.querySelector("#board-search")?.focus();else this.view.showCommandPalette(this.model);}
       if(event.key==="?"){event.preventDefault();this.view.showShortcuts();}
@@ -315,7 +293,6 @@ class AppController {
     }
   }
 
-  applyMove(id,updates) { this.model.moveRecord(id,updates); this.view.closeOverlay(); this.update(); this.view.toast("Record moved"); }
   requestDeleteRecords(ids) { if (ids.length) this.view.showConfirm(`Delete ${ids.length} record${ids.length===1?"":"s"}?`,"The selected data will be removed from this board. Undo remains available afterward.","confirm-delete-records",ids.join(",")); }
   deleteRecords(ids) { if (!ids.length) return; this.model.remove(ids); this.view.closeOverlay(); this.update(); this.view.toast("Record deleted",true); }
   deleteBoard(id) { try { this.model.deleteBoard(id); this.view.closeOverlay(); this.update(); this.view.toast("Board deleted",true); } catch(error) { this.view.showMessage("Board not deleted",error.message); } }
@@ -333,19 +310,24 @@ class AppController {
     if(command==="settings")this.view.showSettings(this.model);
   }
 
-  addItem() { const id=this.model.quickAdd(); this.update(); this.focusItem(id); this.view.toast("New item added. Type directly in the highlighted name cell."); }
-  focusItem(id) { requestAnimationFrame(()=>{ const input=document.querySelector(`[data-action="cell-edit"][data-id="${id}"][data-field="serial"]`); input?.focus(); input?.select?.(); }); }
-  async copyItem(id) { const row=this.model.rows.find((item)=>item.id===Number(id)); if(!row)return; const text=this.model.board.columns.map((column)=>`${column.label}: ${row[column.key]??""}`).join("\n"); try { if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(text); else { const area=document.createElement("textarea");area.value=text;document.body.append(area);area.select();document.execCommand("copy");area.remove(); } this.view.toast("Item copied to clipboard"); } catch { this.view.showMessage("Copy failed","Clipboard access is not available in this browser."); } }
+  focusItem(id) { requestAnimationFrame(()=>{ const cell=this.cellButton(id,"serial"); cell?.scrollIntoView({block:"nearest",inline:"nearest"}); cell?.focus(); }); }
   loadAvatar(file) { if(!file)return; if(file.size>1024*1024){this.view.showMessage("Photo is too large","Choose an image smaller than 1 MB.");return;} const reader=new FileReader(); reader.onload=()=>{this.model.setAvatar(reader.result);this.view.showProfileSettings(this.model);this.view.toast("Profile photo updated");}; reader.onerror=()=>this.view.showMessage("Photo not loaded","The selected image could not be read."); reader.readAsDataURL(file); }
-  exportCsv() { const fields=this.model.board.columns; const quote=(value)=>`"${String(value??"").replaceAll('"','""')}"`; const csv=[fields.map((field)=>quote(field.label)).join(","),...this.model.visibleRows.map((row)=>fields.map((field)=>quote(row[field.key])).join(","))].join("\n"); this.download(new Blob([csv],{type:"text/csv"}),`${this.model.board.name.toLowerCase().replace(/[^a-z0-9]+/g,"-")}.csv`); this.view.toast("Board exported"); }
-  exportBackup() { const backup=JSON.stringify(this.model.createBackup(),null,2); this.download(new Blob([backup],{type:"application/json"}),"jarc-database-backup.json"); this.view.toast("Full backup exported"); }
+  // A cell starting with = + - @ (or tab/carriage return) can run as a formula in Excel, Sheets or LibreOffice, so it is
+  // exported with a leading apostrophe. Plain numbers in Number columns (e.g. -5) are left as numbers.
+  csvCell(value,column=null){ let text=String(value??""); const plainNumber=column?.type==="number"&&/^-?\d+(\.\d+)?$/.test(text.trim()); if(!plainNumber&&/^[=+\-@\t\r]/.test(text))text="'"+text; return `"${text.replaceAll('"','""')}"`; }
+  exportCsv() { const fields=this.model.board.columns; const csv=[fields.map((field)=>this.csvCell(field.label)).join(","),...this.model.visibleRows.map((row)=>fields.map((field)=>this.csvCell(row[field.key],field)).join(","))].join("\n"); if(this.download(new Blob([csv],{type:"text/csv"}),`${this.model.board.name.toLowerCase().replace(/[^a-z0-9]+/g,"-")||"board"}.csv`))this.view.toast("Board exported"); }
+  exportBackup() { const backup=JSON.stringify(this.model.createBackup(),null,2); if(this.download(new Blob([backup],{type:"application/json"}),"jarc-database-backup.json"))this.view.toast("Full backup exported"); }
   async importData(file) {
     if(!file)return;
     try{
       if(file.size>10*1024*1024)throw Error("Choose a file smaller than 10 MB.");
-      const text=await file.text();const data=file.name.toLowerCase().endsWith(".csv")?this.parseCsv(text):JSON.parse(text);
-      if(data.workspaces){this.pendingBackup=data;this.view.showConfirm("Restore workspace backup?","This replaces the current workspaces. Download a full backup from Settings → Data first. You can undo a restore during this session.","restore-backup");return;}
-      const rows=Array.isArray(data)?data:data.rows;if(!Array.isArray(rows)||!rows.length||rows.some(r=>!r||typeof r!=="object"||Array.isArray(r)))throw Error("The file must contain a non-empty list of records.");
+      const text=await file.text(), isCsv=file.name.toLowerCase().endsWith(".csv");
+      let data; if(isCsv)data=this.parseCsv(text); else { try{data=JSON.parse(text);}catch{throw Error("This file isn't valid JSON. Choose a JARC backup (.json), a JSON list of records, or a CSV file.");} }
+      if(!isCsv&&data&&typeof data==="object"&&!Array.isArray(data)&&"workspaces" in data){
+        const summary=this.model.validateBackup(data); // throws a readable reason before anything changes
+        this.pendingBackup=data;this.view.showConfirm("Restore workspace backup?",`This replaces your current data with ${summary.workspaces} workspace${summary.workspaces===1?"":"s"}, ${summary.boards} board${summary.boards===1?"":"s"} and ${summary.records} record${summary.records===1?"":"s"}. Download a full backup from Settings → Data first. You can undo a restore during this session.`,"restore-backup","","Restore backup");return;
+      }
+      const rows=Array.isArray(data)?data:data?.rows;this.model.assertImportable(rows);
       this.pendingImport=rows;this.view.showImportPreview(this.model,rows);
     }catch(error){this.view.showMessage("Import not ready",error.message);}
   }
@@ -365,24 +347,26 @@ class AppController {
     return rows.map((r,i)=>{if(r.length!==headers.length)throw Error("Row "+(i+2)+" has "+r.length+" values; expected "+headers.length+".");return Object.fromEntries(headers.map((h,j)=>[h,r[j]]));});
   }
 
-  download(blob,filename) { const url=URL.createObjectURL(blob),link=document.createElement("a"); link.href=url; link.download=filename; link.click(); setTimeout(()=>URL.revokeObjectURL(url),500); }
+  download(blob,filename) { try { const url=URL.createObjectURL(blob),link=document.createElement("a"); link.href=url; link.download=filename; link.click(); setTimeout(()=>URL.revokeObjectURL(url),500); return true; } catch(error) { this.view.showMessage("Export failed",`The file could not be created in this browser (${error.message}). Try again, or use a different browser.`); return false; } }
   chooseBoardAction(action) {
     if(this.model.screen==="board"&&this.model.board&&!this.model.board.archived){action==="import"?this.view.showImport(this.model):this.view.showRecordForm(this.model);return;}
     const boards=this.model.workspaces.filter(w=>!w.archived).flatMap(w=>w.boards.filter(b=>!b.archived).map(b=>({...b,workspaceId:w.id,workspaceName:w.name})));
-    this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>${action==="import"?"Import into a board":"Create a record in…"}</h2>${this.view.closeButton()}</div><div class="choice-list">${boards.map(b=>`<button data-action="choose-board-action" data-mode="${action}" data-id="${b.id}" data-workspace="${b.workspaceId}">${icon("board")}<span><strong>${this.view.escape(b.name)}</strong><small>${this.view.escape(b.workspaceName)}</small></span></button>`).join("")||'<p>Create a board first to add records.</p><button data-action="new-board" class="button primary">Create board</button>'}</div></div>`);
+    this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>${action==="import"?"Import into a board":"Create a record in…"}</h2>${this.view.closeButton()}</div><div class="choice-list">${boards.map(b=>`<button data-action="choose-board-action" data-mode="${this.view.attr(action)}" data-id="${this.view.attr(b.id)}" data-workspace="${this.view.attr(b.workspaceId)}">${icon("board")}<span><strong>${this.view.escape(b.name)}</strong><small>${this.view.escape(b.workspaceName)}</small></span></button>`).join("")||'<p>Create a board first to add records.</p><button data-action="new-board" class="button primary">Create board</button>'}</div></div>`);
   }
   toggleSidebar(){document.body.classList.toggle("nav-collapsed");localStorage.setItem("jarc-nav-collapsed",document.body.classList.contains("nav-collapsed")?"1":"0");}
   saveFeedback(){
     const button=this.root.querySelector(".save-state");if(!button)return;
     const state=this.model.saveState||"saved";button.classList.toggle("save-error",state==="error");
     button.innerHTML=state==="error"?"Couldn't save · Retry":state==="saving"?"Saving…":`<i></i> ${navigator.onLine?"Saved locally":"Offline · saved locally"}`;
+    if(state==="error"&&!this.saveErrorNotified){this.saveErrorNotified=true;this.view.toast(this.model.saveError==="quota"?"Browser storage is full — your latest changes are not saved. Export a backup from Settings → Data.":"Changes couldn't be saved in this browser. Export a backup from Settings → Data, then use Retry.");}
+    if(state==="saved")this.saveErrorNotified=false;
   }
   onContextMenu(event){
     const row=event.target.closest('[data-record-context]'),board=event.target.closest('[data-board-context]'),workspace=event.target.closest('[data-action="workspace-menu"]');
     if(!row&&!board&&!workspace)return;event.preventDefault();
     if(row)this.view.showRecordMenu(this.model.rows.find(r=>r.id===Number(row.dataset.recordContext)));
     else if(board){this.boardMenuWorkspace=board.dataset.workspace||this.model.currentWorkspaceId;this.view.showBoardMenu(this.model.workspaces.find(w=>w.id===this.boardMenuWorkspace).boards.find(b=>b.id===board.dataset.boardContext));}
-    else this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>${this.view.escape(this.model.workspace.name)}</h2>${this.view.closeButton()}</div><div class="choice-list"><button data-action="workspace-manage">Rename and customize</button><button data-action="settings-section" data-section="members">Manage local members</button><button data-action="archive-workspace" data-id="${this.model.workspace.id}" data-archived="1">Archive workspace</button><button class="danger" data-action="request-delete-workspace" data-id="${this.model.workspace.id}">Delete workspace</button></div></div>`);
+    else this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>${this.view.escape(this.model.workspace.name)}</h2>${this.view.closeButton()}</div><div class="choice-list"><button data-action="workspace-manage">Rename and customize</button><button data-action="settings-section" data-section="members">Manage local members</button><button data-action="archive-workspace" data-id="${this.view.attr(this.model.workspace.id)}" data-archived="1">Archive workspace</button><button class="danger" data-action="request-delete-workspace" data-id="${this.view.attr(this.model.workspace.id)}">Delete workspace</button></div></div>`);
     const pop=this.root.querySelector('.popover');if(pop){pop.style.left=Math.min(event.clientX,innerWidth-260)+"px";pop.style.top=Math.min(event.clientY,innerHeight-340)+"px";pop.style.right="auto";}
   }
   startRowDrag(event){
@@ -449,10 +433,10 @@ class AppController {
   guard(action){try{action();}catch(error){this.view.showMessage("Action could not be completed",error.message);}}
 
   // ---- Table interaction (Stage 4). Cell edits patch one cell; row inserts refresh only the board view.
-  cellButton(id,field){return this.root.querySelector(`tr[data-record-context="${id}"] [data-action="cell-open"][data-field="${CSS.escape(field)}"]`);}
+  cellButton(id,field){return this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"] [data-action="cell-open"][data-field="${CSS.escape(field)}"]`);}
   patchCell(id,field,focus=false){
     const row=this.model.rows.find((r)=>r.id===Number(id)), column=this.model.board.columns.find((c)=>c.key===field);
-    const td=this.root.querySelector(`tr[data-record-context="${id}"] td[data-column-key="${CSS.escape(field)}"]`);
+    const td=this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"] td[data-column-key="${CSS.escape(field)}"]`);
     if(!row||!column||!td)return;
     td.outerHTML=this.view.cell(row,column,this.model); this.saveFeedback();
     if(focus)this.cellButton(id,field)?.focus();
@@ -488,6 +472,7 @@ class AppController {
       else this.model.updateCell(id,field,value);
     }
     this.patchCell(id,field,move!=="none");
+    if(!note&&column?.type==="link"&&value.trim()&&value!==input.dataset.original&&!this.view.safeHref(value,"link"))note="Saved as text — only http, https, mailto and tel links can be opened.";
     if(note)this.view.toast(note);
     if(move==="next"||move==="prev"){const cell=this.cellButton(id,field);(this.adjacentCell(cell,move==="next"?1:-1)||cell)?.focus();}
   }
@@ -596,4 +581,15 @@ class AppController {
     if(result)this.view.toast(`Options updated${result.cleared?` · ${result.cleared} value${result.cleared===1?"":"s"} cleared`:""}`,true);
   }
 }
-try { new AppController(document.querySelector("#app")); } catch(error) { const root=document.querySelector("#app");root.textContent=error.message;root.setAttribute("role","alert"); }
+try { new AppController(document.querySelector("#app")); } catch(error) {
+  const root=document.querySelector("#app"); let raw=null; try { raw=localStorage.getItem("jarc-database-data"); } catch {}
+  root.innerHTML='<main class="startup-error" role="alert"><h1>JARC couldn\'t open your saved data</h1><p class="startup-error-message"></p><p>Nothing has been deleted. Download a copy of the stored data before trying anything else.</p><div class="startup-error-actions"><button type="button" class="button primary" data-recover="download">Download stored data</button><button type="button" class="button secondary" data-recover="reload">Try again</button><button type="button" class="button danger" data-recover="reset">Clear stored data…</button></div></main>';
+  root.querySelector(".startup-error-message").textContent=error.message;
+  if(!raw)root.querySelector('[data-recover="download"]').disabled=true;
+  root.addEventListener("click",(event)=>{
+    const action=event.target.closest("[data-recover]")?.dataset.recover;
+    if(action==="download"&&raw){const url=URL.createObjectURL(new Blob([raw],{type:"application/json"})),link=document.createElement("a");link.href=url;link.download="jarc-stored-data-"+new Date().toISOString().slice(0,10)+".json";link.click();setTimeout(()=>URL.revokeObjectURL(url),500);}
+    if(action==="reload")location.reload();
+    if(action==="reset"&&confirm("Permanently delete the stored JARC data in this browser? Download it first if you might need it."))try{localStorage.removeItem("jarc-database-data");location.reload();}catch{}
+  });
+}

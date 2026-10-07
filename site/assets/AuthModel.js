@@ -1,3 +1,8 @@
+// TEMPORARY FRONTEND-ONLY ACCESS SCREEN — NOT SECURITY.
+// The sign-in check below runs entirely in the browser: the expected values ship inside this public file and the
+// "signed in" flag is a browser-storage entry, so anyone can read or bypass it. It must not protect real or shared data.
+// Replace with server-side authentication (planned: Microsoft Entra ID via the backend) before production use.
+// Do not add further credentials, secrets or environment variables here.
 class AuthModel {
   constructor() {
     this.username = "medtek";

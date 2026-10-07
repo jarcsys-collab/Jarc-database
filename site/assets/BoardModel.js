@@ -1,3 +1,6 @@
+// Import limits (Stage 5). Generous for real boards, but they keep a single import from filling this browser's storage.
+const IMPORT_LIMITS = Object.freeze({ rows: 5000, fields: 200, cellLength: 10000 });
+
 class BoardModel {
   constructor() {
     const saved = this.readStorage();
@@ -89,8 +92,8 @@ class BoardModel {
     window.dispatchEvent(new CustomEvent("jarc-save", {detail:"saving"}));
     try {
       localStorage.setItem("jarc-database-data", JSON.stringify({workspaces:this.workspaces,currentWorkspaceId:this.currentWorkspaceId,currentBoardId:this.currentBoardId,currentView:this.currentView,screen:this.screen,settings:this.settings,profile:this.profile,notifications:this.notifications,recentBoards:this.recentBoards,members:this.members,recentRecords:this.recentRecords,recentCommands:this.recentCommands}));
-      this.saveState = "saved";
-    } catch (error) { this.saveState = "error"; }
+      this.saveState = "saved"; this.saveError = "";
+    } catch (error) { this.saveState = "error"; this.saveError = error?.name === "QuotaExceededError" || /quota/i.test(String(error?.message)) ? "quota" : "blocked"; }
     window.dispatchEvent(new CustomEvent("jarc-save", {detail:this.saveState}));
     return this.saveState === "saved";
   }
@@ -242,7 +245,7 @@ class BoardModel {
   createBackup() { return JSON.parse(JSON.stringify({version:11,exportedAt:new Date().toISOString(),workspaces:this.workspaces,currentWorkspaceId:this.currentWorkspaceId,currentBoardId:this.currentBoardId,settings:this.settings,profile:this.profile,notifications:this.notifications,recentBoards:this.recentBoards,recentRecords:this.recentRecords,recentCommands:this.recentCommands,members:this.members})); }
 
   restoreBackup(data) {
-    if(!data || !Array.isArray(data.workspaces) || !data.workspaces.length || data.workspaces.some(w=>!w.id||!w.name||!Array.isArray(w.boards)||w.boards.some(b=>!b.id||!b.name||!Array.isArray(b.records))))throw Error("This is not a valid Jarc workspace backup.");
+    this.validateBackup(data); // throws a readable reason; nothing is applied unless the whole backup is valid
     this.snapshot("Backup restore undone");this.workspaces=JSON.parse(JSON.stringify(data.workspaces));this.currentWorkspaceId=data.currentWorkspaceId||this.workspaces[0].id;this.currentBoardId=data.currentBoardId||this.workspaces[0].boards[0]?.id||"";this.settings={...this.settings,...data.settings};this.profile={...this.profile,...data.profile};this.notifications=data.notifications||[];this.recentBoards=data.recentBoards||[];this.recentRecords=data.recentRecords||[];this.recentCommands=data.recentCommands||[];this.members=data.members||this.members;this.normalizeBoards();this.screen="home";this.save();
   }
 
@@ -259,7 +262,7 @@ class BoardModel {
       const row={}; let reason="";
       this.board.columns.forEach(c=>{
         const key=mapping?mapping[c.key]:Object.keys(source).find(k=>k.toLowerCase()===c.key.toLowerCase()||k.toLowerCase()===c.label.toLowerCase());
-        const value=key?source[key]:c.defaultValue;row[c.key]=c.type==="checkbox"?[true,"true","yes","1",1].includes(value):String(value??"");
+        const value=key?source[key]:c.defaultValue;if(value!==null&&typeof value==="object"){reason=c.label+" has an unsupported nested value";return;}row[c.key]=c.type==="checkbox"?[true,"true","yes","1",1].includes(value):String(value??"");
         if(c.required&&!String(row[c.key]).trim())reason=c.label+" is required";
         if(row[c.key]&&c.type==="number"&&!Number.isFinite(Number(row[c.key])))reason=c.label+" must be a number";
         if(row[c.key]&&c.type==="date"&&(!/^\d{4}-\d{2}-\d{2}$/.test(row[c.key])||Number.isNaN(new Date(row[c.key]).getTime())||new Date(row[c.key]).toISOString().slice(0,10)!==row[c.key]))reason=c.label+" must use YYYY-MM-DD";
@@ -281,6 +284,98 @@ class BoardModel {
   rememberRecord(row){this.recentRecords=[{id:row.id,boardId:this.board.id,workspaceId:this.workspace.id},...this.recentRecords.filter(r=>r.id!==row.id||r.boardId!==this.board.id)].slice(0,8);this.save();}
   rememberCommand(command){this.recentCommands=[command,...this.recentCommands.filter(c=>c!==command)].slice(0,5);this.save();}
   resizeColumn(key,width){const column=this.board.columns.find(c=>c.key===key);if(column){column.width=Math.max(100,Math.min(600,width));this.save();}}
+
+  // --- Backup validation (Stage 5). Checks the whole file before anything is applied and explains the first problem.
+  // Accepts the current backup format (version 11) and older backups without a version or without board columns.
+  validateBackup(data){
+    const fail=(reason)=>{throw new Error(`This backup can't be restored: ${reason}`);};
+    const isObject=(v)=>v!==null&&typeof v==="object"&&!Array.isArray(v);
+    const isId=(v)=>typeof v==="string"&&/^[A-Za-z0-9_-]{1,100}$/.test(v);
+    const isRecordId=(v)=>(Number.isSafeInteger(v)&&v>0)||isId(v);
+    const isText=(v,max=500)=>typeof v==="string"&&v.length<=max;
+    const isColor=(v)=>v===undefined||v===""||(typeof v==="string"&&/^#[0-9a-f]{3,8}$/i.test(v));
+    const isPrimitive=(v)=>v===null||["string","number","boolean"].includes(typeof v);
+    const flatList=(v)=>Array.isArray(v)&&v.every((item)=>isObject(item)&&Object.values(item).every(isPrimitive));
+    const types=new Set(this.columnTypes.map((t)=>t.type)), views=["table","list","kanban","calendar"];
+    if(!isObject(data))fail("the file is not a JARC backup.");
+    if(data.version!==undefined&&!(Number.isInteger(data.version)&&data.version>=1&&data.version<=11))fail("it was made by an unsupported version of JARC.");
+    if(!Array.isArray(data.workspaces)||!data.workspaces.length)fail("it contains no workspaces.");
+    const workspaceIds=new Set(); let boards=0, records=0;
+    data.workspaces.forEach((w,wi)=>{
+      const where=`workspace ${wi+1}`;
+      if(!isObject(w))fail(`${where} is not a workspace.`);
+      if(!isId(w.id)||workspaceIds.has(w.id))fail(`${where} has a missing, invalid or duplicate ID.`); workspaceIds.add(w.id);
+      if(!isText(w.name,200)||!w.name.trim())fail(`${where} has no valid name.`);
+      if(!isColor(w.color))fail(`workspace "${w.name}" has an invalid colour.`);
+      if((w.icon!==undefined&&!isText(w.icon,4))||(w.description!==undefined&&!isText(w.description,5000)))fail(`workspace "${w.name}" has an invalid icon or description.`);
+      if(!Array.isArray(w.boards))fail(`workspace "${w.name}" has no board list.`);
+      const boardIds=new Set();
+      w.boards.forEach((b,bi)=>{
+        boards+=1; const bw=`board ${bi+1} in "${w.name}"`;
+        if(!isObject(b))fail(`${bw} is not a board.`);
+        if(!isId(b.id)||boardIds.has(b.id))fail(`${bw} has a missing, invalid or duplicate ID.`); boardIds.add(b.id);
+        if(!isText(b.name,200)||!b.name.trim())fail(`${bw} has no valid name.`);
+        if(b.description!==undefined&&!isText(b.description,5000))fail(`board "${b.name}" has an invalid description.`);
+        if(b.lastView!==undefined&&!views.includes(b.lastView))fail(`board "${b.name}" has an unknown view.`);
+        if(!Array.isArray(b.records))fail(`board "${b.name}" has no record list.`);
+        if(b.columns!==undefined){
+          if(!Array.isArray(b.columns)||!b.columns.length)fail(`board "${b.name}" has an empty or invalid column list.`);
+          const keys=new Set();
+          b.columns.forEach((c)=>{
+            if(!isObject(c)||!isId(c.key)||keys.has(c.key))fail(`board "${b.name}" has a column with a missing, invalid or duplicate key.`); keys.add(c.key);
+            if(!isText(c.label,200))fail(`board "${b.name}" has a column without a valid name.`);
+            if(!types.has(c.type))fail(`board "${b.name}" uses an unsupported column type "${String(c.type).slice(0,30)}".`);
+            if(c.options!==undefined&&(!Array.isArray(c.options)||c.options.some((o)=>!isText(o,200))))fail(`column "${c.label}" in "${b.name}" has invalid options.`);
+            if((c.defaultValue!==undefined&&!isPrimitive(c.defaultValue))||(c.width!==undefined&&c.width!==null&&!Number.isFinite(c.width)))fail(`column "${c.label}" in "${b.name}" has invalid settings.`);
+          });
+          const primary=b.columns.find((c)=>c.key==="serial");
+          if(!primary)fail(`board "${b.name}" has no primary Item column.`);
+          if(primary.type!=="text")fail(`board "${b.name}" has a primary column that is not text.`);
+        }
+        if(b.groups!==undefined&&(!Array.isArray(b.groups)||b.groups.some((g)=>!isText(g,200))))fail(`board "${b.name}" has invalid groups.`);
+        if(b.activity!==undefined&&!flatList(b.activity))fail(`board "${b.name}" has invalid activity history.`);
+        if(b.savedViews!==undefined&&(!Array.isArray(b.savedViews)||b.savedViews.some((v)=>!isObject(v)||!isRecordId(v.id)||!isText(v.name,200)||["visibleColumns","columnOrder"].some((k)=>v[k]!==undefined&&(!Array.isArray(v[k])||!v[k].every(isId))))))fail(`board "${b.name}" has invalid saved views.`);
+        const recordIds=new Set();
+        b.records.forEach((r,ri)=>{
+          records+=1; const rw=`record ${ri+1} in "${b.name}"`;
+          if(!isObject(r))fail(`${rw} is not a record.`);
+          if(!isRecordId(r.id)||recordIds.has(r.id))fail(`${rw} has a missing, invalid or duplicate ID.`); recordIds.add(r.id);
+          for(const [key,value] of Object.entries(r)){
+            if(key==="activity"){if(!flatList(value))fail(`${rw} has invalid history.`);continue;}
+            if(!isPrimitive(value))fail(`${rw} has an unsupported value in "${key.slice(0,40)}".`);
+            if(typeof value==="string"&&value.length>100000)fail(`${rw} has a value that is too long.`);
+          }
+        });
+      });
+    });
+    if(data.currentWorkspaceId!=null&&data.currentWorkspaceId!==""&&!isId(data.currentWorkspaceId))fail("the selected workspace ID is invalid.");
+    if(data.currentBoardId!=null&&data.currentBoardId!==""&&!isId(data.currentBoardId))fail("the selected board ID is invalid.");
+    if(data.settings!==undefined&&(!isObject(data.settings)||!Object.values(data.settings).every(isPrimitive)||!isColor(data.settings.accentColor)))fail("its settings are invalid.");
+    if(data.profile!==undefined){
+      if(!isObject(data.profile)||!Object.values(data.profile).every(isPrimitive)||!isColor(data.profile.color))fail("its profile is invalid.");
+      if(data.profile.avatar&&!/^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(data.profile.avatar))fail("its profile photo is not a supported image.");
+    }
+    for(const key of ["notifications","recentBoards","recentRecords","members"])if(data[key]!==undefined&&!flatList(data[key]))fail(`its ${key} list is invalid.`);
+    if(data.members?.some((m)=>!isId(m.id)))fail("a member has an invalid ID.");
+    if([...(data.recentBoards||[]),...(data.recentRecords||[]),...(data.notifications||[])].some((x)=>(x.boardId!==undefined&&!isId(x.boardId))||(x.workspaceId!==undefined&&!isId(x.workspaceId))))fail("its recent items refer to invalid IDs.");
+    if(data.recentCommands!==undefined&&(!Array.isArray(data.recentCommands)||!data.recentCommands.every((c)=>isText(c,100))))fail("its recent commands are invalid.");
+    return {workspaces:data.workspaces.length,boards,records};
+  }
+  // Rejects imports that are too large or not flat records, before any preview or change.
+  assertImportable(rows){
+    if(!Array.isArray(rows)||!rows.length)throw new Error("The file must contain a non-empty list of records.");
+    if(rows.length>IMPORT_LIMITS.rows)throw new Error(`This import has ${rows.length.toLocaleString()} records. Import at most ${IMPORT_LIMITS.rows.toLocaleString()} at a time.`);
+    rows.forEach((row,i)=>{
+      if(!row||typeof row!=="object"||Array.isArray(row))throw new Error(`Record ${i+1} is not a set of named fields.`);
+      const entries=Object.entries(row);
+      if(entries.length>IMPORT_LIMITS.fields)throw new Error(`Record ${i+1} has more than ${IMPORT_LIMITS.fields} fields.`);
+      for(const [key,value] of entries){
+        if(value!==null&&typeof value==="object")throw new Error(`Record ${i+1} has a nested value in "${String(key).slice(0,40)}". Use plain text, numbers or true/false.`);
+        if(String(value??"").length>IMPORT_LIMITS.cellLength)throw new Error(`Record ${i+1} has a value longer than ${IMPORT_LIMITS.cellLength.toLocaleString()} characters in "${String(key).slice(0,40)}".`);
+      }
+    });
+    return true;
+  }
 
   // --- Column schema helpers. Records stay flat objects keyed by column key; nothing here migrates stored data.
   columnType(type){return this.columnTypes.find((item)=>item.type===type);}

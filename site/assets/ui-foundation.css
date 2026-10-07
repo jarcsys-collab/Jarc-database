@@ -857,3 +857,10 @@ th.col-drop-after { box-shadow: inset -3px 0 0 var(--accent); }
   .column-menu-button { opacity: .85; }
   .editable-table .row-actions, .editable-table .actions-col { min-width: 84px; width: 84px; }
 }
+/* 14. Startup recovery screen (Stage 5): shown when saved data can't be read. Nothing is deleted automatically. */
+.startup-error { max-width: 560px; margin: 12vh auto 0; padding: 32px 28px; border: 1px solid var(--line-strong); border-radius: var(--radius-xl); background: var(--surface-raised); box-shadow: var(--shadow-lg); }
+.startup-error h1 { font-size: var(--fs-xl); margin: 0 0 12px; }
+.startup-error p { color: var(--muted); font-size: var(--fs-md); margin: 0 0 12px; }
+.startup-error-message { padding: 10px 12px; border-radius: var(--radius-md); background: color-mix(in srgb, var(--danger) 10%, var(--surface)); color: var(--text) !important; }
+.startup-error-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+@media (max-width: 620px) { .startup-error { margin: 24px 16px; padding: 24px 18px; } }
