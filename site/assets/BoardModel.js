@@ -2,10 +2,10 @@
 const IMPORT_LIMITS = Object.freeze({ rows: 5000, fields: 200, cellLength: 10000 });
 
 class BoardModel {
+  // The constructor builds configuration and a default (empty-storage) state synchronously. Stored data is loaded by
+  // `await model.init()` (Stage 8), so the same model works with a network adapter later.
   constructor(storage = window.jarcStorage) {
     this.storage = storage; // StorageService (Stage 6): the only path to persistence
-    const saved = this.readStorage();
-    this.workspaces = saved.workspaces || this.defaultWorkspaces();
     this.defaultColumns = [
       { key: "serial", label: "Record / Serial", type: "text", required: true },
       { key: "group", label: "Group", type: "group" },
@@ -33,11 +33,6 @@ class BoardModel {
       { type: "link", label: "Link", category: "Contact", description: "Web addresses" },
       { type: "group", label: "Group", category: "Organization", description: "Sort records into this board's groups" }
     ];
-    this.normalizeBoards();
-    this.currentWorkspaceId = saved.currentWorkspaceId || "engineering";
-    this.currentBoardId = saved.currentBoardId || "medtek";
-    this.screen = saved.screen || "home";
-    this.currentView = saved.currentView || "table";
     this.query = "";
     this.status = "All";
     this.sortDirection = "desc"; this.sortKey = ""; this.quickFilter = "all"; this.columnFilter = null;
@@ -46,6 +41,27 @@ class BoardModel {
     this.history = [];
     this.activeSavedViewId = null;
     this.showArchived = false;
+    this.pendingSaves = 0; this.lastSave = Promise.resolve(true); this.failure = null;
+    this.applyState({});
+    this.markPersisted();
+  }
+
+  // Loads stored data (asynchronously) and adopts it. Throws StorageError; the controller shows the recovery screen.
+  async init() {
+    const { data, user } = await this.storage.loadState();
+    this.applyState({ ...(user || {}), ...(data || {}) });
+    this.markPersisted();
+    return this;
+  }
+
+  // Applies loaded (or default) shared data and per-user state, filling defaults for anything missing.
+  applyState(saved) {
+    this.workspaces = saved.workspaces || this.defaultWorkspaces();
+    this.normalizeBoards();
+    this.currentWorkspaceId = saved.currentWorkspaceId || "engineering";
+    this.currentBoardId = saved.currentBoardId || "medtek";
+    this.screen = saved.screen || "home";
+    this.currentView = saved.currentView || "table";
     this.manualSort = Boolean(this.board?.manualOrder);
     this.settings = { theme: "dark", density: "comfortable", accentColor: "#0f9489", fontSize: "normal", highContrast: false, reduceMotion: false, stickyFirstColumn: true, showInvoiceDate: true, showOwner: true, showPriority: true, showBoardCounts: true, showIcons: true, dateFormat: "DD/MM/YYYY", language: "English", autosave: true, settingsSection: "appearance", ...(saved.settings || {}) };
     this.profile = { name: "medtek", email: "", role: "Workspace admin", initials: "M", avatar: "", color: "#0f9489", presence: "Available", startScreen: "Home", ...(saved.profile || {}) };
@@ -73,13 +89,6 @@ class BoardModel {
     ];
   }
 
-  // Loads shared data + per-user state through StorageService. Throws StorageError (INVALID_DATA / STORAGE_UNAVAILABLE),
-  // which the startup recovery screen shows; nothing is deleted or overwritten.
-  readStorage() {
-    const { data, user } = this.storage.loadState();
-    return { ...(user || {}), ...(data || {}) };
-  }
-
   // What gets persisted, split into shared application data and per-user state (see StorageService).
   toStorageState() {
     return {
@@ -88,16 +97,63 @@ class BoardModel {
     };
   }
 
-  // Every change is committed as a named operation (createRecord, updateColumns, ...). The local adapter saves the
-  // whole state; a future API adapter can send just that operation. saveError holds a StorageError code.
+  // Every change is committed as a named operation (createRecord, updateColumns, ...). Operations change the model in
+  // memory first (that is the optimistic state the UI shows) and return their usual value; save() persists
+  // asynchronously and returns a Promise<boolean>. The local adapter saves the whole state; a future API adapter can
+  // send just that operation. saveError holds a StorageError code.
+  //
+  // Rollback: the model remembers the last state that was saved successfully (data, user state and undo history).
+  // If a save fails, it returns to exactly that state — so a change that was never saved leaves no undo entry —
+  // and keeps the attempted state so a user-triggered Retry can apply and save it again.
   save(change = { op: "saveState" }) {
-    this.saveState = "saving";
+    const state = this.toStorageState(), text = JSON.stringify(state), history = this.history.slice();
+    this.pendingSaves += 1; this.saveState = "saving";
     window.dispatchEvent(new CustomEvent("jarc-save", {detail:"saving"}));
-    const result = this.storage.commit(change, this.toStorageState());
-    this.saveState = result.ok ? "saved" : "error"; this.saveError = result.ok ? "" : result.code;
-    window.dispatchEvent(new CustomEvent("jarc-save", {detail:this.saveState}));
-    return this.saveState === "saved";
+    const done = this.storage.commit(change, state).then((result) => {
+      this.pendingSaves -= 1;
+      if (result.ok) {
+        this.persisted = { text, history };
+        // A newer successful save supersedes an earlier failure: the failed change stays rolled back (the user saw it
+        // revert) and Retry is no longer offered, so it can never overwrite these newer, saved edits.
+        this.saveState = this.pendingSaves ? "saving" : "saved"; this.saveError = ""; this.failure = null;
+        if (!this.pendingSaves) window.dispatchEvent(new CustomEvent("jarc-save", {detail:this.saveState}));
+        return true;
+      }
+      if (result.code !== StorageError.CODES.CANCELLED) this.rollback(change, result);
+      return false;
+    });
+    this.lastSave = done;
+    return done;
   }
+  markPersisted() { this.persisted = { text: JSON.stringify(this.toStorageState()), history: this.history.slice() }; this.failure = null; }
+  // Replaces shared data and per-user state from a serialized storage state, keeping view-only state (search, filters).
+  adoptState(text) {
+    const { data, user } = JSON.parse(text);
+    this.workspaces = data.workspaces; this.members = data.members; Object.assign(this, user);
+    this.normalizeBoards();
+    this.manualSort = Boolean(this.board?.manualOrder);
+    const ids = new Set(this.rows.map((row) => row.id)); [...this.selected].forEach((id) => { if (!ids.has(id)) this.selected.delete(id); });
+  }
+  rollback(change, result) {
+    this.failure = { text: JSON.stringify(this.toStorageState()), history: this.history.slice(), change, code: result.code };
+    this.adoptState(this.persisted.text); this.history = this.persisted.history.slice();
+    this.saveState = "error"; this.saveError = result.code;
+    window.dispatchEvent(new CustomEvent("jarc-save", {detail:"error"}));
+    window.dispatchEvent(new CustomEvent("jarc-rollback", {detail:{ code: result.code, op: change.op }}));
+  }
+  // User-triggered Retry: re-applies everything that failed to save (including later changes made before the failure
+  // was reported) and saves once more. Without a pending failure it simply saves the current state.
+  retryFailedSave() {
+    const failure = this.failure;
+    if (!failure) return this.save({ op: "saveState", reason: "retry" });
+    this.failure = null;
+    this.adoptState(failure.text); this.history = failure.history.slice();
+    return this.save({ ...failure.change, retry: true });
+  }
+  // Used after a pessimistic (busy-button) operation fails: the dialog reports it and the user retries from there.
+  discardFailedSave() { this.failure = null; this.saveState = "saved"; this.saveError = ""; window.dispatchEvent(new CustomEvent("jarc-save", {detail:"saved"})); }
+  // Resolves true when every save started so far has succeeded.
+  async whenSaved() { await this.lastSave; return !this.failure && this.saveState !== "error"; }
 
   normalizeBoards() {
     this.workspaces.forEach((space) => space.boards.forEach((board) => {

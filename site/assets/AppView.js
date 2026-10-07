@@ -325,11 +325,32 @@ class AppView {
   showDensityMenu(model){document.querySelector("#overlay-root").innerHTML=`<div class="popover density-popover"><div class="popover-title"><strong>Table density</strong></div><button data-action="set-density" data-value="comfortable" class="${model.settings.density==="comfortable"?"selected":""}">Comfortable</button><button data-action="set-density" data-value="compact" class="${model.settings.density==="compact"?"selected":""}">Compact</button></div>`;}
   showViewOverflow(model){document.querySelector("#overlay-root").innerHTML=`<div class="popover view-overflow"><button data-action="manage-columns">${icon("columns")} Columns</button><button data-action="density-menu">${icon("list")} Density</button><button data-action="import">${icon("import")} Import records</button><button data-action="export" ${model.rows.length?"":"disabled"}>${icon("export")} Export records</button><button data-action="saved-views">${icon("star")} Saved views</button><button data-action="manage-groups">${icon("group")} Manage groups</button><button data-action="undo" ${model.canUndo?"":"disabled"}>Undo last change</button><button data-action="clear-filters">Reset view</button></div>`;}
   closeOverlay() { const root=document.querySelector("#overlay-root"); if(root) { root.innerHTML = ""; delete root.dataset.open; } }
-  toast(message,undo=false) {
+  // action: true shows Undo (calls onUndo); {label, onClick} shows a custom action such as Retry.
+  toast(message,action=false) {
     const toast=document.createElement("div");toast.className="toast";toast.setAttribute("role","status");toast.textContent=message;
-    if(undo){const button=document.createElement("button");button.textContent="Undo";button.onclick=()=>{this.onUndo?.();toast.remove();};toast.append(button);}
-    document.querySelector("#toast-region").append(toast);setTimeout(()=>toast.remove(),undo?8000:3500);
+    if(action){const button=document.createElement("button");button.type="button";button.textContent=action===true?"Undo":action.label;button.onclick=()=>{toast.remove();action===true?this.onUndo?.():action.onClick();};toast.append(button);}
+    document.querySelector("#toast-region").append(toast);setTimeout(()=>toast.remove(),action?8000:3500);
+    return toast;
   }
+  // ---- Async UI helpers (Stage 8)
+  renderLoading() {
+    this.root.innerHTML=`<main class="app-loading" role="status" aria-live="polite"><span class="brand-mark" aria-hidden="true">J</span><span class="loading-spinner" aria-hidden="true"></span><p>Loading your workspace…</p></main>`;
+  }
+  // Busy state for a button running a pessimistic operation: disabled, spinner, same width, aria-busy.
+  setBusy(button,busy) {
+    if(!button)return;
+    if(busy){button.dataset.previousMinWidth=button.style.minWidth;button.style.minWidth=button.offsetWidth+"px";button.disabled=true;button.setAttribute("aria-busy","true");button.classList.add("is-busy");}
+    else{button.disabled=false;button.removeAttribute("aria-busy");button.classList.remove("is-busy");button.style.minWidth=button.dataset.previousMinWidth||"";delete button.dataset.previousMinWidth;}
+  }
+  // Shows an error inside the open dialog (falls back to a toast). The dialog stays open so the user can retry.
+  showDialogError(message) {
+    const panel=document.querySelector("#overlay-root .modal, #overlay-root .record-drawer, #overlay-root .settings-drawer, #overlay-root .popover");
+    if(!panel){this.toast(message);return;}
+    let box=panel.querySelector(".dialog-error");
+    if(!box){box=document.createElement("p");box.className="dialog-error";box.setAttribute("role","alert");const actions=panel.querySelector(".modal-actions");actions?actions.before(box):panel.append(box);}
+    box.textContent=message;
+  }
+  clearDialogError() { document.querySelector("#overlay-root .dialog-error")?.remove(); }
 
   date(value){if(!value)return "—";const d=new Date(String(value).slice(0,10)+"T00:00:00");return Number.isNaN(d.getTime())?String(value):new Intl.DateTimeFormat("en",{month:"short",day:"numeric",year:"numeric"}).format(d);}
 

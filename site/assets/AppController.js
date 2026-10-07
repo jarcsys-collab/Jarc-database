@@ -9,9 +9,9 @@ class AppController {
     root.addEventListener("keyup", (event) => { if (event.target.dataset?.action === "password-input") { const warning=document.querySelector("#caps-warning"); if(warning) warning.hidden=!event.getModifierState("CapsLock"); } });
     document.addEventListener("keydown", (event) => this.onKeydown(event));
     root.addEventListener("keydown",()=>this.auth.touch());
-    setInterval(() => { if (this.auth.checkTimeout()) this.update(); }, 30000);
+    setInterval(() => { if (this.ready && this.auth.checkTimeout()) this.update(); }, 30000);
     setInterval(()=>{if(this.auth.authenticated)return;const button=this.root.querySelector('.login-submit');if(!button)return;const seconds=this.auth.lockSeconds;button.disabled=seconds>0;const label=button.querySelector('span');if(label)label.textContent=seconds?'Try again in '+seconds+'s':this.auth.lockedScreen?'Unlock workspace':'Sign in';},1000);
-    this.update();
+    this.start();
     root.addEventListener("focusin",e=>{if(e.target.matches('input,textarea,select'))e.target.dataset.beforeEdit=e.target.value;});
     root.addEventListener("contextmenu",e=>this.onContextMenu(e));
     root.addEventListener("pointerdown",e=>this.startResize(e));
@@ -20,7 +20,7 @@ class AppController {
     // Leaving a cell editor saves it (Esc cancels first); leaving an empty draft row discards it.
     root.addEventListener("focusout",e=>{const a=e.target.dataset?.action;if(a==="cell-input")this.commitCell(e.target,"none");else if(a==="draft-input")this.commitDraft(e.target);});
     document.addEventListener("pointerdown",e=>{const overlay=this.root.querySelector('#overlay-root');if(overlay?.querySelector('.popover,.profile-popover')&&!overlay.contains(e.target)&&!e.target.closest('[data-action]'))this.view.closeOverlay();});
-    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("online",()=>this.saveFeedback());window.addEventListener("offline",()=>this.saveFeedback());
+    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("jarc-rollback",(event)=>this.onRollback(event.detail));window.addEventListener("jarc-connection",()=>this.saveFeedback());window.addEventListener("online",()=>this.saveFeedback());window.addEventListener("offline",()=>this.saveFeedback());
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>this.view.applyDisplay(this.model));
     root.addEventListener("pointerover",e=>{
       const target=e.target.closest('button');if(!target)return;
@@ -34,6 +34,14 @@ class AppController {
     if (window.jarcStorage.getPreference("navCollapsed")==="1") document.body.classList.add("nav-collapsed");
     if (window.jarcStorage.getPreference("workspaceSectionCollapsed")==="1") document.body.classList.add("workspace-section-collapsed");
   }
+  // Loads stored data before anything data-dependent renders. Loading screen first; failures show the recovery screen
+  // with an in-place Retry (no page reload needed).
+  async start() {
+    this.ready = false; this.view.renderLoading();
+    try { await this.model.init(); }
+    catch (error) { renderStartupRecovery(this.root, error, () => this.start()); return; }
+    this.root.onclick = null; this.ready = true; this.update();
+  }
   update() { this.auth.authenticated ? this.view.render(this.model) : this.view.renderLogin(this.auth,this.model); this.saveFeedback(); }
   togglePanel(name, opener) { const root=document.querySelector("#overlay-root"); if(root?.dataset.open===name){this.view.closeOverlay();return false;} opener(); const next=document.querySelector("#overlay-root"); if(next)next.dataset.open=name; return true; }
   markPanel(name) { const root=document.querySelector("#overlay-root"); if(root)root.dataset.open=name; }
@@ -41,9 +49,10 @@ class AppController {
   onClick(event) {
     const target = event.target.closest("[data-action]"); if (!target) return;
     const action = target.dataset.action;
+    if (window.jarcStorage?.connection === "offline" && ["cell-open","set-cell-option","inline-add","open-form","new-item","new-board","add-column","create-workspace","import"].includes(action)) { this.view.toast(StorageError.describe(StorageError.CODES.OFFLINE).message); return; }
     if(action==="login-theme-choice"){this.model.updateSetting("theme",target.dataset.theme);this.view.applyDisplay(this.model);this.root.querySelectorAll('[data-action="login-theme-choice"]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.theme===target.dataset.theme)));return;}
     this.lastTrigger=target;
-    if(action==="retry-save"){this.model.save({op:"saveState",reason:"retry"});this.saveFeedback();return;}
+    if(action==="retry-save"){this.retrySave();return;}
     if(action==="dismiss-hint"){this.model.updateSetting("dismissedHint",true);this.update();return;}
     if(action==="toggle-home-archived"){this.model.updateSetting("homeArchived",!this.model.settings.homeArchived);this.update();return;}
     if(action==="home-create-record"||action==="home-import"){this.chooseBoardAction(action==="home-import"?"import":"record");return;}
@@ -51,9 +60,7 @@ class AppController {
     if(action==="favorite-board"){this.view.closeOverlay();this.model.toggleFavorite(target.dataset.id);this.update();return;}
     if(action==="remove-filter"){this.model[target.dataset.key]=target.dataset.key==="status"?"All":target.dataset.key==="quickFilter"?"all":"";this.model.activeSavedViewId=null;this.update();return;}
     if(action==="archive-workspace"){this.model.archiveWorkspace(target.dataset.id,target.dataset.archived==="1");this.update();this.view.showSettings(this.model,"workspace");return;}
-    if(action==="restore-backup"){const backup=this.pendingBackup;this.pendingBackup=null;try{this.model.restoreBackup(backup);}catch(error){this.view.showMessage("Backup not restored",`${error.message}
-
-Your current data was not changed.`);return;}this.update();this.view.toast(this.model.saveState==="error"?"Backup restored for this session only — it could not be saved in this browser":"Backup restored",true);return;}
+    if(action==="restore-backup"){const backup=this.pendingBackup;this.runBusy(target,()=>{this.model.restoreBackup(backup);},()=>{this.pendingBackup=null;this.update();this.view.toast("Backup restored",true);});return;}
     if(action==="move-record-board"){this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>Move record to…</h2>${this.view.closeButton()}</div><p>Existing field values and missing columns will be preserved.</p><div class="choice-list">${this.model.workspaces.filter(w=>!w.archived).flatMap(w=>w.boards.filter(b=>!b.archived&&b.id!==this.model.board.id).map(b=>`<button data-action="confirm-move-record" data-id="${this.view.attr(target.dataset.id)}" data-board="${this.view.attr(b.id)}">${this.view.escape(w.name)} / ${this.view.escape(b.name)}</button>`)).join("")||"<p>Create another board first.</p>"}</div></div>`);return;}
     if(action==="confirm-move-record"){this.model.moveRecordToBoard(target.dataset.id,target.dataset.board);this.update();this.view.toast("Record moved");return;}
     if(action==="adjacent-record"){const list=this.model.visibleRows;const index=list.findIndex(r=>r.id===Number(target.dataset.id));const row=list[(index+Number(target.dataset.direction)+list.length)%list.length];if(row)this.view.showRecordForm(this.model,row);return;}
@@ -74,7 +81,7 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
     if (action === "rename-board") this.view.showBoardForm(this.model.workspace.boards.find((board) => board.id === target.dataset.id));
     if (action === "duplicate-board") { this.model.duplicateBoard(target.dataset.id); this.view.closeOverlay(); this.update(); this.view.toast("Board duplicated"); }
     if (action === "delete-board") this.view.showConfirm("Delete board?","The board and its records will be removed. You can still use Undo afterward.","confirm-delete-board",target.dataset.id);
-    if (action === "confirm-delete-board") this.deleteBoard(target.dataset.payload);
+    if (action === "confirm-delete-board") this.deleteBoard(target.dataset.payload,target);
     if (action === "archived-view") { this.model.showArchived=true; this.model.activeSavedViewId=null; this.model.selected.clear(); this.update(); }
     if (["open-form","new-item"].includes(action)) this.view.showRecordForm(this.model);
     if (action === "edit") this.view.showRecordForm(this.model,this.model.rows.find((row)=>row.id===Number(target.dataset.id)));
@@ -83,7 +90,7 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
     if (action === "archive-item") { const row=this.model.rows.find((item)=>item.id===Number(target.dataset.id)); const archive=!row.archived; this.model.archiveItem(target.dataset.id,archive); this.update(); this.view.toast(archive?"Record archived":"Record restored",true); }
     if (action === "delete") this.requestDeleteRecords([Number(target.dataset.id)]);
     if (action === "delete-selected") this.requestDeleteRecords([...this.model.selected]);
-    if (action === "confirm-delete-records") this.deleteRecords(target.dataset.payload.split(",").map(Number));
+    if (action === "confirm-delete-records") this.deleteRecords(target.dataset.payload.split(",").map(Number),target);
     if (action === "clear-selection") { this.model.selected.clear(); this.update(); }
     if(action==="sort")this.view.showSort(this.model);
     if (action === "group") { if(!this.model.groupColumn){this.togglePanel("group-help",()=>this.view.showGroupHelp());return;} this.model.grouped = !this.model.grouped; this.model.activeSavedViewId=null; this.update(); }
@@ -94,7 +101,7 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
     if (action === "manage-groups") this.view.showGroupManager(this.model);
     if (action === "save-group") { const input=target.closest(".manager-row").querySelector('[data-role="group-name"]'); if (input.value !== target.dataset.old) { this.model.renameGroup(target.dataset.old,input.value); this.view.showGroupManager(this.model); } }
     if (action === "request-delete-group") { const fallback=this.model.board.groups.find((group)=>group!==target.dataset.group); this.view.showConfirm("Delete group?",`Items in ${target.dataset.group} will move to ${fallback}.`,"confirm-delete-group",target.dataset.group); }
-    if (action === "confirm-delete-group") { const fallback=this.model.board.groups.find((group)=>group!==target.dataset.payload); this.model.deleteGroup(target.dataset.payload,fallback); this.view.closeOverlay(); this.update(); this.view.toast("Group deleted"); }
+    if (action === "confirm-delete-group") { const name=target.dataset.payload, fallback=this.model.board.groups.find((group)=>group!==name); this.runBusy(target,()=>this.model.deleteGroup(name,fallback),()=>{this.view.closeOverlay();this.update();this.view.toast("Group deleted");}); }
     if (action === "manage-columns") this.togglePanel("columns",()=>this.view.showColumnManager(this.model));
     if (action === "add-column") this.view.showAddColumn(this.model);
     if (action === "column-editor") this.togglePanel(`column-${target.dataset.key}`,()=>this.view.showColumnEditor(this.model,target.dataset.key));
@@ -104,10 +111,10 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
       // Empty columns delete straight away (with Undo); columns holding data ask first and say how much.
       const column=this.model.board.columns.find((item)=>item.key===target.dataset.key); if(!column||column.key==="serial")return;
       const used=this.model.columnUsage(column.key);
-      if(!used){this.model.deleteColumn(column.key);this.view.closeOverlay();this.update();this.view.toast(`${column.label} column deleted`,true);}
+      if(!used){this.runBusy(target,()=>this.model.deleteColumn(column.key),()=>{this.view.closeOverlay();this.update();this.view.toast(`${column.label} column deleted`,true);});}
       else this.view.showConfirm(`Delete "${column.label}"?`,`This column contains data in ${used} record${used===1?"":"s"}. Deleting it will remove those values.`,"confirm-delete-column",column.key,"Delete column");
     }
-    if (action === "confirm-delete-column") { this.model.deleteColumn(target.dataset.payload); this.view.closeOverlay(); this.update(); this.view.toast("Column deleted",true); }
+    if (action === "confirm-delete-column") { const key=target.dataset.payload; this.runBusy(target,()=>this.model.deleteColumn(key),()=>{this.view.closeOverlay();this.update();this.view.toast("Column deleted",true);}); }
     // ---- Table interaction (Stage 4)
     if (action === "cell-open") { this.openCell(target); return; }
     if (action === "set-cell-option") { const id=Number(target.dataset.id), field=target.dataset.field, column=this.model.board.columns.find((c)=>c.key===field); this.model.updateCell(id,field,target.dataset.value); this.view.closeOverlay(); if(column?.type==="group"&&this.model.grouped)this.refreshBoard(); else this.patchCell(id,field,true); return; }
@@ -122,12 +129,12 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
     if (action === "choose-column-type") { this.view.showColumnNameStep(this.model,target.dataset.type); this.selectOverlayInput('[name="label"]'); }
     if (action === "rename-column") { this.view.showRenameColumn(this.model,target.dataset.key); this.selectOverlayInput('[name="label"]'); }
     if (action === "change-column-type") this.view.showColumnChooser(this.model,{mode:"change",key:target.dataset.key});
-    if (action === "choose-new-type") this.changeColumnType(target.dataset.key,target.dataset.type);
-    if (action === "confirm-change-type") { const [key,type]=target.dataset.payload.split("|"); this.changeColumnType(key,type,true); }
+    if (action === "choose-new-type") this.changeColumnType(target.dataset.key,target.dataset.type,false,target);
+    if (action === "confirm-change-type") { const [key,type]=target.dataset.payload.split("|"); this.changeColumnType(key,type,true,target); }
     if (action === "edit-column-options") this.view.showOptionEditor(this.model,target.dataset.key);
     if (action === "add-option-row") { const list=target.closest("form").querySelector(".option-list"); list.insertAdjacentHTML("beforeend",this.view.optionRow()); list.lastElementChild.querySelector("input").focus(); }
     if (action === "remove-option-row") { const row=target.closest(".option-row"), next=row.nextElementSibling||row.previousElementSibling; row.remove(); (next?.querySelector("input")||this.root.querySelector('[data-action="add-option-row"]'))?.focus(); }
-    if (action === "confirm-column-options") this.applyColumnOptions(true);
+    if (action === "confirm-column-options") this.applyColumnOptions(true,target);
     if (action === "hide-column") { const column=this.model.board.columns.find((item)=>item.key===target.dataset.key); if(column&&this.model.setColumnVisible(column.key,false)){this.view.closeOverlay();this.update();this.view.toast(`${column.label} hidden · show it again from Columns`,true);} }
     if (action === "add-group-column") { const column=this.model.addColumn({label:this.model.uniqueColumnLabel("Group"),type:"group"}); if(column){this.model.grouped=true;this.view.closeOverlay();this.update();this.view.toast("Group column added",true);} }
     if (action === "saved-views") this.togglePanel("views",()=>this.view.showSavedViews(this.model));
@@ -147,8 +154,8 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
     if (action === "settings-section") { this.model.updateSetting("settingsSection",target.dataset.section); this.view.showSettings(this.model,target.dataset.section); this.markPanel("settings"); }
     if (action === "workspace-manage") this.view.showSettings(this.model,"workspace");
     if (action === "request-delete-workspace") this.view.showConfirm("Delete workspace?","All boards and records in this workspace will be deleted from this browser.","confirm-delete-workspace",target.dataset.id);
-    if (action === "confirm-delete-workspace") { try{this.model.deleteWorkspace(target.dataset.payload);this.view.closeOverlay();this.update();this.view.toast("Workspace deleted",true);}catch(error){this.view.showMessage("Workspace not deleted",error.message);} }
-    if (action === "remove-member") { this.model.removeMember(target.dataset.id); this.view.showSettings(this.model,"members"); }
+    if (action === "confirm-delete-workspace") { const id=target.dataset.payload; this.runBusy(target,()=>this.model.deleteWorkspace(id),()=>{this.view.closeOverlay();this.update();this.view.toast("Workspace deleted",true);}); }
+    if (action === "remove-member") { const id=target.dataset.id; this.runBusy(target,()=>this.model.removeMember(id),()=>{this.update();this.view.showSettings(this.model,"members");}); }
     if (action === "theme") { this.model.updateSetting("theme",target.dataset.theme); this.view.applyDisplay(this.model); this.view.showSettings(this.model); this.markPanel("settings"); }
     if (action === "invite") this.view.showInvite();
     if (action === "profile-menu") this.togglePanel("profile",()=>this.view.showProfileMenu(this.model,this.auth));
@@ -213,7 +220,7 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
   }
   onSubmit(event) {
     event.preventDefault(); const action=event.target.dataset.action; const data=Object.fromEntries(new FormData(event.target));
-    if (action === "workspace-form") { const workspace=this.model.createWorkspace(data); if(workspace){this.view.closeOverlay();this.update();this.view.toast("Workspace created");} return; }
+    if (action === "workspace-form") { this.runBusy(event.submitter,()=>this.model.createWorkspace(data)?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast("Workspace created");}); return; }
     if(action==="login-form"){
       data.username=String(data.username||"").trim();
       if(!data.username){const field=event.target.querySelector('[name="username"]');field.value="";field.reportValidity();return;}
@@ -223,9 +230,9 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
       if(signedIn)this.model.syncUsername(data.username);this.update();return;
     }
     if(action==="sort-form"){this.model.sortKey=data.key;this.model.sortDirection=data.direction;this.model.manualSort=false;this.model.board.manualOrder=false;this.model.save({op:"updateBoard",boardId:this.model.board.id});this.model.activeSavedViewId=null;this.update();return;}
-    if(action==="confirm-import-form"){const result=this.model.importRows(this.pendingImport,data);this.pendingImport=null;this.update();this.view.toast(result.valid.length+" records imported"+(result.issues.length?" · "+result.issues.length+" skipped":""),true);return;}
-    if (action === "record-form") { const edit=Boolean(data.id); this.model.board.columns.filter((column)=>column.type==="checkbox").forEach((column)=>{data[column.key]=Boolean(data[column.key]);}); this.model.upsert(data); this.view.closeOverlay(); this.update(); this.view.toast(edit?"Record updated":"Record added"); }
-    if (action === "board-form") { if(data.id){this.model.renameBoard(data.id,data.name);const b=this.model.workspace.boards.find(b=>b.id===data.id);b.description=data.description;this.model.save({op:"updateBoard",boardId:data.id});}else{this.model.currentWorkspaceId=data.workspace;this.model.createBoard(data.name,data.description,data.template);} this.view.closeOverlay(); this.update(); this.view.toast(data.id?"Board renamed":"Board created"); }
+    if(action==="confirm-import-form"){let result;this.runBusy(event.submitter,()=>{result=this.model.importRows(this.pendingImport,data);},()=>{this.pendingImport=null;this.view.closeOverlay();this.update();this.view.toast(result.valid.length+" records imported"+(result.issues.length?" · "+result.issues.length+" skipped":""),true);});return;}
+    if (action === "record-form") { const edit=Boolean(data.id); this.model.board.columns.filter((column)=>column.type==="checkbox").forEach((column)=>{data[column.key]=Boolean(data[column.key]);}); this.runBusy(event.submitter,()=>{this.model.upsert(data);},()=>{this.view.closeOverlay();this.update();this.view.toast(edit?"Record updated":"Record added");}); }
+    if (action === "board-form") { this.runBusy(event.submitter,()=>{if(data.id){this.model.renameBoard(data.id,data.name);const b=this.model.workspace.boards.find(b=>b.id===data.id);b.description=data.description;this.model.save({op:"updateBoard",boardId:data.id});}else{this.model.currentWorkspaceId=data.workspace;this.model.createBoard(data.name,data.description,data.template);}},()=>{this.view.closeOverlay();this.update();this.view.toast(data.id?"Board renamed":"Board created");}); }
     if (action === "invite-form") { if(this.model.addMember(data)){this.view.closeOverlay();this.update();this.view.toast("Member added");}else this.view.showMessage("Member not added","Use a unique email address."); }
     if (action === "global-search-form") this.globalSearch(data.term);
     if (action === "add-group-form") { if (this.model.addGroup(data.name)) { this.view.showGroupManager(this.model); this.view.toast("Group added"); } else this.view.showMessage("Group not added","Use a unique, non-empty group name."); }
@@ -237,9 +244,9 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
       else this.model.columnFilter={key,op,value:noValue?"":value};
       this.model.activeSavedViewId=null; this.view.closeOverlay(); this.update(); return;
     }
-    if (action === "create-column-form") { const column=this.model.addColumn({label:data.label,type:data.type,options:data.options||""}); if(column){this.view.closeOverlay();this.update();this.root.querySelector(`th[data-column-key="${CSS.escape(column.key)}"]`)?.scrollIntoView({block:"nearest",inline:"nearest"});this.view.toast(`${column.label} column added`,true);} }
+    if (action === "create-column-form") { let column; this.runBusy(event.submitter,()=>{column=this.model.addColumn({label:data.label,type:data.type,options:data.options||""});return column?undefined:false;},()=>{this.view.closeOverlay();this.update();this.root.querySelector(`th[data-column-key="${CSS.escape(column.key)}"]`)?.scrollIntoView({block:"nearest",inline:"nearest"});this.view.toast(`${column.label} column added`,true);}); }
     if (action === "rename-column-form") { if(this.model.renameColumn(data.key,data.label)){this.view.closeOverlay();this.update();this.view.toast("Column renamed",true);} }
-    if (action === "column-options-form") { this.pendingOptions={key:data.key,items:[...event.target.querySelectorAll(".option-row input")].map((input)=>({from:input.dataset.from||null,to:input.value}))}; this.applyColumnOptions(); }
+    if (action === "column-options-form") { this.pendingOptions={key:data.key,items:[...event.target.querySelectorAll(".option-row input")].map((input)=>({from:input.dataset.from||null,to:input.value}))}; this.applyColumnOptions(false,event.submitter); }
     if (action === "edit-column-form") { this.model.renameColumn(data.key,data.label); this.model.updateColumnConfig({[data.key]:{visible:data.key==="serial"?true:Boolean(data.visible),required:data.key==="serial"?true:Boolean(data.required),connection:data.connection||"",defaultValue:data.defaultValue||"",options:String(data.options||"").split(",").map((item)=>item.trim()).filter(Boolean)}}); this.view.closeOverlay(); this.update(); this.view.toast("Column updated"); }
     if (action === "save-view-form") { if (this.model.saveView(data.name)) { this.view.closeOverlay(); this.update(); this.view.toast("View saved"); } }
     if (action === "profile-form") { data.name=this.auth.username; this.model.updateProfile(data); this.view.closeOverlay(); this.update(); this.view.toast("Profile updated"); }
@@ -294,8 +301,8 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
   }
 
   requestDeleteRecords(ids) { if (ids.length) this.view.showConfirm(`Delete ${ids.length} record${ids.length===1?"":"s"}?`,"The selected data will be removed from this board. Undo remains available afterward.","confirm-delete-records",ids.join(",")); }
-  deleteRecords(ids) { if (!ids.length) return; this.model.remove(ids); this.view.closeOverlay(); this.update(); this.view.toast("Record deleted",true); }
-  deleteBoard(id) { try { this.model.deleteBoard(id); this.view.closeOverlay(); this.update(); this.view.toast("Board deleted",true); } catch(error) { this.view.showMessage("Board not deleted",error.message); } }
+  deleteRecords(ids,button=null) { if (!ids.length) return; this.runBusy(button,()=>this.model.remove(ids),()=>{this.view.closeOverlay();this.update();this.view.toast("Record deleted",true);}); }
+  deleteBoard(id,button=null) { this.runBusy(button,()=>this.model.deleteBoard(id),()=>{this.view.closeOverlay();this.update();this.view.toast("Board deleted",true);}); }
   globalSearch(term) { if (!term) return; const match=this.model.allRecords.find((row)=>Object.values(row).some((value)=>String(value||"").toLowerCase().includes(term.toLowerCase()))); if (!match) { this.view.showMessage("No matching items",`No item matched “${term}”.`); return; } this.model.openBoard(match.boardId,match.workspaceId); this.model.query=term; this.view.closeOverlay(); this.update(); }
   runCommand(command) {
     this.model.rememberCommand(command);this.view.closeOverlay();
@@ -315,8 +322,9 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
   // A cell starting with = + - @ (or tab/carriage return) can run as a formula in Excel, Sheets or LibreOffice, so it is
   // exported with a leading apostrophe. Plain numbers in Number columns (e.g. -5) are left as numbers.
   csvCell(value,column=null){ let text=String(value??""); const plainNumber=column?.type==="number"&&/^-?\d+(\.\d+)?$/.test(text.trim()); if(!plainNumber&&/^[=+\-@\t\r]/.test(text))text="'"+text; return `"${text.replaceAll('"','""')}"`; }
-  exportCsv() { const fields=this.model.board.columns; const csv=[fields.map((field)=>this.csvCell(field.label)).join(","),...this.model.visibleRows.map((row)=>fields.map((field)=>this.csvCell(row[field.key],field)).join(","))].join("\n"); if(this.download(new Blob([csv],{type:"text/csv"}),`${this.model.board.name.toLowerCase().replace(/[^a-z0-9]+/g,"-")||"board"}.csv`))this.view.toast("Board exported"); }
-  exportBackup() { const backup=JSON.stringify(this.model.createBackup(),null,2); if(this.download(new Blob([backup],{type:"application/json"}),"jarc-database-backup.json"))this.view.toast("Full backup exported"); }
+  // Exports are async-shaped so a future server-generated export can replace them without changing callers.
+  async exportCsv() { const fields=this.model.board.columns; const csv=[fields.map((field)=>this.csvCell(field.label)).join(","),...this.model.visibleRows.map((row)=>fields.map((field)=>this.csvCell(row[field.key],field)).join(","))].join("\n"); if(this.download(new Blob([csv],{type:"text/csv"}),`${this.model.board.name.toLowerCase().replace(/[^a-z0-9]+/g,"-")||"board"}.csv`))this.view.toast("Board exported"); }
+  async exportBackup() { const backup=JSON.stringify(this.model.createBackup(),null,2); if(this.download(new Blob([backup],{type:"application/json"}),"jarc-database-backup.json"))this.view.toast("Full backup exported"); }
   async importData(file) {
     if(!file)return;
     try{
@@ -357,9 +365,10 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
   saveFeedback(){
     const button=this.root.querySelector(".save-state");if(!button)return;
     const state=this.model.saveState||"saved";button.classList.toggle("save-error",state==="error");
-    button.innerHTML=state==="error"?"Couldn't save · Retry":state==="saving"?"Saving…":`<i></i> ${navigator.onLine?"Saved locally":"Offline · saved locally"}`;
-    if(state==="error"&&!this.saveErrorNotified){this.saveErrorNotified=true;this.view.toast(this.model.saveError===StorageError.CODES.QUOTA?"Browser storage is full — your latest changes are not saved. Export a backup from Settings → Data.":"Changes couldn't be saved in this browser. Export a backup from Settings → Data, then use Retry.");}
-    if(state==="saved")this.saveErrorNotified=false;
+    const offline=window.jarcStorage?.connection==="offline"; document.body.classList.toggle("storage-offline",offline);
+    button.innerHTML=offline?"Offline — changes can't be saved":state==="error"?"Couldn't save · Retry":state==="saving"?"Saving…":`<i></i> ${navigator.onLine?"Saved locally":"Offline · saved locally"}`;
+
+
   }
   onContextMenu(event){
     const row=event.target.closest('[data-record-context]'),board=event.target.closest('[data-board-context]'),workspace=event.target.closest('[data-action="workspace-menu"]');
@@ -431,6 +440,35 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
     requestAnimationFrame(()=>{const focus=panel.querySelector('[autofocus]')||panel.querySelector('input:not([type="hidden"]),select,textarea')||panel.querySelector('button');focus?.focus();});
   }
   guard(action){try{action();}catch(error){this.view.showMessage("Action could not be completed",error.message);}}
+
+  // ---- Async persistence (Stage 8)
+  // An optimistic change failed to save: the model has already rolled back to the last saved state. Redraw, explain,
+  // and offer a single user-triggered Retry when it can help. Busy (pessimistic) operations report in their dialog.
+  onRollback(detail){
+    if(this.busy||!this.ready)return;
+    this.update();
+    const info=StorageError.describe(detail?.code);
+    // One save-error toast at a time: a newer failure replaces the previous message instead of stacking.
+    document.querySelectorAll('.toast[data-kind="save-error"]').forEach((toast)=>toast.remove());
+    const toast=this.view.toast(info.message,info.retryable?{label:"Retry",onClick:()=>this.retrySave()}:false);
+    if(toast)toast.dataset.kind="save-error";
+  }
+  retrySave(){ this.model.retryFailedSave(); this.update(); }
+  // Pessimistic operation: the button shows progress and ignores repeat clicks; the screen updates only after the save
+  // succeeds. On failure the model has rolled back, the dialog stays open with the reason, and clicking again retries.
+  // perform() may return false for "nothing to do" and may throw a validation error.
+  async runBusy(button,perform,onSuccess){
+    if(this.busy)return false;
+    this.busy=true; this.view.clearDialogError(); this.view.setBusy(button,true);
+    let ok=false,message="";
+    try{ if(perform()===false){this.busy=false;this.view.setBusy(button,false);return false;} ok=await this.model.whenSaved(); if(!ok)message=StorageError.describe(this.model.saveError).message; }
+    catch(error){ message=error?.message||StorageError.describe(StorageError.CODES.INTERNAL_ERROR).message; }
+    this.busy=false; this.view.setBusy(button,false);
+    if(ok){ onSuccess(); return true; }
+    if(this.model.failure)this.model.discardFailedSave();
+    this.view.showDialogError(`${message} Nothing was changed.`);
+    this.saveFeedback(); return false;
+  }
 
   // ---- Table interaction (Stage 4). Cell edits patch one cell; row inserts refresh only the board view.
   cellButton(id,field){return this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"] [data-action="cell-open"][data-field="${CSS.escape(field)}"]`);}
@@ -563,33 +601,37 @@ Your current data was not changed.`);return;}this.update();this.view.toast(this.
   }
   selectOverlayInput(selector){requestAnimationFrame(()=>{const input=this.root.querySelector(`#overlay-root ${selector}`);input?.focus();input?.select();});}
   // Change a column's type. Values that can't be kept are only cleared after an explicit confirmation.
-  changeColumnType(key,type,confirmed=false){
+  changeColumnType(key,type,confirmed=false,button=null){
     const column=this.model.board.columns.find((c)=>c.key===key), meta=this.model.columnType(type); if(!column||!meta)return;
     if(column.key==="serial"){this.view.showMessage("Type not changed","The primary column always stays text.");return;}
     const impact=this.model.typeChangeImpact(key,type);
     if(impact&&!confirmed){this.view.showConfirm(`Change "${column.label}" to ${meta.label}?`,`${impact} record${impact===1?" has a value":"s have values"} that can't be stored as ${meta.label}. ${impact===1?"It":"They"} will be cleared. You can undo this right afterwards.`,"confirm-change-type",`${key}|${type}`,"Change type");return;}
-    const label=column.label, result=this.model.changeColumnType(key,type); this.view.closeOverlay(); this.update();
-    if(result)this.view.toast(`${label} is now ${meta.label}${result.cleared?` · ${result.cleared} value${result.cleared===1?"":"s"} cleared`:""}`,true);
+    const label=column.label; let result; this.runBusy(button,()=>{result=this.model.changeColumnType(key,type);},()=>{this.view.closeOverlay();this.update();
+    if(result)this.view.toast(`${label} is now ${meta.label}${result.cleared?` · ${result.cleared} value${result.cleared===1?"":"s"} cleared`:""}`,true);});
   }
   // Save edited options. Removing options that records still use needs confirmation; renames carry values along.
-  applyColumnOptions(confirmed=false){
+  applyColumnOptions(confirmed=false,button=null){
     const pending=this.pendingOptions; if(!pending)return;
     const plan=this.model.optionsEditPlan(pending.key,pending.items);
     if(!plan||!plan.options.length){this.view.showMessage("Options not saved","Keep at least one option.");return;}
     if(plan.affected&&!confirmed){const used=plan.removed.filter((o)=>this.model.rows.some((r)=>r[pending.key]===o));this.view.showConfirm("Remove options in use?",`${plan.affected} record${plan.affected===1?" uses":"s use"} ${used.length===1?`"${used[0]}"`:"the removed options"}. Those values will be cleared. You can undo this right afterwards.`,"confirm-column-options","","Remove options");return;}
-    const result=this.model.editColumnOptions(pending.key,pending.items); this.pendingOptions=null; this.view.closeOverlay(); this.update();
-    if(result)this.view.toast(`Options updated${result.cleared?` · ${result.cleared} value${result.cleared===1?"":"s"} cleared`:""}`,true);
+    let result; this.runBusy(button,()=>{result=this.model.editColumnOptions(pending.key,pending.items);},()=>{this.pendingOptions=null;this.view.closeOverlay();this.update();
+    if(result)this.view.toast(`Options updated${result.cleared?` · ${result.cleared} value${result.cleared===1?"":"s"} cleared`:""}`,true);});
   }
 }
-try { new AppController(document.querySelector("#app")); } catch(error) {
-  const root=document.querySelector("#app"); let raw=null; try { raw=window.jarcStorage.readRawState(); } catch {}
+// Startup recovery screen: shown when stored data can't be loaded. Nothing is deleted automatically; "Try again"
+// re-runs loading in place.
+function renderStartupRecovery(root, error, onRetry) {
+
+  let raw=null; try { raw=window.jarcStorage.readRawState(); } catch {}
   root.innerHTML='<main class="startup-error" role="alert"><h1>JARC couldn\'t open your saved data</h1><p class="startup-error-message"></p><p>Nothing has been deleted. Download a copy of the stored data before trying anything else.</p><div class="startup-error-actions"><button type="button" class="button primary" data-recover="download">Download stored data</button><button type="button" class="button secondary" data-recover="reload">Try again</button><button type="button" class="button danger" data-recover="reset">Clear stored data…</button></div></main>';
-  root.querySelector(".startup-error-message").textContent=error.message;
+  root.querySelector(".startup-error-message").textContent=error instanceof StorageError?error.message:"Something went wrong while loading JARC.";
   if(!raw)root.querySelector('[data-recover="download"]').disabled=true;
-  root.addEventListener("click",(event)=>{
+  root.onclick=(event)=>{
     const action=event.target.closest("[data-recover]")?.dataset.recover;
     if(action==="download"&&raw){const url=URL.createObjectURL(new Blob([raw],{type:"application/json"})),link=document.createElement("a");link.href=url;link.download="jarc-stored-data-"+new Date().toISOString().slice(0,10)+".json";link.click();setTimeout(()=>URL.revokeObjectURL(url),500);}
-    if(action==="reload")location.reload();
+    if(action==="reload")onRetry();
     if(action==="reset"&&confirm("Permanently delete the stored JARC data in this browser? Download it first if you might need it."))try{window.jarcStorage.clearState();location.reload();}catch{}
-  });
+  };
 }
+try { new AppController(document.querySelector("#app")); } catch(error) { renderStartupRecovery(document.querySelector("#app"), error, () => location.reload()); }
