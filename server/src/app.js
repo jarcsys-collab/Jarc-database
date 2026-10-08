@@ -7,6 +7,8 @@ const path = require("path");
 const express = require("express");
 const { healthRoutes } = require("./routes/health");
 const { stateRoutes } = require("./routes/state");
+const { resourceRoutes } = require("./routes/resources");
+const { devActorMiddleware } = require("./context/dev-actor");
 const { apiNotFound, errorHandler, sendError } = require("./middleware/errors");
 const { version } = require("../package.json");
 
@@ -15,17 +17,26 @@ const { version } = require("../package.json");
 const JSON_BODY_LIMIT = "10mb";
 const DEFAULT_SITE_DIR = path.resolve(__dirname, "..", "..", "site");
 
-function createApp({ repository, environment = "development", enableDevStateApi = true, siteDir = DEFAULT_SITE_DIR, logger = console } = {}) {
+// dataLayer (Stage 10, optional): { connection, services } from createDataLayer, plus devActor (the development
+// user document). Without it the server behaves exactly as in Stage 9.
+function createApp({ repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, enableDevResourceApi = Boolean(dataLayer), siteDir = DEFAULT_SITE_DIR, logger = console } = {}) {
+  if (environment === "production" && (enableDevStateApi || enableDevResourceApi)) {
+    throw new Error("Development (pre-auth) APIs can't be enabled in production.");
+  }
   const app = express();
   app.disable("x-powered-by");
   app.use((req, res, next) => { res.set("X-Content-Type-Options", "nosniff"); next(); });
 
   const api = express.Router();
   api.use(express.json({ limit: JSON_BODY_LIMIT, strict: true }));
-  api.use(healthRoutes({ environment, version }));
+  api.use(healthRoutes({ environment, version, database: dataLayer?.connection ?? null }));
   if (enableDevStateApi) {
     if (!repository) throw new Error("createApp needs a repository when the development state API is enabled.");
     api.use(stateRoutes({ repository }));
+  }
+  if (enableDevResourceApi) {
+    if (!dataLayer || !devActor) throw new Error("createApp needs a data layer and the development actor for the resource API.");
+    api.use(devActorMiddleware(devActor, { environment }), resourceRoutes({ services: dataLayer.services }));
   }
   api.use(apiNotFound);
   app.use("/api/v1", api);

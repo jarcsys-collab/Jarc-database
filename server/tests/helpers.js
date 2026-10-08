@@ -1,6 +1,12 @@
-// Shared test helpers. Tests use an ephemeral port on 127.0.0.1 and never need MongoDB or network access.
+// Shared test helpers. Tests use an ephemeral port on 127.0.0.1 and never need MongoDB or network access: the
+// MongoDB tests run the real connection manager, bootstrap, repositories and services on an in-memory fake client.
 const { createApp } = require("../src/app");
 const { MemoryStateRepository } = require("../src/repositories/memory-state-repository");
+const { MongoConnection } = require("../src/db/connection");
+const { ensureDatabase } = require("../src/db/bootstrap");
+const { createDataLayer } = require("../src/data-layer");
+const { ensureDevelopmentActor } = require("../src/context/dev-actor");
+const { FakeMongoClient } = require("./support/fake-mongo");
 
 async function startApp(options = {}) {
   const logger = { errors: [], error(...args) { this.errors.push(args); } };
@@ -27,4 +33,26 @@ function validState(overrides = {}) {
   };
 }
 
-module.exports = { startApp, validState };
+// The full Stage 10 stack on a fake MongoDB client: connect → bootstrap → data layer → development actor → app.
+async function startMongoApp(options = {}) {
+  const fake = options.fake || new FakeMongoClient();
+  const connection = new MongoConnection({ uri: "mongodb://fake.invalid", dbName: "jarc_database", createClient: () => fake });
+  await connection.connect();
+  await ensureDatabase(connection.db);
+  const logger = { errors: [], error(...args) { this.errors.push(args.map(String).join(" ")); } };
+  const dataLayer = createDataLayer({ connection, logger });
+  const devActor = await ensureDevelopmentActor(dataLayer.repos.users, { environment: "test" });
+  const started = await startApp({ dataLayer, devActor, logger, ...options.app });
+  return { ...started, fake, connection, dataLayer, devActor, db: connection.db, logger };
+}
+
+// JSON request helper: returns { status, body, headers }.
+async function api(base, method, path, body, { raw } = {}) {
+  const init = { method, headers: {} };
+  if (body !== undefined) { init.headers["Content-Type"] = "application/json"; init.body = raw ? body : JSON.stringify(body); }
+  const res = await fetch(base + path, init);
+  const text = await res.text();
+  return { status: res.status, body: text ? JSON.parse(text) : null, headers: res.headers };
+}
+
+module.exports = { startApp, startMongoApp, api, validState };

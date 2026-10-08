@@ -174,7 +174,8 @@ describe("Static frontend (same origin)", () => {
 
 describe("Configuration", () => {
   test("defaults: development on 127.0.0.1:3000 with the development state API", () => {
-    assert.deepEqual({ ...loadConfig({}) }, { nodeEnv: "development", port: 3000, host: "127.0.0.1", enableDevStateApi: true });
+    // Stage 10 added dataStore/mongo/enableDevResourceApi; the defaults keep Stage 9 behaviour (memory, no MongoDB).
+    assert.deepEqual({ ...loadConfig({}) }, { nodeEnv: "development", port: 3000, host: "127.0.0.1", dataStore: "memory", mongo: null, enableDevStateApi: true, enableDevResourceApi: false });
   });
   test("production disables the transitional state API", async () => {
     assert.equal(loadConfig({ NODE_ENV: "production" }).enableDevStateApi, false);

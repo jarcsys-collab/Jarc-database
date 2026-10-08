@@ -2,7 +2,7 @@
   "name": "jarc-database-server",
   "version": "0.1.0",
   "private": true,
-  "description": "JARC Database API and static frontend server (Stage 9 foundation: development-only in-memory state).",
+  "description": "JARC Database API and static frontend server (Stage 10: MongoDB data layer with a development/pre-auth resource API).",
   "main": "src/server.js",
   "scripts": {
     "start": "node --env-file-if-exists=.env src/server.js",
@@ -13,6 +13,7 @@
     "node": ">=22.9"
   },
   "dependencies": {
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "mongodb": "^7.7.0"
   }
 }
