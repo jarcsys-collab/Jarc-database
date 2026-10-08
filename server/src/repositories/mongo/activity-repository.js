@@ -9,6 +9,8 @@ class ActivityRepository {
 
   async appendMany(entries, { session } = {}) { if (entries.length) await this.collection.insertMany(entries, { session }); return entries.length; }
 
+  listByBoard(boardId, { limit = 50 } = {}) { return this.collection.find({ boardId }, { sort: { createdAt: -1, _id: -1 }, limit: Math.min(limit, 200) }).toArray(); }
+
   listByWorkspace(workspaceId, { limit = 50 } = {}) { return this.collection.find({ workspaceId }, { sort: { createdAt: -1 }, limit: Math.min(limit, 200) }).toArray(); }
 }
 

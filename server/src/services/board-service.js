@@ -8,9 +8,18 @@ const { notFound, conflict, missingOrStale, activityEntry, appendActivity, field
 class BoardService {
   constructor({ repos, connection, logger }) { Object.assign(this, { repos, connection, logger }); }
 
+  // Board summaries carry recordCount (active records), so lists can show counts without loading records.
   async listByWorkspace(workspaceId) {
     if (!await this.repos.workspaces.findById(workspaceId)) throw notFound("workspace");
-    return this.repos.boards.listByWorkspace(workspaceId);
+    const boards = await this.repos.boards.listByWorkspace(workspaceId);
+    return Promise.all(boards.map(async (board) => ({ ...board, recordCount: await this.repos.records.countActive(board._id) })));
+  }
+
+  // Board history, newest first. Read-only: the API offers no way to write activity.
+  async activity(boardId, query) {
+    const { limit } = validate.activityQuery(query);
+    await this.get(boardId);
+    return this.repos.activities.listByBoard(boardId, { limit });
   }
 
   async get(id) {

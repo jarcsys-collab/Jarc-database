@@ -144,7 +144,48 @@ function checkValue(column, value, { maxLength = LIMITS.valueLength } = {}) {
 
 const hasValue = (value) => value !== undefined && value !== null && value !== false && String(value).trim() !== "";
 
+// ---- Schema-change rules (Stage 11). Exact ports of the frontend's BoardModel rules, so a change made through the
+// API rewrites stored values the same way the browser does.
+const OPTION_TYPES = Object.freeze(["status", "dropdown", "priority"]);
+const FALLBACK_OPTIONS = Object.freeze({ status: ["New", "In Progress", "Waiting", "Completed", "Cancelled", "Review", "Defective", "Clear"], priority: ["Low", "Medium", "High", "Critical"] });
+
+// The options a column offers: its own list, or the app's built-in list for status/priority columns without one.
+function effectiveOptions(column) {
+  if (column.options?.length) return [...column.options];
+  return [...(FALLBACK_OPTIONS[column.type] || [])];
+}
+
+// Can an existing value be kept when a column becomes `type`? Empty values always fit (BoardModel.valueFits).
+function valueFits(value, type) {
+  if (!hasValue(value)) return true;
+  const text = String(value).trim();
+  if (type === "number") return Number.isFinite(Number(text));
+  if (type === "date") return DATE.test(text) && !Number.isNaN(new Date(`${text}T00:00:00`).getTime());
+  if (type === "checkbox") return value === true || ["true", "yes", "1"].includes(text.toLowerCase());
+  return typeof value !== "boolean";
+}
+
+// The value a record keeps after its column changes to `type` (BoardModel.changeColumnType).
+function convertValue(value, type) {
+  const fits = valueFits(value, type);
+  if (type === "checkbox") return fits && hasValue(value);
+  return !fits || typeof value === "boolean" ? "" : value;
+}
+
+// Option edit plan (BoardModel.optionsEditPlan): items are [{ from: existing option or null, to: new text }];
+// options left out are removed. Uses Maps, so option text can never act as an object key.
+function optionsPlan(column, items) {
+  const previous = effectiveOptions(column);
+  const kept = items.filter((item) => String(item.to || "").trim());
+  const removed = new Set(previous.filter((option) => !kept.some((item) => item.from === option)));
+  const renames = new Map(kept.filter((item) => item.from && item.from !== item.to.trim()).map((item) => [item.from, item.to.trim()]));
+  const options = [...new Set(kept.map((item) => item.to.trim()))];
+  const mapValue = (value) => (renames.has(value) ? renames.get(value) : removed.has(value) ? "" : value);
+  return { options, removed, renames, mapValue };
+}
+
 module.exports = {
-  COLUMN_TYPES, PRIMARY_KEY, LIMITS, GROUP_ID, VIEW_ID, LEGACY_DEFAULT_COLUMNS, LEGACY_DEFAULT_GROUPS, BLANK_BOARD_COLUMNS,
-  newGroupId, newViewId, normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, viewState, groupColumnOf, checkValue, hasValue
+  COLUMN_TYPES, PRIMARY_KEY, LIMITS, GROUP_ID, VIEW_ID, LEGACY_DEFAULT_COLUMNS, LEGACY_DEFAULT_GROUPS, BLANK_BOARD_COLUMNS, OPTION_TYPES,
+  newGroupId, newViewId, normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, viewState, groupColumnOf, checkValue, hasValue,
+  effectiveOptions, valueFits, convertValue, optionsPlan
 };

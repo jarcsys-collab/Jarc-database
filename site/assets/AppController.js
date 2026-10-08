@@ -20,7 +20,7 @@ class AppController {
     // Leaving a cell editor saves it (Esc cancels first); leaving an empty draft row discards it.
     root.addEventListener("focusout",e=>{const a=e.target.dataset?.action;if(a==="cell-input")this.commitCell(e.target,"none");else if(a==="draft-input")this.commitDraft(e.target);});
     document.addEventListener("pointerdown",e=>{const overlay=this.root.querySelector('#overlay-root');if(overlay?.querySelector('.popover,.profile-popover')&&!overlay.contains(e.target)&&!e.target.closest('[data-action]'))this.view.closeOverlay();});
-    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("jarc-rollback",(event)=>this.onRollback(event.detail));window.addEventListener("jarc-connection",()=>this.saveFeedback());window.addEventListener("online",()=>this.saveFeedback());window.addEventListener("offline",()=>this.saveFeedback());
+    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("jarc-board-status",()=>this.refreshWhenIdle());window.addEventListener("jarc-ids-changed",()=>this.refreshWhenIdle());window.addEventListener("jarc-rollback",(event)=>this.onRollback(event.detail));window.addEventListener("jarc-connection",()=>this.saveFeedback());window.addEventListener("online",()=>this.saveFeedback());window.addEventListener("offline",()=>this.saveFeedback());
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>this.view.applyDisplay(this.model));
     root.addEventListener("pointerover",e=>{
       const target=e.target.closest('button');if(!target)return;
@@ -30,7 +30,7 @@ class AppController {
     });
     root.addEventListener("pointerout",()=>{clearTimeout(this.tooltipTimer);document.querySelector('.ui-tooltip')?.remove();});
     this.overlayObserver=new MutationObserver(()=>this.enhanceOverlay());this.overlayObserver.observe(root,{childList:true,subtree:true});
-    const originalClose=this.view.closeOverlay.bind(this.view);this.view.closeOverlay=()=>{originalClose();this.boardMenuWorkspace=null;this.root.querySelector(".app-shell")?.removeAttribute("inert");this.overlayReturnFocus?.focus?.();this.overlayReturnFocus=null;};
+    const originalClose=this.view.closeOverlay.bind(this.view);this.view.closeOverlay=()=>{originalClose();if(this.pendingRefresh){this.pendingRefresh=false;Promise.resolve().then(()=>this.update());}this.boardMenuWorkspace=null;this.root.querySelector(".app-shell")?.removeAttribute("inert");this.overlayReturnFocus?.focus?.();this.overlayReturnFocus=null;};
     if (window.jarcStorage.getPreference("navCollapsed")==="1") document.body.classList.add("nav-collapsed");
     if (window.jarcStorage.getPreference("workspaceSectionCollapsed")==="1") document.body.classList.add("workspace-section-collapsed");
   }
@@ -42,7 +42,16 @@ class AppController {
     catch (error) { renderStartupRecovery(this.root, error, () => this.start()); return; }
     this.root.onclick = null; this.ready = true; this.update();
   }
-  update() { this.auth.authenticated ? this.view.render(this.model) : this.view.renderLogin(this.auth,this.model); this.saveFeedback(); }
+  update() { this.pendingRefresh = false; this.auth.authenticated ? this.view.render(this.model) : this.view.renderLogin(this.auth,this.model); this.saveFeedback(); }
+  // Resource mode: re-render after records load or server IDs replace temporary ones, but never under an open
+  // dialog (it re-renders when the dialog closes) or while a field is being edited (the next update shows it; old
+  // temporary IDs on the page still resolve through the model, so nothing breaks in the meantime).
+  refreshWhenIdle() {
+    if (!this.ready || !this.auth.authenticated) return;
+    const active = document.activeElement, overlay = this.root.querySelector("#overlay-root");
+    if (overlay?.children.length || (active && this.root.contains(active) && active.matches('input:not([type="checkbox"]),textarea,select'))) { this.pendingRefresh = true; return; }
+    this.update();
+  }
   togglePanel(name, opener) { const root=document.querySelector("#overlay-root"); if(root?.dataset.open===name){this.view.closeOverlay();return false;} opener(); const next=document.querySelector("#overlay-root"); if(next)next.dataset.open=name; return true; }
   markPanel(name) { const root=document.querySelector("#overlay-root"); if(root)root.dataset.open=name; }
 
@@ -53,6 +62,8 @@ class AppController {
     if(action==="login-theme-choice"){this.model.updateSetting("theme",target.dataset.theme);this.view.applyDisplay(this.model);this.root.querySelectorAll('[data-action="login-theme-choice"]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.theme===target.dataset.theme)));return;}
     this.lastTrigger=target;
     if(action==="retry-save"){this.retrySave();return;}
+    if(action==="retry-board-load"){this.model.ensureBoardRecords(this.model.board?.id);this.update();return;}
+    if(action==="load-more-records"){this.model.ensureBoardRecords(this.model.board?.id,{more:true});return;}
     if(action==="dismiss-hint"){this.model.updateSetting("dismissedHint",true);this.update();return;}
     if(action==="toggle-home-archived"){this.model.updateSetting("homeArchived",!this.model.settings.homeArchived);this.update();return;}
     if(action==="home-create-record"||action==="home-import"){this.chooseBoardAction(action==="home-import"?"import":"record");return;}
@@ -63,7 +74,7 @@ class AppController {
     if(action==="restore-backup"){const backup=this.pendingBackup;this.runBusy(target,()=>{this.model.restoreBackup(backup);},()=>{this.pendingBackup=null;this.update();this.view.toast("Backup restored",true);});return;}
     if(action==="move-record-board"){this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>Move record to…</h2>${this.view.closeButton()}</div><p>Existing field values and missing columns will be preserved.</p><div class="choice-list">${this.model.workspaces.filter(w=>!w.archived).flatMap(w=>w.boards.filter(b=>!b.archived&&b.id!==this.model.board.id).map(b=>`<button data-action="confirm-move-record" data-id="${this.view.attr(target.dataset.id)}" data-board="${this.view.attr(b.id)}">${this.view.escape(w.name)} / ${this.view.escape(b.name)}</button>`)).join("")||"<p>Create another board first.</p>"}</div></div>`);return;}
     if(action==="confirm-move-record"){this.model.moveRecordToBoard(target.dataset.id,target.dataset.board);this.update();this.view.toast("Record moved");return;}
-    if(action==="adjacent-record"){const list=this.model.visibleRows;const index=list.findIndex(r=>r.id===Number(target.dataset.id));const row=list[(index+Number(target.dataset.direction)+list.length)%list.length];if(row)this.view.showRecordForm(this.model,row);return;}
+    if(action==="adjacent-record"){const list=this.model.visibleRows;const index=list.findIndex(r=>r.id===this.model.idOf(target.dataset.id));const row=list[(index+Number(target.dataset.direction)+list.length)%list.length];if(row)this.view.showRecordForm(this.model,row);return;}
     if(["rename-board","duplicate-board","delete-board","archive-board","move-board","favorite-board","open-board"].includes(action)&&this.boardMenuWorkspace){this.model.currentWorkspaceId=this.boardMenuWorkspace;this.boardMenuWorkspace=null;}
     if (action === "toggle-password") { const input=document.querySelector('[name="password"]'); const showing=input.type === "text"; input.type=showing?"password":"text"; target.textContent=showing?"Show":"Hide"; target.setAttribute("aria-label",showing?"Show password":"Hide password"); target.setAttribute("aria-pressed",String(!showing));input.focus(); }
     if (action === "nav") { this.model.openScreen(target.dataset.screen); this.update(); }
@@ -74,7 +85,7 @@ class AppController {
     if (action === "toggle-workspace-section") { document.body.classList.toggle("workspace-section-collapsed"); window.jarcStorage.setPreference("workspaceSectionCollapsed",document.body.classList.contains("workspace-section-collapsed")?"1":"0"); }
     if (action === "workspace-menu") this.togglePanel("workspace",()=>this.view.showWorkspaceMenu(this.model));
     if (action === "create-workspace") this.view.showWorkspaceForm();
-    if (action === "record-menu") this.togglePanel(`record-${target.dataset.id}`,()=>this.view.showRecordMenu(this.model.rows.find((row)=>row.id===Number(target.dataset.id))));
+    if (action === "record-menu") this.togglePanel(`record-${target.dataset.id}`,()=>this.view.showRecordMenu(this.model.rows.find((row)=>row.id===this.model.idOf(target.dataset.id))));
     if (action === "switch-workspace") { this.model.switchWorkspace(target.dataset.id); this.view.closeOverlay(); this.update(); }
     if(action==="board-menu"){this.boardMenuWorkspace=target.dataset.workspace||this.model.currentWorkspaceId;const ws=this.model.workspaces.find(w=>w.id===this.boardMenuWorkspace);this.togglePanel(`board-${target.dataset.id}`,()=>this.view.showBoardMenu(ws.boards.find(b=>b.id===target.dataset.id)));}
     if (action === "new-board") this.view.showBoardForm(null);
@@ -84,13 +95,13 @@ class AppController {
     if (action === "confirm-delete-board") this.deleteBoard(target.dataset.payload,target);
     if (action === "archived-view") { this.model.showArchived=true; this.model.activeSavedViewId=null; this.model.selected.clear(); this.update(); }
     if (["open-form","new-item"].includes(action)) this.view.showRecordForm(this.model);
-    if (action === "edit") this.view.showRecordForm(this.model,this.model.rows.find((row)=>row.id===Number(target.dataset.id)));
+    if (action === "edit") this.view.showRecordForm(this.model,this.model.rows.find((row)=>row.id===this.model.idOf(target.dataset.id)));
     if (action === "duplicate-record") { const id=this.model.duplicateRecord(target.dataset.id); this.update(); if(id)this.focusItem(id); this.view.toast("Item duplicated"); }
     if (action === "pin-item") { this.model.togglePin(target.dataset.id); this.update(); this.view.toast("Pin updated"); }
-    if (action === "archive-item") { const row=this.model.rows.find((item)=>item.id===Number(target.dataset.id)); const archive=!row.archived; this.model.archiveItem(target.dataset.id,archive); this.update(); this.view.toast(archive?"Record archived":"Record restored",true); }
-    if (action === "delete") this.requestDeleteRecords([Number(target.dataset.id)]);
+    if (action === "archive-item") { const row=this.model.rows.find((item)=>item.id===this.model.idOf(target.dataset.id)); const archive=!row.archived; this.model.archiveItem(target.dataset.id,archive); this.update(); this.view.toast(archive?"Record archived":"Record restored",true); }
+    if (action === "delete") this.requestDeleteRecords([this.model.idOf(target.dataset.id)]);
     if (action === "delete-selected") this.requestDeleteRecords([...this.model.selected]);
-    if (action === "confirm-delete-records") this.deleteRecords(target.dataset.payload.split(",").map(Number),target);
+    if (action === "confirm-delete-records") this.deleteRecords(target.dataset.payload.split(",").map((id)=>this.model.idOf(id)),target);
     if (action === "clear-selection") { this.model.selected.clear(); this.update(); }
     if(action==="sort")this.view.showSort(this.model);
     if (action === "group") { if(!this.model.groupColumn){this.togglePanel("group-help",()=>this.view.showGroupHelp());return;} this.model.grouped = !this.model.grouped; this.model.activeSavedViewId=null; this.update(); }
@@ -117,7 +128,7 @@ class AppController {
     if (action === "confirm-delete-column") { const key=target.dataset.payload; this.runBusy(target,()=>this.model.deleteColumn(key),()=>{this.view.closeOverlay();this.update();this.view.toast("Column deleted",true);}); }
     // ---- Table interaction (Stage 4)
     if (action === "cell-open") { this.openCell(target); return; }
-    if (action === "set-cell-option") { const id=Number(target.dataset.id), field=target.dataset.field, column=this.model.board.columns.find((c)=>c.key===field); this.model.updateCell(id,field,target.dataset.value); this.view.closeOverlay(); if(column?.type==="group"&&this.model.grouped)this.refreshBoard(); else this.patchCell(id,field,true); return; }
+    if (action === "set-cell-option") { const id=this.model.idOf(target.dataset.id), field=target.dataset.field, column=this.model.board.columns.find((c)=>c.key===field); this.model.updateCell(id,field,target.dataset.value); this.view.closeOverlay(); if(column?.type==="group"&&this.model.grouped)this.refreshBoard(); else this.patchCell(id,field,true); return; }
     if (action === "inline-add") { this.startInlineAdd(target); return; }
     if (action === "sort-column") { this.applySort(target.dataset.key,target.dataset.direction); return; }
     if (action === "clear-sort") { this.applySort("","desc"); return; }
@@ -175,7 +186,7 @@ class AppController {
     if (action === "command-palette") this.view.showCommandPalette(this.model);
     if (action === "palette-workspace") { this.model.switchWorkspace(target.dataset.id); this.view.closeOverlay(); this.update(); }
     if (action === "palette-board") { this.model.openBoard(target.dataset.id,target.dataset.workspace); this.view.closeOverlay(); this.update(); }
-    if (action === "palette-record") { this.model.openBoard(target.dataset.board,target.dataset.workspace); const row=this.model.rows.find(r=>r.id===Number(target.dataset.id)); this.update(); this.view.showRecordForm(this.model,row); }
+    if (action === "palette-record") { this.model.openBoard(target.dataset.board,target.dataset.workspace); const row=this.model.rows.find(r=>r.id===this.model.idOf(target.dataset.id)); this.update(); this.view.showRecordForm(this.model,row); }
     if (action === "run-command") this.runCommand(target.dataset.command);
     if (action === "global-search") this.view.showGlobalSearch();
     if(action==="move-board"){const choices=this.model.workspaces.filter(w=>w.id!==this.model.currentWorkspaceId&&!w.archived);this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>Move board to workspace</h2>${this.view.closeButton()}</div><div class="choice-list">${choices.map(w=>`<button data-action="apply-move-board" data-id="${this.view.attr(target.dataset.id)}" data-workspace="${this.view.attr(w.id)}">${this.view.escape(w.name)}</button>`).join("")||"<p>Create another workspace to move this board.</p>"}</div></div>`);}
@@ -209,7 +220,7 @@ class AppController {
     if(action==="quick-view"){this.model.quickFilter=event.target.value;this.model.showArchived=false;this.model.activeSavedViewId=null;this.update();return;}
     if(action==="import-mapping"){const data=Object.fromEntries(new FormData(event.target.form));this.view.showImportPreview(this.model,this.pendingImport,data);return;}
     if (action === "filter") { this.model.status=event.target.value; this.model.activeSavedViewId=null; this.update(); }
-    if (action === "select") { this.model.toggleRow(Number(event.target.dataset.id)); this.update(); }
+    if (action === "select") { this.model.toggleRow(this.model.idOf(event.target.dataset.id)); this.update(); }
     if (action === "select-all") { this.model.visibleRows.forEach((row)=>event.target.checked?this.model.selected.add(row.id):this.model.selected.delete(row.id)); this.update(); }
     if (action === "density") { this.model.updateSetting("density",event.target.checked?"compact":"comfortable"); document.documentElement.dataset.density=this.model.settings.density; }
     if (action === "setting") { this.model.updateSetting(event.target.dataset.key,event.target.checked); this.update(); this.view.showSettings(this.model); }
@@ -257,7 +268,7 @@ class AppController {
   onKeydown(event) {
     if(this.busy)return;
     if(event.target.dataset?.action==="row-drag"&&event.altKey&&["ArrowUp","ArrowDown"].includes(event.key)){
-      event.preventDefault();const id=Number(event.target.dataset.id),rows=this.model.visibleRows,index=rows.findIndex(r=>r.id===id),up=event.key==="ArrowUp",target=rows[index+(up?-1:1)];
+      event.preventDefault();const id=this.model.idOf(event.target.dataset.id),rows=this.model.visibleRows,index=rows.findIndex(r=>r.id===id),up=event.key==="ArrowUp",target=rows[index+(up?-1:1)];
       if(target&&this.model.reorderRecord(id,target.id,up?"before":"after")){this.update();this.root.querySelector('[data-action="row-drag"][data-id="'+id+'"]')?.focus();this.view.toast("Row moved",true);}return;
     }
     const editing=event.target.matches?.('input,textarea,select,[contenteditable="true"]');
@@ -367,14 +378,14 @@ class AppController {
     const button=this.root.querySelector(".save-state");if(!button)return;
     const state=this.model.saveState||"saved";button.classList.toggle("save-error",state==="error");
     const offline=window.jarcStorage?.connection==="offline"; document.body.classList.toggle("storage-offline",offline);
-    button.innerHTML=offline?"Offline — changes can't be saved":state==="error"?"Couldn't save · Retry":state==="saving"?"Saving…":`<i></i> ${this.model.storage.adapter.mode==="api"?"Saved":navigator.onLine?"Saved locally":"Offline · saved locally"}`;
+    button.innerHTML=offline?"Offline — changes can't be saved":state==="error"?"Couldn't save · Retry":state==="saving"?"Saving…":`<i></i> ${["api","resource"].includes(this.model.storage.adapter.mode)?"Saved":navigator.onLine?"Saved locally":"Offline · saved locally"}`;
 
 
   }
   onContextMenu(event){
     const row=event.target.closest('[data-record-context]'),board=event.target.closest('[data-board-context]'),workspace=event.target.closest('[data-action="workspace-menu"]');
     if(!row&&!board&&!workspace)return;event.preventDefault();
-    if(row)this.view.showRecordMenu(this.model.rows.find(r=>r.id===Number(row.dataset.recordContext)));
+    if(row)this.view.showRecordMenu(this.model.rows.find(r=>r.id===this.model.idOf(row.dataset.recordContext)));
     else if(board){this.boardMenuWorkspace=board.dataset.workspace||this.model.currentWorkspaceId;this.view.showBoardMenu(this.model.workspaces.find(w=>w.id===this.boardMenuWorkspace).boards.find(b=>b.id===board.dataset.boardContext));}
     else this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>${this.view.escape(this.model.workspace.name)}</h2>${this.view.closeButton()}</div><div class="choice-list"><button data-action="workspace-manage">Rename and customize</button><button data-action="settings-section" data-section="members">Manage local members</button><button data-action="archive-workspace" data-id="${this.view.attr(this.model.workspace.id)}" data-archived="1">Archive workspace</button><button class="danger" data-action="request-delete-workspace" data-id="${this.view.attr(this.model.workspace.id)}">Delete workspace</button></div></div>`);
     const pop=this.root.querySelector('.popover');if(pop){pop.style.left=Math.min(event.clientX,innerWidth-260)+"px";pop.style.top=Math.min(event.clientY,innerHeight-340)+"px";pop.style.right="auto";}
@@ -385,14 +396,14 @@ class AppController {
     if(!row||event.button!==0||(!handle&&event.target.closest('input,textarea,select,button,a,[contenteditable]')))return;
     if(!handle&&event.pointerType==='touch')return;
     event.preventDefault();
-    const id=Number(row.dataset.recordContext),board=this.model.board,startX=event.clientX,startY=event.clientY,wrap=row.closest('.table-wrap');
+    const id=this.model.idOf(row.dataset.recordContext),board=this.model.board,startX=event.clientX,startY=event.clientY,wrap=row.closest('.table-wrap');
     let active=false,ghost=null,target=null,position='before',x=startX,y=startY,frame;
     const clearMarks=()=>this.root.querySelectorAll('.row-drop-before,.row-drop-after').forEach(r=>r.classList.remove('row-drop-before','row-drop-after'));
     const locate=()=>{
       clearMarks();target=null;
       const element=document.elementFromPoint(x,y)?.closest('tr[data-record-context]');
       if(!element||element===row||element.closest('.table-wrap')!==wrap)return;
-      const source=this.model.rows.find(r=>r.id===id),other=this.model.rows.find(r=>r.id===Number(element.dataset.recordContext));
+      const source=this.model.rows.find(r=>r.id===id),other=this.model.rows.find(r=>r.id===this.model.idOf(element.dataset.recordContext));
       if(!source||!other||Boolean(source.pinned)!==Boolean(other.pinned))return;
       if(this.model.grouped&&this.model.groupColumn&&(source[this.model.groupColumn.key]||'')!==(other[this.model.groupColumn.key]||''))return;
       const bounds=element.getBoundingClientRect();position=y<bounds.top+bounds.height/2?'before':'after';target=other.id;element.classList.add('row-drop-'+position);
@@ -448,7 +459,8 @@ class AppController {
   onRollback(detail){
     if(this.busy||!this.ready)return;
     this.update();
-    const info=StorageError.describe(detail?.code);
+    // Resource mode already loaded the server's latest copy after a conflict, so the message says so.
+    const info=detail?.refreshed?StorageError.describeRefreshed(detail.code):StorageError.describe(detail?.code);
     // One save-error toast at a time: a newer failure replaces the previous message instead of stacking.
     document.querySelectorAll('.toast[data-kind="save-error"]').forEach((toast)=>toast.remove());
     const toast=this.view.toast(info.message,info.retryable?{label:"Retry",onClick:()=>this.retrySave()}:false);
@@ -476,7 +488,7 @@ class AppController {
   // ---- Table interaction (Stage 4). Cell edits patch one cell; row inserts refresh only the board view.
   cellButton(id,field){return this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"] [data-action="cell-open"][data-field="${CSS.escape(field)}"]`);}
   patchCell(id,field,focus=false){
-    const row=this.model.rows.find((r)=>r.id===Number(id)), column=this.model.board.columns.find((c)=>c.key===field);
+    const row=this.model.rows.find((r)=>r.id===this.model.idOf(id)), column=this.model.board.columns.find((c)=>c.key===field);
     const td=this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"] td[data-column-key="${CSS.escape(field)}"]`);
     if(!row||!column||!td)return;
     td.outerHTML=this.view.cell(row,column,this.model); this.saveFeedback();
@@ -491,7 +503,7 @@ class AppController {
     this.saveFeedback();
   }
   openCell(button){
-    const id=Number(button.dataset.id), field=button.dataset.field, row=this.model.rows.find((r)=>r.id===id), column=this.model.board.columns.find((c)=>c.key===field);
+    const id=this.model.idOf(button.dataset.id), field=button.dataset.field, row=this.model.rows.find((r)=>r.id===id), column=this.model.board.columns.find((c)=>c.key===field);
     if(!row||!column)return;
     if(column.type==="checkbox"){this.model.updateCell(id,field,!row[field]);this.patchCell(id,field,true);return;}
     if(this.view.isChoiceColumn(column)){button.scrollIntoView({block:"nearest",inline:"nearest"});this.togglePanel(`cell-${id}-${field}`,()=>this.view.showCellOptions(this.model,row,column));return;}
@@ -505,7 +517,7 @@ class AppController {
   }
   commitCell(input,move="stay"){
     if(input.dataset.done)return; input.dataset.done="1";
-    const id=Number(input.dataset.id), field=input.dataset.field, column=this.model.board.columns.find((c)=>c.key===field), value=input.value;
+    const id=this.model.idOf(input.dataset.id), field=input.dataset.field, column=this.model.board.columns.find((c)=>c.key===field), value=input.value;
     let note="";
     if(column&&value!==input.dataset.original){
       if(column.required&&!value.trim())note=`${column.label} can't be empty`;
@@ -517,7 +529,7 @@ class AppController {
     if(note)this.view.toast(note);
     if(move==="next"||move==="prev"){const cell=this.cellButton(id,field);(this.adjacentCell(cell,move==="next"?1:-1)||cell)?.focus();}
   }
-  cancelCell(input){input.dataset.done="1";this.patchCell(Number(input.dataset.id),input.dataset.field,true);}
+  cancelCell(input){input.dataset.done="1";this.patchCell(this.model.idOf(input.dataset.id),input.dataset.field,true);}
   cellInputKey(event){
     const input=event.target;
     if(event.key==="Escape"){event.preventDefault();this.cancelCell(input);}
@@ -542,7 +554,7 @@ class AppController {
     if(key.length===1&&key!==" "){
       // Typing on a focused text-like cell starts editing with that character; letter shortcuts stay quiet here.
       event.preventDefault();
-      const row=this.model.rows.find((r)=>r.id===Number(cell.dataset.id)), column=this.model.board.columns.find((c)=>c.key===cell.dataset.field);
+      const row=this.model.rows.find((r)=>r.id===this.model.idOf(cell.dataset.id)), column=this.model.board.columns.find((c)=>c.key===cell.dataset.field);
       if(row&&column&&column.type!=="checkbox"&&!this.view.isChoiceColumn(column))this.openCellEditor(cell.closest("td"),row,column,key);
       return true;
     }
@@ -630,7 +642,7 @@ function renderStartupRecovery(root, error, onRetry) {
   root.innerHTML='<main class="startup-error" role="alert"><h1>JARC couldn\'t open your saved data</h1><p class="startup-error-message"></p><p>Nothing has been deleted. Download a copy of the stored data before trying anything else.</p><div class="startup-error-actions"><button type="button" class="button primary" data-recover="download">Download stored data</button><button type="button" class="button secondary" data-recover="reload">Try again</button><button type="button" class="button danger" data-recover="reset">Clear stored data…</button></div></main>';
   root.querySelector(".startup-error-message").textContent=error instanceof StorageError?error.message:"Something went wrong while loading JARC.";
   if(!raw)root.querySelector('[data-recover="download"]').disabled=true;
-  if(window.jarcStorage?.adapter?.mode==="api"){ // server data: nothing to download or clear from this browser
+  if(["api","resource"].includes(window.jarcStorage?.adapter?.mode)){ // server data: nothing to download or clear from this browser
     root.querySelector("h1").textContent="JARC couldn't load your workspace";
     root.querySelector(".startup-error-message+p").textContent="Your data on the server has not been changed.";
     root.querySelectorAll('[data-recover="download"],[data-recover="reset"]').forEach((button)=>button.remove());

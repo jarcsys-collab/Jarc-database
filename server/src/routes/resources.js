@@ -7,8 +7,9 @@
 // Responses use `id` (string), never `_id`, and ISO 8601 dates. Single resources are wrapped ({ workspace },
 // { board }, { record }); lists are { items } (records add nextCursor and limit).
 const express = require("express");
-const { parseId, versionParam, allowOnly, queryString, fail } = require("../validation/common");
-const { workspaceToApi, boardToApi, recordToApi } = require("../api/serialize");
+const { parseId, versionParam, allowOnly, queryString, fail, isSafeKey } = require("../validation/common");
+const { GROUP_ID } = require("../domain/board-schema");
+const { workspaceToApi, boardToApi, recordToApi, activityToApi } = require("../api/serialize");
 
 function resourceRoutes({ services }) {
   const router = express.Router();
@@ -42,6 +43,25 @@ function resourceRoutes({ services }) {
     send(res, 200, { items: page.items.map(recordToApi), nextCursor: page.nextCursor, limit: page.limit });
   });
   router.post("/boards/:boardId/records", async (req, res) => { noQuery(req); send(res, 201, { record: recordToApi(await services.records.create(parseId(req.params.boardId, "boardId"), req.body, req.actor)) }); });
+  // Batches (Stage 11), each one transaction: CSV import / multi-create, bulk edits and reorders, multi-delete.
+  router.post("/boards/:boardId/records/batch", async (req, res) => { noQuery(req); send(res, 201, { items: (await services.records.createMany(parseId(req.params.boardId, "boardId"), req.body, req.actor)).map(recordToApi) }); });
+  router.patch("/boards/:boardId/records", async (req, res) => { noQuery(req); send(res, 200, { items: (await services.records.updateMany(parseId(req.params.boardId, "boardId"), req.body, req.actor)).map(recordToApi) }); });
+  router.post("/boards/:boardId/records/delete", async (req, res) => { noQuery(req); send(res, 200, await services.records.deleteMany(parseId(req.params.boardId, "boardId"), req.body, req.actor)); });
+
+  // ---- Board schema changes that rewrite record values (Stage 11). Each is one transaction; ?dryRun=true → { affected }.
+  const columnKey = (req) => { if (!isSafeKey(req.params.key)) fail("The column key is not valid."); return req.params.key; };
+  const schemaResult = (res, result) => send(res, 200, result.dryRun ? result : { board: boardToApi(result.board), affected: result.affected, recordsChanged: result.recordsChanged });
+  router.post("/boards/:boardId/columns", async (req, res) => { noQuery(req); const result = await services.schema.addColumn(parseId(req.params.boardId, "boardId"), req.body, req.actor); send(res, 201, { board: boardToApi(result.board), recordsChanged: result.recordsChanged }); });
+  router.delete("/boards/:boardId/columns/:key", async (req, res) => schemaResult(res, await services.schema.deleteColumn(parseId(req.params.boardId, "boardId"), columnKey(req), req.query, req.actor)));
+  router.post("/boards/:boardId/columns/:key/type", async (req, res) => schemaResult(res, await services.schema.changeType(parseId(req.params.boardId, "boardId"), columnKey(req), req.body, req.query, req.actor)));
+  router.put("/boards/:boardId/columns/:key/options", async (req, res) => schemaResult(res, await services.schema.editOptions(parseId(req.params.boardId, "boardId"), columnKey(req), req.body, req.query, req.actor)));
+  router.delete("/boards/:boardId/groups/:groupId", async (req, res) => {
+    if (!GROUP_ID.test(req.params.groupId)) fail("The group ID is not valid.");
+    schemaResult(res, await services.schema.deleteGroup(parseId(req.params.boardId, "boardId"), req.params.groupId, req.query, req.actor));
+  });
+  router.post("/boards/:boardId/move", async (req, res) => { noQuery(req); const result = await services.schema.moveBoard(parseId(req.params.boardId, "boardId"), req.body, req.actor); send(res, 200, { board: boardToApi(result.board), recordsMoved: result.records }); });
+  router.get("/boards/:boardId/activity", async (req, res) => { send(res, 200, { items: (await services.boards.activity(parseId(req.params.boardId, "boardId"), req.query)).map(activityToApi) }); });
+
   router.get("/records/:recordId", async (req, res) => { noQuery(req); send(res, 200, { record: recordToApi(await services.records.get(parseId(req.params.recordId, "recordId"))) }); });
   router.patch("/records/:recordId", async (req, res) => { noQuery(req); send(res, 200, { record: recordToApi(await services.records.update(parseId(req.params.recordId, "recordId"), req.body, req.actor)) }); });
   router.delete("/records/:recordId", async (req, res) => {

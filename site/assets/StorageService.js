@@ -1,7 +1,9 @@
 // Storage boundary (Stage 6) with an asynchronous contract (Stage 8).
 //
 //   AppView → AppController → BoardModel / AuthModel → StorageService → LocalAsyncAdapter → browser storage (default)
-//                                                                       → ApiAdapter → fetch → Express /api/v1 (Stage 9, opt-in)
+//                                                                       → ApiAdapter → fetch → /api/v1/state (Stage 9, transitional)
+//                                                                       → ResourceApiAdapter → fetch → /api/v1 resources → MongoDB
+//                                                                         (Stage 11, ResourceApiAdapter.js, opt-in ?storage=resource)
 //
 // Application state is loaded and saved through Promises, so either adapter works without UI changes.
 // LocalAsyncAdapter is the only code that touches localStorage/sessionStorage. StorageService owns the stored
@@ -46,6 +48,12 @@ StorageError.describe = (codeOrError) => {
   const [message, retryable] = messages[code] || messages[C.INTERNAL_ERROR];
   return { code: code || C.INTERNAL_ERROR, message, retryable, offline: code === C.OFFLINE || code === C.SERVICE_UNAVAILABLE };
 };
+// After resource mode has reloaded the server's latest copy (conflict or deleted elsewhere). Nothing to retry.
+StorageError.describeRefreshed = (code) => ({
+  code,
+  message: code === StorageError.CODES.NOT_FOUND ? "This item was deleted by another user. The latest data has been loaded." : "This item was changed by another user. The latest version has been loaded.",
+  retryable: false, offline: false
+});
 StorageError.from = (error) => {
   if (error instanceof StorageError) return error;
   const quota = error?.name === "QuotaExceededError" || error?.name === "NS_ERROR_DOM_QUOTA_REACHED" || error?.code === 22 || error?.code === 1014 || /quota/i.test(String(error?.message));
@@ -199,6 +207,8 @@ class StorageService {
   // Returns { data, user, source, migrated }. data/user are null when nothing is stored yet.
   // Throws StorageError(INVALID_DATA | STORAGE_UNAVAILABLE). Never deletes or overwrites unreadable data.
   async loadState() {
+    // Resource mode loads workspaces, boards and records from separate endpoints and returns them already split.
+    if (this.adapter.loadResourceState) { const { data, user } = await this.adapter.loadResourceState(); return { data, user, source: "resource", migrated: false }; }
     const { raw, source } = await this.adapter.readAppState();
     if (raw === null) return { data: null, user: null, source, migrated: false };
     let parsed;
@@ -238,23 +248,40 @@ class StorageService {
     if (!StorageService.OPERATIONS.includes(change?.op)) throw new Error(`Unknown storage operation "${change?.op}"`);
     this.lastChange = { ...change, at: Date.now() };
     const text = this.serialize({ ...this.extraFields, ...user, ...data }), generation = this.generation;
+    // Resource mode sends only what changed (per workspace, board and record). It gets its own copy of the state,
+    // and may return a reconcile (server IDs for new items, latest server data after a conflict) for the model.
+    const resource = Boolean(this.adapter.commitState), snapshot = resource ? JSON.parse(JSON.stringify({ data, user })) : null;
     const run = async () => {
       if (generation !== this.generation) return { ok: false, code: StorageError.CODES.CANCELLED, message: "" };
       try {
-        await this.adapter.writeAppState(text);
+        const outcome = resource ? await this.adapter.commitState(this.lastChangeFor(change), snapshot) : await this.adapter.writeAppState(text);
         this.setConnection("online");
-        return { ok: true };
+        return { ok: true, reconcile: outcome?.reconcile || null };
       } catch (error) {
         this.generation += 1;
         const failure = StorageError.from(error);
         if (StorageError.describe(failure.code).offline) this.setConnection("offline");
-        return { ok: false, code: failure.code, message: failure.message };
+        return { ok: false, code: failure.code, message: failure.message, reconcile: error?.reconcile || null };
       }
     };
     const result = this.queue.then(run);
     this.queue = result;
     return result;
   }
+
+  lastChangeFor(change) { return JSON.parse(JSON.stringify(change)); }
+
+  // Resource mode only: fetch a board's records (in order with saves). Other modes already hold every record.
+  loadBoard(boardId, options) {
+    const result = this.queue.then(() => this.adapter.loadBoardRecords(boardId, options));
+    this.queue = result.catch(() => {});
+    return result.then((value) => { this.setConnection("online"); return value; }, (error) => {
+      const failure = StorageError.from(error);
+      if (StorageError.describe(failure.code).offline) this.setConnection("offline");
+      throw failure;
+    });
+  }
+  boardLoadState(boardId) { return this.adapter.boardLoadState?.(boardId) || null; }
 
   // ---- Recovery helpers (startup failure screen) ---------------------------------------------------------------
   readRawState() { return this.adapter.readRawAppState(); }
@@ -270,10 +297,16 @@ class StorageService {
   removeSessionValue(name) { try { this.adapter.remove("session", this.adapter.keyFor("session", name)); return true; } catch (error) { if (!(error instanceof StorageError)) throw error; return false; } }
 }
 
-// Adapter selection. LOCAL (browser storage) is the default everywhere. API mode is an explicit development opt-in,
-// ?storage=api, and only works when the page is served by the JARC Express server (same origin, /api/v1).
+// Adapter selection. LOCAL (browser storage) is the default everywhere. The server modes are explicit development
+// opt-ins and only work when the page is served by the JARC Express server (same origin, /api/v1):
+//   ?storage=api       transitional whole-state API (GET/PUT /api/v1/state)
+//   ?storage=resource  resource API backed by MongoDB (ResourceApiAdapter.js)
 StorageService.createAdapter = (search = window.location.search) => {
   const mode = new URLSearchParams(search).get("storage");
+  if (mode === "resource") {
+    if (typeof ResourceApiAdapter === "undefined") throw new Error("Resource mode needs assets/ResourceApiAdapter.js.");
+    return new ResourceApiAdapter();
+  }
   return mode === "api" ? new ApiAdapter() : new LocalAsyncAdapter();
 };
 

@@ -34,9 +34,14 @@ string is never logged or returned by the API.
 | URL | Mode | Where data is saved |
 |---|---|---|
 | `http://127.0.0.1:3000/` | LOCAL (default) | this browser's localStorage, exactly as before |
-| `http://127.0.0.1:3000/?storage=api` | API (development) | the server, through `GET/PUT /api/v1/state` |
+| `http://127.0.0.1:3000/?storage=api` | API (transitional) | server memory, through `GET/PUT /api/v1/state` |
+| `http://127.0.0.1:3000/?storage=resource` | RESOURCE (development, needs `DATA_STORE=mongodb`) | MongoDB, through the resource endpoints below |
 
-The frontend does not use the resource endpoints yet.
+The modes never share data, and nothing is copied from one to another. In resource mode the browser loads workspaces,
+then board summaries, then records page by page (200 per request) for the board being opened: up to 2,000 records
+load at once, larger boards show "Load more". Saves send only what changed, with each item's expected version; a 409
+loads the latest server copy instead of overwriting. Per-user state (selection, settings, favourites, last view,
+recent items, local contacts) stays in that browser. Restoring a backup is disabled in resource mode.
 
 ## Endpoints
 
@@ -62,7 +67,20 @@ change is attributed to a fixed development user, "Local developer (pre-auth)". 
 | GET / PATCH / DELETE | `/api/v1/boards/:boardId` | DELETE cascades to the board's records |
 | GET / POST | `/api/v1/boards/:boardId/records` | GET: `limit` (1–200, default 50), `cursor`, `sort` (`position`\|`createdAt`\|`updatedAt`), `dir`, `groupId`, `status`, `archived` |
 | GET / PATCH / DELETE | `/api/v1/records/:recordId` | PATCH `{ expectedVersion, values?, groupId?, position?, archived?, pinned? }`; a stale version → 409 |
+| POST | `/api/v1/boards/:boardId/records/batch` | Create up to 5,000 records in one transaction (CSV import, duplicate board, undo) |
+| PATCH | `/api/v1/boards/:boardId/records` | `{ items: [{ id, expectedVersion, ...changes }] }` — bulk edits and reorders; one stale version → 409, nothing written |
+| POST | `/api/v1/boards/:boardId/records/delete` | `{ records: [{ id, expectedVersion }] }` — multi-delete; already-deleted records are skipped |
+| POST | `/api/v1/boards/:boardId/columns` | Add a column (`index`, `copyFrom` to duplicate); existing records are filled in the same transaction |
+| DELETE | `/api/v1/boards/:boardId/columns/:key` | Delete a column and its values (`?expectedVersion=&dryRun=`) |
+| POST | `/api/v1/boards/:boardId/columns/:key/type` | Change type; values converted with the app's rules (`?dryRun=true` → `{ affected }`) |
+| PUT | `/api/v1/boards/:boardId/columns/:key/options` | Rename/remove options; values that used them are rewritten (`?dryRun=true`) |
+| DELETE | `/api/v1/boards/:boardId/groups/:groupId` | Delete a group, moving its records (`?expectedVersion=&moveTo=<groupId>|none`) |
+| POST | `/api/v1/boards/:boardId/move` | Move a board (and its records) to another workspace |
+| GET | `/api/v1/boards/:boardId/activity` | Board history, newest first (`limit` ≤ 200). Read-only |
 | POST | `/api/v1/imports[?dryRun=true]` | Development migration of a state document or browser backup; all or nothing, refuses repeats |
+
+Labels, column order, visibility, widths, adding/renaming groups and saved views use `PATCH /api/v1/boards/:boardId`.
+Board lists include `recordCount` (active records).
 
 IDs are 24-character strings (`id`); dates are ISO 8601. Errors always use
 `{ "error": { "code": "...", "message": "...", "details"? } }`. Unknown `/api` paths return a JSON 404.
@@ -70,6 +88,6 @@ IDs are 24-character strings (`id`); dates are ISO 8601. Errors always use
 ## Temporary parts
 
 - `MemoryStateRepository` keeps the state **in server memory only**. Restarting the server clears it.
-- `GET/PUT /api/v1/state` saves the whole document at once with no authentication. It stays until the frontend moves
-  to the resource endpoints. It is disabled when `NODE_ENV=production`.
+- `GET/PUT /api/v1/state` (TRANSITIONAL) saves the whole document at once with no authentication. Resource mode no
+  longer needs it; it stays until resource mode replaces API mode everywhere. It is disabled when `NODE_ENV=production`.
 - The resource API has no sign-in yet. Microsoft Entra authentication and per-workspace permissions come later.

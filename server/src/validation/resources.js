@@ -1,7 +1,7 @@
 // Request validation for the resource API. Each function returns a new object containing only allowed, checked
 // fields, so request bodies are never passed to MongoDB as they arrive.
 const { fail, requireBody, allowOnly, text, color, bool, finiteNumber, version, queryString, parseId, isObject, isSafeKey } = require("./common");
-const { normalizeColumns, normalizeGroups, normalizeSavedViews, groupColumnOf, checkValue, hasValue, PRIMARY_KEY, LIMITS } = require("../domain/board-schema");
+const { normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, groupColumnOf, checkValue, hasValue, PRIMARY_KEY, LIMITS, COLUMN_TYPES } = require("../domain/board-schema");
 
 const POSITION = { min: -1e15, max: 1e15 };
 
@@ -32,7 +32,8 @@ function workspacePatch(raw) {
 }
 
 // ---- Boards
-const BOARD_SIMPLE_FIELDS = { name: (v) => text(v, "name", { required: true }), description: (v) => text(v, "description", { max: 5000 }), icon: (v) => text(v, "icon", { max: 4 }), archived: (v) => bool(v, "archived"), position: (v) => finiteNumber(v, "position", POSITION), manualOrder: (v) => bool(v, "manualOrder") };
+const BOARD_SIMPLE_FIELDS = { name: (v) => text(v, "name", { required: true }), description: (v) => text(v, "description", { max: 5000 }), icon: (v) => text(v, "icon", { max: 4 }), archived: (v) => bool(v, "archived"), position: (v) => finiteNumber(v, "position", POSITION), manualOrder: (v) => bool(v, "manualOrder"), nextItemNumber: (v) => wholeNumber(v, "nextItemNumber") };
+const wholeNumber = (v, label) => { if (!Number.isSafeInteger(v) || v < 1 || v > 1e9) fail(`${label} must be a whole number of at least 1.`); return v; };
 
 function boardCreate(raw, { actorId, now }) {
   const body = requireBody(raw);
@@ -203,4 +204,108 @@ function decodeCursor(textValue, sort) {
   return { value, id };
 }
 
-module.exports = { workspaceCreate, workspacePatch, boardCreate, boardPatch, recordCreate, recordPatch, recordListQuery, encodeCursor, decodeCursor, RECORD_SORTS, PAGE };
+// ---- Stage 11: schema changes, board move, batch records, activity paging
+const BATCH_MAX = 5000;
+
+function boardMove(raw) {
+  const body = requireBody(raw);
+  allowOnly(body, ["expectedVersion", "workspaceId"], "the board move");
+  return { expectedVersion: version(body.expectedVersion), workspaceId: parseId(body.workspaceId, "workspaceId") };
+}
+
+function columnAdd(raw, board) {
+  const body = requireBody(raw);
+  allowOnly(body, ["expectedVersion", "column", "index", "copyFrom"], "the new column");
+  const expectedVersion = version(body.expectedVersion);
+  const column = normalizeColumn(body.column, "The new column");
+  if (board.columns.some((c) => c.key === column.key)) fail(`Column key "${column.key}" already exists on this board.`);
+  if (board.columns.length >= LIMITS.columns) fail(`A board can have at most ${LIMITS.columns} columns.`);
+  let index = board.columns.length;
+  if (body.index !== undefined) {
+    if (!Number.isSafeInteger(body.index) || body.index < 1 || body.index > board.columns.length) fail("index must place the column after the Item column.");
+    index = body.index;
+  }
+  let copyFrom;
+  if (body.copyFrom !== undefined) {
+    copyFrom = board.columns.find((c) => c.key === body.copyFrom);
+    if (!copyFrom) fail("copyFrom must be an existing column key.");
+  }
+  return { expectedVersion, column, index, copyFrom };
+}
+
+function columnType(raw) {
+  const body = requireBody(raw);
+  allowOnly(body, ["expectedVersion", "type"], "the type change");
+  if (!COLUMN_TYPES.includes(body.type)) fail("type is not a supported column type.");
+  return { expectedVersion: version(body.expectedVersion), type: body.type };
+}
+
+function columnOptions(raw) {
+  const body = requireBody(raw);
+  allowOnly(body, ["expectedVersion", "items"], "the options change");
+  if (!Array.isArray(body.items) || body.items.length > LIMITS.options) fail(`items must be a list of at most ${LIMITS.options} options.`);
+  const items = body.items.map((item, index) => {
+    if (!isObject(item)) fail(`Option ${index + 1} must be an object.`);
+    allowOnly(item, ["from", "to"], `option ${index + 1}`);
+    const from = item.from === undefined || item.from === null ? null : text(item.from, `The original text of option ${index + 1}`, { max: LIMITS.optionLength, trim: false });
+    return { from, to: text(item.to ?? "", `Option ${index + 1}`, { max: LIMITS.optionLength, trim: false }) };
+  });
+  return { expectedVersion: version(body.expectedVersion), items };
+}
+
+function batchList(body, field, label) {
+  if (!Array.isArray(body[field]) || !body[field].length) fail(`${field} must be a non-empty list.`);
+  if (body[field].length > BATCH_MAX) fail(`At most ${BATCH_MAX} ${label} can be sent at once.`);
+  return body[field];
+}
+
+function recordBatchCreate(raw, board) {
+  const body = requireBody(raw);
+  allowOnly(body, ["records"], "the batch");
+  return batchList(body, "records", "records").map((item, index) => { try { return recordCreate(item, board); } catch (error) { error.message = `Record ${index + 1}: ${error.message}`; throw error; } });
+}
+
+function uniqueIds(items) {
+  const seen = new Set();
+  for (const item of items) { const key = item.id.toHexString(); if (seen.has(key)) fail("The same record appears twice in the batch."); seen.add(key); }
+  return items;
+}
+
+function recordBatchUpdate(raw, board) {
+  const body = requireBody(raw);
+  allowOnly(body, ["items"], "the batch");
+  return uniqueIds(batchList(body, "items", "records").map((item, index) => {
+    try {
+      if (!isObject(item)) fail("must be an object.");
+      const { id, ...rest } = item;
+      return { id: parseId(id, "id"), ...recordPatch(rest, board) };
+    } catch (error) { error.message = `Record ${index + 1}: ${error.message}`; throw error; }
+  }));
+}
+
+function recordBatchDelete(raw) {
+  const body = requireBody(raw);
+  allowOnly(body, ["records"], "the batch");
+  return uniqueIds(batchList(body, "records", "records").map((item, index) => {
+    if (!isObject(item)) fail(`Record ${index + 1} must be an object.`);
+    allowOnly(item, ["id", "expectedVersion"], `record ${index + 1}`);
+    return { id: parseId(item.id, "id"), expectedVersion: version(item.expectedVersion) };
+  }));
+}
+
+function dryRunParam(query, allowed = []) {
+  allowOnly(query, ["dryRun", ...allowed], "the query");
+  const value = queryString(query.dryRun, "dryRun") ?? "false";
+  if (!["true", "false"].includes(value)) fail("dryRun must be true or false.");
+  return value === "true";
+}
+
+function activityQuery(query) {
+  allowOnly(query, ["limit"], "the query");
+  const raw = queryString(query.limit, "limit");
+  if (raw === undefined) return { limit: 50 };
+  if (!/^\d{1,4}$/.test(raw) || Number(raw) < 1 || Number(raw) > 200) fail("limit must be a whole number from 1 to 200.");
+  return { limit: Number(raw) };
+}
+
+module.exports = { boardMove, columnAdd, columnType, columnOptions, recordBatchCreate, recordBatchUpdate, recordBatchDelete, dryRunParam, activityQuery, BATCH_MAX, workspaceCreate, workspacePatch, boardCreate, boardPatch, recordCreate, recordPatch, recordListQuery, encodeCursor, decodeCursor, RECORD_SORTS, PAGE };

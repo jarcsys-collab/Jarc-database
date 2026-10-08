@@ -161,6 +161,34 @@ class FakeCollection {
     this.replaceAt(index, applyUpdate(clone(this.docs[index]), update));
     return { matchedCount: 1, modifiedCount: 1, upsertedCount: 0 };
   }
+  async updateMany(filter, update, options = {}) {
+    if (!filter || !Object.keys(filter).length) throw new Error("fake-mongo: refusing an unscoped updateMany");
+    this.record("updateMany", { filter, update, options });
+    let modified = 0;
+    const next = this.docs.map((d) => { if (!matches(d, filter)) return d; modified += 1; return applyUpdate(clone(d), update); });
+    this.assertUnique(next); this.docs = next;
+    return { matchedCount: modified, modifiedCount: modified };
+  }
+  // Supports updateOne and deleteOne operations, applied in order (ordered: true semantics).
+  async bulkWrite(operations, options = {}) {
+    this.record("bulkWrite", { count: operations.length, options });
+    let matchedCount = 0, modifiedCount = 0, deletedCount = 0;
+    for (const operation of operations) {
+      if (operation.updateOne) {
+        const { filter, update } = operation.updateOne;
+        if (!filter || !Object.keys(filter).length) throw new Error("fake-mongo: refusing an unscoped bulk update");
+        const index = this.docs.findIndex((d) => matches(d, filter));
+        if (index < 0) continue;
+        this.replaceAt(index, applyUpdate(clone(this.docs[index]), update)); matchedCount += 1; modifiedCount += 1;
+      } else if (operation.deleteOne) {
+        const { filter } = operation.deleteOne;
+        if (!filter || !Object.keys(filter).length) throw new Error("fake-mongo: refusing an unscoped bulk delete");
+        const index = this.docs.findIndex((d) => matches(d, filter));
+        if (index >= 0) { this.docs = this.docs.filter((_, i) => i !== index); deletedCount += 1; }
+      } else throw new Error("fake-mongo: unsupported bulkWrite operation");
+    }
+    return { matchedCount, modifiedCount, deletedCount };
+  }
   async findOneAndUpdate(filter, update, options = {}) {
     this.record("findOneAndUpdate", { filter, update, options });
     const index = this.docs.findIndex((d) => matches(d, filter));

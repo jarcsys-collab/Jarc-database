@@ -9,6 +9,7 @@ const { WorkspaceService } = require("./services/workspace-service");
 const { BoardService } = require("./services/board-service");
 const { RecordService } = require("./services/record-service");
 const { ImportService } = require("./services/import-service");
+const { BoardSchemaService } = require("./services/board-schema-service");
 
 function createDataLayer({ connection, logger = console }) {
   const db = connection.db;
@@ -24,7 +25,7 @@ function createDataLayer({ connection, logger = console }) {
   return {
     connection,
     repos,
-    services: { workspaces: new WorkspaceService(deps), boards: new BoardService(deps), records: new RecordService(deps), imports: new ImportService(deps) }
+    services: { workspaces: new WorkspaceService(deps), boards: new BoardService(deps), records: new RecordService(deps), imports: new ImportService(deps), schema: new BoardSchemaService(deps) }
   };
 }
 

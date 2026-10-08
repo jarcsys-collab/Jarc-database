@@ -42,6 +42,8 @@ class BoardModel {
     this.activeSavedViewId = null;
     this.showArchived = false;
     this.pendingSaves = 0; this.lastSave = Promise.resolve(true); this.failure = null; this.collecting = null;
+    this.idAliases = new Map(); // temporary client IDs → server IDs (resource mode), so stale references still resolve
+    this.boardLoading = {};     // boardId → "loading" | "error" while records are fetched (resource mode)
     this.applyState({});
     this.markPersisted();
   }
@@ -51,7 +53,19 @@ class BoardModel {
     const { data, user } = await this.storage.loadState();
     this.applyState({ ...(user || {}), ...(data || {}) });
     this.markPersisted();
+    if (this.board) this.ensureBoardRecords(this.board.id); // resource mode loads records per board
     return this;
+  }
+
+  // Record and saved-view IDs: numbers in local mode, server ID strings (24 hex characters) in resource mode. Values
+  // arriving from the page (data attributes) are strings, so they are normalised here, and temporary IDs that have
+  // since been replaced by server IDs still resolve.
+  idOf(value) {
+    if (value === null || value === undefined || value === "") return value;
+    const text = String(value);
+    if (this.idAliases.has(text)) return this.idAliases.get(text);
+    if (typeof value === "number") return value;
+    return /^\d{1,17}$/.test(text) ? Number(text) : text;
   }
 
   // Applies loaded (or default) shared data and per-user state, filling defaults for anything missing.
@@ -114,6 +128,7 @@ class BoardModel {
       this.pendingSaves -= 1;
       if (result.ok) {
         this.persisted = { text, history };
+        this.applyReconcile(result.reconcile);
         // A newer successful save supersedes an earlier failure: the failed change stays rolled back (the user saw it
         // revert) and Retry is no longer offered, so it can never overwrite these newer, saved edits.
         this.saveState = this.pendingSaves ? "saving" : "saved"; this.saveError = ""; this.failure = null;
@@ -138,9 +153,77 @@ class BoardModel {
   rollback(change, result) {
     this.failure = { text: JSON.stringify(this.toStorageState()), history: this.history.slice(), change, code: result.code };
     this.adoptState(this.persisted.text); this.history = this.persisted.history.slice();
-    this.saveState = "error"; this.saveError = result.code;
-    window.dispatchEvent(new CustomEvent("jarc-save", {detail:"error"}));
-    window.dispatchEvent(new CustomEvent("jarc-rollback", {detail:{ code: result.code, op: change.op }}));
+    this.applyReconcile(result.reconcile);
+    // Someone else changed (or deleted) it: the latest server version is now shown. Nothing is pending and Retry
+    // must not re-send the stale change, so the failed attempt is dropped instead of kept for Retry.
+    const stale = [StorageError.CODES.CONFLICT, StorageError.CODES.NOT_FOUND].includes(result.code) && result.reconcile;
+    if (stale) { this.failure = null; this.saveState = this.pendingSaves ? "saving" : "saved"; this.saveError = ""; }
+    else { this.saveState = "error"; this.saveError = result.code; }
+    window.dispatchEvent(new CustomEvent("jarc-save", {detail:this.saveState}));
+    window.dispatchEvent(new CustomEvent("jarc-rollback", {detail:{ code: result.code, op: change.op, refreshed: Boolean(stale) }}));
+  }
+
+  // Applies what the server reported after a save (resource mode): temporary IDs replaced by server IDs, and, after
+  // a conflict, the latest server copy of what changed. Applied to the visible state, the last saved state, a
+  // pending failed save and the undo history, so all of them keep referring to the same server records.
+  applyReconcile(reconcile) {
+    if (!reconcile || reconcile.empty) return;
+    const fix = (text) => { const state = JSON.parse(text); reconcile.applyTo(state); return JSON.stringify(state); };
+    const live = this.toStorageState(); reconcile.applyTo(live); this.adoptState(JSON.stringify(live));
+    if (this.persisted) this.persisted = { ...this.persisted, text: fix(this.persisted.text) };
+    if (this.failure) this.failure = { ...this.failure, text: fix(this.failure.text) };
+    this.history = this.history.map((entry) => {
+      const state = { data: { workspaces: JSON.parse(entry.workspaces) }, user: { currentWorkspaceId: entry.currentWorkspaceId, currentBoardId: entry.currentBoardId } };
+      reconcile.applyTo(state, { idsOnly: true });
+      return { ...entry, workspaces: JSON.stringify(state.data.workspaces), currentWorkspaceId: state.user.currentWorkspaceId, currentBoardId: state.user.currentBoardId };
+    });
+    for (const [from, to] of reconcile.ids) this.idAliases.set(from, to);
+    this.selected = new Set([...this.selected].map((id) => reconcile.id(id)));
+    if (this.activeSavedViewId !== null) this.activeSavedViewId = reconcile.id(this.activeSavedViewId);
+    if (reconcile.ids.size) window.dispatchEvent(new CustomEvent("jarc-ids-changed"));
+  }
+
+  // ---- Per-board record loading (resource mode). Local and transitional modes have every record already.
+  boardLoadState(boardId = this.board?.id) {
+    if (this.boardLoading[boardId]) return { state: this.boardLoading[boardId] };
+    return this.storage.boardLoadState?.(boardId) || { state: "full" };
+  }
+  // Active (non-archived) record count for lists: counted from loaded records, or the server's count before loading.
+  boardRecordCount(board) {
+    const state = this.boardLoadState(board.id).state;
+    return state === "full" || board.recordCount === undefined ? (board.records || []).filter((r) => !r.archived).length : board.recordCount;
+  }
+  async ensureBoardRecords(boardId, { more = false } = {}) {
+    if (!this.storage.loadBoard || !boardId) return;
+    const current = this.boardLoadState(boardId).state;
+    if (current === "loading" || (current === "full" && !more) || (current === "partial" && !more)) return;
+    this.boardLoading[boardId] = "loading";
+    window.dispatchEvent(new CustomEvent("jarc-board-status", { detail: { boardId } }));
+    try {
+      const loaded = await this.storage.loadBoard(boardId, { more });
+      delete this.boardLoading[boardId];
+      this.mergeLoadedRecords(boardId, loaded);
+    } catch (error) {
+      this.boardLoading[boardId] = "error";
+      this.boardLoadError = StorageError.describe(error).message;
+    }
+    window.dispatchEvent(new CustomEvent("jarc-board-status", { detail: { boardId } }));
+  }
+  // Adds loaded server records to the board in every copy of the state (visible, saved, failed, undo history), so
+  // an undo or rollback never "forgets" records and asks the server to delete them.
+  mergeLoadedRecords(boardId, { records, activity }) {
+    const merge = (workspaces) => {
+      const board = workspaces.flatMap((w) => w.boards).find((b) => b.id === boardId);
+      if (!board) return;
+      const known = new Set((board.records || []).map((r) => String(r.id)));
+      board.records = [...(board.records || []), ...records.filter((r) => !known.has(String(r.id))).map((r) => JSON.parse(JSON.stringify(r)))];
+      if (activity) board.activity = JSON.parse(JSON.stringify(activity));
+    };
+    const fix = (text) => { const state = JSON.parse(text); merge(state.data.workspaces); return JSON.stringify(state); };
+    const live = this.toStorageState(); merge(live.data.workspaces); this.adoptState(JSON.stringify(live));
+    this.persisted = { ...this.persisted, text: fix(this.persisted.text) };
+    if (this.failure) this.failure = { ...this.failure, text: fix(this.failure.text) };
+    this.history = this.history.map((entry) => { const workspaces = JSON.parse(entry.workspaces); merge(workspaces); return { ...entry, workspaces: JSON.stringify(workspaces) }; });
   }
   // User-triggered Retry: re-applies everything that failed to save (including later changes made before the failure
   // was reported) and saves once more. Without a pending failure it simply saves the current state.
@@ -187,6 +270,7 @@ class BoardModel {
       if (capture().text !== before.text) { result = perform(); }
       else { restore(proposed); this.persisted = proposed; }
     }
+    this.applyReconcile(outcome.reconcile);
     if (!this.pendingSaves && !this.failure) { this.saveState = "saved"; this.saveError = ""; window.dispatchEvent(new CustomEvent("jarc-save", {detail:"saved"})); }
     if (outcome.ok) return { ok: true, result };
     // CANCELLED: an earlier optimistic save failed first; report that failure's reason.
@@ -206,7 +290,7 @@ class BoardModel {
     }));
   }
   get workspace() { return this.workspaces.find((space) => space.id === this.currentWorkspaceId) || this.workspaces[0]; }
-  get board() { return this.workspace.boards.find((board) => board.id === this.currentBoardId) || this.workspace.boards[0]; }
+  get board() { return this.workspace?.boards.find((board) => board.id === this.currentBoardId) || this.workspace?.boards[0]; }
   get rows() { return this.board?.records || []; }
   get allRecords() { return this.workspaces.flatMap((space) => space.boards.flatMap((board) => { const byType=(type)=>board.columns?.find((column)=>column.type===type)?.key; return board.records.map((record) => ({ ...record, owner:record[byType("owner")]??record.owner, status:record[byType("status")]??record.status, priority:record[byType("priority")]??record.priority, dueDate:record[this.dueColumn(board)?.key]??record.dueDate, boardId: board.id, boardName: board.name, workspaceId: space.id, workspaceName:space.name, boardArchived:Boolean(board.archived), workspaceArchived:Boolean(space.archived) })); })); }
   get myWork() { return this.allRecords.filter((record) => !record.archived && !record.boardArchived && !record.workspaceArchived && [this.profile.initials,this.profile.name,this.profile.email].filter(Boolean).includes(record.owner)); }
@@ -235,6 +319,7 @@ class BoardModel {
 
   openScreen(screen) { this.screen = screen; this.selected.clear(); this.save({op:"updateUserState"}); }
   openBoard(boardId, workspaceId = this.currentWorkspaceId) {
+    boardId = this.idOf(boardId); workspaceId = this.idOf(workspaceId);
     const space = this.workspaces.find(w=>w.id===workspaceId);
     const board = space?.boards.find(b=>b.id===boardId);
     if (!board) throw Error("This board is no longer available.");
@@ -243,6 +328,7 @@ class BoardModel {
     board.openCount=(board.openCount||0)+1;
     this.recentBoards=[{boardId,workspaceId,openedAt:new Date().toISOString()},...this.recentBoards.filter(r=>r.boardId!==boardId||r.workspaceId!==workspaceId)].slice(0,10);
     this.save({op:"updateUserState",boardId,workspaceId});
+    this.ensureBoardRecords(boardId);
   }
 
   switchWorkspace(id) { const space = this.workspaces.find((item) => item.id === id); if (!space) return; this.currentWorkspaceId = id; this.currentBoardId = space.boards[0]?.id || ""; this.screen = "home"; this.save({op:"updateUserState",workspaceId:id}); }
@@ -282,7 +368,7 @@ class BoardModel {
 
   upsert(record) {
     this.snapshot(record.id ? "Record edit undone" : "Record creation undone");
-    const id = Number(record.id) || this.nextRecordId();
+    const id = record.id ? this.idOf(record.id) : this.nextRecordId();
     const prior=this.rows.find(r=>r.id===id);
     const at=new Date().toISOString();
     const clean = { ...prior, ...record, id, createdAt:prior?.createdAt || at, updatedAt:at, activity:[...(prior?.activity||[]),{at,text:prior?"Record updated":"Record created",by:this.profile.name}].slice(-50) };
@@ -291,15 +377,15 @@ class BoardModel {
     if (index >= 0) this.rows[index] = clean; else this.rows.unshift(clean);
     this.log(index >= 0 ? `Updated ${clean.serial}` : `Added ${clean.serial}`); this.save({op:index>=0?"updateRecord":"createRecord",boardId:this.board.id,recordId:id}); return clean;
   }
-  updateCell(id, field, value) { const column = this.board.columns.find((item) => item.key === field); const row = this.rows.find((item) => item.id === Number(id)); if (!column || !row) return; if (column.required && !String(value).trim()) return; this.snapshot(`${column.label} change undone`); row[field] = column.type === "checkbox" ? Boolean(value) : String(value); this.recordActivity(row, `Changed ${column.label}`); this.log(`Updated ${column.label} on ${row.serial}`); this.save({op:"updateRecord",boardId:this.board.id,recordId:row.id,fields:[field]}); }
-  moveRecord(id, updates) { const row = this.rows.find((item) => item.id === Number(id)); if (!row) return; this.snapshot("Record move undone"); Object.assign(row, updates); this.log(`Moved ${row.serial} to ${updates.status || updates.group}`); this.save({op:"updateRecord",boardId:this.board.id,recordId:row.id,fields:Object.keys(updates)}); }
-  remove(ids) { this.snapshot("Record deletion undone"); const removeIds = new Set(ids.map(Number)); const names = this.rows.filter((row) => removeIds.has(row.id)).map((row) => row.serial); this.board.records = this.rows.filter((row) => !removeIds.has(row.id)); removeIds.forEach((id) => this.selected.delete(id)); this.log(`Deleted ${names.join(", ")}`); this.save({op:"deleteRecords",boardId:this.board.id,recordIds:[...removeIds]}); }
-  duplicateRecord(id) { const source = this.rows.find((row) => row.id === Number(id)); if (!source) return false; this.snapshot("Item duplication undone"); const copy = { ...source, id: Date.now()*1000+Math.floor(Math.random()*1000), serial: `${source.serial} copy`, archived:false }; this.rows.unshift(copy); this.manualSort=true; this.log(`Duplicated ${source.serial}`); this.save({op:"createRecord",boardId:this.board.id,recordId:copy.id}); return copy.id; }
+  updateCell(id, field, value) { const column = this.board.columns.find((item) => item.key === field); const row = this.rows.find((item) => item.id === this.idOf(id)); if (!column || !row) return; if (column.required && !String(value).trim()) return; this.snapshot(`${column.label} change undone`); row[field] = column.type === "checkbox" ? Boolean(value) : String(value); this.recordActivity(row, `Changed ${column.label}`); this.log(`Updated ${column.label} on ${row.serial}`); this.save({op:"updateRecord",boardId:this.board.id,recordId:row.id,fields:[field]}); }
+  moveRecord(id, updates) { const row = this.rows.find((item) => item.id === this.idOf(id)); if (!row) return; this.snapshot("Record move undone"); Object.assign(row, updates); this.log(`Moved ${row.serial} to ${updates.status || updates.group}`); this.save({op:"updateRecord",boardId:this.board.id,recordId:row.id,fields:Object.keys(updates)}); }
+  remove(ids) { this.snapshot("Record deletion undone"); const removeIds = new Set(ids.map((id)=>this.idOf(id))); const names = this.rows.filter((row) => removeIds.has(row.id)).map((row) => row.serial); this.board.records = this.rows.filter((row) => !removeIds.has(row.id)); removeIds.forEach((id) => this.selected.delete(id)); this.log(`Deleted ${names.join(", ")}`); this.save({op:"deleteRecords",boardId:this.board.id,recordIds:[...removeIds]}); }
+  duplicateRecord(id) { const source = this.rows.find((row) => row.id === this.idOf(id)); if (!source) return false; this.snapshot("Item duplication undone"); const copy = { ...source, id: Date.now()*1000+Math.floor(Math.random()*1000), serial: `${source.serial} copy`, archived:false }; this.rows.unshift(copy); this.manualSort=true; this.log(`Duplicated ${source.serial}`); this.save({op:"createRecord",boardId:this.board.id,recordId:copy.id}); return copy.id; }
   quickAdd() { this.snapshot("Quick add undone"); const id = this.nextRecordId(); const row={id,archived:false,pinned:false}; this.board.columns.forEach((column)=>{ if(column.type==="checkbox")row[column.key]=false; else if(column.type==="group")row[column.key]=column.defaultValue||this.board.groups[0]; else if(column.type==="status")row[column.key]=column.defaultValue||column.options[0]||"Review"; else if(column.type==="owner")row[column.key]=column.defaultValue||"Unassigned"; else if(column.type==="priority")row[column.key]=column.defaultValue||"Medium"; else row[column.key]=column.defaultValue; }); const used=new Set(this.rows.map((item)=>String(item.serial||"").toLowerCase())); let number=this.board.nextItemNumber||1,name=number===1?"New item":`New item ${number}`; while(used.has(name.toLowerCase())){number+=1;name=`New item ${number}`;} this.board.nextItemNumber=number+1; row.serial=name; this.rows.unshift(row); this.showArchived=false; this.manualSort=true; this.log(`Added ${name}`); this.save({op:"createRecord",boardId:this.board.id,recordId:id}); return id; }
-  togglePin(id) { const row=this.rows.find((item)=>item.id===Number(id)); if(!row)return; this.snapshot("Pin change undone"); row.pinned=!row.pinned; this.log(`${row.pinned?"Pinned":"Unpinned"} ${row.serial}`); this.save({op:"updateRecord",boardId:this.board.id,recordId:row.id,fields:["pinned"]}); }
-  archiveItem(id, archived=true) { const row=this.rows.find((item)=>item.id===Number(id)); if(!row)return; this.snapshot(archived?"Archive undone":"Restore undone"); row.archived=archived; this.recordActivity(row,archived?"Record archived":"Record restored"); this.selected.delete(row.id); this.log(`${archived?"Archived":"Restored"} ${row.serial}`); this.save({op:"updateRecord",boardId:this.board.id,recordId:row.id,fields:["archived"]}); }
+  togglePin(id) { const row=this.rows.find((item)=>item.id===this.idOf(id)); if(!row)return; this.snapshot("Pin change undone"); row.pinned=!row.pinned; this.log(`${row.pinned?"Pinned":"Unpinned"} ${row.serial}`); this.save({op:"updateRecord",boardId:this.board.id,recordId:row.id,fields:["pinned"]}); }
+  archiveItem(id, archived=true) { const row=this.rows.find((item)=>item.id===this.idOf(id)); if(!row)return; this.snapshot(archived?"Archive undone":"Restore undone"); row.archived=archived; this.recordActivity(row,archived?"Record archived":"Record restored"); this.selected.delete(row.id); this.log(`${archived?"Archived":"Restored"} ${row.serial}`); this.save({op:"updateRecord",boardId:this.board.id,recordId:row.id,fields:["archived"]}); }
   reorderRecord(id,targetId,position="before") {
-    const visible=this.visibleRows, source=visible.find(r=>r.id===Number(id)), target=visible.find(r=>r.id===Number(targetId));
+    const visible=this.visibleRows, source=visible.find(r=>r.id===this.idOf(id)), target=visible.find(r=>r.id===this.idOf(targetId));
     if(!source||!target||source===target||!["before","after"].includes(position))return false;
     if(Boolean(source.pinned)!==Boolean(target.pinned))return false;
     if(this.grouped&&this.groupColumn&&(source[this.groupColumn.key]||"")!==(target[this.groupColumn.key]||""))return false;
@@ -314,18 +400,18 @@ class BoardModel {
   }
 
   addGroup(name) { const clean = name.trim(); if (!clean || this.board.groups.includes(clean)) return false; this.snapshot("Group creation undone"); this.board.groups.push(clean); this.log(`Created group ${clean}`); this.save({op:"updateGroups",boardId:this.board.id}); return true; }
-  renameGroup(oldName, newName) { const clean = newName.trim(); if (!clean || this.board.groups.includes(clean)) return false; this.snapshot("Group rename undone"); this.board.groups = this.board.groups.map((name) => name === oldName ? clean : name); if(this.groupColumn)this.rows.forEach((row) => { if (row[this.groupColumn.key] === oldName) row[this.groupColumn.key] = clean; }); this.log(`Renamed group ${oldName} to ${clean}`); this.save({op:"updateGroups",boardId:this.board.id,affectsRecords:true}); return true; }
-  deleteGroup(name, moveTo) { if (this.board.groups.length <= 1) return false; this.snapshot("Group deletion undone"); if(this.groupColumn)this.rows.forEach((row) => { if (row[this.groupColumn.key] === name) row[this.groupColumn.key] = moveTo; }); this.board.groups = this.board.groups.filter((group) => group !== name); this.log(`Deleted group ${name}`); this.save({op:"updateGroups",boardId:this.board.id,affectsRecords:true}); return true; }
+  renameGroup(oldName, newName) { const clean = newName.trim(); if (!clean || this.board.groups.includes(clean)) return false; this.snapshot("Group rename undone"); this.board.groups = this.board.groups.map((name) => name === oldName ? clean : name); if(this.groupColumn)this.rows.forEach((row) => { if (row[this.groupColumn.key] === oldName) row[this.groupColumn.key] = clean; }); this.log(`Renamed group ${oldName} to ${clean}`); this.save({op:"updateGroups",boardId:this.board.id,affectsRecords:true,group:{from:oldName,to:clean}}); return true; }
+  deleteGroup(name, moveTo) { if (this.board.groups.length <= 1) return false; this.snapshot("Group deletion undone"); if(this.groupColumn)this.rows.forEach((row) => { if (row[this.groupColumn.key] === name) row[this.groupColumn.key] = moveTo; }); this.board.groups = this.board.groups.filter((group) => group !== name); this.log(`Deleted group ${name}`); this.save({op:"updateGroups",boardId:this.board.id,affectsRecords:true,group:{remove:name,moveTo}}); return true; }
   addColumn({ label, type, required = false, defaultValue = "", options = "" }) { const clean=String(label||"").trim(); if(!clean||!this.columnTypes.some((item)=>item.type===type))return false; this.snapshot("Column creation undone"); const key=`custom_${Date.now()}_${Math.random().toString(36).slice(2,8)}`; let optionList=[...new Set((Array.isArray(options)?options:String(options).split(",")).map((item)=>String(item).trim()).filter(Boolean))]; if(!optionList.length)optionList=this.newColumnOptions(type); const column={ key, label:clean, type, visible:true, connection:"", required:Boolean(required), defaultValue:String(defaultValue||""), options:optionList }; this.board.columns.push(column); this.rows.forEach((row)=>{row[key]=column.type==="checkbox"?false:column.defaultValue;}); this.log(`Added ${clean} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,affectsRecords:true}); return column; }
   renameColumn(key, label) { const column=this.board.columns.find((item)=>item.key===key); const clean=String(label||"").trim(); if(!column||!clean)return false; this.snapshot("Column rename undone"); column.label=clean; this.log(`Renamed column to ${clean}`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key}); return true; }
   deleteColumn(key) { if(key==="serial")return false; const index=this.board.columns.findIndex((item)=>item.key===key); if(index<0)return false; this.snapshot("Column deletion undone"); const [column]=this.board.columns.splice(index,1); this.rows.forEach((row)=>{delete row[key];}); this.log(`Deleted ${column.label} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,affectsRecords:true}); return true; }
   moveColumn(key, direction) { const index=this.board.columns.findIndex((item)=>item.key===key); const target=index+(direction==="left"?-1:1); if(key==="serial"||index<0||target<1||target>=this.board.columns.length)return false; this.snapshot("Column reorder undone"); [this.board.columns[index],this.board.columns[target]]=[this.board.columns[target],this.board.columns[index]]; this.save({op:"updateColumns",boardId:this.board.id,columnKey:key}); return true; }
-  duplicateColumn(key) { const source=this.board.columns.find((item)=>item.key===key); if(!source)return false; this.snapshot("Column duplication undone"); const copy={...source,key:`custom_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,label:`${source.label} copy`,required:false,options:[...source.options]}; this.board.columns.splice(this.board.columns.indexOf(source)+1,0,copy); this.rows.forEach((row)=>{row[copy.key]=row[source.key]??copy.defaultValue;}); this.log(`Duplicated ${source.label} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:copy.key,affectsRecords:true}); return copy; }
+  duplicateColumn(key) { const source=this.board.columns.find((item)=>item.key===key); if(!source)return false; this.snapshot("Column duplication undone"); const copy={...source,key:`custom_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,label:`${source.label} copy`,required:false,options:[...source.options]}; this.board.columns.splice(this.board.columns.indexOf(source)+1,0,copy); this.rows.forEach((row)=>{row[copy.key]=row[source.key]??copy.defaultValue;}); this.log(`Duplicated ${source.label} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:copy.key,copyFrom:source.key,affectsRecords:true}); return copy; }
   updateColumnConfig(config) { this.snapshot("Column settings undone"); Object.entries(config).forEach(([key, value]) => { const column=this.board.columns.find((item)=>item.key===key); if(column)Object.assign(column,value); }); this.save({op:"updateColumns",boardId:this.board.id,columnKeys:Object.keys(config)}); }
   saveView(name) { const clean = name.trim(); if (!clean) return false; const view={ id: Date.now(), name: clean, status: this.status, query: this.query, grouped: this.grouped, sortDirection: this.sortDirection, view:this.currentView, visibleColumns:this.board.columns.filter(c=>c.visible!==false).map(c=>c.key), density:this.settings.density, sortKey:this.sortKey,quickFilter:this.quickFilter,showArchived:this.showArchived,columnOrder:this.board.columns.map(c=>c.key),columnWidths:Object.fromEntries(this.board.columns.map(c=>[c.key,c.width])) }; this.board.savedViews.push(view); this.activeSavedViewId=view.id; this.save({op:"updateViews",boardId:this.board.id}); return true; }
-  applyView(id) { const view = this.board.savedViews.find((item) => item.id === Number(id)); if (!view) return; Object.assign(this, { status: view.status, query: view.query, grouped: view.grouped, sortDirection: view.sortDirection }); if(view.view)this.currentView=view.view; if(view.visibleColumns){this.board.columns.forEach(c=>c.visible=view.visibleColumns.includes(c.key));} if(view.density)this.settings.density=view.density; this.sortKey=view.sortKey||"";this.quickFilter=view.quickFilter||"all";this.showArchived=Boolean(view.showArchived);if(view.columnOrder)this.board.columns.sort((a,b)=>{const ai=view.columnOrder.indexOf(a.key),bi=view.columnOrder.indexOf(b.key);return (ai<0?999:ai)-(bi<0?999:bi);});if(view.columnWidths)this.board.columns.forEach(c=>c.width=view.columnWidths[c.key]||c.width);this.manualSort=false; this.activeSavedViewId=view.id;this.save({op:"updateColumns",boardId:this.board.id,viewId:view.id}); }
+  applyView(id) { const view = this.board.savedViews.find((item) => item.id === this.idOf(id)); if (!view) return; Object.assign(this, { status: view.status, query: view.query, grouped: view.grouped, sortDirection: view.sortDirection }); if(view.view)this.currentView=view.view; if(view.visibleColumns){this.board.columns.forEach(c=>c.visible=view.visibleColumns.includes(c.key));} if(view.density)this.settings.density=view.density; this.sortKey=view.sortKey||"";this.quickFilter=view.quickFilter||"all";this.showArchived=Boolean(view.showArchived);if(view.columnOrder)this.board.columns.sort((a,b)=>{const ai=view.columnOrder.indexOf(a.key),bi=view.columnOrder.indexOf(b.key);return (ai<0?999:ai)-(bi<0?999:bi);});if(view.columnWidths)this.board.columns.forEach(c=>c.width=view.columnWidths[c.key]||c.width);this.manualSort=false; this.activeSavedViewId=view.id;this.save({op:"updateColumns",boardId:this.board.id,viewId:view.id}); }
   resetMainView() { this.sortKey="";this.quickFilter="all";this.columnFilter=null;this.query=""; this.status="All"; this.grouped=false; this.sortDirection="desc"; this.activeSavedViewId=null; this.showArchived=false; this.manualSort=Boolean(this.board?.manualOrder); }
-  deleteView(id) { this.board.savedViews = this.board.savedViews.filter((view) => view.id !== Number(id)); if(this.activeSavedViewId===Number(id))this.resetMainView(); this.save({op:"updateViews",boardId:this.board.id}); }
+  deleteView(id) { this.board.savedViews = this.board.savedViews.filter((view) => view.id !== this.idOf(id)); if(this.activeSavedViewId===this.idOf(id))this.resetMainView(); this.save({op:"updateViews",boardId:this.board.id}); }
   toggleRow(id) { this.selected.has(id) ? this.selected.delete(id) : this.selected.add(id); }
   log(text) { if (!this.board) return; const at = new Date().toISOString(); this.board.updatedAt=at; this.board.activity.unshift({ id: Date.now(), text, at }); this.board.activity = this.board.activity.slice(0, 80); if(!this.settings.muteActivity)this.notifications.unshift({ id: Date.now() + 1, text, boardId: this.board.id, workspaceId: this.workspace.id, at, read: false }); this.notifications = this.notifications.slice(0,50); }
   updateSetting(key, value) { this.settings[key] = value; this.save({op:"updateUserState"}); }
@@ -336,10 +422,11 @@ class BoardModel {
   updateBoardDescription(value) { this.board.description=String(value).trim(); this.log("Updated the board description"); this.save({op:"updateBoard",boardId:this.board.id}); }
   markAllNotificationsRead() { this.notifications.forEach((item)=>{item.read=true;}); this.save({op:"updateUserState"}); }
   clearNotifications() { this.notifications=[]; this.save({op:"updateUserState"}); }
-  bulkUpdate(ids, field, value) { const targets=new Set(ids.map(Number)); this.snapshot(`Bulk ${field} change undone`); this.rows.forEach((row)=>{ if(targets.has(row.id)){row[field]=value;this.recordActivity(row,"Changed "+field);} }); this.log(`Updated ${field} on ${targets.size} records`); this.save({op:"updateRecords",boardId:this.board.id,recordIds:[...targets],fields:[field]}); }
+  bulkUpdate(ids, field, value) { const targets=new Set(ids.map((id)=>this.idOf(id))); this.snapshot(`Bulk ${field} change undone`); this.rows.forEach((row)=>{ if(targets.has(row.id)){row[field]=value;this.recordActivity(row,"Changed "+field);} }); this.log(`Updated ${field} on ${targets.size} records`); this.save({op:"updateRecords",boardId:this.board.id,recordIds:[...targets],fields:[field]}); }
   createBackup() { return JSON.parse(JSON.stringify({version:11,exportedAt:new Date().toISOString(),workspaces:this.workspaces,currentWorkspaceId:this.currentWorkspaceId,currentBoardId:this.currentBoardId,settings:this.settings,profile:this.profile,notifications:this.notifications,recentBoards:this.recentBoards,recentRecords:this.recentRecords,recentCommands:this.recentCommands,members:this.members})); }
 
   restoreBackup(data) {
+    if (this.storage.adapter?.mode === "resource") throw new Error("Restoring a backup isn't available while you're working on shared server data. Use it in local mode.");
     this.validateBackup(data); // throws a readable reason; nothing is applied unless the whole backup is valid
     this.snapshot("Backup restore undone");this.workspaces=JSON.parse(JSON.stringify(data.workspaces));this.currentWorkspaceId=data.currentWorkspaceId||this.workspaces[0].id;this.currentBoardId=data.currentBoardId||this.workspaces[0].boards[0]?.id||"";this.settings={...this.settings,...data.settings};this.profile={...this.profile,...data.profile};this.notifications=data.notifications||[];this.recentBoards=data.recentBoards||[];this.recentRecords=data.recentRecords||[];this.recentCommands=data.recentCommands||[];this.members=data.members||this.members;this.normalizeBoards();this.screen="home";this.save({op:"replaceAll",reason:"restore"});
   }
@@ -375,7 +462,7 @@ class BoardModel {
   }
   isDueSoon(row,key="dueDate"){const value=row[key];if(!value)return false;const days=(new Date(value+"T00:00:00")-new Date(new Date().toDateString()))/86400000;return days>=0&&days<=7&&!row.archived&&!row.boardArchived&&!row.workspaceArchived;}
   archiveWorkspace(id,archived=true){const w=this.workspaces.find(w=>w.id===id);if(!w)return; if(archived&&this.workspaces.filter(w=>!w.archived).length<2)throw Error("Keep at least one active workspace.");this.snapshot("Workspace archive undone");w.archived=archived;if(archived&&this.currentWorkspaceId===id)this.switchWorkspace(this.workspaces.find(w=>!w.archived).id);this.save({op:"updateWorkspace",workspaceId:id,fields:["archived"]});}
-  moveRecordToBoard(id,boardId){const row=this.rows.find(r=>r.id===Number(id));const target=this.workspaces.flatMap(w=>w.boards).find(b=>b.id===boardId);if(!row||!target||target===this.board)return false;this.snapshot("Record move undone");this.board.columns.forEach(c=>{if(!target.columns.some(t=>t.key===c.key))target.columns.push(JSON.parse(JSON.stringify(c)));});if(target.records.some(r=>r.id===row.id))row.id=this.nextRecordId();target.records.push(row);this.board.records=this.rows.filter(r=>r!==row);this.recordActivity(row,"Moved to "+target.name);this.log("Moved record to "+target.name);this.save({op:"moveRecord",boardId:this.board.id,targetBoardId:boardId,recordId:row.id});return true;}
+  moveRecordToBoard(id,boardId){const row=this.rows.find(r=>r.id===this.idOf(id));const target=this.workspaces.flatMap(w=>w.boards).find(b=>b.id===boardId);if(!row||!target||target===this.board)return false;this.snapshot("Record move undone");this.board.columns.forEach(c=>{if(!target.columns.some(t=>t.key===c.key))target.columns.push(JSON.parse(JSON.stringify(c)));});if(target.records.some(r=>r.id===row.id))row.id=this.nextRecordId();target.records.push(row);this.board.records=this.rows.filter(r=>r!==row);this.recordActivity(row,"Moved to "+target.name);this.log("Moved record to "+target.name);this.save({op:"moveRecord",boardId:this.board.id,targetBoardId:boardId,recordId:row.id});return true;}
   rememberRecord(row){this.recentRecords=[{id:row.id,boardId:this.board.id,workspaceId:this.workspace.id},...this.recentRecords.filter(r=>r.id!==row.id||r.boardId!==this.board.id)].slice(0,8);this.save({op:"updateUserState"});}
   rememberCommand(command){this.recentCommands=[command,...this.recentCommands.filter(c=>c!==command)].slice(0,5);this.save({op:"updateUserState"});}
   resizeColumn(key,width){const column=this.board.columns.find(c=>c.key===key);if(column){column.width=Math.max(100,Math.min(600,width));this.save({op:"updateColumns",boardId:this.board.id,columnKey:key});}}
@@ -529,7 +616,7 @@ class BoardModel {
     this.rows.forEach((row)=>{const value=row[key];if(plan.renames[value]!==undefined)row[key]=plan.renames[value];else if(plan.removed.includes(value))row[key]="";});
     if(plan.renames[plan.column.defaultValue]!==undefined)plan.column.defaultValue=plan.renames[plan.column.defaultValue];else if(plan.removed.includes(plan.column.defaultValue))plan.column.defaultValue="";
     plan.column.options=plan.options;
-    this.log(`Updated ${plan.column.label} options`);this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,affectsRecords:true});
+    this.log(`Updated ${plan.column.label} options`);this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,optionItems:items.map((i)=>({from:i.from??null,to:String(i.to||"")})),affectsRecords:true});
     return {cleared:plan.affected};
   }
   // Basic per-column filter: {key, op, value}. Session state only, like the status filter and search.

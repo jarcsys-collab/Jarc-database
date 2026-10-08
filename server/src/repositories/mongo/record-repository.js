@@ -36,6 +36,48 @@ class RecordRepository extends VersionedRepository {
     return this.collection.countDocuments({ boardId, groupId: { $in: groupIds } });
   }
 
+  // Every record of one board, in board order (schema changes rewrite them all). Board-scoped by ObjectId.
+  listAllForBoard(boardId, { session } = {}) {
+    return this.collection.find({ boardId: scopedId(boardId, "boardId") }, { sort: { position: 1, _id: 1 }, session }).toArray();
+  }
+
+  findManyInBoard(boardId, ids, { session } = {}) {
+    return this.collection.find({ boardId: scopedId(boardId, "boardId"), _id: { $in: ids } }, { session }).toArray();
+  }
+
+  async countActive(boardId) { return this.collection.countDocuments({ boardId, archived: false }); }
+
+  // Batched per-record updates. Every operation is filtered by _id AND boardId (and version when given), and only
+  // uses update documents built by the services. Returns the number of matched documents.
+  async bulkUpdate(updates, { session } = {}) {
+    let matched = 0;
+    for (let i = 0; i < updates.length; i += 1000) {
+      const ops = updates.slice(i, i + 1000).map(({ filter, update }) => ({ updateOne: { filter, update } }));
+      matched += (await this.collection.bulkWrite(ops, { ordered: true, session })).matchedCount;
+    }
+    return matched;
+  }
+
+  async bulkDelete(filters, { session } = {}) {
+    let deleted = 0;
+    for (let i = 0; i < filters.length; i += 1000) {
+      const ops = filters.slice(i, i + 1000).map((filter) => ({ deleteOne: { filter } }));
+      deleted += (await this.collection.bulkWrite(ops, { ordered: true, session })).deletedCount;
+    }
+    return deleted;
+  }
+
+  // Moves every record of a board to another group (or none). Board-scoped.
+  async moveGroup(boardId, fromGroupId, toGroupId, { session, actorId, now }) {
+    const { modifiedCount } = await this.collection.updateMany({ boardId: scopedId(boardId, "boardId"), groupId: fromGroupId }, { $set: { groupId: toGroupId, updatedBy: actorId, updatedAt: now }, $inc: { version: 1 } }, { session });
+    return modifiedCount;
+  }
+
+  async setWorkspaceForBoard(boardId, workspaceId, { session }) {
+    const { modifiedCount } = await this.collection.updateMany({ boardId: scopedId(boardId, "boardId") }, { $set: { workspaceId } }, { session });
+    return modifiedCount;
+  }
+
   async deleteByBoard(boardId, { session } = {}) {
     const { deletedCount } = await this.collection.deleteMany({ boardId: scopedId(boardId, "boardId") }, { session });
     return deletedCount;
