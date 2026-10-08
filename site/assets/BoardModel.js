@@ -41,7 +41,7 @@ class BoardModel {
     this.history = [];
     this.activeSavedViewId = null;
     this.showArchived = false;
-    this.pendingSaves = 0; this.lastSave = Promise.resolve(true); this.failure = null;
+    this.pendingSaves = 0; this.lastSave = Promise.resolve(true); this.failure = null; this.collecting = null;
     this.applyState({});
     this.markPersisted();
   }
@@ -106,6 +106,7 @@ class BoardModel {
   // If a save fails, it returns to exactly that state — so a change that was never saved leaves no undo entry —
   // and keeps the attempted state so a user-triggered Retry can apply and save it again.
   save(change = { op: "saveState" }) {
+    if (this.collecting) { this.collecting.push(change); return Promise.resolve(true); } // inside applyAfterSave
     const state = this.toStorageState(), text = JSON.stringify(state), history = this.history.slice();
     this.pendingSaves += 1; this.saveState = "saving";
     window.dispatchEvent(new CustomEvent("jarc-save", {detail:"saving"}));
@@ -154,6 +155,43 @@ class BoardModel {
   discardFailedSave() { this.failure = null; this.saveState = "saved"; this.saveError = ""; window.dispatchEvent(new CustomEvent("jarc-save", {detail:"saved"})); }
   // Resolves true when every save started so far has succeeded.
   async whenSaved() { await this.lastSave; return !this.failure && this.saveState !== "error"; }
+
+  // Destructive and structural changes (Stage 9): persist first, then apply. `perform` runs the usual model methods;
+  // their saves are collected instead of written, the model goes straight back to its current state, and the proposed
+  // state is written. Only when storage accepts it does the model (and so the UI) change. If the write fails nothing
+  // was ever applied, so there is nothing to roll back. The same path is used with every storage adapter.
+  // Resolves { ok, result, code?, skipped? }; `result` is perform's return value; perform returning false skips.
+  async applyAfterSave(perform) {
+    const capture = () => ({ text: JSON.stringify(this.toStorageState()), history: this.history.slice() });
+    const restore = (snapshot) => { this.adoptState(snapshot.text); this.history = snapshot.history.slice(); };
+    const before = capture(), changes = [];
+    let result;
+    this.collecting = changes;
+    try { result = perform(); }
+    catch (error) { this.collecting = null; restore(before); throw error; }
+    this.collecting = null;
+    if (result === false || !changes.length) { if (changes.length) restore(before); return { ok: result !== false, result, skipped: true }; }
+    const proposed = capture();
+    restore(before);
+
+    const change = { ...changes[changes.length - 1], ops: changes.map((c) => c.op) };
+    this.pendingSaves += 1; this.saveState = "saving";
+    window.dispatchEvent(new CustomEvent("jarc-save", {detail:"saving"}));
+    const done = this.storage.commit(change, JSON.parse(proposed.text));
+    this.lastSave = done.then((outcome) => outcome.ok);
+    const outcome = await done;
+    this.pendingSaves -= 1;
+    if (outcome.ok) {
+      // Another change made while this one was saving was built on the old state; re-apply on top so it isn't lost
+      // and the next save stores both. Otherwise adopt exactly what was saved.
+      if (capture().text !== before.text) { result = perform(); }
+      else { restore(proposed); this.persisted = proposed; }
+    }
+    if (!this.pendingSaves && !this.failure) { this.saveState = "saved"; this.saveError = ""; window.dispatchEvent(new CustomEvent("jarc-save", {detail:"saved"})); }
+    if (outcome.ok) return { ok: true, result };
+    // CANCELLED: an earlier optimistic save failed first; report that failure's reason.
+    return { ok: false, result, code: outcome.code === StorageError.CODES.CANCELLED ? (this.saveError || outcome.code) : outcome.code };
+  }
 
   normalizeBoards() {
     this.workspaces.forEach((space) => space.boards.forEach((board) => {

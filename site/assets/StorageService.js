@@ -1,11 +1,12 @@
 // Storage boundary (Stage 6) with an asynchronous contract (Stage 8).
 //
-//   AppView → AppController → BoardModel / AuthModel → StorageService → LocalAsyncAdapter → browser storage
+//   AppView → AppController → BoardModel / AuthModel → StorageService → LocalAsyncAdapter → browser storage (default)
+//                                                                       → ApiAdapter → fetch → Express /api/v1 (Stage 9, opt-in)
 //
-// Application state is loaded and saved through Promises, so a future ApiAdapter (fetch → Express → MongoDB) can
-// replace LocalAsyncAdapter without UI changes. LocalAsyncAdapter is the only code that touches localStorage/sessionStorage. StorageService owns the stored
+// Application state is loaded and saved through Promises, so either adapter works without UI changes.
+// LocalAsyncAdapter is the only code that touches localStorage/sessionStorage. StorageService owns the stored
 // schema version, the split between shared application data and per-user state, and the list of named data
-// operations. A future ApiAdapter can implement the same contract against the backend without UI changes.
+// operations.
 
 // Predictable errors between storage and the model/UI. Raw browser exceptions are kept in `cause` only.
 class StorageError extends Error {
@@ -59,6 +60,7 @@ StorageError.from = (error) => {
 // they are per-device browser state, not application data.
 class LocalAsyncAdapter {
   constructor() {
+    this.mode = "local";
     this.keys = Object.freeze({
       app: "jarc-database-data",
       legacyApp: ["medtek", "database", "v9"].join("-"), // pre-JARC key; read-only, never deleted
@@ -99,6 +101,77 @@ class LocalAsyncAdapter {
   async writeAppState(text) { this.write("local", this.keys.app, text); }
   readRawAppState() { return this.read("local", this.keys.app); }
   clearAppState() { this.remove("local", this.keys.app); } // explicit user action only (recovery screen)
+}
+
+// Application state over HTTP (Stage 9): the same async contract as LocalAsyncAdapter, against the Express API on
+// the same origin. Uses the TRANSITIONAL development endpoints GET/PUT /api/v1/state, which the resource API
+// (/api/v1/workspaces, /boards, /records) replaces later. Preferences and temporary sign-in values are per-device,
+// so they stay in browser storage through a LocalAsyncAdapter. No credentials or secrets are used or stored here.
+class ApiAdapter {
+  constructor({ baseUrl = "/api/v1", timeoutMs = ApiAdapter.TIMEOUT_MS, fetch: fetchImpl, device = new LocalAsyncAdapter() } = {}) {
+    this.mode = "api";
+    this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.timeoutMs = timeoutMs;
+    this.fetch = fetchImpl || ((...args) => window.fetch(...args));
+    this.device = device;
+    this.keys = device.keys;
+  }
+  static TIMEOUT_MS = 15000;
+  // HTTP status → StorageError code. Unlisted 4xx/5xx statuses become INTERNAL_ERROR.
+  static STATUS_CODES = Object.freeze({
+    400: "VALIDATION_ERROR", 422: "VALIDATION_ERROR", 401: "UNAUTHENTICATED", 403: "FORBIDDEN", 404: "NOT_FOUND",
+    409: "CONFLICT", 413: "PAYLOAD_TOO_LARGE", 429: "RATE_LIMITED", 500: "INTERNAL_ERROR",
+    502: "SERVICE_UNAVAILABLE", 503: "SERVICE_UNAVAILABLE", 504: "SERVICE_UNAVAILABLE"
+  });
+  static codeForStatus(status) { return ApiAdapter.STATUS_CODES[status] || StorageError.CODES.INTERNAL_ERROR; }
+
+  // Per-device values stay local in API mode.
+  read(areaName, key) { return this.device.read(areaName, key); }
+  write(areaName, key, value) { this.device.write(areaName, key, value); }
+  remove(areaName, key) { this.device.remove(areaName, key); }
+  keyFor(group, name) { return this.device.keyFor(group, name); }
+
+  async readAppState() {
+    let body;
+    try { body = await this.request("GET", "/state"); }
+    catch (error) {
+      // Loading has its own wording; connection and timeout messages already fit.
+      if (error.code === StorageError.CODES.OFFLINE || /took too long/.test(error.message)) throw error;
+      throw new StorageError(error.code, "The JARC server couldn't load your workspace. Try again in a moment.", error.cause);
+    }
+    if (!body || typeof body !== "object" || !("state" in body)) throw new StorageError(StorageError.CODES.INTERNAL_ERROR, "The JARC server sent a response JARC can't use. Try again in a moment.");
+    return body.state === null ? { raw: null, source: "none" } : { raw: JSON.stringify(body.state), source: "api" };
+  }
+  async writeAppState(text) { await this.request("PUT", "/state", text); }
+  // The recovery screen's download/clear actions apply to browser storage only; server data is never cleared here.
+  readRawAppState() { return null; }
+  clearAppState() { throw new StorageError(StorageError.CODES.FORBIDDEN, "Server data can't be cleared from this screen."); }
+
+  // One request with a timeout. Resolves with the parsed JSON body; rejects only with StorageError (safe messages,
+  // the raw failure kept in `cause`).
+  async request(method, path, body) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const fail = (code, message, cause) => new StorageError(code, message || StorageError.describe(code).message, cause);
+    try {
+      let response;
+      try {
+        response = await this.fetch(this.baseUrl + path, {
+          method, body, signal: controller.signal, credentials: "same-origin", cache: "no-store",
+          headers: body === undefined ? { Accept: "application/json" } : { Accept: "application/json", "Content-Type": "application/json" }
+        });
+      } catch (error) {
+        if (controller.signal.aborted) throw fail(StorageError.CODES.SERVICE_UNAVAILABLE, "The JARC server took too long to respond. Try again in a moment.", error);
+        throw fail(StorageError.CODES.OFFLINE, "Can't reach the JARC server. Check your connection, then try again.", error);
+      }
+      if (!response.ok) throw fail(ApiAdapter.codeForStatus(response.status), null, { status: response.status });
+      try { return await response.json(); }
+      catch (error) {
+        if (controller.signal.aborted) throw fail(StorageError.CODES.SERVICE_UNAVAILABLE, "The JARC server took too long to respond. Try again in a moment.", error);
+        throw fail(StorageError.CODES.INTERNAL_ERROR, "The JARC server sent a response JARC can't use. Try again in a moment.", error);
+      }
+    } finally { clearTimeout(timer); }
+  }
 }
 
 class StorageService {
@@ -197,7 +270,15 @@ class StorageService {
   removeSessionValue(name) { try { this.adapter.remove("session", this.adapter.keyFor("session", name)); return true; } catch (error) { if (!(error instanceof StorageError)) throw error; return false; } }
 }
 
+// Adapter selection. LOCAL (browser storage) is the default everywhere. API mode is an explicit development opt-in,
+// ?storage=api, and only works when the page is served by the JARC Express server (same origin, /api/v1).
+StorageService.createAdapter = (search = window.location.search) => {
+  const mode = new URLSearchParams(search).get("storage");
+  return mode === "api" ? new ApiAdapter() : new LocalAsyncAdapter();
+};
+
 window.StorageError = StorageError;
 window.LocalAsyncAdapter = LocalAsyncAdapter;
+window.ApiAdapter = ApiAdapter;
 window.StorageService = StorageService;
-window.jarcStorage = new StorageService(new LocalAsyncAdapter());
+window.jarcStorage = new StorageService(StorageService.createAdapter());

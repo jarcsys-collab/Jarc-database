@@ -1,10 +1,10 @@
 class AppController {
   constructor(root) {
-    this.root = root; this.auth = new AuthModel(); this.model = new BoardModel(); this.view = new AppView(root);this.view.onUndo=()=>{const label=this.model.undo();this.update();this.view.toast(label);};
+    this.root = root; this.auth = new AuthModel(); this.model = new BoardModel(); this.view = new AppView(root);this.view.onUndo=()=>{if(this.busy)return;const label=this.model.undo();this.update();this.view.toast(label);};
     root.addEventListener("click", (event) => this.guard(()=>this.onClick(event)));
     root.addEventListener("input", (event) => this.onInput(event));
     root.addEventListener("change", (event) => this.guard(()=>this.onChange(event)));
-    root.addEventListener("submit", (event) => this.guard(()=>this.onSubmit(event)));
+    root.addEventListener("submit", (event) => { if(this.busy)event.preventDefault(); this.guard(()=>this.onSubmit(event)); }); // never a native submit, even while busy
     root.addEventListener("pointerdown", () => this.auth.touch());
     root.addEventListener("keyup", (event) => { if (event.target.dataset?.action === "password-input") { const warning=document.querySelector("#caps-warning"); if(warning) warning.hidden=!event.getModifierState("CapsLock"); } });
     document.addEventListener("keydown", (event) => this.onKeydown(event));
@@ -255,6 +255,7 @@ class AppController {
     if (action === "workspace-settings-form") { this.model.updateWorkspace(this.model.currentWorkspaceId,data); this.update();this.view.showSettings(this.model,"workspace"); this.view.toast("Workspace updated"); }
   }
   onKeydown(event) {
+    if(this.busy)return;
     if(event.target.dataset?.action==="row-drag"&&event.altKey&&["ArrowUp","ArrowDown"].includes(event.key)){
       event.preventDefault();const id=Number(event.target.dataset.id),rows=this.model.visibleRows,index=rows.findIndex(r=>r.id===id),up=event.key==="ArrowUp",target=rows[index+(up?-1:1)];
       if(target&&this.model.reorderRecord(id,target.id,up?"before":"after")){this.update();this.root.querySelector('[data-action="row-drag"][data-id="'+id+'"]')?.focus();this.view.toast("Row moved",true);}return;
@@ -366,7 +367,7 @@ class AppController {
     const button=this.root.querySelector(".save-state");if(!button)return;
     const state=this.model.saveState||"saved";button.classList.toggle("save-error",state==="error");
     const offline=window.jarcStorage?.connection==="offline"; document.body.classList.toggle("storage-offline",offline);
-    button.innerHTML=offline?"Offline — changes can't be saved":state==="error"?"Couldn't save · Retry":state==="saving"?"Saving…":`<i></i> ${navigator.onLine?"Saved locally":"Offline · saved locally"}`;
+    button.innerHTML=offline?"Offline — changes can't be saved":state==="error"?"Couldn't save · Retry":state==="saving"?"Saving…":`<i></i> ${this.model.storage.adapter.mode==="api"?"Saved":navigator.onLine?"Saved locally":"Offline · saved locally"}`;
 
 
   }
@@ -439,7 +440,7 @@ class AppController {
     if(pop&&this.lastTrigger?.isConnected){const r=this.lastTrigger.getBoundingClientRect();panel.style.left=Math.max(8,Math.min(r.left,innerWidth-panel.offsetWidth-12))+"px";panel.style.top=Math.max(8,Math.min(r.bottom+6,innerHeight-panel.offsetHeight-12))+"px";panel.style.right="auto";}
     requestAnimationFrame(()=>{const focus=panel.querySelector('[autofocus]')||panel.querySelector('input:not([type="hidden"]),select,textarea')||panel.querySelector('button');focus?.focus();});
   }
-  guard(action){try{action();}catch(error){this.view.showMessage("Action could not be completed",error.message);}}
+  guard(action){if(this.busy)return;try{action();}catch(error){this.view.showMessage("Action could not be completed",error.message);}}
 
   // ---- Async persistence (Stage 8)
   // An optimistic change failed to save: the model has already rolled back to the last saved state. Redraw, explain,
@@ -453,19 +454,21 @@ class AppController {
     const toast=this.view.toast(info.message,info.retryable?{label:"Retry",onClick:()=>this.retrySave()}:false);
     if(toast)toast.dataset.kind="save-error";
   }
-  retrySave(){ this.model.retryFailedSave(); this.update(); }
+  retrySave(){ if(this.busy)return; this.model.retryFailedSave(); this.update(); }
   // Pessimistic operation: the button shows progress and ignores repeat clicks; the screen updates only after the save
   // succeeds. On failure the model has rolled back, the dialog stays open with the reason, and clicking again retries.
   // perform() may return false for "nothing to do" and may throw a validation error.
+  // Destructive/structural actions: the change is saved first and applied only after storage accepts it
+  // (model.applyAfterSave), so a failure leaves the data and the open dialog exactly as they were.
   async runBusy(button,perform,onSuccess){
     if(this.busy)return false;
     this.busy=true; this.view.clearDialogError(); this.view.setBusy(button,true);
-    let ok=false,message="";
-    try{ if(perform()===false){this.busy=false;this.view.setBusy(button,false);return false;} ok=await this.model.whenSaved(); if(!ok)message=StorageError.describe(this.model.saveError).message; }
+    let ok=false,skipped=false,message="";
+    try{ const outcome=await this.model.applyAfterSave(perform); ok=outcome.ok; skipped=outcome.skipped&&!outcome.ok; if(!ok)message=StorageError.describe(outcome.code).message; }
     catch(error){ message=error?.message||StorageError.describe(StorageError.CODES.INTERNAL_ERROR).message; }
     this.busy=false; this.view.setBusy(button,false);
     if(ok){ onSuccess(); return true; }
-    if(this.model.failure)this.model.discardFailedSave();
+    if(skipped)return false;
     this.view.showDialogError(`${message} Nothing was changed.`);
     this.saveFeedback(); return false;
   }
@@ -627,6 +630,11 @@ function renderStartupRecovery(root, error, onRetry) {
   root.innerHTML='<main class="startup-error" role="alert"><h1>JARC couldn\'t open your saved data</h1><p class="startup-error-message"></p><p>Nothing has been deleted. Download a copy of the stored data before trying anything else.</p><div class="startup-error-actions"><button type="button" class="button primary" data-recover="download">Download stored data</button><button type="button" class="button secondary" data-recover="reload">Try again</button><button type="button" class="button danger" data-recover="reset">Clear stored data…</button></div></main>';
   root.querySelector(".startup-error-message").textContent=error instanceof StorageError?error.message:"Something went wrong while loading JARC.";
   if(!raw)root.querySelector('[data-recover="download"]').disabled=true;
+  if(window.jarcStorage?.adapter?.mode==="api"){ // server data: nothing to download or clear from this browser
+    root.querySelector("h1").textContent="JARC couldn't load your workspace";
+    root.querySelector(".startup-error-message+p").textContent="Your data on the server has not been changed.";
+    root.querySelectorAll('[data-recover="download"],[data-recover="reset"]').forEach((button)=>button.remove());
+  }
   root.onclick=(event)=>{
     const action=event.target.closest("[data-recover]")?.dataset.recover;
     if(action==="download"&&raw){const url=URL.createObjectURL(new Blob([raw],{type:"application/json"})),link=document.createElement("a");link.href=url;link.download="jarc-stored-data-"+new Date().toISOString().slice(0,10)+".json";link.click();setTimeout(()=>URL.revokeObjectURL(url),500);}
