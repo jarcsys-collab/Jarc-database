@@ -58,7 +58,7 @@ class AppController {
     }
     // The profile shows the Microsoft account's name and email (kept in this browser, per account).
     if (this.entra) {
-      const role = this.auth.isSystemAdmin ? "JARC administrator" : "Microsoft work account";
+      const role = this.auth.isSystemAdmin ? "JARC administrator" : this.auth.sharedAccess ? "JARC employee · shared access" : "Microsoft work account";
       if (this.model.profile.name !== this.auth.username || this.model.profile.email !== this.auth.email || this.model.profile.role !== role) this.model.updateProfile({ name: this.auth.username, email: this.auth.email, role });
     }
     this.root.onclick = null; this.ready = true; this.update();

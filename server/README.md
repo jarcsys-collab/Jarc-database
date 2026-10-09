@@ -76,6 +76,28 @@ session. Requests that change data (POST/PUT/PATCH/DELETE) need the session's `X
 `Origin` matching `ENTRA_REDIRECT_URI`. Users are created on first sign-in, keyed by tenant + object ID (email is
 display-only); a disabled user gets 403 `ACCOUNT_DISABLED` and their session ends.
 
+### Access policy (`ACCESS_POLICY`)
+
+| Value | Who can do what |
+|---|---|
+| `role_based` (default; also when unset, empty or unrecognised) | The workspace roles below and the `JARC.Admin` app role. |
+| `development_shared` | **Development collaboration.** Every signed-in employee of the configured tenant can create workspaces and acts as WORKSPACE_ADMIN in every workspace: see, create, edit and delete boards, columns, groups and records, edit and delete workspaces, move boards. New workspaces are visible to everyone at once (they live in MongoDB). |
+
+`development_shared` changes only who may do what after sign-in. Microsoft sign-in, the session cookie, CSRF, the
+tenant/audience/issuer/expiry checks and disabled-account lockout all still apply, and these stay restricted:
+imports (`JARC.Admin` only) and membership changes (a real WORKSPACE_ADMIN membership or `JARC.Admin`), so nothing
+granted by the shared policy outlives it. The server logs a warning at startup while it is on; signed-in responses
+(`/auth/session`, `/me`) report `accessPolicy` and `canCreateWorkspaces`.
+
+**Switching back to role-based access before production rollout**
+1. Set `ACCESS_POLICY=role_based` (or remove the variable) and redeploy. No data migration is needed.
+2. From then on employees see only workspaces they are members of; `JARC.Admin` holders see all.
+3. Each workspace created during shared development has its creator as WORKSPACE_ADMIN; everyone else needs to be added.
+   A `JARC.Admin` (or that creator) adds members with `POST /api/v1/workspaces/:id/members`. Review
+   `workspaceMembers` and assign `JARC.Admin` in Entra (Enterprise applications → Users and groups) first, so every
+   workspace has the right admins.
+4. Data, boards and records are unchanged; activity history keeps the real employee who made each change.
+
 Permissions per workspace: **VIEWER** reads; **MEMBER** edits boards, records, columns (add/rename), groups and views;
 **WORKSPACE_ADMIN** also deletes or retypes columns, removes options, archives/deletes/moves boards, edits the
 workspace and manages members; **SYSTEM_ADMIN** (the `JARC.Admin` app role) creates and deletes workspaces and

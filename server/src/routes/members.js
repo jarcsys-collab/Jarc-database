@@ -1,8 +1,11 @@
 // Workspace membership management. Viewing members: any member. Adding, changing roles and removing: WORKSPACE_ADMIN
 // (or SYSTEM_ADMIN). A workspace always keeps at least one admin (services/membership-service.js).
+// Changes need a real membership even under ACCESS_POLICY=development_shared (see auth/access.js).
 const express = require("express");
 const { parseId, allowOnly } = require("../validation/common");
 const { memberToApi } = require("../api/serialize");
+
+const MEMBERSHIP_ONLY = Object.freeze({ membershipOnly: true });
 
 function memberRoutes({ services, access }) {
   const router = express.Router();
@@ -16,18 +19,18 @@ function memberRoutes({ services, access }) {
     send(res, 200, { items: (await services.members.list(workspace._id)).map(memberToApi) });
   });
   router.post("/workspaces/:workspaceId/members", async (req, res) => {
-    const { workspace } = await access.workspace(req.actor, workspaceId(req), "WORKSPACE_ADMIN");
+    const { workspace } = await access.workspace(req.actor, workspaceId(req), "WORKSPACE_ADMIN", MEMBERSHIP_ONLY);
     noQuery(req);
     send(res, 201, { member: memberToApi(await services.members.add(workspace._id, req.body, req.actor)) });
   });
   router.patch("/workspaces/:workspaceId/members/:memberId", async (req, res) => {
-    const { workspace } = await access.workspace(req.actor, workspaceId(req), "WORKSPACE_ADMIN");
+    const { workspace } = await access.workspace(req.actor, workspaceId(req), "WORKSPACE_ADMIN", MEMBERSHIP_ONLY);
     noQuery(req);
     const member = await services.members.changeRole(workspace._id, parseId(req.params.memberId, "memberId"), req.body, req.actor);
     send(res, 200, { member: memberToApi(member) });
   });
   router.delete("/workspaces/:workspaceId/members/:memberId", async (req, res) => {
-    const { workspace } = await access.workspace(req.actor, workspaceId(req), "WORKSPACE_ADMIN");
+    const { workspace } = await access.workspace(req.actor, workspaceId(req), "WORKSPACE_ADMIN", MEMBERSHIP_ONLY);
     noQuery(req);
     send(res, 200, await services.members.remove(workspace._id, parseId(req.params.memberId, "memberId"), req.actor));
   });

@@ -27,7 +27,8 @@ const MSAL_BUNDLE = path.join(path.dirname(require.resolve("@azure/msal-browser/
 // as in Stage 9. Who may use the resource API:
 //   auth = { mode: "entra", entra, verify }   Microsoft Entra ID sign-in → server session cookie (required in production)
 //   enableDevResourceApi + devActor            the fixed development user (development and test only)
-function createApp({ repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, siteDir = DEFAULT_SITE_DIR, logger = console } = {}) {
+// accessPolicy: "role_based" (default) or "development_shared" (see auth/access.js).
+function createApp({ repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", siteDir = DEFAULT_SITE_DIR, logger = console } = {}) {
   if (environment === "production" && (enableDevStateApi || enableDevResourceApi)) {
     throw new Error("Development (pre-auth) APIs can't be enabled in production.");
   }
@@ -48,12 +49,12 @@ function createApp({ repository, environment = "development", enableDevStateApi 
   if (enableDevResourceApi || auth) {
     if (!dataLayer) throw new Error("createApp needs a data layer for the resource API.");
     if (enableDevResourceApi && !devActor) throw new Error("createApp needs the development actor for the development resource API.");
-    if (auth) api.use(signInRoutes({ entra: auth.entra, verify: auth.verify, repos: dataLayer.repos }));
+    const access = new Access(dataLayer.repos, { policy: accessPolicy });
+    if (auth) api.use(signInRoutes({ entra: auth.entra, verify: auth.verify, repos: dataLayer.repos, access }));
     const identify = auth ? sessionAuthentication({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users, entra: auth.entra }) : devActorMiddleware(devActor, { environment });
-    const access = new Access(dataLayer.repos);
     // Everything after `identify` requires a caller (in Entra mode, a valid session — including unknown paths).
-    if (auth) api.use(identify, sessionRoutes({ repos: dataLayer.repos }));
-    api.use(identify, meRoutes({ repos: dataLayer.repos, mode: auth ? "entra" : "dev" }), memberRoutes({ services: dataLayer.services, access }), resourceRoutes({ services: dataLayer.services, access }));
+    if (auth) api.use(identify, sessionRoutes({ repos: dataLayer.repos, access }));
+    api.use(identify, meRoutes({ repos: dataLayer.repos, mode: auth ? "entra" : "dev", access }), memberRoutes({ services: dataLayer.services, access }), resourceRoutes({ services: dataLayer.services, access }));
   }
   api.use(apiNotFound);
   app.use("/api/v1", api);

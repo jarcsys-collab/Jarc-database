@@ -24,17 +24,18 @@ function resourceRoutes({ services, access }) {
   const recordId = (req) => parseId(req.params.recordId, "recordId");
 
   // ---- Workspaces
-  // Only the workspaces the caller belongs to (system admins: all), each with the caller's role.
+  // Only the workspaces the caller belongs to (system admins, and everyone under development_shared: all), each with
+  // the caller's role.
   router.get("/workspaces", async (req, res) => {
     noQuery(req);
     const roles = await access.visibleRoles(req.actor);
     const items = (await services.workspaces.list())
       .filter((w) => !roles || roles.has(w._id.toHexString()))
-      .map((w) => ({ ...workspaceToApi(w), role: roles ? roles.get(w._id.toHexString()) : "SYSTEM_ADMIN" }));
+      .map((w) => ({ ...workspaceToApi(w), role: roles ? roles.get(w._id.toHexString()) : access.globalRole(req.actor) }));
     send(res, 200, { items });
   });
   router.post("/workspaces", async (req, res) => {
-    access.requireSystemAdmin(req.actor);
+    access.requireWorkspaceManager(req.actor);
     noQuery(req);
     send(res, 201, { workspace: { ...workspaceToApi(await services.workspaces.create(req.body, req.actor)), role: "WORKSPACE_ADMIN" } });
   });
@@ -49,7 +50,7 @@ function resourceRoutes({ services, access }) {
     send(res, 200, { workspace: { ...workspaceToApi(await services.workspaces.update(workspace._id, req.body, req.actor)), role } });
   });
   router.delete("/workspaces/:workspaceId", async (req, res) => {
-    const { workspace } = await access.workspace(req.actor, workspaceId(req), "SYSTEM_ADMIN");
+    const { workspace } = await access.deletableWorkspace(req.actor, workspaceId(req));
     send(res, 200, { deleted: true, removed: await services.workspaces.delete(workspace._id, deleteQuery(req), req.actor) });
   });
 

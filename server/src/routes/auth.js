@@ -11,6 +11,8 @@
 //   GET  /api/v1/auth/session         the signed-in user, admin flag, session expiry and the CSRF token
 //   POST /api/v1/auth/sign-out        ends the session (CSRF-protected like every other change)
 //   GET  /api/v1/me                   the user's display details, admin flag and workspace roles
+// Signed-in responses also carry the access policy and whether the caller may create workspaces (display only; every
+// request is still authorized by the server).
 const express = require("express");
 const { allowOnly, requireBody } = require("../validation/common");
 const { userToApi } = require("../api/serialize");
@@ -20,6 +22,7 @@ const { sendError } = require("../middleware/errors");
 
 const SIGN_IN_ATTEMPT_MS = 10 * 60 * 1000;
 const SCOPES = Object.freeze(["openid", "profile", "email"]);
+const permissionsOf = (access, actor) => ({ accessPolicy: access.policy, canCreateWorkspaces: access.canManageWorkspaces(actor) });
 
 function authConfigRoutes({ mode, entra }) {
   const router = express.Router();
@@ -34,7 +37,7 @@ function authConfigRoutes({ mode, entra }) {
 }
 
 // Sign-in: nonce, then ID token → session. Mounted before session authentication (no session exists yet).
-function signInRoutes({ entra, verify, repos }) {
+function signInRoutes({ entra, verify, repos, access }) {
   const router = express.Router();
   const sessionLifetimeMs = entra.sessionMaxHours * 60 * 60 * 1000;
   const idleMs = entra.sessionIdleMinutes * 60 * 1000;
@@ -72,18 +75,18 @@ function signInRoutes({ entra, verify, repos }) {
     const sessionSecret = randomSecret(), now = new Date();
     const session = await repos.sessions.create({ sessionSecret, userId: user._id, tenantId: identity.tenantId, objectId: identity.objectId, isSystemAdmin: identity.isSystemAdmin, now, idleMs, maxMs: sessionLifetimeMs });
     res.append("Set-Cookie", cookieHeader(SESSION_COOKIE, sessionSecret, sessionLifetimeMs / 1000));
-    res.status(201).set("Cache-Control", "no-store").json({ user: userToApi(user), isSystemAdmin: identity.isSystemAdmin, csrfToken: csrfTokenFor(sessionSecret), expiresAt: session.expiresAt.toISOString() });
+    res.status(201).set("Cache-Control", "no-store").json({ user: userToApi(user), isSystemAdmin: identity.isSystemAdmin, ...permissionsOf(access, identity), csrfToken: csrfTokenFor(sessionSecret), expiresAt: session.expiresAt.toISOString() });
   });
   return router;
 }
 
 // Mounted after session authentication.
-function sessionRoutes({ repos }) {
+function sessionRoutes({ repos, access }) {
   const router = express.Router();
   router.get("/auth/session", async (req, res) => {
     allowOnly(req.query, [], "the query");
     const [user, session] = await Promise.all([repos.users.findById(req.actor.userId), repos.sessions.findBySecret(req.sessionSecret)]);
-    res.set("Cache-Control", "no-store").json({ user: userToApi(user), isSystemAdmin: req.actor.isSystemAdmin, csrfToken: csrfTokenFor(req.sessionSecret), expiresAt: session.expiresAt.toISOString(), idleExpiresAt: session.idleExpiresAt.toISOString() });
+    res.set("Cache-Control", "no-store").json({ user: userToApi(user), isSystemAdmin: req.actor.isSystemAdmin, ...permissionsOf(access, req.actor), csrfToken: csrfTokenFor(req.sessionSecret), expiresAt: session.expiresAt.toISOString(), idleExpiresAt: session.idleExpiresAt.toISOString() });
   });
   router.post("/auth/sign-out", async (req, res) => {
     allowOnly(req.query, [], "the query");
@@ -94,14 +97,14 @@ function sessionRoutes({ repos }) {
   return router;
 }
 
-function meRoutes({ repos, mode }) {
+function meRoutes({ repos, mode, access }) {
   const router = express.Router();
   router.get("/me", async (req, res) => {
     allowOnly(req.query, [], "the query");
     const user = await repos.users.findById(req.actor.userId);
     const memberships = await repos.memberships.listForUser(req.actor.userId);
     res.set("Cache-Control", "no-store").json({
-      user: userToApi(user), authMode: mode, isSystemAdmin: Boolean(req.actor.isSystemAdmin),
+      user: userToApi(user), authMode: mode, isSystemAdmin: Boolean(req.actor.isSystemAdmin), ...permissionsOf(access, req.actor),
       memberships: memberships.map((m) => ({ workspaceId: m.workspaceId.toHexString(), role: m.role }))
     });
   });

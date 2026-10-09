@@ -38,6 +38,7 @@ function loadConfig(env = process.env) {
 
   const preAuth = nodeEnv !== "production";
   const { authMode, entra } = loadAuthConfig(env, nodeEnv, dataStore);
+  const { accessPolicy, accessPolicyIgnored } = loadAccessPolicy(env);
   return Object.freeze({
     nodeEnv,
     port,
@@ -46,6 +47,9 @@ function loadConfig(env = process.env) {
     mongo,
     authMode,
     entra,
+    accessPolicy,
+    // An ACCESS_POLICY value that wasn't recognised (role_based is used instead); reported at startup.
+    accessPolicyIgnored,
     // GET/PUT /api/v1/state is a transitional development endpoint with no authentication. Never in production.
     enableDevStateApi: preAuth,
     // AUTH_MODE=dev: the resource API attributes every change to the fixed development user (DEVELOPMENT / PRE-AUTH).
@@ -103,6 +107,20 @@ function loadAuthConfig(env, nodeEnv, dataStore) {
   };
 }
 
+// ACCESS_POLICY selects how workspace permissions are decided (auth/access.js):
+//   role_based          (default) workspace memberships and the JARC.Admin app role. Use this in production.
+//   development_shared  DEVELOPMENT COLLABORATION: every signed-in employee of the configured Entra tenant can create
+//                       workspaces and manage every workspace and its boards, columns and records. Sign-in, sessions,
+//                       CSRF and tenant checks are unchanged.
+// Only the exact value development_shared turns sharing on; unset, empty or anything else is role_based (fails safe).
+const ACCESS_POLICIES = ["role_based", "development_shared"];
+
+function loadAccessPolicy(env) {
+  const value = env.ACCESS_POLICY;
+  if (value === "development_shared") return { accessPolicy: "development_shared", accessPolicyIgnored: false };
+  return { accessPolicy: "role_based", accessPolicyIgnored: value !== undefined && value !== "" && value !== "role_based" };
+}
+
 function assertJarcDatabaseName(name) {
   if (name !== JARC_DB_NAME) {
     throw new ConfigError(`MONGODB_DB_NAME must be exactly "${JARC_DB_NAME}". JARC Database shares its Atlas cluster with other applications and never uses another database.`);
@@ -120,4 +138,4 @@ function assertMongoUri(uri) {
   if (pathDb && pathDb !== JARC_DB_NAME) throw new ConfigError(`MONGODB_URI names a different database in its path. Remove it (or use "${JARC_DB_NAME}"); the database always comes from MONGODB_DB_NAME.`);
 }
 
-module.exports = { loadConfig, assertJarcDatabaseName, ConfigError, JARC_DB_NAME };
+module.exports = { loadConfig, assertJarcDatabaseName, ConfigError, JARC_DB_NAME, ACCESS_POLICIES };

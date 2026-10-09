@@ -70,7 +70,7 @@ const entraEnv = (overrides = {}) => ({ ...TEST_ENTRA, ...overrides });
 
 // The full stack with Microsoft Entra ID sign-in (AUTH_MODE=entra): ID tokens verified against a local test key set,
 // server sessions in the fake MongoDB. No development user exists in this mode.
-async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient() } = {}) {
+async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient(), accessPolicy } = {}) {
   const { createEntraVerifier } = require("../src/auth/entra-token");
   const connection = new MongoConnection({ uri: "mongodb://fake.invalid", dbName: "jarc_database", createClient: () => fake });
   await connection.connect();
@@ -79,7 +79,7 @@ async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient() 
   const dataLayer = createDataLayer({ connection, logger });
   const config = { ...issuer.config, ...entra };
   const verify = createEntraVerifier({ ...config, keySet: issuer.keySet });
-  const started = await startApp({ dataLayer, auth: { mode: "entra", entra: config, verify }, logger });
+  const started = await startApp({ dataLayer, auth: { mode: "entra", entra: config, verify }, logger, ...(accessPolicy ? { accessPolicy } : {}) });
   return { ...started, fake, connection, dataLayer, db: connection.db, logger, entra: config };
 }
 

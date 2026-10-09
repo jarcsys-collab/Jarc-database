@@ -175,7 +175,7 @@ describe("Static frontend (same origin)", () => {
 describe("Configuration", () => {
   test("defaults: development on 127.0.0.1:3000 with the development state API", () => {
     // Stage 10 added dataStore/mongo/enableDevResourceApi; the defaults keep Stage 9 behaviour (memory, no MongoDB).
-    assert.deepEqual({ ...loadConfig({}) }, { nodeEnv: "development", port: 3000, host: "127.0.0.1", dataStore: "memory", mongo: null, authMode: "dev", entra: null, enableDevStateApi: true, enableDevResourceApi: false });
+    assert.deepEqual({ ...loadConfig({}) }, { nodeEnv: "development", port: 3000, host: "127.0.0.1", dataStore: "memory", mongo: null, authMode: "dev", entra: null, accessPolicy: "role_based", accessPolicyIgnored: false, enableDevStateApi: true, enableDevResourceApi: false });
   });
   test("production disables the transitional state API", async () => {
     // Stage 12: production also requires Entra ID settings (see entra-config tests); placeholders here.
