@@ -877,3 +877,42 @@ body.storage-offline .save-state { color: var(--warning); }
 body.storage-offline .editable-table .cell-display { cursor: not-allowed; }
 @keyframes jarc-spin { to { transform: rotate(360deg); } }
 html[data-motion=reduced] .loading-spinner, html[data-motion=reduced] .is-busy::after { animation-duration: 2.4s; }
+/* No workspaces yet (empty shared database): an invitation inside the normal layout (AppView.noWorkspaces). */
+.no-workspace { display: grid; place-items: center; padding: var(--space-8) var(--space-6) 56px; min-height: calc(100vh - 140px); box-sizing: border-box; }
+.no-workspace-card { width: 100%; max-width: 560px; text-align: center; padding: 36px 32px 28px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); }
+.no-workspace-card .empty-symbol { margin: 0 auto var(--space-4); color: var(--accent-text); background: var(--accent-soft); border-color: transparent; }
+.no-workspace-card h1 { margin: var(--space-1) 0 var(--space-2); font-size: var(--fs-xl); line-height: 1.25; letter-spacing: -.3px; }
+.no-workspace-card > p { margin: 0 auto var(--space-5); max-width: 42ch; color: var(--muted); font-size: var(--fs-base); line-height: 1.55; }
+.no-workspace-create { min-height: 40px; padding: 0 var(--space-5); }
+.no-workspace-steps { list-style: none; margin: 28px 0 0; padding: var(--space-5) 0 0; border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); text-align: left; }
+.no-workspace-steps li { display: flex; gap: var(--space-3); align-items: flex-start; }
+.no-workspace-steps strong { display: block; font-size: var(--fs-sm); color: var(--text); }
+.no-workspace-steps small { display: block; margin-top: 2px; color: var(--muted); font-size: var(--fs-sm); line-height: 1.45; }
+.no-workspace-step-icon { flex: none; display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-md); background: var(--surface-2); color: var(--muted); }
+.no-workspace-step-icon .icon { width: 15px; height: 15px; }
+.nav-empty-workspaces { padding: var(--space-1) 0 var(--space-2); }
+.nav-empty-workspaces > p { margin: 0 0 var(--space-1); padding: 0 10px; color: var(--faint); font-size: var(--fs-sm); }
+@media (max-width: 760px) {
+  .no-workspace { padding: var(--space-6) var(--space-4) var(--space-8); min-height: 0; place-items: start center; }
+  .no-workspace-card { padding: 28px 20px 22px; }
+  .no-workspace-card h1 { font-size: var(--fs-lg); }
+  .no-workspace-steps { grid-template-columns: 1fr; }
+}
+
+/* Icon-only sidebar (the tablet/phone rail and the collapsed desktop sidebar): labels are hidden visually but kept for
+   assistive technology, so every icon button (Home, My work, boards, Create workspace, Settings…) keeps its name. */
+body.nav-collapsed .sidebar:not(.open) .nav-text,
+body.nav-collapsed .sidebar:not(.open) .sidebar-settings span {
+  display: block; position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
+@media (max-width: 1024px) {
+  .sidebar:not(.open) .nav-text,
+  .sidebar:not(.open) .sidebar-settings span {
+    display: block; position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+    overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+  }
+  /* Navigation drawer (menu button on tablets and phones): the Workspaces heading with its Create workspace button. */
+  .sidebar.open .workspace-heading { display: flex !important; }
+  .sidebar.open .workspace-heading .nav-label { display: block !important; }
+}

@@ -86,6 +86,15 @@ class AppController {
   togglePanel(name, opener) { const root=document.querySelector("#overlay-root"); if(root?.dataset.open===name){this.view.closeOverlay();return false;} opener(); const next=document.querySelector("#overlay-root"); if(next)next.dataset.open=name; return true; }
   markPanel(name) { const root=document.querySelector("#overlay-root"); if(root)root.dataset.open=name; }
 
+  // With no workspaces (a new shared database) the full layout is shown, but most actions need a workspace. These work
+  // without one; anything else opens "Create workspace" instead of acting on a workspace that doesn't exist.
+  static NO_WORKSPACE_ACTIONS = new Set(["create-workspace","close-overlay","nav","toggle-nav","collapse-nav","toggle-workspace-section","command-palette","run-command","retry-save","dismiss-hint","notifications","notification-filter","mark-notifications","profile-menu","profile-settings","choose-avatar","remove-avatar","set-presence","settings","settings-section","setting","theme","shortcuts","request-logout","confirm-logout","lock-session"]);
+  static NO_WORKSPACE_COMMANDS = new Set(["home","mywork","theme","settings","notifications","shortcuts"]);
+  needsWorkspace(allowed) {
+    if (this.model.workspaces.length || allowed) return false;
+    this.view.closeOverlay(); this.view.showWorkspaceForm(); return true;
+  }
+
   onClick(event) {
     const target = event.target.closest("[data-action]"); if (!target) return;
     const action = target.dataset.action;
@@ -94,6 +103,7 @@ class AppController {
     if (window.jarcStorage?.connection === "offline" && ["cell-open","set-cell-option","inline-add","open-form","new-item","new-board","add-column","create-workspace","import"].includes(action)) { this.view.toast(StorageError.describe(StorageError.CODES.OFFLINE).message); return; }
     if(action==="login-theme-choice"){this.model.updateSetting("theme",target.dataset.theme);this.view.applyDisplay(this.model);this.root.querySelectorAll('[data-action="login-theme-choice"]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.theme===target.dataset.theme)));return;}
     this.lastTrigger=target;
+    if(this.needsWorkspace(AppController.NO_WORKSPACE_ACTIONS.has(action)))return;
     if(action==="retry-save"){this.retrySave();return;}
     if(action==="retry-board-load"){this.model.ensureBoardRecords(this.model.board?.id);this.update();return;}
     if(action==="load-more-records"){this.model.ensureBoardRecords(this.model.board?.id,{more:true});return;}
@@ -350,6 +360,7 @@ class AppController {
   deleteBoard(id,button=null) { this.runBusy(button,()=>this.model.deleteBoard(id),()=>{this.view.closeOverlay();this.update();this.view.toast("Board deleted",true);}); }
   globalSearch(term) { if (!term) return; const match=this.model.allRecords.find((row)=>Object.values(row).some((value)=>String(value||"").toLowerCase().includes(term.toLowerCase()))); if (!match) { this.view.showMessage("No matching items",`No item matched “${term}”.`); return; } this.model.openBoard(match.boardId,match.workspaceId); this.model.query=term; this.view.closeOverlay(); this.update(); }
   runCommand(command) {
+    if(this.needsWorkspace(AppController.NO_WORKSPACE_COMMANDS.has(command)))return;
     this.model.rememberCommand(command);this.view.closeOverlay();
     if(command==="home"||command==="mywork"){this.model.openScreen(command);this.update();}
     if(command==="new-record")this.chooseBoardAction("record");
@@ -402,6 +413,7 @@ class AppController {
 
   download(blob,filename) { try { const url=URL.createObjectURL(blob),link=document.createElement("a"); link.href=url; link.download=filename; link.click(); setTimeout(()=>URL.revokeObjectURL(url),500); return true; } catch(error) { this.view.showMessage("Export failed",`The file could not be created in this browser (${error.message}). Try again, or use a different browser.`); return false; } }
   chooseBoardAction(action) {
+    if(this.needsWorkspace(false))return;
     if(this.model.screen==="board"&&this.model.board&&!this.model.board.archived){action==="import"?this.view.showImport(this.model):this.view.showRecordForm(this.model);return;}
     const boards=this.model.workspaces.filter(w=>!w.archived).flatMap(w=>w.boards.filter(b=>!b.archived).map(b=>({...b,workspaceId:w.id,workspaceName:w.name})));
     this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>${action==="import"?"Import into a board":"Create a record in…"}</h2>${this.view.closeButton()}</div><div class="choice-list">${boards.map(b=>`<button data-action="choose-board-action" data-mode="${this.view.attr(action)}" data-id="${this.view.attr(b.id)}" data-workspace="${this.view.attr(b.workspaceId)}">${icon("board")}<span><strong>${this.view.escape(b.name)}</strong><small>${this.view.escape(b.workspaceName)}</small></span></button>`).join("")||'<p>Create a board first to add records.</p><button data-action="new-board" class="button primary">Create board</button>'}</div></div>`);
