@@ -11,6 +11,7 @@ class AppController {
     root.addEventListener("keydown",()=>this.auth.touch());
     setInterval(() => { if (this.ready && this.auth.checkTimeout()) this.update(); }, 30000);
     setInterval(()=>{if(this.auth.authenticated)return;const button=this.root.querySelector('.login-submit');if(!button)return;const seconds=this.auth.lockSeconds;button.disabled=seconds>0;const label=button.querySelector('span');if(label)label.textContent=seconds?'Try again in '+seconds+'s':this.auth.lockedScreen?'Unlock workspace':'Sign in';},1000);
+    this.setupNavDrawer();
     this.start();
     root.addEventListener("focusin",e=>{if(e.target.matches('input,textarea,select'))e.target.dataset.beforeEdit=e.target.value;});
     root.addEventListener("contextmenu",e=>this.onContextMenu(e));
@@ -65,11 +66,14 @@ class AppController {
   }
   update() {
     this.pendingRefresh = false;
-    if (this.entra && (this.entraGate || !this.auth.authenticated)) { this.view.renderEntraGate(this.entraGate || "signed-out", this.model); return; }
-    this.auth.authenticated ? this.view.render(this.model) : this.view.renderLogin(this.auth,this.model); this.saveFeedback();
+    if (this.entra && (this.entraGate || !this.auth.authenticated)) { this.navOpen = false; this.applyNav(); this.view.renderEntraGate(this.entraGate || "signed-out", this.model); return; }
+    if (!this.auth.authenticated) this.navOpen = false; // sign-in screens have no drawer
+    const focus = this.focusedControl();
+    this.auth.authenticated ? this.view.render(this.model) : this.view.renderLogin(this.auth,this.model); this.applyNav(); this.saveFeedback();
+    this.refocus(focus);
   }
   // Microsoft sign-in screens: "signed-out" | "expired" | "denied" | "error". Shown instead of the app.
-  showEntraGate(state, options = {}) { this.entraGate = state; this.view.renderEntraGate(state, this.model, options); }
+  showEntraGate(state, options = {}) { this.entraGate = state; this.navOpen = false; this.applyNav(); this.view.renderEntraGate(state, this.model, options); }
   entraSignIn() {
     this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true });
     this.entra.signIn().catch(() => this.showEntraGate("error", { message: "Microsoft sign-in couldn't start. Check your connection, then try again." }));
@@ -80,11 +84,60 @@ class AppController {
   refreshWhenIdle() {
     if (!this.ready || !this.auth.authenticated) return;
     const active = document.activeElement, overlay = this.root.querySelector("#overlay-root");
-    if (overlay?.children.length || (active && this.root.contains(active) && active.matches('input:not([type="checkbox"]),textarea,select'))) { this.pendingRefresh = true; return; }
+    if (this.navOpen || this.tapping || overlay?.children.length || (active && this.root.contains(active) && active.matches('input:not([type="checkbox"]),textarea,select'))) { this.pendingRefresh = true; return; }
     this.update();
   }
   togglePanel(name, opener) { const root=document.querySelector("#overlay-root"); if(root?.dataset.open===name){this.view.closeOverlay();return false;} opener(); const next=document.querySelector("#overlay-root"); if(next)next.dataset.open=name; return true; }
   markPanel(name) { const root=document.querySelector("#overlay-root"); if(root)root.dataset.open=name; }
+
+  // ---- Navigation drawer (tablets and phones, ≤1024 px): the menu button opens and closes it (it stays above the
+  // drawer and shows ✕ while open); a tap anywhere outside, Escape, choosing anything in it, or any dialog opening
+  // also closes it. The state lives here, not
+  // in the DOM, so re-renders keep it; the page behind doesn't scroll while it is open.
+  static DRAWER_QUERY = "(max-width: 1024px)";
+  setupNavDrawer() {
+    this.navOpen = false; this.tapping = false;
+    this.drawerMedia = window.matchMedia ? window.matchMedia(AppController.DRAWER_QUERY) : null;
+    this.drawerMedia?.addEventListener?.("change", () => { if (!this.drawerMedia.matches) this.setNav(false, { restoreFocus: false }); });
+    let release = null;
+    const endTap = (delay) => { clearTimeout(release); release = setTimeout(() => { this.tapping = false; this.flushRefresh(); }, delay); };
+    document.addEventListener("pointerdown", () => { clearTimeout(release); this.tapping = true; }, true);
+    document.addEventListener("pointerup", () => endTap(400), true);       // fallback when no click follows (scroll)
+    document.addEventListener("pointercancel", () => endTap(0), true);
+    document.addEventListener("click", () => endTap(0));                   // after the app has handled the tap
+    // A tap anywhere outside the drawer closes it (the backdrop, or a quiet part of the top bar).
+    this.root.addEventListener("click", (event) => { if (this.navOpen && !event.target.closest('#sidebar,[data-action="toggle-nav"]')) this.setNav(false); });
+  }
+  setNav(open, { restoreFocus = true } = {}) {
+    open = Boolean(open) && Boolean(this.drawerMedia ? this.drawerMedia.matches : true);
+    const changed = open !== this.navOpen;
+    this.navOpen = open; this.applyNav();
+    if (!changed) return;
+    if (open) this.root.querySelector("#sidebar nav button")?.focus({ preventScroll: true });
+    else {
+      const toggle = this.root.querySelector('[data-action="toggle-nav"]'), active = document.activeElement;
+      if (restoreFocus && (!active || active === document.body || this.root.querySelector("#sidebar")?.contains(active) || active.matches?.(".nav-backdrop"))) toggle?.focus({ preventScroll: true });
+      this.flushRefresh();
+    }
+  }
+  applyNav() {
+    const open = Boolean(this.navOpen);
+    this.root.querySelector("#sidebar")?.classList.toggle("open", open);
+    document.documentElement.classList.toggle("nav-drawer-open", open);
+    const toggle = this.root.querySelector('[data-action="toggle-nav"]');
+    if (toggle) { toggle.setAttribute("aria-expanded", String(open)); toggle.setAttribute("aria-label", open ? "Close navigation" : "Open navigation"); }
+  }
+  // The focused button, described so the same control can be focused again after a re-render.
+  focusedControl() {
+    const active = document.activeElement;
+    if (!active || !this.root.contains(active) || !active.dataset?.action || active.matches("input,textarea,select")) return null;
+    return ["action", "id", "screen", "board", "workspace"].map((k) => active.dataset[k] === undefined ? "" : `[data-${k}="${CSS.escape(active.dataset[k])}"]`).join("");
+  }
+  refocus(selector) {
+    if (!selector || (document.activeElement && document.activeElement !== document.body)) return;
+    this.root.querySelector(selector)?.focus({ preventScroll: true });
+  }
+  flushRefresh() { if (this.pendingRefresh && !this.navOpen && !this.tapping) { this.pendingRefresh = false; this.refreshWhenIdle(); } }
 
   // With no workspaces (a new shared database) the full layout is shown, but most actions need a workspace. These work
   // without one; anything else opens "Create workspace" instead of acting on a workspace that doesn't exist.
@@ -103,6 +156,9 @@ class AppController {
     if (window.jarcStorage?.connection === "offline" && ["cell-open","set-cell-option","inline-add","open-form","new-item","new-board","add-column","create-workspace","import"].includes(action)) { this.view.toast(StorageError.describe(StorageError.CODES.OFFLINE).message); return; }
     if(action==="login-theme-choice"){this.model.updateSetting("theme",target.dataset.theme);this.view.applyDisplay(this.model);this.root.querySelectorAll('[data-action="login-theme-choice"]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.theme===target.dataset.theme)));return;}
     this.lastTrigger=target;
+    if(action==="toggle-nav"){this.setNav(!this.navOpen);return;}
+    // Choosing anything in the drawer (a screen, board, workspace, settings…) closes it first.
+    if(this.navOpen&&target.closest("#sidebar")&&action!=="toggle-workspace-section")this.setNav(false,{restoreFocus:false});
     if(this.needsWorkspace(AppController.NO_WORKSPACE_ACTIONS.has(action)))return;
     if(action==="retry-save"){this.retrySave();return;}
     if(action==="retry-board-load"){this.model.ensureBoardRecords(this.model.board?.id);this.update();return;}
@@ -123,7 +179,6 @@ class AppController {
     if (action === "nav") { this.model.openScreen(target.dataset.screen); this.update(); }
     if (action === "open-board") { this.view.closeOverlay();this.model.openBoard(target.dataset.id); this.update(); }
     if (action === "open-record-board") { this.model.openBoard(target.dataset.board,target.dataset.workspace); this.update(); }
-    if (action === "toggle-nav") document.querySelector("#sidebar").classList.toggle("open");
     if (action === "collapse-nav") { document.body.classList.toggle("nav-collapsed"); window.jarcStorage.setPreference("navCollapsed",document.body.classList.contains("nav-collapsed")?"1":"0"); }
     if (action === "toggle-workspace-section") { document.body.classList.toggle("workspace-section-collapsed"); window.jarcStorage.setPreference("workspaceSectionCollapsed",document.body.classList.contains("workspace-section-collapsed")?"1":"0"); }
     if (action === "workspace-menu") this.togglePanel("workspace",()=>this.view.showWorkspaceMenu(this.model));
@@ -325,7 +380,7 @@ class AppController {
     if(event.key==="Escape"){
       event.preventDefault();
       if(event.target.dataset.action==="board-title-inline"){event.target.value=event.target.dataset.beforeEdit??event.target.defaultValue;event.target.blur();return;}
-      this.view.closeOverlay();document.querySelector("#sidebar")?.classList.remove("open");return;
+      this.view.closeOverlay();this.setNav(false);return;
     }
     const root=document.querySelector("#overlay-root");
     if(root?.children.length){
@@ -486,6 +541,7 @@ class AppController {
   }
   enhanceOverlay(){
     const root=this.root.querySelector('#overlay-root');if(!root?.children.length){this.root.querySelector(".app-shell")?.removeAttribute("inert");return;}
+    if(this.navOpen)this.setNav(false,{restoreFocus:false});
     const panel=root.querySelector('.modal,.record-drawer,.settings-window,.settings-drawer,.popover,.profile-popover');if(!panel)return;
     if(panel.dataset.enhanced)return;panel.dataset.enhanced="1";
     panel.setAttribute("role","dialog");panel.setAttribute("aria-modal","true");panel.setAttribute("aria-label",panel.querySelector('h2')?.textContent||"Actions");

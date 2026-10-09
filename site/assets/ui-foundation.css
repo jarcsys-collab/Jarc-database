@@ -916,3 +916,46 @@ body.nav-collapsed .sidebar:not(.open) .sidebar-settings span {
   .sidebar.open .workspace-heading { display: flex !important; }
   .sidebar.open .workspace-heading .nav-label { display: block !important; }
 }
+
+/* Navigation drawer (tablets and phones, ≤1024 px). AppController owns the open state (html.nav-drawer-open).
+   While open, the top bar stays above the drawer so the menu button (now ✕) can close it again; a backdrop covers
+   the page, any tap outside the drawer closes it, and the page behind stays put. The desktop "collapse sidebar"
+   chevron does nothing at these widths, so it isn't offered. */
+.nav-backdrop, .nav-toggle-close { display: none; }
+.nav-toggle-open, .nav-toggle-close { line-height: 0; }
+@media (max-width: 1024px) {
+  .sidebar-collapse-top { display: none; }
+  .sidebar.open { z-index: 40; overscroll-behavior: contain; }
+  html.nav-drawer-open .topbar { z-index: 45; }
+  /* The top bar covers the drawer's brand row: keep the "J" mark in its rail column (tablets) and drop the text. */
+  .sidebar.open .brand { width: 48px; }
+  .sidebar.open .brand-copy { display: none !important; }
+  html.nav-drawer-open .nav-backdrop { display: block; position: fixed; inset: 0; z-index: 35; background: rgb(8 13 22 / .45); -webkit-tap-highlight-color: transparent; touch-action: none; animation: fade-in .14s ease; }
+  html.nav-drawer-open, html.nav-drawer-open body { overflow: hidden; overscroll-behavior: none; }
+  /* The menu button: a 44 px touch target that shows ✕ while the drawer is open. */
+  .topbar .nav-toggle { width: 44px; height: 44px; margin-left: -6px; }
+  .topbar .nav-toggle .icon { width: 22px; height: 22px; }
+  .nav-toggle[aria-expanded="true"] .nav-toggle-open { display: none; }
+  .nav-toggle[aria-expanded="true"] .nav-toggle-close { display: inline; }
+}
+@media (prefers-reduced-motion: reduce) { html.nav-drawer-open .nav-backdrop { animation: none; } }
+
+/* Touch devices (phones, tablets): no hover, coarse pointer. Desktop is unaffected.
+   - Text fields use at least 16 px: iOS Safari zooms the whole page when a smaller field gets focus, and doesn't
+     zoom back out.
+   - Controls a finger uses often get roomier touch targets (around 40–44 px). */
+@media (hover: none) and (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]),
+  select, textarea { font-size: max(16px, 1em) !important; } /* beats every component size; touch devices only */
+  .topbar .icon-button, .topbar .notification-button { width: 44px; height: 44px; }
+  .topbar .profile-button { width: 40px; height: 40px; }
+  .sidebar.open .nav-item, .sidebar.open .tree-item, .sidebar.open .sidebar-settings, .sidebar.open .new-board-nav, .sidebar.open .workspace-switch { min-height: 44px; }
+  .workspace-heading .mini-button { width: 40px; height: 40px; }
+  .notification-tabs button { min-height: 40px; padding: 8px 12px; font-size: var(--fs-sm); }
+  .section-heading button, .section-controls button, .section-controls select { min-height: 40px; }
+  .search-field, .select-control { height: 42px; }
+  .tool-button, .board-tools .icon-button { min-height: 40px; }
+  .editable-table .check-col input[type="checkbox"], .editable-table th.check-col input[type="checkbox"] { width: 22px; height: 22px; }
+  .modal-actions .button, .modal .button, .record-drawer .button { min-height: 44px; }
+  .icon-button { min-width: 40px; min-height: 40px; }
+}

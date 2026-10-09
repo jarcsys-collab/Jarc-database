@@ -93,6 +93,9 @@ class ResourceApiAdapter {
   static FALLBACK_OPTIONS = Object.freeze({ status: ["New", "In Progress", "Waiting", "Completed", "Cancelled", "Review", "Defective", "Clear"], priority: ["Low", "Medium", "High", "Critical"] });
   // Deleting shared data is only expected from these operations. Anything else that would delete server data (for
   // example a stale or partly loaded copy) is refused instead of sent.
+  // Changes that only touch this person's own state (screen, views, settings, profile, favourites, recents, local
+  // contacts). They are kept in this browser (saveUserState) and never write shared data.
+  static USER_ONLY_OPS = Object.freeze(["updateUserState", "updateMembers"]);
   static DELETE_OPS = Object.freeze({ records: ["deleteRecords", "moveRecord", "replaceAll"], boards: ["deleteBoard", "replaceAll"], workspaces: ["deleteWorkspace", "replaceAll"] });
 
   constructor({ baseUrl = "/api/v1", timeoutMs, fetch, device } = {}) {
@@ -304,6 +307,10 @@ class ResourceApiAdapter {
   blocked() { return new StorageError(StorageError.CODES.INTERNAL_ERROR, "This change would have removed shared data unexpectedly, so it wasn't saved. Reload to see the latest data."); }
 
   async sync(change, data, reconcile) {
+    // A per-user change has nothing to send. Comparing its snapshot with the server copy anyway could only misfire:
+    // a board's records may still be loading into the model (e.g. right after startup), which looks like deletions
+    // and was refused with a false "wasn't saved" error.
+    if ((change.ops || [change.op]).every((op) => ResourceApiAdapter.USER_ONLY_OPS.includes(op))) return;
     const target = this.resolveTarget(data.workspaces);
     const allowed = (kind) => ResourceApiAdapter.DELETE_OPS[kind].includes(change.op);
     const targetBoardIds = new Set(target.flatMap((w) => (w.boards || []).map((b) => String(b.id))));

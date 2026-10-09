@@ -381,9 +381,21 @@ describe("Pagination and loading", () => {
     model.upsert({ serial: "Keep me" }); await settle(model);
     const state = model.toStorageState();
     state.data.workspaces[0].boards[0].records = [];
-    const result = await model.storage.commit({ op: "updateUserState" }, state);
+    const result = await model.storage.commit({ op: "updateBoard" }, state);
     assert.equal(result.ok, false);
     assert.match(result.message, /removed shared data unexpectedly/);
+    assert.equal((await serverRecords(board.id)).length, 1);
+  });
+
+  test("a per-user change never writes shared data, even from a snapshot whose records are still loading", async () => {
+    const model = await tab();
+    const board = await newBoard(model);
+    model.upsert({ serial: "Keep me" }); await settle(model);
+    const state = model.toStorageState();
+    state.data.workspaces[0].boards[0].records = []; // the model's copy lags the server copy (startup)
+    requests = [];
+    for (const op of ["updateUserState", "updateMembers"]) assert.equal((await model.storage.commit({ op }, state)).ok, true, op);
+    same(requests, [], "no API request for per-user changes");
     assert.equal((await serverRecords(board.id)).length, 1);
   });
 });
