@@ -1,0 +1,8 @@
+# Keep secrets, local dependencies and repository metadata out of the Docker build context.
+**/.env
+**/.env.*
+**/node_modules
+.git
+.github
+server/tests
+**/*.log
