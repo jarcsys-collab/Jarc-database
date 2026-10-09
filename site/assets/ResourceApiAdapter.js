@@ -102,6 +102,12 @@ class ResourceApiAdapter {
     this.keys = this.device.keys;
     this.reset();
   }
+  // Entra sign-in: the session's CSRF token for changes (see ApiAdapter.useCsrfToken), and per-account keys so
+  // people sharing a computer never see each other's JARC preferences or selection.
+  useCsrfToken(token) { this.http.useCsrfToken(token); }
+  setAccount(userId) { this.accountKey = userId ? String(userId) : null; }
+  get userKey() { return this.accountKey ? `${ResourceApiAdapter.USER_KEY}:${this.accountKey}` : ResourceApiAdapter.USER_KEY; }
+
   get timeoutMs() { return this.http.timeoutMs; }
   set timeoutMs(value) { this.http.timeoutMs = value; }
   reset() { this.workspaces = new Map(); this.boards = new Map(); this.records = new Map(); this.aliases = new Map(); }
@@ -110,7 +116,10 @@ class ResourceApiAdapter {
   read(areaName, key) { return this.device.read(areaName, key); }
   write(areaName, key, value) { this.device.write(areaName, key, value); }
   remove(areaName, key) { this.device.remove(areaName, key); }
-  keyFor(group, name) { return this.device.keyFor(group, name); }
+  keyFor(group, name) {
+    const key = this.device.keyFor(group, name);
+    return this.accountKey && group === "preferences" ? `${key}:${this.accountKey}` : key;
+  }
   // The recovery screen's download/clear actions apply to browser storage only; server data is never cleared here.
   readRawAppState() { return null; }
   clearAppState() { throw new StorageError(StorageError.CODES.FORBIDDEN, "Server data can't be cleared from this screen."); }
@@ -163,7 +172,7 @@ class ResourceApiAdapter {
 
   // ---- Per-user state (this browser only) ----------------------------------------------------------------------
   readUserState() {
-    try { const raw = this.device.read("local", ResourceApiAdapter.USER_KEY); const value = raw ? JSON.parse(raw) : {}; return value && typeof value === "object" ? value : {}; }
+    try { const raw = this.device.read("local", this.userKey); const value = raw ? JSON.parse(raw) : {}; return value && typeof value === "object" ? value : {}; }
     catch { return {}; }
   }
   saveUserState(user, data) {
@@ -175,7 +184,7 @@ class ResourceApiAdapter {
     const state = { ...user, currentWorkspaceId: r(user.currentWorkspaceId), currentBoardId: r(user.currentBoardId), members: data.members, boardPrefs };
     state.recentBoards = (user.recentBoards || []).map((x) => ({ ...x, boardId: r(x.boardId), workspaceId: r(x.workspaceId) }));
     state.recentRecords = (user.recentRecords || []).map((x) => ({ ...x, id: r(x.id), boardId: r(x.boardId), workspaceId: r(x.workspaceId) }));
-    try { this.device.write("local", ResourceApiAdapter.USER_KEY, JSON.stringify(state)); } catch { /* per-user only; never blocks a shared save */ }
+    try { this.device.write("local", this.userKey, JSON.stringify(state)); } catch { /* per-user only; never blocks a shared save */ }
   }
 
   // ---- Load ----------------------------------------------------------------------------------------------------

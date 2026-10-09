@@ -9,6 +9,7 @@ const { MongoConnection, redact, CLIENT_OPTIONS } = require("../src/db/connectio
 const { ensureDatabase, INDEXES, COLLECTIONS } = require("../src/db/bootstrap");
 const { translateMongoError } = require("../src/db/errors");
 const { FakeMongoClient } = require("./support/fake-mongo");
+const { entraEnv } = require("./helpers");
 
 // Placeholder values only: these strings are never real credentials and nothing connects to them.
 const URI = "mongodb+srv://jarc_app:placeholder-not-a-secret@cluster.invalid/?retryWrites=true";
@@ -77,7 +78,7 @@ describe("MongoDB configuration", () => {
   });
 
   test("production with MongoDB: the pre-auth resource API and state API are disabled", () => {
-    const config = loadConfig(mongoEnv({ NODE_ENV: "production" }));
+    const config = loadConfig({ ...mongoEnv({ NODE_ENV: "production" }), ...entraEnv() }); // Stage 12: production requires Entra ID
     assert.equal(config.enableDevResourceApi, false);
     assert.equal(config.enableDevStateApi, false);
     assert.equal(config.mongo.dbName, "jarc_database");
@@ -166,7 +167,8 @@ describe("Database bootstrap", () => {
   test("creates the six collections and the documented indexes", async () => {
     const { db } = await connect();
     const result = await ensureDatabase(db);
-    assert.deepEqual(result.createdCollections.sort(), ["activities", "boards", "records", "users", "workspaceMembers", "workspaces"]);
+    // Stage 12C added sessions and loginAttempts (server-side Entra sign-in sessions).
+    assert.deepEqual(result.createdCollections.sort(), ["activities", "boards", "loginAttempts", "records", "sessions", "users", "workspaceMembers", "workspaces"]);
     assert.deepEqual(Object.values(COLLECTIONS).sort(), result.createdCollections.sort());
     const names = async (c) => (await db.collection(c).listIndexes().toArray()).map((i) => i.name).sort();
     assert.deepEqual(await names("workspaceMembers"), ["_id_", "uniq_workspace_user", "user_status"]);

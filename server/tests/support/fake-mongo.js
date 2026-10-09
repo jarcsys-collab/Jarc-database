@@ -198,6 +198,14 @@ class FakeCollection {
     this.replaceAt(index, after);
     return clone(options.returnDocument === "after" ? after : before);
   }
+  async findOneAndDelete(filter, options = {}) {
+    this.record("findOneAndDelete", { filter, options });
+    const index = this.docs.findIndex((d) => matches(d, filter));
+    if (index < 0) return null;
+    const doc = this.docs[index];
+    this.docs = this.docs.filter((_, i) => i !== index);
+    return clone(doc);
+  }
   async deleteOne(filter, options = {}) {
     this.record("deleteOne", { filter, options });
     const index = this.docs.findIndex((d) => matches(d, filter));

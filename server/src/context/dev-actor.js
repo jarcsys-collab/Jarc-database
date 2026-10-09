@@ -21,7 +21,8 @@ async function ensureDevelopmentActor(users, { environment, now = new Date() }) 
 // Attaches req.actor for the resource routes and labels every response as pre-auth.
 function devActorMiddleware(actorUser, { environment }) {
   assertNotProduction(environment);
-  const actor = Object.freeze({ userId: actorUser._id, kind: "development" });
+  // The single local developer: treated as SYSTEM_ADMIN so every resource is reachable (development only).
+  const actor = Object.freeze({ userId: actorUser._id, kind: "development", isSystemAdmin: true });
   return (req, res, next) => {
     req.actor = actor;
     res.set("X-JARC-Auth", "development-pre-auth");

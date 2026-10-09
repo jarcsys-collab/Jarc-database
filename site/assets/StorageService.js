@@ -23,6 +23,7 @@ StorageError.CODES = Object.freeze({
   VALIDATION_ERROR: "VALIDATION_ERROR", UNAUTHENTICATED: "UNAUTHENTICATED", FORBIDDEN: "FORBIDDEN", CONFLICT: "CONFLICT",
   PAYLOAD_TOO_LARGE: "PAYLOAD_TOO_LARGE", RATE_LIMITED: "RATE_LIMITED", SERVICE_UNAVAILABLE: "SERVICE_UNAVAILABLE",
   OFFLINE: "OFFLINE", INTERNAL_ERROR: "INTERNAL_ERROR",
+  ACCOUNT_DISABLED: "ACCOUNT_DISABLED", // Entra sign-in: the JARC account is disabled
   CANCELLED: "CANCELLED"              // internal: a queued save skipped because an earlier save failed
 });
 // The one place that turns an error code into user-facing text. Never includes raw exceptions, stacks or tokens.
@@ -37,6 +38,7 @@ StorageError.describe = (codeOrError) => {
     [C.VALIDATION_ERROR]: ["That change isn't valid and wasn't saved.", false],
     [C.NOT_FOUND]: ["This item no longer exists. Reload to see the latest data.", false],
     [C.UNAUTHENTICATED]: ["Your session has expired. Sign in again to keep working.", false],
+    [C.ACCOUNT_DISABLED]: ["Your JARC account doesn't have access. Contact a JARC administrator.", false],
     [C.FORBIDDEN]: ["You don't have permission to make this change.", false],
     [C.CONFLICT]: ["Someone else changed this item. Reload to see the latest version.", false],
     [C.PAYLOAD_TOO_LARGE]: ["This is too large to save.", false],
@@ -133,6 +135,13 @@ class ApiAdapter {
   });
   static codeForStatus(status) { return ApiAdapter.STATUS_CODES[status] || StorageError.CODES.INTERNAL_ERROR; }
 
+  // Entra sign-in (resource mode, AUTH_MODE=entra): the HttpOnly session cookie travels automatically with same-origin
+  // requests; requests that change data also carry the session's CSRF token — only ever to this origin, never logged.
+  useCsrfToken(token) { this.csrfToken = token || null; }
+  isSameOrigin(url) {
+    try { return new URL(url, window.location.origin).origin === window.location.origin; } catch { return false; }
+  }
+
   // Per-device values stay local in API mode.
   read(areaName, key) { return this.device.read(areaName, key); }
   write(areaName, key, value) { this.device.write(areaName, key, value); }
@@ -156,28 +165,49 @@ class ApiAdapter {
   clearAppState() { throw new StorageError(StorageError.CODES.FORBIDDEN, "Server data can't be cleared from this screen."); }
 
   // One request with a timeout. Resolves with the parsed JSON body; rejects only with StorageError (safe messages,
-  // the raw failure kept in `cause`).
+  // the raw failure kept in `cause`). Nothing is ever retried automatically.
   async request(method, path, body) {
+    const url = this.baseUrl + path;
+    const csrf = this.csrfToken && !(method === "GET" || method === "HEAD") && this.isSameOrigin(url) ? this.csrfToken : null;
+    return this.send(method, url, body, csrf);
+  }
+
+  async send(method, url, body, csrf) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     const fail = (code, message, cause) => new StorageError(code, message || StorageError.describe(code).message, cause);
     try {
       let response;
       try {
-        response = await this.fetch(this.baseUrl + path, {
-          method, body, signal: controller.signal, credentials: "same-origin", cache: "no-store",
-          headers: body === undefined ? { Accept: "application/json" } : { Accept: "application/json", "Content-Type": "application/json" }
-        });
+        const headers = body === undefined ? { Accept: "application/json" } : { Accept: "application/json", "Content-Type": "application/json" };
+        if (csrf) headers["X-CSRF-Token"] = csrf;
+        response = await this.fetch(url, { method, body, signal: controller.signal, credentials: "same-origin", cache: "no-store", headers });
       } catch (error) {
         if (controller.signal.aborted) throw fail(StorageError.CODES.SERVICE_UNAVAILABLE, "The JARC server took too long to respond. Try again in a moment.", error);
         throw fail(StorageError.CODES.OFFLINE, "Can't reach the JARC server. Check your connection, then try again.", error);
       }
-      if (!response.ok) throw fail(ApiAdapter.codeForStatus(response.status), null, { status: response.status });
-      try { return await response.json(); }
+      if (!response.ok) {
+        // Only the error code is read from the body (never its text): it tells a disabled account from other 403s.
+        let serverCode = null;
+        try { serverCode = (await response.json())?.error?.code ?? null; } catch { /* not JSON */ }
+        let error;
+        if (serverCode === StorageError.CODES.ACCOUNT_DISABLED) {
+          error = fail(StorageError.CODES.ACCOUNT_DISABLED, null, { status: response.status });
+          window.dispatchEvent?.(new CustomEvent("jarc-access-denied"));
+        } else if (this.csrfToken && (response.status === 401 || serverCode === "CSRF_INVALID")) {
+          // The signed-in session ended (expired, signed out elsewhere, or no longer valid): nothing is retried.
+          error = fail(StorageError.CODES.UNAUTHENTICATED, null, { status: response.status });
+          window.dispatchEvent?.(new CustomEvent("jarc-session-expired"));
+        } else error = fail(ApiAdapter.codeForStatus(response.status), null, { status: response.status });
+        throw error;
+      }
+      let parsed;
+      try { parsed = await response.json(); }
       catch (error) {
         if (controller.signal.aborted) throw fail(StorageError.CODES.SERVICE_UNAVAILABLE, "The JARC server took too long to respond. Try again in a moment.", error);
         throw fail(StorageError.CODES.INTERNAL_ERROR, "The JARC server sent a response JARC can't use. Try again in a moment.", error);
       }
+      return parsed;
     } finally { clearTimeout(timer); }
   }
 }
@@ -301,8 +331,10 @@ class StorageService {
 // opt-ins and only work when the page is served by the JARC Express server (same origin, /api/v1):
 //   ?storage=api       transitional whole-state API (GET/PUT /api/v1/state)
 //   ?storage=resource  resource API backed by MongoDB (ResourceApiAdapter.js)
+// A page that is the landing point of a Microsoft sign-in or sign-out redirect has no ?storage= in its URL; the mode
+// it came from is restored (EntraAuth), so the user returns to resource mode.
 StorageService.createAdapter = (search = window.location.search) => {
-  const mode = new URLSearchParams(search).get("storage");
+  const mode = new URLSearchParams(search).get("storage") || (typeof EntraAuth !== "undefined" ? EntraAuth.pendingReturnMode() : null);
   if (mode === "resource") {
     if (typeof ResourceApiAdapter === "undefined") throw new Error("Resource mode needs assets/ResourceApiAdapter.js.");
     return new ResourceApiAdapter();

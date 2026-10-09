@@ -44,4 +44,15 @@ function activityToApi(doc) {
   };
 }
 
-module.exports = { workspaceToApi, boardToApi, recordToApi, activityToApi, hex, iso };
+// Workspace members, with the user's display details (never their Entra identifiers).
+function memberToApi(doc) {
+  return {
+    id: hex(doc._id), workspaceId: hex(doc.workspaceId), userId: hex(doc.userId), role: doc.role, status: doc.status,
+    displayName: doc.user?.displayName ?? null, email: doc.user?.email ?? null, createdAt: iso(doc.createdAt), updatedAt: iso(doc.updatedAt)
+  };
+}
+
+// The signed-in user (GET /me): display details and account status; no tenant or object IDs.
+function userToApi(doc) { return { id: hex(doc._id), displayName: doc.displayName || "", email: doc.email ?? null, status: doc.status }; }
+
+module.exports = { workspaceToApi, boardToApi, recordToApi, activityToApi, memberToApi, userToApi, hex, iso };

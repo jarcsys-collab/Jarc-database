@@ -20,7 +20,7 @@ class AppController {
     // Leaving a cell editor saves it (Esc cancels first); leaving an empty draft row discards it.
     root.addEventListener("focusout",e=>{const a=e.target.dataset?.action;if(a==="cell-input")this.commitCell(e.target,"none");else if(a==="draft-input")this.commitDraft(e.target);});
     document.addEventListener("pointerdown",e=>{const overlay=this.root.querySelector('#overlay-root');if(overlay?.querySelector('.popover,.profile-popover')&&!overlay.contains(e.target)&&!e.target.closest('[data-action]'))this.view.closeOverlay();});
-    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("jarc-board-status",()=>this.refreshWhenIdle());window.addEventListener("jarc-ids-changed",()=>this.refreshWhenIdle());window.addEventListener("jarc-rollback",(event)=>this.onRollback(event.detail));window.addEventListener("jarc-connection",()=>this.saveFeedback());window.addEventListener("online",()=>this.saveFeedback());window.addEventListener("offline",()=>this.saveFeedback());
+    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("jarc-session-expired",()=>{if(this.entra)this.showEntraGate("expired");});window.addEventListener("jarc-access-denied",()=>{if(this.entra)this.showEntraGate("denied");});window.addEventListener("jarc-board-status",()=>this.refreshWhenIdle());window.addEventListener("jarc-ids-changed",()=>this.refreshWhenIdle());window.addEventListener("jarc-rollback",(event)=>this.onRollback(event.detail));window.addEventListener("jarc-connection",()=>this.saveFeedback());window.addEventListener("online",()=>this.saveFeedback());window.addEventListener("offline",()=>this.saveFeedback());
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>this.view.applyDisplay(this.model));
     root.addEventListener("pointerover",e=>{
       const target=e.target.closest('button');if(!target)return;
@@ -38,11 +38,42 @@ class AppController {
   // with an in-place Retry (no page reload needed).
   async start() {
     this.ready = false; this.view.renderLoading();
+    // Resource mode with Microsoft Entra ID (server AUTH_MODE=entra): a JARC server session (Microsoft sign-in) FIRST; no
+    // protected data is requested before that. Other modes keep the temporary sign-in (AuthModel).
+    if (this.model.storage.adapter.mode === "resource" && typeof EntraAuth !== "undefined") {
+      let signIn;
+      try { signIn = await EntraAuth.prepare(this.model.storage.adapter); }
+      catch (error) { renderStartupRecovery(this.root, error, () => this.start()); return; }
+      if (signIn.mode === "entra") {
+        this.entra = signIn.entra;
+        if (signIn.state !== "signed-in") { this.showEntraGate(signIn.state); return; }
+        this.auth = new EntraSession(signIn.entra, signIn.me);
+      }
+    }
     try { await this.model.init(); }
-    catch (error) { renderStartupRecovery(this.root, error, () => this.start()); return; }
+    catch (error) {
+      if (this.entra && error?.code === StorageError.CODES.UNAUTHENTICATED) { this.showEntraGate("expired"); return; }
+      if (this.entra && error?.code === StorageError.CODES.ACCOUNT_DISABLED) { this.showEntraGate("denied"); return; }
+      renderStartupRecovery(this.root, error, () => this.start()); return;
+    }
+    // The profile shows the Microsoft account's name and email (kept in this browser, per account).
+    if (this.entra) {
+      const role = this.auth.isSystemAdmin ? "JARC administrator" : "Microsoft work account";
+      if (this.model.profile.name !== this.auth.username || this.model.profile.email !== this.auth.email || this.model.profile.role !== role) this.model.updateProfile({ name: this.auth.username, email: this.auth.email, role });
+    }
     this.root.onclick = null; this.ready = true; this.update();
   }
-  update() { this.pendingRefresh = false; this.auth.authenticated ? this.view.render(this.model) : this.view.renderLogin(this.auth,this.model); this.saveFeedback(); }
+  update() {
+    this.pendingRefresh = false;
+    if (this.entra && (this.entraGate || !this.auth.authenticated)) { this.view.renderEntraGate(this.entraGate || "signed-out", this.model); return; }
+    this.auth.authenticated ? this.view.render(this.model) : this.view.renderLogin(this.auth,this.model); this.saveFeedback();
+  }
+  // Microsoft sign-in screens: "signed-out" | "expired" | "denied" | "error". Shown instead of the app.
+  showEntraGate(state, options = {}) { this.entraGate = state; this.view.renderEntraGate(state, this.model, options); }
+  entraSignIn() {
+    this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true });
+    this.entra.signIn().catch(() => this.showEntraGate("error", { message: "Microsoft sign-in couldn't start. Check your connection, then try again." }));
+  }
   // Resource mode: re-render after records load or server IDs replace temporary ones, but never under an open
   // dialog (it re-renders when the dialog closes) or while a field is being edited (the next update shows it; old
   // temporary IDs on the page still resolve through the model, so nothing breaks in the meantime).
@@ -58,6 +89,8 @@ class AppController {
   onClick(event) {
     const target = event.target.closest("[data-action]"); if (!target) return;
     const action = target.dataset.action;
+    if (action === "entra-sign-in" && this.entra) { this.entraSignIn(); return; }
+    if (action === "entra-sign-out" && this.entra) { this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true, signingOut: true }); this.entra.signOut(); return; }
     if (window.jarcStorage?.connection === "offline" && ["cell-open","set-cell-option","inline-add","open-form","new-item","new-board","add-column","create-workspace","import"].includes(action)) { this.view.toast(StorageError.describe(StorageError.CODES.OFFLINE).message); return; }
     if(action==="login-theme-choice"){this.model.updateSetting("theme",target.dataset.theme);this.view.applyDisplay(this.model);this.root.querySelectorAll('[data-action="login-theme-choice"]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.theme===target.dataset.theme)));return;}
     this.lastTrigger=target;

@@ -37,18 +37,70 @@ function loadConfig(env = process.env) {
   }
 
   const preAuth = nodeEnv !== "production";
+  const { authMode, entra } = loadAuthConfig(env, nodeEnv, dataStore);
   return Object.freeze({
     nodeEnv,
     port,
     host: env.HOST || "127.0.0.1",
     dataStore,
     mongo,
+    authMode,
+    entra,
     // GET/PUT /api/v1/state is a transitional development endpoint with no authentication. Never in production.
     enableDevStateApi: preAuth,
-    // The Stage 10 resource API (/workspaces, /boards, /records, /imports) has no authentication yet
-    // (DEVELOPMENT / PRE-AUTH). It is only served outside production, and only with MongoDB.
-    enableDevResourceApi: preAuth && dataStore === "mongodb"
+    // AUTH_MODE=dev: the resource API attributes every change to the fixed development user (DEVELOPMENT / PRE-AUTH).
+    // Only outside production, and only with MongoDB.
+    enableDevResourceApi: preAuth && dataStore === "mongodb" && authMode === "dev"
   });
+}
+
+// AUTH_MODE selects how the resource API knows who is calling:
+//   dev   (default outside production) the fixed development user; refused in production.
+//   entra Microsoft Entra ID sign-in with a server-managed session (HttpOnly cookie). REQUIRED in production.
+//
+// Entra mode uses ONE app registration — the existing single-page application (SPA) — and no client secret: the
+// browser signs in with authorization code + PKCE (scopes openid, profile, email), and the server verifies the
+// resulting ID token (signature, issuer, audience = the SPA, tenant, freshness and a server-issued single-use nonce)
+// once, then issues its own session cookie. The ENTRA_* values are public identifiers, not secrets.
+const AUTH_MODES = ["dev", "entra"];
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ENTRA_REQUIRED = ["ENTRA_TENANT_ID", "ENTRA_SPA_CLIENT_ID", "ENTRA_REDIRECT_URI"];
+
+function wholeNumberSetting(env, name, fallback, min, max) {
+  if (env[name] === undefined || env[name] === "") return fallback;
+  const value = Number(env[name]);
+  if (!Number.isInteger(value) || value < min || value > max) throw new ConfigError(`${name} must be a whole number from ${min} to ${max}.`);
+  return value;
+}
+
+function loadAuthConfig(env, nodeEnv, dataStore) {
+  const production = nodeEnv === "production";
+  if (production && env.AUTH_MODE !== "entra") throw new ConfigError("Production requires AUTH_MODE=entra. The server will not start without Microsoft Entra ID authentication.");
+  const authMode = env.AUTH_MODE ? env.AUTH_MODE : "dev";
+  if (!AUTH_MODES.includes(authMode)) throw new ConfigError(`AUTH_MODE must be one of: ${AUTH_MODES.join(", ")}.`);
+  if (authMode === "dev") return { authMode, entra: null };
+
+  const missing = ENTRA_REQUIRED.filter((name) => !env[name]);
+  if (missing.length) throw new ConfigError(`AUTH_MODE=entra needs ${missing.join(", ")}.`);
+  if (dataStore !== "mongodb") throw new ConfigError("AUTH_MODE=entra needs DATA_STORE=mongodb: sign-in sessions are kept in the jarc_database database.");
+  for (const name of ["ENTRA_TENANT_ID", "ENTRA_SPA_CLIENT_ID"]) if (!GUID.test(env[name])) throw new ConfigError(`${name} must be a GUID (the ID shown in the Entra app registration).`);
+  let redirect;
+  try { redirect = new URL(env.ENTRA_REDIRECT_URI); } catch { throw new ConfigError("ENTRA_REDIRECT_URI must be a full URL such as http://localhost:3000/."); }
+  const local = redirect.hostname === "localhost";
+  if (redirect.protocol !== "https:" && !(redirect.protocol === "http:" && local)) throw new ConfigError("ENTRA_REDIRECT_URI must use https (plain http is only allowed for localhost).");
+  if (production && local) throw new ConfigError("ENTRA_REDIRECT_URI can't be a localhost address in production.");
+  const adminRole = env.ENTRA_ADMIN_ROLE || "JARC.Admin";
+  if (!/^[A-Za-z0-9._-]{1,100}$/.test(adminRole)) throw new ConfigError("ENTRA_ADMIN_ROLE must be an app role value such as JARC.Admin.");
+  return {
+    authMode,
+    entra: Object.freeze({
+      tenantId: env.ENTRA_TENANT_ID.toLowerCase(), clientId: env.ENTRA_SPA_CLIENT_ID.toLowerCase(), redirectUri: redirect.href,
+      // Requests that change data must come from this origin (checked with the CSRF token).
+      appOrigin: redirect.origin, adminRole,
+      sessionIdleMinutes: wholeNumberSetting(env, "SESSION_IDLE_MINUTES", 30, 5, 480),
+      sessionMaxHours: wholeNumberSetting(env, "SESSION_MAX_HOURS", 8, 1, 24)
+    })
+  };
 }
 
 function assertJarcDatabaseName(name) {

@@ -5,11 +5,13 @@ const { MembershipRepository } = require("./repositories/mongo/membership-reposi
 const { BoardRepository } = require("./repositories/mongo/board-repository");
 const { RecordRepository } = require("./repositories/mongo/record-repository");
 const { ActivityRepository } = require("./repositories/mongo/activity-repository");
+const { SessionRepository } = require("./repositories/mongo/session-repository");
 const { WorkspaceService } = require("./services/workspace-service");
 const { BoardService } = require("./services/board-service");
 const { RecordService } = require("./services/record-service");
 const { ImportService } = require("./services/import-service");
 const { BoardSchemaService } = require("./services/board-schema-service");
+const { MembershipService } = require("./services/membership-service");
 
 function createDataLayer({ connection, logger = console }) {
   const db = connection.db;
@@ -19,13 +21,14 @@ function createDataLayer({ connection, logger = console }) {
     memberships: new MembershipRepository(db),
     boards: new BoardRepository(db),
     records: new RecordRepository(db),
-    activities: new ActivityRepository(db)
+    activities: new ActivityRepository(db),
+    sessions: new SessionRepository(db)
   };
   const deps = { repos, connection, logger };
   return {
     connection,
     repos,
-    services: { workspaces: new WorkspaceService(deps), boards: new BoardService(deps), records: new RecordService(deps), imports: new ImportService(deps), schema: new BoardSchemaService(deps) }
+    services: { workspaces: new WorkspaceService(deps), boards: new BoardService(deps), records: new RecordService(deps), imports: new ImportService(deps), schema: new BoardSchemaService(deps), members: new MembershipService(deps) }
   };
 }
 

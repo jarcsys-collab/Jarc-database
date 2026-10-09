@@ -2,7 +2,7 @@
   "name": "jarc-database-server",
   "version": "0.1.0",
   "private": true,
-  "description": "JARC Database API and static frontend server (Stage 10: MongoDB data layer with a development/pre-auth resource API).",
+  "description": "JARC Database API and static frontend server (MongoDB data layer; Microsoft Entra ID authentication with workspace roles).",
   "main": "src/server.js",
   "scripts": {
     "start": "node --env-file-if-exists=.env src/server.js",
@@ -10,10 +10,12 @@
     "test": "node --test"
   },
   "engines": {
-    "node": ">=22.9"
+    "node": ">=22.12"
   },
   "dependencies": {
+    "@azure/msal-browser": "4.30.0",
     "express": "^5.2.1",
+    "jose": "6.2.12",
     "mongodb": "^7.7.0"
   }
 }

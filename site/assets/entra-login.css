@@ -1,0 +1,45 @@
+/* Microsoft Entra ID sign-in page (resource mode with AUTH_MODE=entra). Uses the app's theme variables, so it follows
+   light/dark mode. The Microsoft button follows Microsoft's sign-in button guidance (logo, colours, wording). */
+.entra-login {
+  min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 24px 16px; box-sizing: border-box;
+  background: radial-gradient(1200px 600px at 50% -10%, var(--accent-soft), transparent 70%), var(--bg-app); color: var(--text);
+}
+.entra-card {
+  width: 100%; max-width: 420px; box-sizing: border-box; padding: 40px 36px 28px; text-align: center;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow);
+}
+.entra-brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 650; font-size: 15px; letter-spacing: .01em; margin-bottom: 28px; }
+.entra-mark {
+  display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px;
+  background: var(--accent); color: #fff; font-weight: 750; font-size: 18px;
+}
+.entra-card h1 { margin: 0 0 10px; font-size: 24px; line-height: 1.25; font-weight: 700; }
+.entra-text { margin: 0 auto 22px; max-width: 34ch; color: var(--muted); font-size: 14.5px; line-height: 1.55; }
+.entra-status { min-height: 22px; margin-bottom: 14px; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--muted); font-size: 13.5px; }
+.entra-spinner {
+  width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent);
+  animation: entra-spin .8s linear infinite;
+}
+@keyframes entra-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .entra-spinner { animation-duration: 2.4s; } }
+
+/* Microsoft sign-in button: light #fff / #8c8c8c border / #5e5e5e text; dark #2f2f2f / white text. */
+.entra-button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 12px; width: 100%; min-height: 44px; padding: 0 16px;
+  font: 600 15px "Segoe UI", system-ui, -apple-system, sans-serif; color: #5e5e5e; background: #fff; border: 1px solid #8c8c8c;
+  border-radius: 6px; cursor: pointer; transition: background-color .15s, box-shadow .15s;
+}
+.entra-button:hover:not(:disabled) { background: #f3f3f3; }
+.entra-button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.entra-button:disabled { opacity: .65; cursor: progress; }
+:root:not([data-theme=light]) .entra-button { color: #fff; background: #2f2f2f; border-color: #2f2f2f; }
+:root:not([data-theme=light]) .entra-button:hover:not(:disabled) { background: #3a3a3a; }
+.entra-ms-logo { width: 21px; height: 21px; flex: none; }
+.entra-login[data-state=denied] .entra-mark { background: var(--danger); }
+.entra-note { margin: 22px 0 0; color: var(--faint); font-size: 12.5px; line-height: 1.5; }
+
+@media (max-width: 480px) {
+  .entra-login { place-items: start center; padding-top: 12vh; }
+  .entra-card { padding: 32px 22px 22px; border-radius: 14px; }
+  .entra-card h1 { font-size: 21px; }
+}

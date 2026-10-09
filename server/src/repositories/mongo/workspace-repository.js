@@ -15,6 +15,10 @@ class WorkspaceRepository extends VersionedRepository {
     return (last?.position ?? 0) + 1000;
   }
 
+  // Increments a counter on the workspace inside a membership transaction, so concurrent membership changes to the
+  // same workspace write the same document and conflict instead of both passing the last-admin check.
+  async touchMembers(id, { session } = {}) { await this.collection.updateOne({ _id: id }, { $inc: { membersVersion: 1 } }, { session }); }
+
   // Legacy (pre-MongoDB) IDs that already exist, for import duplicate detection.
   async existingLegacyIds(legacyIds, { session } = {}) {
     if (!legacyIds.length) return [];

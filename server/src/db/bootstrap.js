@@ -13,7 +13,10 @@ const COLLECTIONS = Object.freeze({
   workspaceMembers: "workspaceMembers",
   boards: "boards",
   records: "records",
-  activities: "activities"
+  activities: "activities",
+  // AUTH_MODE=entra: server-side sign-in sessions and single-use sign-in nonces (TTL-cleaned).
+  sessions: "sessions",
+  loginAttempts: "loginAttempts"
 });
 
 const present = { $exists: true };
@@ -22,7 +25,9 @@ const INDEXES = Object.freeze({
     // Future Microsoft Entra identity: tenant + object ID (immutable). Email is never the identity key.
     { name: "uniq_entra_identity", key: { tenantId: 1, entraObjectId: 1 }, unique: true, partialFilterExpression: { entraObjectId: { $type: "string" } } },
     // The single fixed DEVELOPMENT actor (pre-auth only; see context/dev-actor.js).
-    { name: "uniq_dev_actor", key: { devKey: 1 }, unique: true, partialFilterExpression: { devKey: { $type: "string" } } }
+    { name: "uniq_dev_actor", key: { devKey: 1 }, unique: true, partialFilterExpression: { devKey: { $type: "string" } } },
+    // Admins add members by email: an exact lookup on the stored lower-case copy (display data, not identity).
+    { name: "email_lookup", key: { emailNormalized: 1 }, partialFilterExpression: { emailNormalized: { $type: "string" } } }
   ],
   workspaces: [
     { name: "position", key: { position: 1 } },
@@ -49,6 +54,13 @@ const INDEXES = Object.freeze({
     { name: "workspace_created", key: { workspaceId: 1, createdAt: -1 } },
     { name: "board_created", key: { boardId: 1, createdAt: -1 } },
     { name: "record_created", key: { recordId: 1, createdAt: -1 } }
+  ],
+  sessions: [
+    { name: "expires", key: { expiresAt: 1 }, expireAfterSeconds: 0 },
+    { name: "user", key: { userId: 1 } }
+  ],
+  loginAttempts: [
+    { name: "expires", key: { expiresAt: 1 }, expireAfterSeconds: 0 }
   ]
 });
 

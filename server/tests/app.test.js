@@ -1,6 +1,6 @@
 const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
-const { startApp, validState } = require("./helpers");
+const { startApp, validState, entraEnv } = require("./helpers");
 const { loadConfig } = require("../src/config");
 
 const json = (body) => ({ method: "PUT", headers: { "Content-Type": "application/json" }, body: typeof body === "string" ? body : JSON.stringify(body) });
@@ -175,10 +175,11 @@ describe("Static frontend (same origin)", () => {
 describe("Configuration", () => {
   test("defaults: development on 127.0.0.1:3000 with the development state API", () => {
     // Stage 10 added dataStore/mongo/enableDevResourceApi; the defaults keep Stage 9 behaviour (memory, no MongoDB).
-    assert.deepEqual({ ...loadConfig({}) }, { nodeEnv: "development", port: 3000, host: "127.0.0.1", dataStore: "memory", mongo: null, enableDevStateApi: true, enableDevResourceApi: false });
+    assert.deepEqual({ ...loadConfig({}) }, { nodeEnv: "development", port: 3000, host: "127.0.0.1", dataStore: "memory", mongo: null, authMode: "dev", entra: null, enableDevStateApi: true, enableDevResourceApi: false });
   });
   test("production disables the transitional state API", async () => {
-    assert.equal(loadConfig({ NODE_ENV: "production" }).enableDevStateApi, false);
+    // Stage 12: production also requires Entra ID settings (see entra-config tests); placeholders here.
+    assert.equal(loadConfig(entraEnv({ NODE_ENV: "production" })).enableDevStateApi, false);
     const prod = await startApp({ enableDevStateApi: false, environment: "production", repository: null });
     try {
       assert.equal((await fetch(`${prod.url}/api/v1/state`)).status, 404);
