@@ -3,6 +3,7 @@
 //
 //   /api/v1/*  → JSON API (unknown paths → JSON 404, never index.html)
 //   /*         → the existing static frontend in site/ (same origin, so no CORS)
+const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const { healthRoutes } = require("./routes/health");
@@ -22,6 +23,16 @@ const JSON_BODY_LIMIT = "10mb";
 const DEFAULT_SITE_DIR = path.resolve(__dirname, "..", "..", "site");
 // Microsoft sign-in library (MSAL Browser, pinned in package.json), served from this origin rather than a CDN.
 const MSAL_BUNDLE = path.join(path.dirname(require.resolve("@azure/msal-browser/package.json")), "lib", "msal-browser.min.js");
+
+// The page's default storage mode (site/index.html; see StorageService.createAdapter). With Microsoft sign-in configured
+// the app opens in resource mode (MongoDB + Microsoft sign-in) without ?storage=resource; ?storage=local still works.
+const STORAGE_DEFAULT_LOCAL = '<meta name="jarc-storage-default" content="local">';
+const STORAGE_DEFAULT_RESOURCE = '<meta name="jarc-storage-default" content="resource">';
+function resourceModeIndex(siteDir) {
+  const html = fs.readFileSync(path.join(siteDir, "index.html"), "utf8");
+  if (!html.includes(STORAGE_DEFAULT_LOCAL)) throw new Error("site/index.html has no jarc-storage-default marker.");
+  return html.replace(STORAGE_DEFAULT_LOCAL, STORAGE_DEFAULT_RESOURCE);
+}
 
 // dataLayer (optional): { connection, repos, services } from createDataLayer. Without it the server behaves exactly
 // as in Stage 9. Who may use the resource API:
@@ -60,6 +71,10 @@ function createApp({ repository, environment = "development", enableDevStateApi 
   app.use("/api/v1", api);
   app.use("/api", apiNotFound); // unversioned API paths are not served either
 
+  if (auth) {
+    const indexHtml = resourceModeIndex(siteDir);
+    app.get(["/", "/index.html"], (req, res) => res.set("Cache-Control", "no-cache").type("html").send(indexHtml));
+  }
   app.get("/vendor/msal-browser.min.js", (req, res) => res.set("Cache-Control", "public, max-age=3600").type("text/javascript").sendFile(MSAL_BUNDLE));
   app.use(express.static(siteDir, { index: "index.html", dotfiles: "ignore" }));
   app.use((req, res) => sendError(res, 404, "NOT_FOUND", "Not found."));

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JARC Database</title>
+  <!-- GitHub Pages entry point: JARC Database runs on Railway (one origin for the app, the API and the Microsoft
+       sign-in session). This page only sends visitors there. It is self-contained: no assets, no API calls. -->
+  <meta name="robots" content="noindex">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="refresh" content="0; url=https://jarc-database-production.up.railway.app/">
+  <link rel="canonical" href="https://jarc-database-production.up.railway.app/">
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; font: 15px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif; background: #111318; color: #e8eaed; }
+    main { padding: 24px; text-align: center; }
+    a { color: #5ccfc3; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>JARC Database</h1>
+    <p>Opening JARC Database… If nothing happens, <a id="jarc-app-link" href="https://jarc-database-production.up.railway.app/">continue to JARC Database</a>.</p>
+  </main>
+  <script>
+    (function () {
+      var target = "https://jarc-database-production.up.railway.app/";
+      // Never redirect a page to its own host (no loop if this file is ever served by the app itself).
+      if (location.host !== new URL(target).host) location.replace(target);
+    })();
+  </script>
+</body>
+</html>

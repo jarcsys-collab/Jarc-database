@@ -1,5 +1,8 @@
-# FUTURE TEST DEPLOYMENT ONLY. Nothing runs merely because this file is uploaded.
-# Enable Pages with GitHub Actions and manually run this workflow when approved.
+# GitHub Pages entry point for JARC Database. Runs only when started manually (Actions → Publish Jarc Database).
+#
+# Pages publishes ONE self-contained page (pages/index.html) that sends visitors to the Railway app, where the app, the
+# API and the Microsoft sign-in session share one origin. The app itself (site/) is not published here: on github.io
+# it would have no API and could only use browser storage.
 name: Publish Jarc Database
 on:
   workflow_dispatch:
@@ -10,6 +13,9 @@ permissions:
 concurrency:
   group: jarc-database-pages
   cancel-in-progress: false
+
+env:
+  APP_URL: https://jarc-database-production.up.railway.app/
 
 jobs:
   publish:
@@ -24,22 +30,27 @@ jobs:
     steps:
       - name: Read this repository
         uses: actions/checkout@v6
-      # Only the generated browser files are exposed as website content.
-      - name: Check prepared files
-        # Fail before publishing if development files were uploaded by mistake.
+      - name: Prepare the entry page
+        # index.html redirects to the app; 404.html is the same page, so any old link under the Pages URL
+        # (e.g. /Jarc-database/?storage=resource or a former asset path) also ends up at the app.
         run: |
-          test -f site/index.html
-          test -f site/.nojekyll
-          test -f site/assets/BoardModel.js
-          test -f site/assets/AppController.js
-          if grep -Eq 'src/main|\.tsx?(["?])' site/index.html; then exit 1; fi
-          if find site -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.map' \) | grep -q .; then exit 1; fi
+          mkdir _pages
+          cp pages/index.html _pages/index.html
+          cp pages/index.html _pages/404.html
+          touch _pages/.nojekyll
+      - name: Check prepared files
+        # Fail before publishing if the page doesn't point at the app or anything else was included.
+        run: |
+          grep -q "content=\"0; url=${APP_URL}\"" _pages/index.html
+          grep -q "href=\"${APP_URL}\"" _pages/index.html
+          if grep -Eq '(src|href)="(assets/|/|\./)' _pages/index.html; then echo "The entry page must not load assets."; exit 1; fi
+          test "$(find _pages -type f | sort | tr '\n' ' ')" = "_pages/.nojekyll _pages/404.html _pages/index.html "
       - name: Configure Pages
         uses: actions/configure-pages@v5
-      - name: Upload the prepared test website
+      - name: Upload the entry page
         uses: actions/upload-pages-artifact@v4
         with:
-          path: site
+          path: _pages
       - name: Publish when manually requested
         id: deployment
         uses: actions/deploy-pages@v4

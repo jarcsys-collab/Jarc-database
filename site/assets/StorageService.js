@@ -327,14 +327,21 @@ class StorageService {
   removeSessionValue(name) { try { this.adapter.remove("session", this.adapter.keyFor("session", name)); return true; } catch (error) { if (!(error instanceof StorageError)) throw error; return false; } }
 }
 
-// Adapter selection. LOCAL (browser storage) is the default everywhere. The server modes are explicit development
-// opt-ins and only work when the page is served by the JARC Express server (same origin, /api/v1):
+// Adapter selection. The server modes only work when the page is served by the JARC Express server (same origin,
+// /api/v1):
+//   ?storage=local     browser storage (always available when asked for explicitly)
 //   ?storage=api       transitional whole-state API (GET/PUT /api/v1/state)
 //   ?storage=resource  resource API backed by MongoDB (ResourceApiAdapter.js)
-// A page that is the landing point of a Microsoft sign-in or sign-out redirect has no ?storage= in its URL; the mode
-// it came from is restored (EntraAuth), so the user returns to resource mode.
-StorageService.createAdapter = (search = window.location.search) => {
-  const mode = new URLSearchParams(search).get("storage") || (typeof EntraAuth !== "undefined" ? EntraAuth.pendingReturnMode() : null);
+// Without ?storage=: the mode a Microsoft sign-in or sign-out redirect came from (EntraAuth), else the page's
+// <meta name="jarc-storage-default">. That is "local" in site/index.html; the JARC server serves "resource" when
+// Microsoft sign-in is configured (AUTH_MODE=entra, always so in production), so the deployed app opens in resource
+// mode with Microsoft sign-in while local development keeps browser storage unless it opts in.
+StorageService.defaultMode = (doc = typeof document !== "undefined" ? document : null) => {
+  const value = doc?.querySelector?.('meta[name="jarc-storage-default"]')?.getAttribute("content");
+  return value === "resource" ? "resource" : "local";
+};
+StorageService.createAdapter = (search = window.location.search, defaultMode = StorageService.defaultMode()) => {
+  const mode = new URLSearchParams(search).get("storage") || (typeof EntraAuth !== "undefined" ? EntraAuth.pendingReturnMode() : null) || defaultMode;
   if (mode === "resource") {
     if (typeof ResourceApiAdapter === "undefined") throw new Error("Resource mode needs assets/ResourceApiAdapter.js.");
     return new ResourceApiAdapter();

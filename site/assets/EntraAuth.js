@@ -1,6 +1,7 @@
 // Microsoft Entra ID sign-in for resource mode (Stage 12C), using MSAL Browser (authorization code flow with PKCE).
 //
-// Used only when the page runs with ?storage=resource AND the server reports AUTH_MODE=entra (GET /api/v1/auth/config).
+// Used only in resource mode (?storage=resource, or by default when the server has AUTH_MODE=entra — see
+// StorageService.createAdapter) AND when the server reports AUTH_MODE=entra (GET /api/v1/auth/config).
 // Local mode, the transitional /state mode and AUTH_MODE=dev keep the temporary AuthModel sign-in.
 //
 //   page load  → GET /api/v1/auth/session: a valid JARC session (HttpOnly cookie)? → signed in (MSAL isn't even loaded)
