@@ -16,7 +16,11 @@ const COLLECTIONS = Object.freeze({
   activities: "activities",
   // AUTH_MODE=entra: server-side sign-in sessions and single-use sign-in nonces (TTL-cleaned).
   sessions: "sessions",
-  loginAttempts: "loginAttempts"
+  loginAttempts: "loginAttempts",
+  // Files columns: one metadata document per attachment, and the GridFS bucket "attachmentFiles" holding the bytes.
+  attachments: "attachments",
+  attachmentFiles: "attachmentFiles.files",
+  attachmentChunks: "attachmentFiles.chunks"
 });
 
 const present = { $exists: true };
@@ -64,6 +68,21 @@ const INDEXES = Object.freeze({
   ],
   loginAttempts: [
     { name: "expires", key: { expiresAt: 1 }, expireAfterSeconds: 0 }
+  ],
+  attachments: [
+    { name: "record_column", key: { recordId: 1, columnKey: 1, createdAt: 1 } },
+    { name: "board_status", key: { boardId: 1, status: 1, createdAt: 1 } },
+    { name: "workspace", key: { workspaceId: 1 } },
+    { name: "status_created", key: { status: 1, createdAt: 1 } },
+    // A retried upload (same browser-generated key) never creates a second attachment.
+    { name: "uniq_upload_key", key: { recordId: 1, uploadKey: 1 }, unique: true, partialFilterExpression: { uploadKey: { $type: "string" } } }
+  ],
+  // The indexes the MongoDB driver itself expects on a GridFS bucket (same names, so it never creates duplicates).
+  "attachmentFiles.files": [
+    { name: "filename_1_uploadDate_1", key: { filename: 1, uploadDate: 1 } }
+  ],
+  "attachmentFiles.chunks": [
+    { name: "files_id_1_n_1", key: { files_id: 1, n: 1 }, unique: true }
   ]
 });
 

@@ -109,6 +109,7 @@ class BoardSchemaService {
         const modeChange = type === "dropdown" && column.type === "dropdown" && multiple !== Boolean(column.multiple);
         if (column.type === type && !modeChange) throw invalid("The column already has this type.");
         if (column.type === "group" || type === "group") throw invalid("Changing a column to or from the Group type isn't supported yet.");
+        if (column.type === "files" || type === "files") throw invalid("Files columns can't be changed to or from another type. Add a new column instead.");
         if (multiple && type !== "dropdown") throw invalid("Only Dropdown columns can allow several values.");
         // People entries that become plain text keep the person's name, never their internal ID.
         const refs = [...new Set(records.flatMap((r) => valueList(r.values[key])).filter((v) => USER_REF.test(v)))];

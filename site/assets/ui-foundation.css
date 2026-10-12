@@ -1100,3 +1100,91 @@ body.nav-collapsed .sidebar:not(.open) .sidebar-settings span {
 @keyframes jarc-drawer-in { from { opacity: .4; transform: translateX(24px); } to { opacity: 1; transform: none; } }
 @keyframes jarc-toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 @keyframes jarc-view-in { from { opacity: .4; } to { opacity: 1; } }
+
+/* Phase 3 — readable cells (monday.com-style, JARC look).
+   -------------------------------------------------------------------------- */
+/* Status, Priority and single-choice Dropdown: the label's colour fills the whole cell; the cell is the button. */
+.editable-table td.cell-fill { padding: 2px; }
+.cell-fill .cell-display { padding: 0; min-height: 36px; border-radius: 3px; overflow: hidden; justify-content: center; }
+.cell-label { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 36px; padding: 0 10px; background: var(--label-bg); color: var(--label-fg); font-size: var(--fs-sm); font-weight: 600; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: filter var(--motion-fast) ease; }
+html[data-density=compact] .cell-fill .cell-display, html[data-density=compact] .cell-label { min-height: 28px; }
+.cell-fill .cell-display:hover .cell-label { filter: brightness(1.08); }
+.cell-fill .cell-display:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.cell-fill .cell-empty { width: 100%; min-height: 36px; display: grid; place-items: center; background: var(--surface-2); border-radius: 3px; }
+/* Empty cells: a subtle hint on hover or keyboard focus (never permanent clutter). */
+.cell-display .cell-empty[data-hint]::before { content: ""; }
+.cell-display:hover .cell-empty[data-hint]::before, .cell-display:focus-visible .cell-empty[data-hint]::before { content: attr(data-hint); color: var(--faint); font-size: var(--fs-sm); }
+.cell[data-type=status] .cell-display:hover .cell-empty::before, .cell[data-type=priority] .cell-display:hover .cell-empty::before,
+.cell[data-type=dropdown] .cell-display:hover .cell-empty::before { content: attr(data-hint); }
+@media (hover: none) { .cell-fill .cell-empty[data-hint]::before { content: attr(data-hint); color: var(--faint); font-size: var(--fs-xs); } }
+/* Checkbox: an obvious box, centred, the whole cell is the target. */
+.cell[data-type=checkbox] .cell-display { justify-content: center; }
+.cell-checkbox { display: inline-grid; place-items: center; width: 22px; height: 22px; border: 2px solid var(--line-strong); border-radius: 6px; background: var(--surface); color: transparent; transition: background-color var(--motion-fast) ease, border-color var(--motion-fast) ease; }
+.cell-checkbox .icon { width: 14px; height: 14px; stroke-width: 3.2; }
+.cell-checkbox.is-checked { background: var(--accent-strong); border-color: var(--accent-strong); color: #fff; }
+.cell-display:hover .cell-checkbox:not(.is-checked) { border-color: var(--accent); }
+@media (hover: none) and (pointer: coarse) { .cell-checkbox { width: 26px; height: 26px; } }
+/* People and dates: larger avatars, a calendar mark, an "Assign" / "Set date" hint when empty. */
+.cell[data-type=owner] .person-avatar { width: 26px; height: 26px; font-size: 10.5px; }
+.people-empty { gap: 6px; }
+.cell-display:hover .people-empty::before, .cell-display:focus-visible .people-empty::before { order: 2; }
+.cell-date { display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
+.cell-date .icon { width: 14px; height: 14px; color: var(--faint); flex: none; }
+
+/* Column header: the ⓘ information control (visible on hover/focus; always on touch screens). */
+.column-info-button { display: inline-grid; place-items: center; flex-shrink: 0; width: 22px; height: 22px; border-radius: var(--radius-sm); color: var(--faint); opacity: 0; transition: opacity var(--motion-fast) ease; }
+.column-info-button .icon { width: 14px; height: 14px; }
+th:hover .column-info-button, th:focus-within .column-info-button, .column-info-button:focus-visible { opacity: 1; }
+.column-info-button:hover { color: var(--text); background: var(--hover); }
+@media (hover: none) { .column-info-button { opacity: .7; } }
+.column-info-popover { width: 280px; }
+.column-info-popover .popover-copy { margin: 4px 8px 8px; line-height: 1.5; }
+
+/* Column menu: grouped sections. */
+.column-menu-popover { min-width: 230px; }
+.menu-section-label { padding: 8px 10px 3px; font-size: var(--fs-xs); font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+.column-menu-popover > button.danger { color: var(--danger); }
+.column-menu-popover > button.danger .icon { color: var(--danger); }
+@media (hover: none) and (pointer: coarse) { .column-menu-popover > button, .column-info-popover .popover-footer > button { min-height: 44px; } }
+
+/* Files column: thumbnails in the cell, the attachment panel, and the preview.
+   -------------------------------------------------------------------------- */
+.file-chips { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.file-thumb { position: relative; display: inline-grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: 5px; overflow: hidden; background: var(--surface-2); border: 1px solid var(--line); color: var(--muted); }
+.file-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.file-thumb .icon { width: 15px; height: 15px; }
+.file-thumb.is-doc em { position: absolute; bottom: 0; left: 0; right: 0; font-size: 7.5px; font-style: normal; font-weight: 700; line-height: 1.3; text-align: center; color: #fff; background: var(--danger); }
+.file-thumb.is-doc .icon { margin-bottom: 6px; }
+.file-chip-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); color: var(--text); }
+.cell[data-type=files] .cell-display { gap: 6px; }
+.files-empty .icon { width: 15px; height: 15px; }
+td.cell[data-type=files].is-drop-target, .file-drop.is-drop-target { outline: 2px dashed var(--accent); outline-offset: -3px; background: var(--accent-soft, rgba(18,165,148,.12)); }
+
+.files-popover { width: min(380px, calc(100vw - 16px)); max-height: min(520px, calc(100vh - 24px)); display: flex; flex-direction: column; }
+.file-drop { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin: 4px 8px 8px; padding: 12px; border: 1.5px dashed var(--line-strong); border-radius: var(--radius-md); }
+.file-drop small { color: var(--faint); line-height: 1.4; }
+.file-pick { cursor: pointer; }
+.file-pick:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+.file-list { list-style: none; margin: 0; padding: 0 4px 6px; overflow-y: auto; }
+.file-row { display: flex; align-items: center; gap: 8px; padding: 6px 4px; border-radius: var(--radius-sm); }
+.file-row + .file-row { border-top: 1px solid var(--line); }
+.file-open { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; padding: 2px; text-align: left; border-radius: var(--radius-sm); }
+.file-open:hover { background: var(--hover); }
+.file-open .file-thumb { width: 40px; height: 40px; }
+.file-row > .file-thumb { width: 40px; height: 40px; }
+.file-meta { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.file-meta strong { font-size: var(--fs-sm); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-meta small { color: var(--faint); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-meta progress { width: 100%; height: 4px; accent-color: var(--accent-strong); }
+.file-error { color: var(--danger) !important; white-space: normal !important; }
+.file-actions { display: inline-flex; align-items: center; gap: 2px; flex: none; }
+.file-row.is-confirming { background: var(--surface-2); flex-wrap: wrap; }
+.file-row.is-confirming .file-meta strong, .file-row.is-confirming .file-meta small { white-space: normal; }
+.file-notice { color: var(--danger); }
+@media (hover: none) and (pointer: coarse) { .file-actions .icon-button { width: 44px; height: 44px; } .file-open { min-height: 48px; } }
+
+.file-preview-modal { width: min(960px, calc(100vw - 24px)); }
+.file-preview-body { display: grid; place-items: center; min-height: 240px; max-height: calc(100vh - 220px); overflow: auto; background: var(--surface-2); border-radius: var(--radius-md); }
+.file-preview-image { max-width: 100%; max-height: calc(100vh - 230px); object-fit: contain; }
+.file-preview-frame { width: 100%; height: calc(100vh - 230px); border: 0; background: #fff; }
+.file-preview-modal a.button { text-decoration: none; }

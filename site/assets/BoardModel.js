@@ -31,8 +31,11 @@ class BoardModel {
       { type: "email", label: "Email", category: "Contact", description: "Email addresses" },
       { type: "phone", label: "Phone", category: "Contact", description: "Phone numbers" },
       { type: "link", label: "Link", category: "Contact", description: "Web addresses" },
-      { type: "group", label: "Group", category: "Organization", description: "Sort records into this board's groups" }
+      { type: "group", label: "Group", category: "Organization", description: "Sort records into this board's groups" },
+      { type: "files", label: "Files", category: "Files", description: "PDFs and photos (JPEG, PNG, WebP), up to 10 MB each" }
     ];
+    // Files columns (resource mode): attachment metadata by ID, and the boards whose attachments are loaded.
+    this.attachments = new Map(); this.attachmentIndex = null; this.attachmentBoards = new Set();
     // People columns: user references ("user:<id>") → { displayName, email, isYou }, from the server's directory.
     this.people = new Map(); this.me = null; this.peopleLoaded = false;
     // Resource mode: the shared activity log (who changed what), newest first; null until loaded.
@@ -416,6 +419,8 @@ class BoardModel {
   renameGroup(oldName, newName) { const clean = newName.trim(); if (!clean || this.board.groups.includes(clean)) return false; this.snapshot("Group rename undone"); this.board.groups = this.board.groups.map((name) => name === oldName ? clean : name); if(this.groupColumn)this.rows.forEach((row) => { if (row[this.groupColumn.key] === oldName) row[this.groupColumn.key] = clean; }); this.log(`Renamed group ${oldName} to ${clean}`); this.save({op:"updateGroups",boardId:this.board.id,affectsRecords:true,group:{from:oldName,to:clean}}); return true; }
   deleteGroup(name, moveTo) { if (this.board.groups.length <= 1) return false; this.snapshot("Group deletion undone"); if(this.groupColumn)this.rows.forEach((row) => { if (row[this.groupColumn.key] === name) row[this.groupColumn.key] = moveTo; }); this.board.groups = this.board.groups.filter((group) => group !== name); this.log(`Deleted group ${name}`); this.save({op:"updateGroups",boardId:this.board.id,affectsRecords:true,group:{remove:name,moveTo}}); return true; }
   addColumn({ label, type, required = false, defaultValue = "", options = "", multiple = false }) { const clean=String(label||"").trim(); if(!clean||!this.columnTypes.some((item)=>item.type===type))return false; this.snapshot("Column creation undone"); const key=`custom_${Date.now()}_${Math.random().toString(36).slice(2,8)}`; let optionList=[...new Set((Array.isArray(options)?options:String(options).split(",")).map((item)=>String(item).trim()).filter(Boolean))]; if(!optionList.length)optionList=this.newColumnOptions(type); const column={ key, label:clean, type, visible:true, connection:"", required:Boolean(required), defaultValue:String(defaultValue||""), options:optionList, ...(type==="dropdown"&&multiple?{multiple:true}:{}) }; this.board.columns.push(column); this.rows.forEach((row)=>{row[key]=column.type==="checkbox"?false:this.isMultiColumn(column)?this.valueList(column.defaultValue):column.defaultValue;}); this.log(`Added ${clean} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,affectsRecords:true}); return column; }
+  // Name and description together (one change, one save).
+  editColumn(key,{label,description=""}){const column=this.board.columns.find((item)=>item.key===key);const clean=String(label||"").trim();if(!column||!clean)return false;const text=String(description||"").trim().slice(0,500);if(column.label===clean&&(column.description||"")===text)return false;this.snapshot("Column edit undone");column.label=clean;if(text)column.description=text;else delete column.description;this.log(`Edited column ${clean}`);this.save({op:"updateColumns",boardId:this.board.id,columnKey:key});return true;}
   renameColumn(key, label) { const column=this.board.columns.find((item)=>item.key===key); const clean=String(label||"").trim(); if(!column||!clean)return false; this.snapshot("Column rename undone"); column.label=clean; this.log(`Renamed column to ${clean}`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key}); return true; }
   deleteColumn(key) { if(key==="serial")return false; const index=this.board.columns.findIndex((item)=>item.key===key); if(index<0)return false; this.snapshot("Column deletion undone"); const [column]=this.board.columns.splice(index,1); this.rows.forEach((row)=>{delete row[key];}); this.log(`Deleted ${column.label} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,affectsRecords:true}); return true; }
   moveColumn(key, direction) { const index=this.board.columns.findIndex((item)=>item.key===key); const target=index+(direction==="left"?-1:1); if(key==="serial"||index<0||target<1||target>=this.board.columns.length)return false; this.snapshot("Column reorder undone"); [this.board.columns[index],this.board.columns[target]]=[this.board.columns[target],this.board.columns[index]]; this.save({op:"updateColumns",boardId:this.board.id,columnKey:key}); return true; }
@@ -576,6 +581,19 @@ class BoardModel {
   }
 
   // --- Column schema helpers. Records stay flat objects keyed by column key; nothing here migrates stored data.
+  // ---- Files columns. Attachments live on the server beside the record (never in its values).
+  filesAvailable(){return typeof this.storage?.adapter?.uploadAttachment==="function";}
+  serverId(id){const resolved=this.storage?.adapter?.resolve?.(id);return String(resolved??id);}
+  attachmentUrl(id,options){return this.storage?.adapter?.attachmentUrl?.(id,options)||"";}
+  attachmentsFor(recordId,key){
+    if(!this.attachmentIndex){this.attachmentIndex=new Map();for(const a of this.attachments.values()){const k=`${a.recordId}:${a.columnKey}`;if(!this.attachmentIndex.has(k))this.attachmentIndex.set(k,[]);this.attachmentIndex.get(k).push(a);}for(const list of this.attachmentIndex.values())list.sort((x,y)=>String(x.createdAt).localeCompare(String(y.createdAt))||String(x.id).localeCompare(String(y.id)));}
+    return this.attachmentIndex.get(`${this.serverId(recordId)}:${key}`)||[];
+  }
+  replaceAttachments(items,match){for(const [id,a] of this.attachments)if(match(a))this.attachments.delete(id);for(const a of items)this.attachments.set(a.id,a);this.attachmentIndex=null;}
+  // Files on a board (optionally only in one column, or on some records), for delete confirmations.
+  boardFileCount(board,{columnKey=null,recordIds=null}={}){const boardId=this.serverId(board.id),records=recordIds?new Set(recordIds.map((id)=>this.serverId(id))):null;let n=0;for(const a of this.attachments.values())if(String(a.boardId)===boardId&&(!columnKey||a.columnKey===columnKey)&&(!records||records.has(String(a.recordId))))n+=1;return n;}
+  addAttachment(a){this.attachments.set(a.id,a);this.attachmentIndex=null;}
+  removeAttachment(id){this.attachments.delete(id);this.attachmentIndex=null;}
   columnType(type){return this.columnTypes.find((item)=>item.type===type);}
   // Options a brand-new column starts with. Existing columns with no stored options keep their legacy defaults.
   newColumnOptions(type){return type==="status"?["New","In Progress","Waiting","Completed","Cancelled"]:type==="priority"?["Low","Medium","High","Critical"]:[];}
@@ -647,6 +665,7 @@ class BoardModel {
   changeColumnType(key,type){
     const column=this.board.columns.find((c)=>c.key===key);
     if(!column||column.key==="serial"||column.type===type||!this.columnType(type))return false;
+    if(column.type==="files"||type==="files")return false; // files can't be converted to or from values
     this.snapshot(`${column.label} type change undone`);
     let cleared=0;
     this.rows.forEach((row)=>{

@@ -11,6 +11,7 @@ const { ObjectId } = require("mongodb");
 const { MongoConnection } = require("../../src/db/connection");
 const { ensureDatabase } = require("../../src/db/bootstrap");
 const { createDataLayer } = require("../../src/data-layer");
+const { MemoryFileStore } = require("../../src/files/file-store");
 const { createApp } = require("../../src/app");
 const { createEntraVerifier } = require("../../src/auth/entra-token");
 const { MemoryStateRepository } = require("../../src/repositories/memory-state-repository");
@@ -27,7 +28,7 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
   const connection = new MongoConnection({ uri: "mongodb://fake.invalid", dbName: "jarc_database", createClient: () => fake });
   await connection.connect();
   await ensureDatabase(connection.db);
-  const dataLayer = createDataLayer({ connection, logger: { error() {} } });
+  const dataLayer = createDataLayer({ connection, logger: { error() {} }, fileStore: new MemoryFileStore() });
   const verify = createEntraVerifier({ ...entra, keySet: issuer.keySet });
   // Optional 2nd argument "shared": ACCESS_POLICY=development_shared (as on Railway); default role_based.
   const accessPolicy = process.argv[3] === "shared" ? "development_shared" : "role_based";

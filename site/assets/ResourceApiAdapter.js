@@ -90,7 +90,7 @@ class ResourceApiAdapter {
   static BATCH_LIMIT = 5000;       // records per batch request (the server's limit)
   static USER_KEY = "jarc-resource-user";
   static USER_FIELDS = Object.freeze(["currentWorkspaceId", "currentBoardId", "currentView", "screen", "settings", "profile", "notifications", "recentBoards", "recentRecords", "recentCommands", "feedSeenAt"]);
-  static COLUMN_FIELDS = Object.freeze(["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection", "colors", "multiple"]);
+  static COLUMN_FIELDS = Object.freeze(["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection", "colors", "multiple", "description"]);
   static OPTION_TYPES = Object.freeze(["status", "dropdown", "priority"]);
   static FALLBACK_OPTIONS = Object.freeze({ status: ["New", "In Progress", "Waiting", "Completed", "Cancelled", "Review", "Defective", "Clear"], priority: ["Low", "Medium", "High", "Critical"] });
   // Deleting shared data is only expected from these operations. Anything else that would delete server data (for
@@ -239,6 +239,43 @@ class ResourceApiAdapter {
     return ids;
   }
   // ---- People who can be assigned in a workspace (People columns): [{ id: "user:<id>", displayName, email, isYou }].
+  // ---- Files columns. Metadata comes as JSON; file contents only from /attachments/:id/content on this origin (the
+  // session cookie authorises them; there are no public links).
+  async loadAttachments(boardId) { return (await this.background(`/boards/${encodeURIComponent(this.resolve(boardId))}/attachments`)).items; }
+  async loadRecordAttachments(recordId) {
+    try { return (await this.background(`/records/${encodeURIComponent(this.resolve(recordId))}/attachments`)).items; }
+    catch (error) { if (error instanceof StorageError && error.code === StorageError.CODES.NOT_FOUND) return []; throw error; }
+  }
+  attachmentUrl(id, { download = false } = {}) { return `${this.http.baseUrl}/attachments/${encodeURIComponent(id)}/content${download ? "?download=1" : ""}`; }
+  async deleteAttachment(id) { await this.request("DELETE", `/attachments/${encodeURIComponent(id)}`); }
+  isSavedRecord(recordId) { return this.records.has(String(this.resolve(recordId))); }
+  isSavedBoard(boardId) { return this.boards.has(String(this.resolve(boardId))); }
+  // One file, streamed as the request body. XMLHttpRequest because fetch can't report upload progress. Resolves with
+  // the attachment; rejects with { status, code, message } (status 0: the connection was lost).
+  uploadAttachment(recordId, columnKey, blob, { name, key, onProgress } = {}) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${this.http.baseUrl}/records/${encodeURIComponent(this.resolve(recordId))}/attachments?column=${encodeURIComponent(columnKey)}`);
+      xhr.timeout = 10 * 60 * 1000;
+      xhr.setRequestHeader("Accept", "application/json");
+      xhr.setRequestHeader("Content-Type", blob.type);
+      xhr.setRequestHeader("X-File-Name", encodeURIComponent(name || blob.name || "file"));
+      if (key) xhr.setRequestHeader("X-Upload-Key", key);
+      if (this.http.csrfToken) xhr.setRequestHeader("X-CSRF-Token", this.http.csrfToken);
+      xhr.upload.onprogress = (event) => { if (event.lengthComputable) onProgress?.(event.loaded / event.total); };
+      xhr.onload = () => {
+        let body = null;
+        try { body = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+        if ((xhr.status === 200 || xhr.status === 201) && body?.attachment) return resolve(body.attachment);
+        const code = body?.error?.code || null;
+        if (this.http.csrfToken && (xhr.status === 401 || code === "CSRF_INVALID")) window.dispatchEvent(new CustomEvent("jarc-session-expired"));
+        reject({ status: xhr.status, code, message: body?.error?.message || (xhr.status === 429 ? "Too many uploads at once. Try again in a moment." : "The upload failed. Try again.") });
+      };
+      xhr.onerror = () => reject({ status: 0, code: "OFFLINE", message: "The connection was lost during the upload. Try again." });
+      xhr.ontimeout = () => reject({ status: 0, code: "TIMEOUT", message: "The upload took too long. Try again." });
+      xhr.send(blob);
+    });
+  }
   async loadPeople(workspaceId) {
     const id = this.resolve(workspaceId);
     if (!this.workspaces.has(String(id))) return [];
@@ -533,6 +570,7 @@ class ResourceApiAdapter {
       out.connection = typeof out.connection === "string" ? out.connection : "";
       if (!ResourceApiAdapter.OPTION_TYPES.includes(out.type) || !Array.isArray(out.colors)) delete out.colors; else out.colors = out.colors.map((c) => (typeof c === "string" ? c : ""));
       if (out.multiple === true && out.type === "dropdown") out.multiple = true; else delete out.multiple;
+      if (typeof out.description === "string" && out.description.trim()) out.description = out.description.trim().slice(0, 500); else delete out.description;
       if (!(typeof out.width === "number" && Number.isFinite(out.width) && out.width >= 0 && out.width <= 5000)) delete out.width;
       return out;
     });

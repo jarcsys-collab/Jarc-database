@@ -43,6 +43,8 @@ class RecordService {
     return { items: page.items, limit, nextCursor: page.hasMore ? validate.encodeCursor(sort, last[sort.field], last._id) : null };
   }
 
+  async exists(id) { return Boolean(await this.repos.records.findById(id)); }
+
   async get(id) {
     const record = await this.repos.records.findById(id);
     if (!record) throw notFound("record");

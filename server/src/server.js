@@ -23,7 +23,7 @@ async function main() {
     connection = new MongoConnection({ uri: config.mongo.uri, dbName: config.mongo.dbName });
     await connection.connect();
     const { createdCollections } = await ensureDatabase(connection.db);
-    dataLayer = createDataLayer({ connection });
+    dataLayer = createDataLayer({ connection, maxFileStorageBytes: config.maxFileStorageBytes });
     if (config.enableDevResourceApi) devActor = await ensureDevelopmentActor(dataLayer.repos.users, { environment: config.nodeEnv });
     console.log(`MongoDB connected (database ${config.mongo.dbName}).${createdCollections.length ? ` Created collections: ${createdCollections.join(", ")}.` : ""}`);
   }
@@ -43,8 +43,15 @@ async function main() {
     if (config.accessPolicy === "development_shared") console.warn("ACCESS_POLICY=development_shared: every signed-in employee can create, edit and delete every workspace, board and record. Development collaboration only — set ACCESS_POLICY=role_based before production rollout.");
   });
 
+  // Files: remove interrupted uploads and files left behind by deletions, shortly after start and every 15 minutes.
+  const files = dataLayer?.services.files;
+  const sweep = files ? setInterval(() => files.sweep(), 15 * 60 * 1000) : null;
+  const firstSweep = files ? setTimeout(() => files.sweep(), 60 * 1000) : null;
+  sweep?.unref(); firstSweep?.unref();
+
   let stopping = false;
   const shutdown = () => {
+    clearInterval(sweep); clearTimeout(firstSweep);
     app.locals.realtime?.closeAll(); // open live-update streams would otherwise keep the server from closing
     if (stopping) return;
     stopping = true;

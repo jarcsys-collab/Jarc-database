@@ -25,6 +25,9 @@ function resourceRoutes({ services, access }) {
   const recordId = (req) => parseId(req.params.recordId, "recordId");
   // Who may be named in a People cell: everyone active under development_shared (and for the local developer),
   // otherwise the record's workspace's active members — the same people GET /workspaces/:id/people offers.
+  // Files of deleted records, boards, workspaces and columns are removed after the delete (never fails the request;
+  // the file sweep catches anything missed).
+  const purgeFiles = (filter) => services.files?.purge(filter);
   const peopleRule = (req) => ({ everyone: access.shared || req.actor.kind === "development" });
 
   // ---- Workspaces
@@ -55,7 +58,12 @@ function resourceRoutes({ services, access }) {
   });
   router.delete("/workspaces/:workspaceId", async (req, res) => {
     const { workspace } = await access.deletableWorkspace(req.actor, workspaceId(req));
-    send(res, 200, { deleted: true, removed: await services.workspaces.delete(workspace._id, deleteQuery(req), req.actor) });
+    // Files are purged by the workspace's boards (read before deleting), never by a stored workspace ID that could
+    // be out of date after a board move.
+    const boardIds = (await services.boards.listByWorkspace(workspace._id)).map((b) => b._id);
+    const removed = await services.workspaces.delete(workspace._id, deleteQuery(req), req.actor);
+    if (boardIds.length) await purgeFiles({ boardId: { $in: boardIds } });
+    send(res, 200, { deleted: true, removed });
   });
 
   // ---- Boards
@@ -83,7 +91,9 @@ function resourceRoutes({ services, access }) {
   });
   router.delete("/boards/:boardId", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "WORKSPACE_ADMIN");
-    send(res, 200, { deleted: true, removed: await services.boards.delete(board._id, deleteQuery(req), req.actor) });
+    const removed = await services.boards.delete(board._id, deleteQuery(req), req.actor);
+    await purgeFiles({ boardId: board._id });
+    send(res, 200, { deleted: true, removed });
   });
 
   // ---- Records (a board's records belong to the board's workspace; batches can only touch that board's records)
@@ -110,7 +120,11 @@ function resourceRoutes({ services, access }) {
   router.post("/boards/:boardId/records/delete", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "MEMBER");
     noQuery(req);
-    send(res, 200, await services.records.deleteMany(board._id, req.body, req.actor));
+    const result = await services.records.deleteMany(board._id, req.body, req.actor);
+    const ids = validate.recordBatchDelete(req.body).map((i) => i.id);
+    const gone = (await Promise.all(ids.map(async (id) => (await services.records.exists(id)) ? null : id))).filter(Boolean);
+    if (gone.length) await purgeFiles({ boardId: board._id, recordId: { $in: gone } });
+    send(res, 200, result);
   });
 
   // ---- Board schema changes (each one transaction; ?dryRun=true → { affected })
@@ -125,7 +139,10 @@ function resourceRoutes({ services, access }) {
   // Deleting a column or changing its type can lose data: workspace admins only.
   router.delete("/boards/:boardId/columns/:key", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "WORKSPACE_ADMIN");
-    schemaResult(res, await services.schema.deleteColumn(board._id, columnKey(req), req.query, req.actor));
+    const key = columnKey(req);
+    const result = await services.schema.deleteColumn(board._id, key, req.query, req.actor);
+    if (!result.dryRun) await purgeFiles({ boardId: board._id, columnKey: key });
+    schemaResult(res, result);
   });
   router.post("/boards/:boardId/columns/:key/type", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "WORKSPACE_ADMIN");
@@ -154,6 +171,7 @@ function resourceRoutes({ services, access }) {
     const { workspaceId: target } = validate.boardMove(requireBody(req.body));
     await access.workspace(req.actor, target, "WORKSPACE_ADMIN");
     const result = await services.schema.moveBoard(board._id, req.body, req.actor);
+    await services.files?.moveBoard(board._id, target);
     send(res, 200, { board: boardToApi(result.board), recordsMoved: result.records });
   });
   router.get("/boards/:boardId/activity", async (req, res) => {
@@ -174,6 +192,7 @@ function resourceRoutes({ services, access }) {
   router.delete("/records/:recordId", async (req, res) => {
     const { record } = await access.record(req.actor, recordId(req), "MEMBER");
     await services.records.delete(record._id, deleteQuery(req), req.actor);
+    await purgeFiles({ recordId: record._id });
     send(res, 200, { deleted: true });
   });
 

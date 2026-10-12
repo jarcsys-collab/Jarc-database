@@ -56,4 +56,12 @@ function memberToApi(doc) {
 // The signed-in user (GET /me): display details and account status; no tenant or object IDs.
 function userToApi(doc) { return { id: hex(doc._id), displayName: doc.displayName || "", email: doc.email ?? null, status: doc.status }; }
 
-module.exports = { workspaceToApi, boardToApi, recordToApi, activityToApi, memberToApi, userToApi, hex, iso };
+// A Files column attachment (metadata only; the contents are at /attachments/:id/content). No storage details.
+function attachmentToApi(doc) {
+  return {
+    id: hex(doc._id), recordId: hex(doc.recordId), boardId: hex(doc.boardId), columnKey: doc.columnKey, name: doc.name, type: doc.type, size: doc.size,
+    uploadedBy: hex(doc.uploadedBy), uploadedByName: doc.uploadedByName ?? null, createdAt: iso(doc.createdAt)
+  };
+}
+
+module.exports = { workspaceToApi, boardToApi, recordToApi, activityToApi, memberToApi, userToApi, attachmentToApi, hex, iso };

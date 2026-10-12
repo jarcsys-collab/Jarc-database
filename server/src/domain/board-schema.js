@@ -3,9 +3,9 @@
 const crypto = require("crypto");
 const { fail, isObject, isPrimitive, isSafeKey, text, color, bool } = require("../validation/common");
 
-const COLUMN_TYPES = Object.freeze(["text", "number", "status", "dropdown", "checkbox", "priority", "owner", "date", "email", "phone", "link", "group"]);
+const COLUMN_TYPES = Object.freeze(["text", "number", "status", "dropdown", "checkbox", "priority", "owner", "date", "email", "phone", "link", "group", "files"]);
 const PRIMARY_KEY = "serial"; // the required Item column; its key never changes (label may)
-const COLUMN_FIELDS = ["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection", "colors", "multiple"];
+const COLUMN_FIELDS = ["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection", "colors", "multiple", "description"];
 // Columns whose cells may hold several values (stored as a list of strings): People always (several assignees), and a
 // Dropdown set to "multiple". People entries are "user:<user ID>" for signed-in employees, or (older data) plain text.
 const MAX_MULTI_VALUES = 100;
@@ -54,6 +54,11 @@ function normalizeColumn(column, where = "a column") {
   if (column.colors !== undefined && column.colors !== null) {
     if (!OPTION_TYPES.includes(result.type) || !Array.isArray(column.colors) || column.colors.length > LIMITS.options) fail(`Column "${column.key}" has invalid label colours.`);
     result.colors = column.colors.map((value) => color(value, `A label colour of column "${column.key}"`));
+  }
+  // Optional guidance shown from the column header (plain text).
+  if (column.description !== undefined && column.description !== null && column.description !== "") {
+    const description = text(column.description, `The description of column "${column.key}"`, { max: 500 });
+    if (description) result.description = description;
   }
   if (column.multiple !== undefined && column.multiple !== null) {
     const multiple = bool(column.multiple, `multiple on column "${column.key}"`);
@@ -156,6 +161,8 @@ function checkValue(column, value, { maxLength = LIMITS.valueLength } = {}) {
     }
     return;
   }
+  // Files columns hold nothing in the record: attachments are their own documents (see services/file-service.js).
+  if (column.type === "files") { if (value !== "") fail(`${where} can only be changed by uploading or removing files.`); return; }
   if (!isPrimitive(value)) fail(`${where} must be text, a number, true/false or null.`);
   if (typeof value === "string" && value.length > maxLength) fail(`${where} is too long.`);
   if (column.type === "checkbox") { if (typeof value !== "boolean") fail(`${where} must be true or false.`); return; }

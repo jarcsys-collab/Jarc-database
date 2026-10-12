@@ -6,6 +6,8 @@ class AppController {
     root.addEventListener("change", (event) => this.guard(()=>this.onChange(event)));
     root.addEventListener("submit", (event) => { if(this.busy)event.preventDefault(); this.guard(()=>this.onSubmit(event)); }); // never a native submit, even while busy
     root.addEventListener("pointerdown", () => this.auth.touch());
+    for (const type of ["dragover", "dragleave", "drop"]) root.addEventListener(type, (event) => this.onFileDrag(event));
+    this.uploads = new Map(); this.filesConfirm = null; this.filesNotice = null;
     root.addEventListener("keyup", (event) => { if (event.target.dataset?.action === "password-input") { const warning=document.querySelector("#caps-warning"); if(warning) warning.hidden=!event.getModifierState("CapsLock"); } });
     document.addEventListener("keydown", (event) => this.onKeydown(event));
     root.addEventListener("keydown",()=>this.auth.touch());
@@ -76,7 +78,13 @@ class AppController {
     window.addEventListener("jarc-save", (event) => { if (event.detail === "saving") this.saveSeq += 1; }); // any save started
     this.live = new LiveUpdates({
       baseUrl: adapter.http.baseUrl, since: this.loadStartedAt, request: (method, p) => adapter.http.request(method, p, undefined, { background: true }),
-      onChanges: (events) => { this.remoteQueue.push(...events); this.processRemote(); this.scheduleFeed(); },
+      onChanges: (events) => {
+        // File changes never alter records: they refresh only the files of the records concerned.
+        const files = events.filter((e) => /^attachment\./.test(e.action)), rest = events.filter((e) => !/^attachment\./.test(e.action));
+        if (files.length) this.applyRemoteFiles(files);
+        if (rest.length) { this.remoteQueue.push(...rest); this.processRemote(); }
+        this.scheduleFeed();
+      },
       onResync: () => this.resync(),
       onSessionEnded: () => { this.stopLive(); window.dispatchEvent(new CustomEvent("jarc-session-expired")); },
       onState: (state) => { this.liveState = state; this.saveFeedback(); if (state === "live" && this.needsResync) { this.needsResync = false; this.resync(); } }
@@ -86,6 +94,7 @@ class AppController {
   stopLive() { this.live?.stop(); this.live = null; this.liveState = null; clearTimeout(this.remoteTimer); }
   // Reload everything this tab shows (after a gap the server couldn't replay).
   resync() {
+    this.model.attachmentBoards.clear(); this.ensureAttachments();
     const events = [{ action: "workspace.updated", workspaceId: null }];
     for (const w of this.model.workspaces) for (const b of w.boards) if (this.model.boardLoadState(b.id).state !== "none") events.push({ action: "board.updated", boardId: b.id, workspaceId: w.id });
     this.remoteQueue.push(...events); this.processRemote(); this.scheduleFeed();
@@ -203,6 +212,7 @@ class AppController {
     this.auth.authenticated ? this.view.render(this.model) : this.view.renderLogin(this.auth,this.model); this.applyNav(); this.saveFeedback();
     this.refocus(focus); this.restoreScroll(scroll);
     if (this.ready && this.model.workspace && this.model.workspace.id !== this.peopleKey) this.loadPeople();
+    this.ensureAttachments();
   }
   // Microsoft sign-in screens: "signed-out" | "expired" | "denied" | "error". Shown instead of the app.
   showEntraGate(state, options = {}) { this.entraGate = state; this.navOpen = false; this.applyNav(); this.view.renderEntraGate(state, this.model, options); }
@@ -324,7 +334,7 @@ class AppController {
     if (action === "new-board") this.view.showBoardForm(null);
     if (action === "rename-board") this.view.showBoardForm(this.model.workspace.boards.find((board) => board.id === target.dataset.id));
     if (action === "duplicate-board") { this.model.duplicateBoard(target.dataset.id); this.view.closeOverlay(); this.update(); this.view.toast("Board duplicated"); }
-    if (action === "delete-board") this.view.showConfirm("Delete board?","The board and its records will be removed. You can still use Undo afterward.","confirm-delete-board",target.dataset.id);
+    if (action === "delete-board") { const board=this.model.workspaces.flatMap((w)=>w.boards).find((x)=>String(x.id)===String(target.dataset.id)), files=board?.columns?.some((c)=>c.type==="files"); this.view.showConfirm("Delete board?",files?"The board and its records will be removed, and files in its Files columns are deleted permanently. Undo can restore the board but not the files.":"The board and its records will be removed. You can still use Undo afterward.","confirm-delete-board",target.dataset.id); }
     if (action === "confirm-delete-board") this.deleteBoard(target.dataset.payload,target);
     if (action === "archived-view") { this.model.showArchived=true; this.model.activeSavedViewId=null; this.model.selected.clear(); this.update(); }
     if (["open-form","new-item"].includes(action)) this.view.showRecordForm(this.model);
@@ -350,6 +360,13 @@ class AppController {
     if (action === "add-column") this.view.showAddColumn(this.model);
     if (action === "column-editor") this.togglePanel(`column-${target.dataset.key}`,()=>this.view.showColumnEditor(this.model,target.dataset.key));
     if (action === "move-column") { const moved=this.model.moveColumn(target.dataset.key,target.dataset.direction); this.view.showColumnEditor(this.model,target.dataset.key); this.markPanel(`column-${target.dataset.key}`); this.view.toast(moved?"Column moved":"The primary record column stays first"); }
+    if (action === "preview-file") { const row=this.model.rows.find((r)=>r.id===this.model.idOf(target.dataset.id)), column=this.model.board.columns.find((c)=>c.key===target.dataset.field), file=this.model.attachments.get(target.dataset.file); if(row&&column&&file){this.view.showFilePreview(this.model,row,column,file);this.markPanel(`preview-${file.id}`);} return; }
+    if (action === "back-to-files") { this.view.closeOverlay(); this.openFiles(target.dataset.id,target.dataset.field); return; }
+    if (action === "request-remove-file") { this.filesConfirm={cell:this.filesCellKey(target.dataset.id,target.dataset.field),id:target.dataset.file}; this.refreshFiles(target.dataset.id,target.dataset.field); return; }
+    if (action === "cancel-remove-file") { this.filesConfirm=null; this.refreshFiles(target.dataset.id,target.dataset.field); return; }
+    if (action === "confirm-remove-file") { target.disabled=true; this.removeFile(target.dataset.id,target.dataset.field,target.dataset.file); return; }
+    if (action === "retry-upload" || action === "dismiss-upload") { const cell=this.filesCellKey(target.dataset.id,target.dataset.field), u=(this.uploads.get(cell)||[]).find((x)=>x.id===target.dataset.upload); if(u){ if(action==="retry-upload")this.startUpload(target.dataset.id,target.dataset.field,u); else this.uploads.set(cell,this.uploads.get(cell).filter((x)=>x!==u)); this.refreshFiles(target.dataset.id,target.dataset.field); } return; }
+    if (action === "column-info") { this.togglePanel(`info-${target.dataset.key}`,()=>this.view.showColumnInfo(this.model,target.dataset.key)); return; }
     if (action === "column-width") { const column=this.model.board.columns.find((c)=>c.key===target.dataset.key); if(column)this.view.overlay(`<form class="modal small-modal" data-action="column-width-form"><div class="modal-head"><div><div class="eyebrow">${this.view.escape(column.label)}</div><h2>Column width</h2></div>${this.view.closeButton()}</div><input type="hidden" name="key" value="${this.view.attr(column.key)}"><label>Width in pixels<input name="width" type="number" min="100" max="600" step="10" required value="${Math.round(column.width||180)}"></label><p class="field-note">Between 100 and 600. You can also drag the edge of the column header.</p><div class="modal-actions"><button type="button" class="button secondary" data-action="close-overlay">Cancel</button><button class="button primary">Save width</button></div></form>`); return; }
     if (action === "toggle-column-multiple") {
       const column=this.model.board.columns.find((c)=>c.key===target.dataset.key); if(!column)return;
@@ -364,7 +381,9 @@ class AppController {
     if (action === "request-delete-column") {
       // Empty columns delete straight away (with Undo); columns holding data ask first and say how much.
       const column=this.model.board.columns.find((item)=>item.key===target.dataset.key); if(!column||column.key==="serial")return;
-      const used=this.model.columnUsage(column.key);
+      const used=this.model.columnUsage(column.key), files=column.type==="files"?this.model.boardFileCount(this.model.board,{columnKey:column.key}):0;
+      // Files are deleted on the server for good: always ask, and say so (Undo can't restore them).
+      if(files){this.view.showConfirm(`Delete "${column.label}"?`,`This column holds ${files} file${files===1?"":"s"}. Deleting it permanently deletes ${files===1?"it":"them"} for everyone — Undo can't bring files back.`,"confirm-delete-column",column.key,"Delete column and files");return;}
       if(!used){this.runBusy(target,()=>this.model.deleteColumn(column.key),()=>{this.view.closeOverlay();this.update();this.view.toast(`${column.label} column deleted`,true);});}
       else this.view.showConfirm(`Delete "${column.label}"?`,`This column contains data in ${used} record${used===1?"":"s"}. Deleting it will remove those values.`,"confirm-delete-column",column.key,"Delete column");
     }
@@ -419,7 +438,7 @@ class AppController {
     if (action === "settings") this.togglePanel("settings",()=>this.view.showSettings(this.model));
     if (action === "settings-section") { this.model.updateSetting("settingsSection",target.dataset.section); this.view.showSettings(this.model,target.dataset.section); this.markPanel("settings"); }
     if (action === "workspace-manage") this.view.showSettings(this.model,"workspace");
-    if (action === "request-delete-workspace") this.view.showConfirm("Delete workspace?","All boards and records in this workspace will be deleted from this browser.","confirm-delete-workspace",target.dataset.id);
+    if (action === "request-delete-workspace") { const workspace=this.model.workspaces.find((w)=>String(w.id)===String(target.dataset.id)), files=workspace?.boards?.some((x)=>x.columns?.some((c)=>c.type==="files")); this.view.showConfirm("Delete workspace?",`All boards and records in this workspace will be deleted${this.model.filesAvailable()?"":" from this browser"}.${files?" Files in Files columns are deleted permanently.":""}`,"confirm-delete-workspace",target.dataset.id); }
     if (action === "confirm-delete-workspace") { const id=target.dataset.payload; this.runBusy(target,()=>this.model.deleteWorkspace(id),()=>{this.view.closeOverlay();this.update();this.view.toast("Workspace deleted",true);}); }
     if (action === "remove-member") { const id=target.dataset.id; this.runBusy(target,()=>this.model.removeMember(id),()=>{this.update();this.view.showSettings(this.model,"members");}); }
     if (action === "theme") { this.model.updateSetting("theme",target.dataset.theme); this.view.applyDisplay(this.model); this.view.showSettings(this.model); this.markPanel("settings"); }
@@ -471,6 +490,7 @@ class AppController {
     const input=document.querySelector('[data-action="search"]'); input?.focus(); input?.setSelectionRange(cursor,cursor);
   }
   onChange(event) {
+    if (event.target.dataset?.action === "files-input") { const input=event.target, files=[...input.files]; input.value=""; this.addFiles(input.dataset.id,input.dataset.field,files); return; }
     const action=event.target.dataset.action;
     if(action==="login-theme"){this.model.updateSetting("theme",event.target.value);this.view.applyDisplay(this.model);return;}
     if(action==="home-sort"){this.model.updateSetting("homeSort",event.target.value);this.update();return;}
@@ -516,10 +536,10 @@ class AppController {
       this.model.activeSavedViewId=null; this.view.closeOverlay(); this.update(); return;
     }
     if (action === "create-column-form") { let column; this.runBusy(event.submitter,()=>{column=this.model.addColumn({label:data.label,type:data.type,options:data.options||"",multiple:data.multiple==="on"});return column?undefined:false;},()=>{this.view.closeOverlay();this.update();this.root.querySelector(`th[data-column-key="${CSS.escape(column.key)}"]`)?.scrollIntoView({block:"nearest",inline:"nearest"});this.view.toast(`${column.label} column added`,true);}); }
-    if (action === "rename-column-form") { if(this.model.renameColumn(data.key,data.label)){this.view.closeOverlay();this.update();this.view.toast("Column renamed",true);} }
+    if (action === "rename-column-form") { this.runBusy(event.submitter,()=>this.model.editColumn(data.key,{label:data.label,description:data.description})?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast("Column updated",true);}); }
     if (action === "column-options-form") { this.pendingOptions={key:data.key,items:[...event.target.querySelectorAll(".option-row")].map((row)=>{const input=row.querySelector(".option-name");return {from:input.dataset.from||null,to:input.value,color:row.querySelector(".option-color")?.value||""};})}; this.applyColumnOptions(false,event.submitter); }
     if (action === "column-width-form") { const width=Number(data.width); if(!Number.isFinite(width))return; this.runBusy(event.submitter,()=>{this.model.resizeColumn(data.key,width);},()=>{this.view.closeOverlay();this.update();this.view.toast("Column width saved");}); }
-    if (action === "edit-column-form") { this.model.renameColumn(data.key,data.label); this.model.updateColumnConfig({[data.key]:{visible:data.key==="serial"?true:Boolean(data.visible),required:data.key==="serial"?true:Boolean(data.required),connection:data.connection||"",defaultValue:data.defaultValue||"",options:String(data.options||"").split(",").map((item)=>item.trim()).filter(Boolean)}}); this.view.closeOverlay(); this.update(); this.view.toast("Column updated"); }
+    if (action === "edit-column-form") { const column=this.model.board.columns.find((c)=>c.key===data.key); const description=String(data.description||"").trim().slice(0,500); this.model.renameColumn(data.key,data.label); this.model.updateColumnConfig({[data.key]:{visible:data.key==="serial"?true:Boolean(data.visible),required:data.key==="serial"?true:Boolean(data.required),connection:data.connection||"",...("defaultValue" in data?{defaultValue:data.defaultValue||""}:{}),...(description?{description}:{})}}); if(column&&!description)delete column.description; this.view.closeOverlay(); this.update(); this.view.toast("Column updated"); }
     if (action === "save-view-form") { if (this.model.saveView(data.name)) { this.view.closeOverlay(); this.update(); this.view.toast("View saved"); } }
     if (action === "profile-form") { data.name=this.auth.username; this.model.updateProfile(data); this.view.closeOverlay(); this.update(); this.view.toast("Profile updated"); }
     if (action === "description-form") { this.model.updateBoardDescription(data.description); this.view.closeOverlay(); this.update(); this.view.toast("Description saved"); }
@@ -573,7 +593,7 @@ class AppController {
     }
   }
 
-  requestDeleteRecords(ids) { if (ids.length) this.view.showConfirm(`Delete ${ids.length} record${ids.length===1?"":"s"}?`,"The selected data will be removed from this board. Undo remains available afterward.","confirm-delete-records",ids.join(",")); }
+  requestDeleteRecords(ids) { if (!ids.length) return; const files=this.model.board?this.model.boardFileCount(this.model.board,{recordIds:ids}):0; this.view.showConfirm(`Delete ${ids.length} record${ids.length===1?"":"s"}?`,files?`The selected data will be removed from this board, and their ${files} attached file${files===1?"":"s"} will be permanently deleted. Undo can restore the records but not the files.`:"The selected data will be removed from this board. Undo remains available afterward.","confirm-delete-records",ids.join(",")); }
   deleteRecords(ids,button=null) { if (!ids.length) return; this.runBusy(button,()=>this.model.remove(ids),()=>{this.view.closeOverlay();this.update();this.view.toast("Record deleted",true);}); }
   deleteBoard(id,button=null) { this.runBusy(button,()=>this.model.deleteBoard(id),()=>{this.view.closeOverlay();this.update();this.view.toast("Board deleted",true);}); }
   globalSearch(term) { if (!term) return; const match=this.model.allRecords.find((row)=>Object.values(row).some((value)=>String(value||"").toLowerCase().includes(term.toLowerCase()))); if (!match) { this.view.showMessage("No matching items",`No item matched “${term}”.`); return; } this.model.openBoard(match.boardId,match.workspaceId); this.model.query=term; this.view.closeOverlay(); this.update(); }
@@ -712,7 +732,7 @@ class AppController {
     if(this.navOpen)this.setNav(false,{restoreFocus:false});
     const panel=root.querySelector('.modal,.record-drawer,.settings-window,.settings-drawer,.popover,.profile-popover');if(!panel)return;
     if(panel.dataset.enhanced)return;panel.dataset.enhanced="1";
-    panel.setAttribute("role","dialog");panel.setAttribute("aria-modal","true");panel.setAttribute("aria-label",panel.querySelector('h2')?.textContent||"Actions");
+    panel.setAttribute("role","dialog");panel.setAttribute("aria-modal","true");if(!panel.getAttribute("aria-label")||panel.querySelector('h2'))panel.setAttribute("aria-label",panel.querySelector('h2')?.textContent||panel.getAttribute("aria-label")||"Actions");
     if(!this.overlayReturnFocus?.isConnected)this.overlayReturnFocus=document.activeElement;
     panel.querySelectorAll('button.icon-button:not([aria-label])').forEach(b=>b.setAttribute('aria-label',b.title||'Close'));
     const pop=panel.matches('.popover,.profile-popover');
@@ -773,10 +793,126 @@ class AppController {
     this.root.querySelector('.board-actions [data-action="export"]')?.toggleAttribute("disabled",!this.model.rows.length);
     this.saveFeedback();
   }
+  // ---- Files columns. Uploads run one request per file (XMLHttpRequest, for progress) and never touch the record, so
+  // they can't overwrite anyone's edits. Each upload carries a key: retrying after a lost connection returns the
+  // first result instead of storing the file twice. Colleagues' uploads and removals arrive as live events.
+  static FILE_TYPES = Object.freeze({ pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp" });
+  fileTypeOf(file){const byType=Object.values(AppController.FILE_TYPES).includes(file.type)?file.type:"";const ext=String(file.name||"").split(".").pop().toLowerCase();return byType||(file.type&&!/octet-stream/.test(file.type)?"":AppController.FILE_TYPES[ext]||"");}
+  filesPanelName(id,field){return `files-${this.model.serverId(id)}-${field}`;}
+  filesCellKey(id,field){return `${this.model.serverId(id)}:${field}`;}
+  filesState(id,field){return {uploads:this.uploads.get(this.filesCellKey(id,field))||[],confirm:this.filesConfirm?.cell===this.filesCellKey(id,field)?this.filesConfirm.id:null,notice:this.filesNotice?.cell===this.filesCellKey(id,field)?this.filesNotice.text:""};}
+  openFiles(id,field){
+    const row=this.model.rows.find((r)=>r.id===this.model.idOf(id)), column=this.model.board.columns.find((c)=>c.key===field);
+    if(!row||!column)return;
+    this.filesConfirm=null;
+    return this.togglePanel(this.filesPanelName(id,field),()=>this.view.showFilesPanel(this.model,row,column,this.filesState(id,field)));
+  }
+  // Re-draws the panel if it is open for this cell (keeps it open), and the cell itself.
+  refreshFiles(id,field,{open=false,focus=null}={}){
+    const row=this.model.rows.find((r)=>String(this.model.serverId(r.id))===String(this.model.serverId(id))), column=this.model.board?.columns.find((c)=>c.key===field);
+    if(!row||!column)return;
+    this.patchCell(row.id,field,false);
+    const root=document.querySelector("#overlay-root"), name=this.filesPanelName(id,field);
+    if(root?.dataset.open===name||open){
+      // Re-drawn in place: keep the panel where it was (the button that was clicked no longer exists to anchor it).
+      const previous=document.querySelector(".files-popover"), place=previous?{left:previous.style.left,top:previous.style.top,right:previous.style.right}:null;
+      if(!place)this.lastTrigger=this.cellButton(row.id,field)||this.lastTrigger;
+      this.view.showFilesPanel(this.model,row,column,this.filesState(id,field));this.markPanel(name);
+      const panel=document.querySelector(".files-popover");if(place&&panel)Object.assign(panel.style,place);
+      if(focus)document.querySelector(`.files-popover ${focus}`)?.focus();
+    }
+  }
+  addFiles(id,field,files){
+    const column=this.model.board?.columns.find((c)=>c.key===field);
+    if(!column||column.type!=="files"||!files.length)return;
+    if(!this.model.filesAvailable()){this.view.toast("Files are stored on the JARC server. Sign in with Microsoft to add them.");return;}
+    if(!this.model.storage.adapter.isSavedRecord(id)){this.view.toast("This record is still being saved. Add files in a moment.");return;}
+    const cell=this.filesCellKey(id,field), list=this.uploads.get(cell)||[];
+    let count=this.model.attachmentsFor(id,field).length+list.filter((u)=>u.state==="uploading").length;
+    for(const file of files){
+      const type=this.fileTypeOf(file);
+      let error="";
+      if(!type)error="Only PDF, JPEG, PNG and WebP files can be added.";
+      else if(file.size>10*1024*1024)error=`Larger than 10 MB (${this.view.fileSize(file.size)}).`;
+      else if(!file.size)error="This file is empty.";
+      else if(count>=20)error="A cell can hold at most 20 files.";
+      const random=()=>Array.from(crypto.getRandomValues(new Uint8Array(12)),(b)=>b.toString(16).padStart(2,"0")).join("");
+      const u={id:`up_${random()}`,key:random(),file,type,name:file.name||"file",size:file.size,progress:0,state:error?"failed":"uploading",error,retryable:!error};
+      list.unshift(u);
+      if(!error){count+=1;this.startUpload(id,field,u);}
+    }
+    this.uploads.set(cell,list);
+    this.refreshFiles(id,field,{open:true});
+  }
+  startUpload(id,field,u){
+    const cell=this.filesCellKey(id,field), adapter=this.model.storage.adapter;
+    u.state="uploading";u.progress=0;u.error="";
+    const blob=u.file.type===u.type?u.file:new Blob([u.file],{type:u.type});
+    adapter.uploadAttachment(id,field,blob,{name:u.name,key:u.key,onProgress:(p)=>{u.progress=p;this.view.updateUploadProgress(u);}}).then((attachment)=>{
+      this.model.addAttachment(attachment);
+      this.uploads.set(cell,(this.uploads.get(cell)||[]).filter((x)=>x!==u));
+      this.refreshFiles(id,field);
+      this.view.toast(`Added ${u.name}`);
+    },(failure)=>{
+      u.state="failed";u.error=failure?.message||"The upload failed. Try again.";
+      u.retryable=![400,404,413,415,507].includes(failure?.status)&&failure?.code!=="TOO_MANY_FILES";
+      this.refreshFiles(id,field);
+    });
+  }
+  async removeFile(id,field,fileId){
+    const cell=this.filesCellKey(id,field);
+    this.filesConfirm=null;
+    try{await this.model.storage.adapter.deleteAttachment(fileId);}
+    catch(error){if(error?.code!==StorageError.CODES.NOT_FOUND){this.filesNotice={cell,text:StorageError.describe(error).message||"The file couldn't be removed. Try again."};this.refreshFiles(id,field);return;}}
+    const name=this.model.attachments.get(fileId)?.name||"file";
+    this.model.removeAttachment(fileId);
+    this.filesNotice=null;
+    this.refreshFiles(id,field,{focus:'.file-pick input, [data-action="preview-file"]'});
+    this.view.toast(`Removed ${name}`);
+  }
+  // Loads the open board's attachments once (resource mode, boards with a Files column).
+  ensureAttachments(){
+    const board=this.model.board, adapter=this.model.storage.adapter;
+    if(!this.ready||this.model.screen!=="board"||!board||!this.model.filesAvailable()||!board.columns.some((c)=>c.type==="files"))return;
+    const id=String(this.model.serverId(board.id));
+    if(this.model.attachmentBoards.has(id)||!adapter.isSavedBoard(id))return;
+    this.model.attachmentBoards.add(id);
+    adapter.loadAttachments(id).then((items)=>{this.model.replaceAttachments(items,(a)=>String(a.boardId)===id);this.refreshBoardWhenIdle();},()=>this.model.attachmentBoards.delete(id));
+  }
+  // Live: a colleague added or removed a file → re-read that record's files and redraw its cells (and an open panel).
+  async applyRemoteFiles(events){
+    const adapter=this.model.storage.adapter;
+    const records=[...new Set(events.filter((e)=>e.recordId&&this.model.attachmentBoards.has(String(e.boardId))).map((e)=>e.recordId))];
+    for(const recordId of records){
+      let items;
+      try{items=await adapter.loadRecordAttachments(recordId);}catch{this.model.attachmentBoards.clear();continue;} // reloaded when the connection is back
+      this.model.replaceAttachments(items,(a)=>String(a.recordId)===String(recordId));
+      if(this.model.screen!=="board"||!this.model.board)continue;
+      for(const column of this.model.board.columns.filter((c)=>c.type==="files")){
+        this.refreshFiles(recordId,column.key);
+        const td=this.root.querySelector(`tr[data-record-context="${CSS.escape(String(recordId))}"] td[data-column-key="${CSS.escape(column.key)}"]`);
+        td?.classList.add("remote-flash");setTimeout(()=>td?.classList.remove("remote-flash"),1600);
+      }
+    }
+  }
+  // Drag and drop: onto a Files cell or the panel's drop area. Files dropped anywhere else never open in the tab.
+  fileDropZone(event){return event.dataTransfer?.types&&[...event.dataTransfer.types].includes("Files")?event.target.closest?.('td.cell[data-type="files"], .file-drop'):null;}
+  onFileDrag(event){
+    if(!event.dataTransfer?.types||![...event.dataTransfer.types].includes("Files"))return;
+    const zone=this.fileDropZone(event);
+    event.preventDefault();
+    if(event.type==="dragover"){event.dataTransfer.dropEffect=zone?"copy":"none";this.root.querySelectorAll(".is-drop-target").forEach((el)=>el!==zone&&el.classList.remove("is-drop-target"));zone?.classList.add("is-drop-target");return;}
+    if(event.type==="dragleave"){if(zone&&!zone.contains(event.relatedTarget))zone.classList.remove("is-drop-target");return;}
+    this.root.querySelectorAll(".is-drop-target").forEach((el)=>el.classList.remove("is-drop-target"));
+    if(!zone)return;
+    const [id,field]=zone.matches(".file-drop")?zone.dataset.dropCell.split(":"):[zone.querySelector(".cell-display")?.dataset.id,zone.dataset.columnKey];
+    if(id&&field)this.addFiles(id,field,[...event.dataTransfer.files]);
+  }
   openCell(button){
     const id=this.model.idOf(button.dataset.id), field=button.dataset.field, row=this.model.rows.find((r)=>r.id===id), column=this.model.board.columns.find((c)=>c.key===field);
     if(!row||!column)return;
     if(column.type==="checkbox"){this.model.updateCell(id,field,!row[field]);this.patchCell(id,field,true);return;}
+    if(column.type==="files"){button.scrollIntoView({block:"nearest",inline:"nearest"});this.openFiles(id,field);return;}
     if(this.view.isChoiceColumn(column)){
       button.scrollIntoView({block:"nearest",inline:"nearest"});
       const needPeople=column.type==="owner"&&this.model.storage.adapter.loadPeople&&!this.model.peopleLoaded;

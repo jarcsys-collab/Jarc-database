@@ -5,11 +5,13 @@
 //
 // Also enforces: unique indexes (with partial filters) → E11000; transactions roll back on error; deleteMany with an
 // empty filter is refused; drop() is refused; every call is recorded in collection.calls for query assertions.
-const { ObjectId, MongoServerError, MongoNetworkError } = require("mongodb");
+const { ObjectId, Binary, MongoServerError, MongoNetworkError } = require("mongodb");
 
 const clone = (v) => {
   if (v instanceof ObjectId) return new ObjectId(v.id);
   if (v instanceof Date) return new Date(v.getTime());
+  if (v instanceof Binary) return new Binary(Buffer.from(v.buffer), v.sub_type); // GridFS chunk data
+  if (Buffer.isBuffer(v) || v instanceof Uint8Array) return new Binary(Buffer.from(v)); // stored as BSON binary, like MongoDB
   if (Array.isArray(v)) return v.map(clone);
   if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, clone(x)]));
   return v;
@@ -112,6 +114,10 @@ class FakeCursor {
     if (this.limitN) docs = docs.slice(0, this.limitN);
     return docs.map((d) => clone(project(d, this.projection)));
   }
+  // One document at a time (the driver's GridFS download stream reads chunks this way).
+  skip(n) { this.skipN = n; return this; }
+  async next() { this.pending ??= (await this.toArray()).slice(this.skipN || 0); return this.pending.shift() ?? null; }
+  async close() { this.pending = []; }
 }
 
 class FakeCollection {

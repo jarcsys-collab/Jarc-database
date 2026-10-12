@@ -36,6 +36,13 @@ function loadConfig(env = process.env) {
     mongo = Object.freeze(Object.defineProperty({ dbName: env.MONGODB_DB_NAME }, "uri", { value: env.MONGODB_URI, enumerable: false }));
   }
 
+  // Files columns: the most all attachments together may use in the database (MB). Optional; default 300 MB, which
+  // keeps a free 512 MB Atlas cluster from being filled by uploads.
+  let maxFileStorageMb = 300;
+  if (env.ATTACHMENTS_MAX_TOTAL_MB !== undefined && env.ATTACHMENTS_MAX_TOTAL_MB !== "") {
+    if (!/^\d{1,7}$/.test(env.ATTACHMENTS_MAX_TOTAL_MB) || Number(env.ATTACHMENTS_MAX_TOTAL_MB) < 1) throw new ConfigError("ATTACHMENTS_MAX_TOTAL_MB must be a whole number of megabytes (1 or more).");
+    maxFileStorageMb = Number(env.ATTACHMENTS_MAX_TOTAL_MB);
+  }
   const preAuth = nodeEnv !== "production";
   const { authMode, entra } = loadAuthConfig(env, nodeEnv, dataStore);
   const { accessPolicy, accessPolicyIgnored } = loadAccessPolicy(env);
@@ -50,6 +57,7 @@ function loadConfig(env = process.env) {
     accessPolicy,
     // An ACCESS_POLICY value that wasn't recognised (role_based is used instead); reported at startup.
     accessPolicyIgnored,
+    maxFileStorageBytes: maxFileStorageMb * 1024 * 1024,
     // GET/PUT /api/v1/state is a transitional development endpoint with no authentication. Never in production.
     enableDevStateApi: preAuth,
     // AUTH_MODE=dev: the resource API attributes every change to the fixed development user (DEVELOPMENT / PRE-AUTH).

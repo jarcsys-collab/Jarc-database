@@ -168,7 +168,7 @@ describe("Database bootstrap", () => {
     const { db } = await connect();
     const result = await ensureDatabase(db);
     // Stage 12C added sessions and loginAttempts (server-side Entra sign-in sessions).
-    assert.deepEqual(result.createdCollections.sort(), ["activities", "boards", "loginAttempts", "records", "sessions", "users", "workspaceMembers", "workspaces"]);
+    assert.deepEqual(result.createdCollections.sort(), ["activities", "attachmentFiles.chunks", "attachmentFiles.files", "attachments", "boards", "loginAttempts", "records", "sessions", "users", "workspaceMembers", "workspaces"]);
     assert.deepEqual(Object.values(COLLECTIONS).sort(), result.createdCollections.sort());
     const names = async (c) => (await db.collection(c).listIndexes().toArray()).map((i) => i.name).sort();
     assert.deepEqual(await names("workspaceMembers"), ["_id_", "uniq_workspace_user", "user_status"]);

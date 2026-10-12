@@ -69,7 +69,8 @@ describe("Columns and notifications (real app, headless browser)", { skip: BROWS
     assert.deepEqual(await ana.evaluate("[...document.querySelectorAll('.cell-options-popover .cell-option')].map(b => [b.dataset.value, b.getAttribute('role')])"), [["To do", "menuitemradio"], ["Working", "menuitemradio"], ["Done", "menuitemradio"]]);
     await click(ana, '.cell-option[data-value="Working"]'); await saved(ana);
     assert.equal((await record(ana, "S-1")).values.status, "Working");
-    assert.equal(await ana.evaluate(`document.querySelector(${JSON.stringify(cell("S-1", "status"))} + " .pill").getAttribute("style")`), "--tone:#3b82f6");
+    // Full-cell label in the label's colour; text is whichever of white/near-black contrasts more (near-black: 5.0:1 vs 3.7:1).
+    assert.equal(await ana.evaluate(`document.querySelector(${JSON.stringify(cell("S-1", "status"))} + " .cell-label").getAttribute("style")`), "--label-bg:#3b82f6;--label-fg:#17191d");
     await click(ana, cell("S-1", "status")); await click(ana, '.popover-footer [data-action="set-cell-option"][data-value=""]'); await saved(ana);
     assert.equal((await record(ana, "S-1")).values.status, "");
   });
