@@ -40,6 +40,8 @@ async function launch(executable = findBrowser()) {
       await send("Emulation.setTouchEmulationEnabled", { enabled: mobile, maxTouchPoints: mobile ? 5 : 1 });
       await send("Emulation.setEmitTouchEventsForMouse", { enabled: mobile, configuration: "mobile" });
     },
+    // The page's prefers-reduced-motion ("reduce" | "no-preference"), independent of this computer's own setting.
+    async motionPreference(value) { await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value }] }); },
     // Opens a file (absolute path) or URL at an exact CSS viewport width and waits for its stylesheets.
     async open(target, { width, height = 800 }) {
       await this.viewport({ width, height });

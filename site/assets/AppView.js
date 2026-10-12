@@ -63,7 +63,9 @@ class AppView {
     document.documentElement.dataset.icons=model.settings.showIcons?"on":"off";
     document.documentElement.dataset.fontSize = model.settings.fontSize;
     document.documentElement.dataset.contrast = model.settings.highContrast ? "high" : "normal";
-    document.documentElement.dataset.motion = model.settings.reduceMotion ? "reduced" : "normal";
+    // "full" overrides a device's reduced-motion request (only when chosen); "system" follows the device.
+    const motion=model.motionPreference?.()??(model.settings.reduceMotion?"reduced":null);
+    document.documentElement.dataset.motion = motion==="full"||motion==="reduced" ? motion : "system";
     document.documentElement.dataset.stickyColumn = model.settings.stickyFirstColumn ? "on" : "off";
     document.documentElement.style.setProperty("--accent", model.settings.accentColor);
     document.documentElement.style.setProperty("--focus", model.settings.accentColor);
@@ -74,6 +76,7 @@ class AppView {
     // The full layout always renders. A new shared server starts with no workspaces (local mode always has at least
     // one): the sidebar and main area then show the "create your first workspace" state (see noWorkspaces).
     this.root.innerHTML = `<div class="app-shell">${this.sidebar(model)}<div class="nav-backdrop" aria-hidden="true"></div><main class="workspace">${this.topbar(model)}${this.content(model)}</main></div><input id="import-file" class="sr-only" type="file" accept="application/json,.json,text/csv,.csv" data-action="import-file"><input id="avatar-file" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp" data-action="avatar-file"><div id="overlay-root"></div>`;
+    this.afterRender(model);
   }
 
   // Microsoft Entra ID sign-in page (resource mode with AUTH_MODE=entra). No password field: Microsoft handles sign-in.
@@ -171,7 +174,7 @@ class AppView {
   // Resource mode loads a board's records when it opens: loading, failed and partly loaded (large board) states.
   boardView(model) {
     const load=model.boardLoadState();
-    if(load.state==="loading"||load.state==="none")return this.skeletonRows(model);
+    if(load.state==="loading"||load.state==="none")return this.boardSkeleton(model);
     if(load.state==="error")return `<section class="empty-state" role="alert"><span class="empty-symbol">${icon("records")}</span><h2>Records couldn't load</h2><p>${this.escape(model.boardLoadError||"Try again in a moment.")}</p><button class="button secondary" data-action="retry-board-load">Try again</button></section>`;
     const partial=load.state==="partial"?`<div class="notice partial-notice" role="status"><span>Showing the first ${Number(load.loaded||0).toLocaleString()} of ${Number(load.total||0).toLocaleString()} records. Search, filters and sorting apply to the loaded records.</span> <button class="button secondary" data-action="load-more-records">Load more</button></div>`:"";
     return partial+this.boardRecordsView(model);
@@ -312,7 +315,7 @@ class AppView {
     const sections=[["account","Account","people"],["profile","Profile","people"],["appearance","Appearance","sun"],["notifications","Notifications","bell"],["workspace","Workspace","board"],["members","Members","people"],["permissions","Permissions","lock"],["data","Data","records"],["security","Security","lock"]];
     const toggle=(key,title,help)=>`<label class="setting-row"><span><strong>${title}</strong><small>${help}</small></span><input type="checkbox" data-action="setting" data-key="${key}" ${model.settings[key]?"checked":""}></label>`;
     let body="";
-    if(section==="appearance")body=`<h3>Theme</h3><p>Choose how JARC looks on this device.</p><div class="theme-grid">${["light","dark","system"].map(t=>`<button class="theme-option ${model.settings.theme===t?"selected":""}" data-action="theme" data-theme="${t}"><span class="theme-preview ${t}"><i></i><i></i><i></i></span><strong>${this.cap(t)}</strong></button>`).join("")}</div><label class="setting-row"><span><strong>Interface density</strong><small>Comfortable spacing or compact rows</small></span><select data-action="setting-select" data-key="density"><option ${model.settings.density==="comfortable"?"selected":""}>Comfortable</option><option ${model.settings.density==="compact"?"selected":""}>Compact</option></select></label><label class="setting-row"><span><strong>Text size</strong><small>Adjust text throughout the workspace</small></span><select data-action="setting-select" data-key="fontSize">${["small","normal","large"].map(v=>`<option ${model.settings.fontSize===v?"selected":""}>${this.cap(v)}</option>`).join("")}</select></label>${toggle("showIcons","Sidebar icons","Recognizable shortcuts in your navigation")}${toggle("showBoardCounts","Board counts","Show record counts beside boards")}${toggle("stickyFirstColumn","Sticky record name","Keep record names in view as you scroll")}${toggle("reduceMotion","Reduce motion","Minimize transitions and movement")}${toggle("highContrast","High contrast","Stronger text and separators")}`;
+    if(section==="appearance")body=`<h3>Theme</h3><p>Choose how JARC looks on this device.</p><div class="theme-grid">${["light","dark","system"].map(t=>`<button class="theme-option ${model.settings.theme===t?"selected":""}" data-action="theme" data-theme="${t}"><span class="theme-preview ${t}"><i></i><i></i><i></i></span><strong>${this.cap(t)}</strong></button>`).join("")}</div><label class="setting-row"><span><strong>Interface density</strong><small>Comfortable spacing or compact rows</small></span><select data-action="setting-select" data-key="density"><option ${model.settings.density==="comfortable"?"selected":""}>Comfortable</option><option ${model.settings.density==="compact"?"selected":""}>Compact</option></select></label><label class="setting-row"><span><strong>Text size</strong><small>Adjust text throughout the workspace</small></span><select data-action="setting-select" data-key="fontSize">${["small","normal","large"].map(v=>`<option ${model.settings.fontSize===v?"selected":""}>${this.cap(v)}</option>`).join("")}</select></label>${toggle("showIcons","Sidebar icons","Recognizable shortcuts in your navigation")}${toggle("showBoardCounts","Board counts","Show record counts beside boards")}${toggle("stickyFirstColumn","Sticky record name","Keep record names in view as you scroll")}${this.motionSetting(model)}${toggle("highContrast","High contrast","Stronger text and separators")}`;
     if(section==="workspace"&&!model.workspace)body=`<h3>No workspace yet</h3><p>Create a workspace to set its name, icon and colour here.</p><button class="button primary" data-action="create-workspace">${icon("plus")} Create workspace</button>`;
     else if(section==="workspace")body=`<form data-action="workspace-settings-form" class="form-grid"><label>Workspace name<input name="name" required value="${this.escape(model.workspace.name)}"></label><label>Icon<input name="icon" maxlength="2" value="${this.escape(model.workspace.icon||model.workspace.name[0])}"></label><label>Color<input type="color" name="color" value="${this.escape(model.workspace.color)}"></label><label class="full">Description<textarea name="description">${this.escape(model.workspace.description||"")}</textarea></label><button class="button primary">Save workspace</button></form><h3 class="section-break">All workspaces</h3><div class="manager-list">${model.workspaces.map(w=>`<div class="manager-row"><span><strong>${this.escape(w.name)}</strong><small>${w.boards.length} boards${w.archived?" · Archived":""}</small></span><button data-action="archive-workspace" data-id="${this.attr(w.id)}" data-archived="${w.archived?"0":"1"}">${w.archived?"Restore":"Archive"}</button><button class="danger" data-action="request-delete-workspace" data-id="${this.attr(w.id)}">Delete</button></div>`).join("")}</div><button class="button secondary" data-action="create-workspace">${icon("plus")} Create workspace</button>`;
     if(section==="members")body=`<p>This device keeps a contact directory for record ownership. Adding a contact does not send an invitation or grant remote access.</p><div class="manager-list">${model.members.map(m=>`<div class="manager-row"><span><strong>${this.escape(m.name)}</strong><small>${this.escape(m.email||m.status)} · ${this.escape(m.role)}</small></span>${m.role!=="Owner"?`<button class="danger" data-action="remove-member" data-id="${this.attr(m.id)}">Remove</button>`:"<small>Current account</small>"}</div>`).join("")}</div><button class="button primary" data-action="invite">${icon("plus")} Add local contact</button>`;
@@ -362,27 +365,31 @@ class AppView {
   }
   filesCell(model,row,column){
     const list=model.attachmentsFor(row.id,column.key);
+    const boardId=model.serverId(model.board?.id);
+    if(!list.length&&model.attachmentLoading?.has(boardId))return `<span class="file-thumb skeleton file-skeleton" aria-hidden="true"></span><span class="sr-only">Loading files</span>`;
+    if(!list.length&&model.attachmentErrors?.has(boardId))return `<span class="cell-empty files-error" title="Files couldn't load. Open to try again.">${icon("paperclip")}<em aria-hidden="true">!</em></span><span class="sr-only">Files couldn't load</span>`;
     if(!list.length)return `<span class="cell-empty files-empty" data-hint="Add files">${icon("paperclip")}</span>`;
     const shown=list.slice(0,3);
     return `<span class="file-chips" title="${this.attr(list.map(a=>a.name).join(", "))}">${shown.map(a=>this.fileThumb(model,a)).join("")}${list.length>3?`<span class="chip-more">+${list.length-3}</span>`:""}${list.length===1?`<span class="file-chip-name">${this.escape(list[0].name)}</span>`:""}</span>`;
   }
   // state: { uploads, confirm (attachment ID awaiting confirmation), notice }
-  showFilesPanel(model,row,column,{uploads=[],confirm=null,notice=""}={}){
+  showFilesPanel(model,row,column,{uploads=[],confirm=null,notice="",fresh=new Set()}={}){
+    const boardId=model.serverId(model.board?.id), loadingFiles=model.attachmentLoading?.has(boardId), failedFiles=model.attachmentErrors?.has(boardId);
     const list=model.attachmentsFor(row.id,column.key), cell=`${row.id}:${column.key}`, ids=`data-id="${this.attr(row.id)}" data-field="${this.attr(column.key)}"`;
     const when=(iso)=>{const d=new Date(iso);return Number.isNaN(d.getTime())?"":d.toLocaleDateString(undefined,{day:"numeric",month:"short",year:"numeric"});};
     const available=model.filesAvailable();
     const upload=(u)=>`<li class="file-row ${u.state==="failed"?"is-failed":"is-uploading"}" data-upload="${this.attr(u.id)}"><span class="file-thumb is-doc" aria-hidden="true">${icon(u.state==="failed"?"close":"upload")}</span><span class="file-meta"><strong>${this.escape(u.name)}</strong>${u.state==="failed"?`<small class="file-error" role="alert">${this.escape(u.error)}</small>`:`<small><span class="upload-text">${this.fileSize(u.size)} · Uploading ${Math.round(u.progress*100)}%</span></small><progress max="100" value="${Math.round(u.progress*100)}" aria-label="Uploading ${this.attr(u.name)}"></progress>`}</span><span class="file-actions">${u.state==="failed"&&u.retryable?`<button type="button" class="icon-button" data-action="retry-upload" ${ids} data-upload="${this.attr(u.id)}" aria-label="Try ${this.attr(u.name)} again" title="Try again">${icon("refresh")}</button>`:""}${u.state==="failed"?`<button type="button" class="icon-button" data-action="dismiss-upload" ${ids} data-upload="${this.attr(u.id)}" aria-label="Dismiss" title="Dismiss">${icon("close")}</button>`:""}</span></li>`;
     const file=(a)=>confirm===a.id
       ?`<li class="file-row is-confirming"><span class="file-meta"><strong>Remove “${this.escape(a.name)}”?</strong><small>Everyone loses access to it. This can't be undone.</small></span><span class="file-actions"><button type="button" class="button secondary small" data-action="cancel-remove-file" ${ids}>Cancel</button><button type="button" class="button danger small" data-action="confirm-remove-file" ${ids} data-file="${this.attr(a.id)}" autofocus>Remove</button></span></li>`
-      :`<li class="file-row"><button type="button" class="file-open" data-action="preview-file" ${ids} data-file="${this.attr(a.id)}" aria-label="Preview ${this.attr(a.name)}">${this.fileThumb(model,a)}<span class="file-meta"><strong>${this.escape(a.name)}</strong><small>${this.fileKind(a.type)} · ${this.fileSize(a.size)}${a.uploadedByName?` · ${this.escape(a.uploadedByName)}`:""}${when(a.createdAt)?` · ${when(a.createdAt)}`:""}</small></span></button><span class="file-actions"><a class="icon-button" href="${this.attr(model.attachmentUrl(a.id,{download:true}))}" download="${this.attr(a.name)}" aria-label="Download ${this.attr(a.name)}" title="Download">${icon("download")}</a><button type="button" class="icon-button" data-action="request-remove-file" ${ids} data-file="${this.attr(a.id)}" aria-label="Remove ${this.attr(a.name)}" title="Remove">${icon("trash")}</button></span></li>`;
+      :`<li class="file-row ${fresh.has(a.id)?"is-fresh":""}"><button type="button" class="file-open" data-action="preview-file" ${ids} data-file="${this.attr(a.id)}" aria-label="Preview ${this.attr(a.name)}">${this.fileThumb(model,a)}<span class="file-meta"><strong>${this.escape(a.name)}${fresh.has(a.id)?`<span class="file-done">${icon("work")} Uploaded</span>`:""}</strong><small>${this.fileKind(a.type)} · ${this.fileSize(a.size)}${a.uploadedByName?` · ${this.escape(a.uploadedByName)}`:""}${when(a.createdAt)?` · ${when(a.createdAt)}`:""}</small></span></button><span class="file-actions"><a class="icon-button" data-action="download-file" data-name="${this.attr(a.name)}" href="${this.attr(model.attachmentUrl(a.id,{download:true}))}" download="${this.attr(a.name)}" aria-label="Download ${this.attr(a.name)}" title="Download">${icon("download")}</a><button type="button" class="icon-button" data-action="request-remove-file" ${ids} data-file="${this.attr(a.id)}" aria-label="Remove ${this.attr(a.name)}" title="Remove">${icon("trash")}</button></span></li>`;
     const picker=available?`<div class="file-drop" data-drop-cell="${this.attr(cell)}"><label class="button primary small file-pick">${icon("upload")} Add files<input type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp" data-action="files-input" ${ids} class="sr-only"></label><small>or drop them here · PDF, JPEG, PNG, WebP · up to 10 MB each</small></div>`:`<p class="popover-copy">Files are stored on the JARC server. Sign in with Microsoft to add or open them.</p>`;
-    document.querySelector("#overlay-root").innerHTML=`<div class="popover files-popover" role="dialog" aria-label="${this.attr(column.label)} files" data-cell="${this.attr(cell)}"><div class="popover-title"><strong>${this.escape(column.label)}</strong><small>${list.length?`${list.length} file${list.length===1?"":"s"}`:"No files yet"}</small></div>${picker}${notice?`<p class="popover-copy file-notice" role="status">${this.escape(notice)}</p>`:""}<ul class="file-list" aria-live="polite">${uploads.map(upload).join("")}${list.map(file).join("")}</ul></div>`;
+    document.querySelector("#overlay-root").innerHTML=`<div class="popover files-popover" role="dialog" aria-label="${this.attr(column.label)} files" data-cell="${this.attr(cell)}"><div class="popover-title"><strong>${this.escape(column.label)}</strong><small>${list.length?`${list.length} file${list.length===1?"":"s"}`:loadingFiles?"Loading…":failedFiles?"Couldn't load":"No files yet"}</small></div>${picker}${notice?`<p class="popover-copy file-notice" role="status">${this.escape(notice)}</p>`:""}${loadingFiles&&!list.length?`<div class="file-list-skeleton" aria-busy="true" role="status" aria-label="Loading files">${Array.from({length:2},()=>`<div class="file-row"><span class="skeleton file-thumb"></span><span class="file-meta"><span class="skeleton skeleton-text" style="width:62%"></span><span class="skeleton skeleton-text is-small" style="width:38%"></span></span></div>`).join("")}</div>`:""}${failedFiles?`<div class="file-load-error" role="alert"><span>Files couldn't load.</span><button type="button" class="button secondary small" data-action="retry-attachments">Try again</button></div>`:""}<ul class="file-list" aria-live="polite">${uploads.map(upload).join("")}${list.map(file).join("")}</ul></div>`;
   }
   updateUploadProgress(u){const row=document.querySelector(`.file-row[data-upload="${CSS.escape(u.id)}"]`);if(!row)return;const pct=Math.round(u.progress*100);const bar=row.querySelector("progress");if(bar)bar.value=pct;const text=row.querySelector(".upload-text");if(text)text.textContent=`${this.fileSize(u.size)} · ${pct>=100?"Saving…":`Uploading ${pct}%`}`;}
   showFilePreview(model,row,column,a){
     const url=model.attachmentUrl(a.id), ids=`data-id="${this.attr(row.id)}" data-field="${this.attr(column.key)}"`;
     const body=a.type==="application/pdf"?`<iframe class="file-preview-frame" src="${this.attr(url)}" title="${this.attr(a.name)}"></iframe>`:`<img class="file-preview-image" src="${this.attr(url)}" alt="${this.attr(a.name)}">`;
-    this.overlay(`<div class="modal file-preview-modal"><div class="modal-head"><div><div class="eyebrow">${this.escape(column.label)} · ${this.fileKind(a.type)} · ${this.fileSize(a.size)}${a.uploadedByName?` · ${this.escape(a.uploadedByName)}`:""}</div><h2>${this.escape(a.name)}</h2></div>${this.closeButton()}</div><div class="file-preview-body">${body}</div><div class="modal-actions"><button type="button" class="button secondary" data-action="back-to-files" ${ids}>${icon("left")} All files</button><a class="button secondary" href="${this.attr(url)}" target="_blank" rel="noopener">${icon("eye")} Open in new tab</a><a class="button primary" href="${this.attr(model.attachmentUrl(a.id,{download:true}))}" download="${this.attr(a.name)}">${icon("download")} Download</a></div></div>`);
+    this.overlay(`<div class="modal file-preview-modal"><div class="modal-head"><div><div class="eyebrow">${this.escape(column.label)} · ${this.fileKind(a.type)} · ${this.fileSize(a.size)}${a.uploadedByName?` · ${this.escape(a.uploadedByName)}`:""}</div><h2>${this.escape(a.name)}</h2></div>${this.closeButton()}</div><div class="file-preview-body is-loading" data-preview-state="loading">${body}<div class="file-preview-status" role="status"><span class="loading-spinner" aria-hidden="true"></span><span>Loading preview…</span></div><div class="file-preview-failed" role="alert">${icon("file")}<span>This preview can't be shown here. Download the file to open it.</span></div></div><div class="modal-actions"><button type="button" class="button secondary" data-action="back-to-files" ${ids}>${icon("left")} All files</button><a class="button secondary" href="${this.attr(url)}" target="_blank" rel="noopener">${icon("eye")} Open in new tab</a><a class="button primary" data-action="download-file" data-name="${this.attr(a.name)}" href="${this.attr(model.attachmentUrl(a.id,{download:true}))}" download="${this.attr(a.name)}">${icon("download")} Download</a></div></div>`);
   }
   showRenameColumn(model,key) {
     const c=model.board.columns.find(item=>item.key===key); if(!c)return;
@@ -413,7 +420,7 @@ class AppView {
   }
   showFeed(model,filter="all",{loading=false}={}){
     const feed=model.feed||[], items=filter==="all"?feed:filter==="assigned"?feed.filter(n=>n.actorId!==model.me&&(n.assigned||[]).some(a=>a.to.includes(model.me)&&!a.from.includes(model.me))):[];
-    const body=loading&&!model.feed?`<div class="quiet-empty" role="status"><span class="loading-spinner" aria-hidden="true"></span><span><strong>Loading activity…</strong></span></div>`:items.map(n=>this.feedItem(model,n)).join("")||`<div class="quiet-empty">${icon("bell")}<span><strong>You're all caught up</strong><small>${filter==="mentions"?"Mentions aren't available yet.":filter==="assigned"?"Records assigned to you by colleagues appear here.":"Changes made by you and your colleagues appear here."}</small></span></div>`;
+    const body=loading&&!model.feed?this.feedSkeleton():items.map(n=>this.feedItem(model,n)).join("")||`<div class="quiet-empty">${icon("bell")}<span><strong>You're all caught up</strong><small>${filter==="mentions"?"Mentions aren't available yet.":filter==="assigned"?"Records assigned to you by colleagues appear here.":"Changes made by you and your colleagues appear here."}</small></span></div>`;
     this.overlay(`<aside class="settings-drawer notification-drawer"><div class="modal-head"><div><div class="eyebrow">Activity across your workspaces</div><h2>Notifications</h2></div>${this.closeButton()}</div><div class="notification-tabs">${["all","mentions","assigned"].map(f=>`<button data-action="notification-filter" data-filter="${f}" class="${f===filter?"active":""}">${this.cap(f)}</button>`).join("")}<button data-action="mark-notifications">Mark all read</button></div><div class="notification-list" aria-busy="${loading}">${body}</div></aside>`,"drawer-overlay");
   }
 
@@ -489,15 +496,73 @@ class AppView {
   formNotice(form,html,kind="info"){let box=form.querySelector(".form-live-notice");if(!box){box=document.createElement("div");box.className="form-live-notice";box.setAttribute("role","status");form.querySelector(".drawer-body")?.prepend(box);}box.dataset.kind=kind;box.innerHTML=html;}
 
   // Skeleton rows while a board's records load (shape of the table, no flashing spinner).
-  skeletonRows(model,count=6){const cols=model.visibleColumns.length;return `<section class="data-region" aria-busy="true"><div class="group-title"><span class="skeleton skeleton-text" style="width:110px"></span></div><div class="table-wrap skeleton-table" role="status" aria-label="Loading records">${Array.from({length:count},(_,i)=>`<div class="skeleton-row">${Array.from({length:Math.min(cols,6)},(_,j)=>`<span class="skeleton skeleton-text" style="width:${[70,55,40,62,48,35][(i+j)%6]}%"></span>`).join("")}</div>`).join("")}</div><span class="sr-only">Loading records…</span></section>`;}
+  // Settings → Appearance → Animations. With no choice yet the selection shows what is in effect.
+  motionSetting(model){
+    const deviceReduces=Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches), chosen=model.motionPreference(), shown=chosen||(deviceReduces?"system":"full");
+    const note=chosen==="full"?(deviceReduces?"On, although your device asks for reduced motion.":"Smooth transitions, loading effects and feedback.")
+      :chosen==="reduced"?"Only essential feedback; no movement or fades."
+      :chosen==="system"?`Following your device: ${deviceReduces?"reduced motion":"full animations"}.`
+      :deviceReduces?"Your device asks for reduced motion, so animations are off. Choose Full animations to turn them on.":"Full animations (default). Choose Reduced motion to minimise movement.";
+    return `<label class="setting-row"><span><strong>Animations</strong><small id="motion-note">${note}</small></span><select data-action="motion-preference" aria-describedby="motion-note">${[["full","Full animations"],["reduced","Reduced motion"],["system","Follow system preference"]].map(([v,l])=>`<option value="${v}" ${shown===v?"selected":""}>${l}</option>`).join("")}</select></label>`;
+  }
+  // ---- Motion (Phase 4). Animations only when what the person is looking at changes (another screen, board or view;
+  // records finishing loading), never on routine re-renders such as live updates. Off with "reduce motion".
+  reducedMotion(){const m=document.documentElement.dataset.motion;if(m==="full")return false;if(m==="reduced")return true;return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);}
+  // Restarts a one-off animation class on an element.
+  play(element,className){if(!element||this.reducedMotion())return;element.classList.remove(className);void element.offsetWidth;element.classList.add(className);element.addEventListener("animationend",()=>element.classList.remove(className),{once:true});}
+  afterRender(model){
+    if(typeof this.root?.querySelector!=="function")return; // rendered without a DOM (unit tests)
+    const screenKey=[model.screen,model.workspace?.id||"",model.screen==="board"?model.board?.id||"":""].join("|");
+    const viewKey=`${screenKey}|${model.currentView}|${model.showArchived?1:0}`;
+    const region=this.root.querySelector(".board-view-region"), busy=Boolean(region?.querySelector('[aria-busy="true"]'));
+    if(this.motionKeys&&screenKey!==this.motionKeys.screen)this.root.querySelectorAll(".workspace > :not(.topbar)").forEach((el)=>this.play(el,"view-enter"));
+    else if(this.motionKeys&&viewKey!==this.motionKeys.view)this.play(region,"view-enter");
+    else if(this.motionKeys?.busy&&!busy&&viewKey===this.motionKeys.view)this.play(region,"content-ready");
+    this.motionKeys={screen:screenKey,view:viewKey,busy};
+  }
+  // Closing a menu, dialog or drawer: the page updates at once (nothing waits for an animation), while a copy of what
+  // closed fades out on a separate, inert layer that the page's own code and selectors never see (a shadow root).
+  exitLayer(){
+    if(this.exitHost?.isConnected)return this.exitHost;
+    if(typeof CSSStyleSheet!=="function"||!document.body.attachShadow)return null;
+    try{
+      const host=document.createElement("div");host.id="jarc-exit-layer";host.setAttribute("aria-hidden","true");host.inert=true;
+      const shadow=host.attachShadow({mode:"open"}), sheet=new CSSStyleSheet();
+      const rules=[...document.styleSheets].flatMap((s)=>{try{return [...s.cssRules].map((r)=>r.cssText);}catch{return [];}});
+      sheet.replaceSync(`:host{position:fixed;inset:0;z-index:69;pointer-events:none;contain:strict}${rules.join("\n")}`);
+      shadow.adoptedStyleSheets=[sheet];document.body.append(host);this.exitHost=host;return host;
+    }catch{return null;}
+  }
+  exitGhost(root){
+    if(!root?.children.length||this.reducedMotion())return;
+    const host=this.exitLayer();if(!host)return;
+    const layer=document.createElement("div");layer.className="exit-ghost";
+    for(const child of root.children){const clone=child.cloneNode(true);clone.querySelectorAll("[id]").forEach((el)=>el.removeAttribute("id"));clone.classList.add("is-exiting");layer.append(clone);}
+    host.shadowRoot.append(layer);
+    setTimeout(()=>layer.remove(),260);
+  }
+  // Loading placeholders shaped like the view that is loading (they appear only if loading takes over ~150 ms).
+  boardSkeleton(model){
+    const view=model.currentView, line=(w,cls="")=>`<span class="skeleton skeleton-text ${cls}" style="width:${w}"></span>`;
+    const wrap=(cls,inner,label="Loading records")=>`<section class="data-region skeleton-region ${cls}" aria-busy="true"><div role="status" aria-label="${label}">${inner}</div><span class="sr-only">${label}…</span></section>`;
+    if(view==="kanban")return wrap("skeleton-kanban",Array.from({length:4},(_,c)=>`<div class="skeleton-lane">${line("46%")}${Array.from({length:3-(c%2)},(_,i)=>`<div class="skeleton-card">${line(["78%","64%","70%"][i])}${line("42%","is-small")}</div>`).join("")}</div>`).join(""));
+    // The Calendar view is an agenda ("Records by date"): a header, then date cards.
+    if(view==="calendar")return wrap("skeleton-calendar",`<div class="skeleton-calendar-head">${line("130px")}${line("70px","is-small")}</div><div class="skeleton-agenda">${Array.from({length:6},(_,i)=>`<div class="skeleton-list-card">${line("34%","is-small")}${line(["62%","48%","70%"][i%3])}</div>`).join("")}</div>`);
+    if(view==="list")return wrap("skeleton-list",Array.from({length:6},(_,i)=>`<div class="skeleton-list-card">${line(["38%","52%","44%"][i%3])}${line(["62%","48%","70%"][i%3],"is-small")}</div>`).join(""));
+    return this.skeletonRows(model);
+  }
+  feedSkeleton(count=5){return `<div class="feed-skeleton" aria-busy="true" role="status" aria-label="Loading activity">${Array.from({length:count},(_,i)=>`<div class="feed-skeleton-item"><span class="skeleton skeleton-avatar"></span><span class="feed-skeleton-lines"><span class="skeleton skeleton-text" style="width:${[72,58,80,64,50][i%5]}%"></span><span class="skeleton skeleton-text is-small" style="width:${[30,24,36][i%3]}%"></span></span></div>`).join("")}<span class="sr-only">Loading activity…</span></div>`;}
+  skeletonRows(model,count=6){const cols=model.visibleColumns.length;return `<section class="data-region skeleton-region" aria-busy="true"><div class="group-title"><span class="skeleton skeleton-text" style="width:110px"></span></div><div class="table-wrap skeleton-table" role="status" aria-label="Loading records">${Array.from({length:count},(_,i)=>`<div class="skeleton-row">${Array.from({length:Math.min(cols,6)},(_,j)=>`<span class="skeleton skeleton-text" style="width:${[70,55,40,62,48,35][(i+j)%6]}%"></span>`).join("")}</div>`).join("")}</div><span class="sr-only">Loading records…</span></section>`;}
   showDensityMenu(model){document.querySelector("#overlay-root").innerHTML=`<div class="popover density-popover"><div class="popover-title"><strong>Table density</strong></div><button data-action="set-density" data-value="comfortable" class="${model.settings.density==="comfortable"?"selected":""}">Comfortable</button><button data-action="set-density" data-value="compact" class="${model.settings.density==="compact"?"selected":""}">Compact</button></div>`;}
   showViewOverflow(model){document.querySelector("#overlay-root").innerHTML=`<div class="popover view-overflow"><button data-action="manage-columns">${icon("columns")} Columns</button><button data-action="density-menu">${icon("list")} Density</button><button data-action="import">${icon("import")} Import records</button><button data-action="export" ${model.rows.length?"":"disabled"}>${icon("export")} Export records</button><button data-action="saved-views">${icon("star")} Saved views</button><button data-action="manage-groups">${icon("group")} Manage groups</button><button data-action="undo" ${model.canUndo?"":"disabled"}>Undo last change</button><button data-action="clear-filters">Reset view</button></div>`;}
-  closeOverlay() { const root=document.querySelector("#overlay-root"); if(root) { root.innerHTML = ""; delete root.dataset.open; } }
+  closeOverlay() { const root=document.querySelector("#overlay-root"); if(root) { this.exitGhost(root); root.innerHTML = ""; delete root.dataset.open; } }
   // action: true shows Undo (calls onUndo); {label, onClick} shows a custom action such as Retry.
   toast(message,action=false) {
     const toast=document.createElement("div");toast.className="toast";toast.setAttribute("role","status");toast.textContent=message;
     if(action){const button=document.createElement("button");button.type="button";button.textContent=action===true?"Undo":action.label;button.onclick=()=>{toast.remove();action===true?this.onUndo?.():action.onClick();};toast.append(button);}
-    document.querySelector("#toast-region").append(toast);setTimeout(()=>toast.remove(),action?8000:3500);
+    document.querySelector("#toast-region").append(toast);
+    // Leaves with a short fade (immediately with reduced motion); an action button removes it at once.
+    setTimeout(()=>{if(!toast.isConnected)return;if(this.reducedMotion())return toast.remove();toast.classList.add("is-leaving");setTimeout(()=>toast.remove(),180);},action?8000:3500);
     return toast;
   }
   // ---- Async UI helpers (Stage 8)

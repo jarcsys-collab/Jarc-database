@@ -7,7 +7,7 @@ class AppController {
     root.addEventListener("submit", (event) => { if(this.busy)event.preventDefault(); this.guard(()=>this.onSubmit(event)); }); // never a native submit, even while busy
     root.addEventListener("pointerdown", () => this.auth.touch());
     for (const type of ["dragover", "dragleave", "drop"]) root.addEventListener(type, (event) => this.onFileDrag(event));
-    this.uploads = new Map(); this.filesConfirm = null; this.filesNotice = null;
+    this.uploads = new Map(); this.filesConfirm = null; this.filesNotice = null; this.freshFiles = new Set(); this.fileSeq = new Map();
     root.addEventListener("keyup", (event) => { if (event.target.dataset?.action === "password-input") { const warning=document.querySelector("#caps-warning"); if(warning) warning.hidden=!event.getModifierState("CapsLock"); } });
     document.addEventListener("keydown", (event) => this.onKeydown(event));
     root.addEventListener("keydown",()=>this.auth.touch());
@@ -66,7 +66,7 @@ class AppController {
       if (this.model.profile.name !== this.auth.username || this.model.profile.email !== this.auth.email || this.model.profile.role !== role) this.model.updateProfile({ name: this.auth.username, email: this.auth.email, role });
     }
     if (this.entra && this.auth.userId) this.model.me = `user:${this.auth.userId}`;
-    this.root.onclick = null; this.ready = true; this.update();
+    this.root.onclick = null; this.ready = true; this.update(); this.offerMotion();
     this.loadPeople(); this.loadFeed(); this.startLive();
     if (!this.feedTimer && this.model.storage.adapter.loadActivityFeed) this.feedTimer = setInterval(() => { if (this.ready && document.visibilityState === "visible") this.loadFeed(); }, 60000);
   }
@@ -212,7 +212,7 @@ class AppController {
     this.auth.authenticated ? this.view.render(this.model) : this.view.renderLogin(this.auth,this.model); this.applyNav(); this.saveFeedback();
     this.refocus(focus); this.restoreScroll(scroll);
     if (this.ready && this.model.workspace && this.model.workspace.id !== this.peopleKey) this.loadPeople();
-    this.ensureAttachments();
+    this.ensureAttachments(); this.trackRows();
   }
   // Microsoft sign-in screens: "signed-out" | "expired" | "denied" | "error". Shown instead of the app.
   showEntraGate(state, options = {}) { this.entraGate = state; this.navOpen = false; this.applyNav(); this.view.renderEntraGate(state, this.model, options); }
@@ -360,7 +360,9 @@ class AppController {
     if (action === "add-column") this.view.showAddColumn(this.model);
     if (action === "column-editor") this.togglePanel(`column-${target.dataset.key}`,()=>this.view.showColumnEditor(this.model,target.dataset.key));
     if (action === "move-column") { const moved=this.model.moveColumn(target.dataset.key,target.dataset.direction); this.view.showColumnEditor(this.model,target.dataset.key); this.markPanel(`column-${target.dataset.key}`); this.view.toast(moved?"Column moved":"The primary record column stays first"); }
-    if (action === "preview-file") { const row=this.model.rows.find((r)=>r.id===this.model.idOf(target.dataset.id)), column=this.model.board.columns.find((c)=>c.key===target.dataset.field), file=this.model.attachments.get(target.dataset.file); if(row&&column&&file){this.view.showFilePreview(this.model,row,column,file);this.markPanel(`preview-${file.id}`);} return; }
+    if (action === "preview-file") { const row=this.model.rows.find((r)=>r.id===this.model.idOf(target.dataset.id)), column=this.model.board.columns.find((c)=>c.key===target.dataset.field), file=this.model.attachments.get(target.dataset.file); if(row&&column&&file){this.view.showFilePreview(this.model,row,column,file);this.markPanel(`preview-${file.id}`);this.watchPreview();} return; }
+    if (action === "download-file") { this.view.toast(`Downloading ${target.dataset.name||"file"}…`); return; } // the browser takes over (no preventDefault)
+    if (action === "retry-attachments") { const id=String(this.model.serverId(this.model.board?.id)); this.model.attachmentErrors.delete(id); this.model.attachmentBoards.delete(id); this.ensureAttachments(); this.refreshFilesCells(); return; }
     if (action === "back-to-files") { this.view.closeOverlay(); this.openFiles(target.dataset.id,target.dataset.field); return; }
     if (action === "request-remove-file") { this.filesConfirm={cell:this.filesCellKey(target.dataset.id,target.dataset.field),id:target.dataset.file}; this.refreshFiles(target.dataset.id,target.dataset.field); return; }
     if (action === "cancel-remove-file") { this.filesConfirm=null; this.refreshFiles(target.dataset.id,target.dataset.field); return; }
@@ -501,6 +503,7 @@ class AppController {
     if (action === "select-all") { this.model.visibleRows.forEach((row)=>event.target.checked?this.model.selected.add(row.id):this.model.selected.delete(row.id)); this.update(); }
     if (action === "density") { this.model.updateSetting("density",event.target.checked?"compact":"comfortable"); document.documentElement.dataset.density=this.model.settings.density; }
     if (action === "setting") { this.model.updateSetting(event.target.dataset.key,event.target.checked); this.update(); this.view.showSettings(this.model); }
+    if (action === "motion-preference") { if(this.model.setMotionPreference(event.target.value)){this.view.applyDisplay(this.model);this.update();this.view.showSettings(this.model,"appearance");this.view.toast(event.target.value==="full"?"Full animations on":event.target.value==="reduced"?"Reduced motion on":"Following your device's motion setting");} return; }
     if (action === "setting-select") { const key=event.target.dataset.key; const value=["density","fontSize"].includes(key)?event.target.value.toLowerCase():event.target.value; this.model.updateSetting(key,value); this.update(); this.view.showSettings(this.model,this.model.settings.settingsSection); }
     if (action === "board-title-inline") { this.model.renameBoard(this.model.currentBoardId,event.target.value); this.update(); this.view.toast("Board name saved"); }
     if (action === "import-file") this.importData(event.target.files[0]);
@@ -594,7 +597,8 @@ class AppController {
   }
 
   requestDeleteRecords(ids) { if (!ids.length) return; const files=this.model.board?this.model.boardFileCount(this.model.board,{recordIds:ids}):0; this.view.showConfirm(`Delete ${ids.length} record${ids.length===1?"":"s"}?`,files?`The selected data will be removed from this board, and their ${files} attached file${files===1?"":"s"} will be permanently deleted. Undo can restore the records but not the files.`:"The selected data will be removed from this board. Undo remains available afterward.","confirm-delete-records",ids.join(",")); }
-  deleteRecords(ids,button=null) { if (!ids.length) return; this.runBusy(button,()=>this.model.remove(ids),()=>{this.view.closeOverlay();this.update();this.view.toast("Record deleted",true);}); }
+  // Rows leave with a short slide once the server has confirmed the deletion, then the table re-renders.
+  deleteRecords(ids,button=null) { if (!ids.length) return; const rows=ids.map((id)=>this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"]`)); this.runBusy(button,()=>this.model.remove(ids),async()=>{this.view.closeOverlay();await this.animateOut(rows.filter((tr)=>tr?.isConnected));this.update();this.view.toast(`${ids.length===1?"Record":`${ids.length} records`} deleted`,true);}); }
   deleteBoard(id,button=null) { this.runBusy(button,()=>this.model.deleteBoard(id),()=>{this.view.closeOverlay();this.update();this.view.toast("Board deleted",true);}); }
   globalSearch(term) { if (!term) return; const match=this.model.allRecords.find((row)=>Object.values(row).some((value)=>String(value||"").toLowerCase().includes(term.toLowerCase()))); if (!match) { this.view.showMessage("No matching items",`No item matched “${term}”.`); return; } this.model.openBoard(match.boardId,match.workspaceId); this.model.query=term; this.view.closeOverlay(); this.update(); }
   runCommand(command) {
@@ -662,11 +666,17 @@ class AppController {
     const state=this.model.saveState||"saved";button.classList.toggle("save-error",state==="error");
     const offline=window.jarcStorage?.connection==="offline"; document.body.classList.toggle("storage-offline",offline);
     const live=this.liveState, server=["api","resource"].includes(this.model.storage.adapter.mode);
-    const shown=offline||live==="offline"?"offline":this.conflictState?"conflict":state==="error"?"error":state==="saving"?"saving":live==="reconnecting"||live==="connecting"?"reconnecting":live==="polling"?"polling":live==="live"?"live":"saved";
-    button.dataset.state=shown;
-    const labels={offline:"Offline — changes can't be saved",conflict:"Conflict — review the change",error:"Couldn't save · Retry",saving:"Saving…",reconnecting:"<i></i> Saved · Reconnecting…",polling:"<i></i> Saved · Checking for updates",live:"<i></i> Saved · Live",saved:`<i></i> ${server?"Saved":navigator.onLine?"Saved locally":"Offline · saved locally"}`};
+    const uploading=this.activeUploads();
+    const shown=offline||live==="offline"?"offline":this.conflictState?"conflict":state==="error"?"error":state==="saving"?"saving":uploading?"uploading":live==="reconnecting"||live==="connecting"?"reconnecting":live==="polling"?"polling":live==="live"?"live":"saved";
+    const labels={offline:"Offline — changes can't be saved",conflict:"Conflict — review the change",error:"Couldn't save · Retry",saving:"Saving…",uploading:`<span class="save-spinner" aria-hidden="true"></span> Uploading ${uploading} file${uploading===1?"":"s"}…`,reconnecting:"<i></i> Saved · Reconnecting…",polling:"<i></i> Saved · Checking for updates",live:"<i></i> Saved · Live",saved:`<i></i> ${server?"Saved":navigator.onLine?"Saved locally":"Offline · saved locally"}`};
     const tips={offline:"No connection. Changes can't be saved until you're back online.",conflict:"Someone else changed what you were editing.",error:"The last change wasn't saved. Click to try again.",saving:"Saving to JARC…",reconnecting:"Everything is saved. Reconnecting to live updates…",polling:"Everything is saved. Live updates are unavailable, so JARC checks for changes every 20 seconds.",live:"Everything is saved. Colleagues' changes appear automatically.",saved:server?"Everything is saved.":"Saved in this browser."};
-    button.innerHTML=labels[shown]; button.title=tips[shown]; button.setAttribute("aria-label",tips[shown]);
+    tips.uploading=`Uploading ${uploading} file${uploading===1?"":"s"}. Files appear for everyone once each upload finishes.`;
+    if(button.dataset.state===shown&&button.dataset.rendered===String(uploading))return; // unchanged: no flicker
+    button.dataset.state=shown;
+    const settled=["saving","uploading"].includes(this.lastSaveShown)&&["live","saved","polling","reconnecting"].includes(shown);
+    button.innerHTML=labels[shown]; button.title=tips[shown]; button.setAttribute("aria-label",tips[shown]); button.dataset.rendered=String(uploading);
+    if(settled)this.view.play(button,"just-saved");
+    this.lastSaveShown=shown;
 
 
   }
@@ -781,13 +791,18 @@ class AppController {
     const td=this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"] td[data-column-key="${CSS.escape(field)}"]`);
     if(!row||!column||!td)return;
     td.outerHTML=this.view.cell(row,column,this.model); this.saveFeedback();
+    this.view.play(this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"] td[data-column-key="${CSS.escape(field)}"]`),"just-changed");
     if(focus)this.cellButton(id,field)?.focus();
   }
   refreshBoard(){
     const region=this.root.querySelector(".board-view-region"); if(!region||this.model.screen!=="board"){this.update();return;}
     const focus=this.focusedControl(), scroll=this.scrollState();
+    const wasBusy=Boolean(region.querySelector('[aria-busy="true"]'));
     region.innerHTML=this.view.boardView(this.model);
-    this.refocus(focus); this.restoreScroll(scroll);
+    const busy=Boolean(region.querySelector('[aria-busy="true"]'));
+    if(wasBusy&&!busy)this.view.play(region,"content-ready"); // records finished loading: fade them in
+    if(this.view.motionKeys)this.view.motionKeys.busy=busy;
+    this.refocus(focus); this.restoreScroll(scroll); this.trackRows();
     const active=this.model.rows.filter((r)=>!r.archived).length, count=this.root.querySelector(".board-nav.selected .nav-count");
     if(count)count.textContent=active;
     this.root.querySelector('.board-actions [data-action="export"]')?.toggleAttribute("disabled",!this.model.rows.length);
@@ -800,11 +815,11 @@ class AppController {
   fileTypeOf(file){const byType=Object.values(AppController.FILE_TYPES).includes(file.type)?file.type:"";const ext=String(file.name||"").split(".").pop().toLowerCase();return byType||(file.type&&!/octet-stream/.test(file.type)?"":AppController.FILE_TYPES[ext]||"");}
   filesPanelName(id,field){return `files-${this.model.serverId(id)}-${field}`;}
   filesCellKey(id,field){return `${this.model.serverId(id)}:${field}`;}
-  filesState(id,field){return {uploads:this.uploads.get(this.filesCellKey(id,field))||[],confirm:this.filesConfirm?.cell===this.filesCellKey(id,field)?this.filesConfirm.id:null,notice:this.filesNotice?.cell===this.filesCellKey(id,field)?this.filesNotice.text:""};}
+  filesState(id,field){return {uploads:this.uploads.get(this.filesCellKey(id,field))||[],confirm:this.filesConfirm?.cell===this.filesCellKey(id,field)?this.filesConfirm.id:null,notice:this.filesNotice?.cell===this.filesCellKey(id,field)?this.filesNotice.text:"",fresh:this.freshFiles};}
   openFiles(id,field){
     const row=this.model.rows.find((r)=>r.id===this.model.idOf(id)), column=this.model.board.columns.find((c)=>c.key===field);
     if(!row||!column)return;
-    this.filesConfirm=null;
+    this.filesConfirm=null; this.filesOpen={id,field};
     return this.togglePanel(this.filesPanelName(id,field),()=>this.view.showFilesPanel(this.model,row,column,this.filesState(id,field)));
   }
   // Re-draws the panel if it is open for this cell (keeps it open), and the cell itself.
@@ -851,12 +866,16 @@ class AppController {
     adapter.uploadAttachment(id,field,blob,{name:u.name,key:u.key,onProgress:(p)=>{u.progress=p;this.view.updateUploadProgress(u);}}).then((attachment)=>{
       this.model.addAttachment(attachment);
       this.uploads.set(cell,(this.uploads.get(cell)||[]).filter((x)=>x!==u));
-      this.refreshFiles(id,field);
-      this.view.toast(`Added ${u.name}`);
+      // Confirmed by the server: marked "Uploaded" in the open panel; a toast only when the panel is closed.
+      this.freshFiles.add(attachment.id); setTimeout(()=>this.freshFiles.delete(attachment.id),4000);
+      const open=document.querySelector("#overlay-root")?.dataset.open===this.filesPanelName(id,field);
+      this.refreshFiles(id,field); this.saveFeedback();
+      if(!open)this.view.toast(`Added ${u.name}`);
     },(failure)=>{
       u.state="failed";u.error=failure?.message||"The upload failed. Try again.";
       u.retryable=![400,404,413,415,507].includes(failure?.status)&&failure?.code!=="TOO_MANY_FILES";
-      this.refreshFiles(id,field);
+      this.refreshFiles(id,field); this.saveFeedback();
+      if(document.querySelector("#overlay-root")?.dataset.open!==this.filesPanelName(id,field))this.view.toast(`${u.name} wasn't uploaded. Open the cell to try again.`);
     });
   }
   async removeFile(id,field,fileId){
@@ -876,8 +895,17 @@ class AppController {
     if(!this.ready||this.model.screen!=="board"||!board||!this.model.filesAvailable()||!board.columns.some((c)=>c.type==="files"))return;
     const id=String(this.model.serverId(board.id));
     if(this.model.attachmentBoards.has(id)||!adapter.isSavedBoard(id))return;
-    this.model.attachmentBoards.add(id);
-    adapter.loadAttachments(id).then((items)=>{this.model.replaceAttachments(items,(a)=>String(a.boardId)===id);this.refreshBoardWhenIdle();},()=>this.model.attachmentBoards.delete(id));
+    // Loading → shown in the Files cells and panel; a failure is shown (with Try again) instead of retrying on every render.
+    this.model.attachmentBoards.add(id); this.model.attachmentLoading.add(id); this.model.attachmentErrors.delete(id);
+    const startedAt=Date.now();
+    adapter.loadAttachments(id).then((items)=>{this.model.replaceBoardAttachments(id,items,startedAt);},()=>{this.model.attachmentErrors.add(id);}).finally(()=>{this.model.attachmentLoading.delete(id);this.refreshFilesCells();});
+  }
+  // Redraws every Files cell on the open board, and the Files panel if one is open.
+  refreshFilesCells(){
+    if(this.model.screen!=="board"||!this.model.board)return;
+    const columns=this.model.board.columns.filter((c)=>c.type==="files");
+    for(const tr of this.root.querySelectorAll("tr[data-record-context]"))for(const c of columns){const td=tr.querySelector(`td[data-column-key="${CSS.escape(c.key)}"]`);if(td){const row=this.model.rows.find((r)=>String(r.id)===tr.dataset.recordContext);if(row)td.outerHTML=this.view.cell(row,c,this.model);}}
+    if(this.filesOpen)this.refreshFiles(this.filesOpen.id,this.filesOpen.field);
   }
   // Live: a colleague added or removed a file → re-read that record's files and redraw its cells (and an open panel).
   async applyRemoteFiles(events){
@@ -885,8 +913,11 @@ class AppController {
     const records=[...new Set(events.filter((e)=>e.recordId&&this.model.attachmentBoards.has(String(e.boardId))).map((e)=>e.recordId))];
     for(const recordId of records){
       let items;
+      // Answers for the same record can arrive out of order: only the latest request's answer is applied.
+      const seq=(this.fileSeq.get(String(recordId))||0)+1; this.fileSeq.set(String(recordId),seq);
       try{items=await adapter.loadRecordAttachments(recordId);}catch{this.model.attachmentBoards.clear();continue;} // reloaded when the connection is back
-      this.model.replaceAttachments(items,(a)=>String(a.recordId)===String(recordId));
+      if(this.fileSeq.get(String(recordId))!==seq)continue;
+      this.model.replaceRecordAttachments(recordId,items);
       if(this.model.screen!=="board"||!this.model.board)continue;
       for(const column of this.model.board.columns.filter((c)=>c.type==="files")){
         this.refreshFiles(recordId,column.key);
@@ -908,6 +939,41 @@ class AppController {
     const [id,field]=zone.matches(".file-drop")?zone.dataset.dropCell.split(":"):[zone.querySelector(".cell-display")?.dataset.id,zone.dataset.columnKey];
     if(id&&field)this.addFiles(id,field,[...event.dataTransfer.files]);
   }
+  // Animations are on by default. A device that asks for reduced motion is respected until the person knowingly
+  // chooses Full animations: once (never again after any choice or dismissal) they are offered that choice.
+  offerMotion(){
+    if(!this.auth.authenticated||this.model.motionPreference()||this.model.settings.motionPromptSeen||!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches)return;
+    this.model.updateSetting("motionPromptSeen",true);
+    this.view.toast("Your device asks for reduced motion, so JARC shows fewer animations.",{label:"Use full animations",onClick:()=>{this.model.setMotionPreference("full");this.view.applyDisplay(this.model);this.view.toast("Full animations on. Change this any time in Settings → Appearance.");}});
+  }
+  // ---- Motion (Phase 4). New rows (yours, a colleague's, an undo) slide in once; rows confirmed deleted by the server
+  // slide out before the table re-renders. Nothing waits for an animation before saving.
+  trackRows(){
+    const board=this.model.screen==="board"?this.model.board:null;
+    if(!board){this.rowMemory=null;return;}
+    const key=String(this.model.serverId(board.id)), ids=this.model.rows.map((r)=>String(r.id));
+    if(!this.rowMemory||this.rowMemory.key!==key||this.model.boardLoadState().state!=="full"&&this.model.boardLoadState().state!=="partial"){this.rowMemory={key,ids:new Set(ids)};return;}
+    const known=new Set([...this.rowMemory.ids].map((id)=>this.model.serverId(id)));
+    const fresh=ids.filter((id)=>!known.has(this.model.serverId(id)));
+    if(fresh.length&&fresh.length<=10)for(const id of fresh)this.view.play(this.root.querySelector(`tr[data-record-context="${CSS.escape(id)}"]`),"row-enter");
+    this.rowMemory={key,ids:new Set(ids)};
+  }
+  // Resolves when the elements have finished leaving (at most ~220 ms; at once with reduced motion).
+  animateOut(elements,className="row-exit"){
+    const list=elements.filter(Boolean);
+    if(!list.length||this.view.reducedMotion())return Promise.resolve();
+    return new Promise((resolve)=>{let left=list.length;const done=()=>{left-=1;if(left<=0)resolve();};for(const el of list){el.classList.add(className);el.addEventListener("animationend",done,{once:true});}setTimeout(resolve,240);});
+  }
+  // File previews: a loading state until the image or PDF has loaded, and a clear message if an image can't be shown.
+  watchPreview(){
+    const body=document.querySelector("#overlay-root .file-preview-body"), media=body?.querySelector(".file-preview-image, .file-preview-frame");
+    if(!media)return;
+    const settle=(state)=>{if(!body.isConnected)return;body.dataset.previewState=state;body.classList.remove("is-loading");};
+    if(media.matches("img")&&media.complete&&media.naturalWidth)return settle("ready");
+    media.addEventListener("load",()=>settle(media.matches("img")&&!media.naturalWidth?"error":"ready"),{once:true});
+    media.addEventListener("error",()=>settle("error"),{once:true});
+  }
+  activeUploads(){let n=0;for(const list of this.uploads?.values()||[])n+=list.filter((u)=>u.state==="uploading").length;return n;}
   openCell(button){
     const id=this.model.idOf(button.dataset.id), field=button.dataset.field, row=this.model.rows.find((r)=>r.id===id), column=this.model.board.columns.find((c)=>c.key===field);
     if(!row||!column)return;

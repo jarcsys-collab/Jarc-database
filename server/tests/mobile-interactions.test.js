@@ -130,6 +130,9 @@ describe("Mobile interactions (real app, headless browser)", { skip: BROWSER ? f
   });
 
   test("startup never shows a false “wasn't saved” error, and no screen scrolls sideways (320–1440 px)", async () => {
+    // Independent of this computer's motion setting: a device asking for reduced motion gets a one-time, intended
+    // animation offer at startup (tested in motion-preference.test.js), which would count as a toast here.
+    await browser.motionPreference("no-preference");
     for (const width of [...PHONES, 768, 1440]) {
       // A fresh start (nothing remembered in this browser) is when the open board's records arrive mid-save.
       await browser.evaluate("localStorage.clear()");

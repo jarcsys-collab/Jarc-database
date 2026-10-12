@@ -36,6 +36,10 @@ class BoardModel {
     ];
     // Files columns (resource mode): attachment metadata by ID, and the boards whose attachments are loaded.
     this.attachments = new Map(); this.attachmentIndex = null; this.attachmentBoards = new Set();
+    // Boards whose attachments are loading, or failed to load (shown in Files cells and the Files panel).
+    this.attachmentLoading = new Set(); this.attachmentErrors = new Set();
+    // When each record's files were last known to be current (newer than any board-wide list fetched before it).
+    this.attachmentStamps = new Map();
     // People columns: user references ("user:<id>") → { displayName, email, isYou }, from the server's directory.
     this.people = new Map(); this.me = null; this.peopleLoaded = false;
     // Resource mode: the shared activity log (who changed what), newest first; null until loaded.
@@ -432,6 +436,10 @@ class BoardModel {
   deleteView(id) { this.board.savedViews = this.board.savedViews.filter((view) => view.id !== this.idOf(id)); if(this.activeSavedViewId===this.idOf(id))this.resetMainView(); this.save({op:"updateViews",boardId:this.board.id}); }
   toggleRow(id) { this.selected.has(id) ? this.selected.delete(id) : this.selected.add(id); }
   log(text) { if (!this.board) return; const at = new Date().toISOString(); this.board.updatedAt=at; this.board.activity.unshift({ id: Date.now(), text, at }); this.board.activity = this.board.activity.slice(0, 80); if(!this.settings.muteActivity)this.notifications.unshift({ id: Date.now() + 1, text, boardId: this.board.id, workspaceId: this.workspace.id, at, read: false }); this.notifications = this.notifications.slice(0,50); }
+  // Animations: "full" | "reduced" | "system", or null when the person hasn't chosen (then: full animations unless
+  // their device asks for reduced motion). An earlier "Reduce motion" choice (reduceMotion: true) counts as Reduced.
+  motionPreference(){const m=this.settings.motion;return ["full","reduced","system"].includes(m)?m:this.settings.reduceMotion===true?"reduced":null;}
+  setMotionPreference(value){if(!["full","reduced","system"].includes(value))return false;this.settings.motion=value;this.settings.reduceMotion=value==="reduced";this.settings.motionPromptSeen=true;this.save({op:"updateUserState"});return true;}
   updateSetting(key, value) { this.settings[key] = value; this.save({op:"updateUserState"}); }
   updateProfile(values) { Object.assign(this.profile, values); const parts=this.profile.name.trim().split(/\s+/); this.profile.initials=(parts[0]?.[0] || "U") + (parts[1]?.[0] || ""); this.profile.initials=this.profile.initials.toUpperCase(); this.save({op:"updateUserState"}); }
   syncUsername(username) { const name=String(username || "medtek").trim().toLowerCase(); this.profile.name=name; this.profile.initials=(name[0] || "M").toUpperCase(); this.save({op:"updateUserState"}); }
@@ -592,8 +600,13 @@ class BoardModel {
   replaceAttachments(items,match){for(const [id,a] of this.attachments)if(match(a))this.attachments.delete(id);for(const a of items)this.attachments.set(a.id,a);this.attachmentIndex=null;}
   // Files on a board (optionally only in one column, or on some records), for delete confirmations.
   boardFileCount(board,{columnKey=null,recordIds=null}={}){const boardId=this.serverId(board.id),records=recordIds?new Set(recordIds.map((id)=>this.serverId(id))):null;let n=0;for(const a of this.attachments.values())if(String(a.boardId)===boardId&&(!columnKey||a.columnKey===columnKey)&&(!records||records.has(String(a.recordId))))n+=1;return n;}
-  addAttachment(a){this.attachments.set(a.id,a);this.attachmentIndex=null;}
-  removeAttachment(id){this.attachments.delete(id);this.attachmentIndex=null;}
+  addAttachment(a){this.attachments.set(a.id,a);this.attachmentIndex=null;this.attachmentStamps.set(String(a.recordId),Date.now());}
+  removeAttachment(id){const a=this.attachments.get(id);if(a)this.attachmentStamps.set(String(a.recordId),Date.now());this.attachments.delete(id);this.attachmentIndex=null;}
+  // One record's files, freshly read from the server.
+  replaceRecordAttachments(recordId,items){this.replaceAttachments(items,(a)=>String(a.recordId)===String(recordId));this.attachmentStamps.set(String(recordId),Date.now());}
+  // A board's files as read when the request started (startedAt). Records whose files changed since then keep their
+  // newer list: a slow board-wide answer never brings back an older state.
+  replaceBoardAttachments(boardId,items,startedAt){const newer=(rid)=>(this.attachmentStamps.get(String(rid))||0)>=startedAt;this.replaceAttachments(items.filter((a)=>!newer(a.recordId)),(a)=>String(a.boardId)===String(boardId)&&!newer(a.recordId));}
   columnType(type){return this.columnTypes.find((item)=>item.type===type);}
   // Options a brand-new column starts with. Existing columns with no stored options keep their legacy defaults.
   newColumnOptions(type){return type==="status"?["New","In Progress","Waiting","Completed","Cancelled"]:type==="priority"?["Low","Medium","High","Critical"]:[];}

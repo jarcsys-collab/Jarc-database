@@ -938,7 +938,7 @@ body.nav-collapsed .sidebar:not(.open) .sidebar-settings span {
   .nav-toggle[aria-expanded="true"] .nav-toggle-open { display: none; }
   .nav-toggle[aria-expanded="true"] .nav-toggle-close { display: inline; }
 }
-@media (prefers-reduced-motion: reduce) { html.nav-drawer-open .nav-backdrop { animation: none; } }
+@media (prefers-reduced-motion: reduce) { html:not([data-motion=full]).nav-drawer-open .nav-backdrop { animation: none; } }
 
 /* Touch devices (phones, tablets): no hover, coarse pointer. Desktop is unaffected.
    - Text fields use at least 16 px: iOS Safari zooms the whole page when a smaller field gets focus, and doesn't
@@ -1188,3 +1188,99 @@ td.cell[data-type=files].is-drop-target, .file-drop.is-drop-target { outline: 2p
 .file-preview-image { max-width: 100%; max-height: calc(100vh - 230px); object-fit: contain; }
 .file-preview-frame { width: 100%; height: calc(100vh - 230px); border: 0; background: #fff; }
 .file-preview-modal a.button { text-decoration: none; }
+
+/* Phase 4 — motion system.
+   Tokens: every animation below uses these. Durations follow the size of what moves (hover 100–140 ms, menus
+   140–180 ms, drawers 220–240 ms, screens 180 ms). Only opacity and transform animate (no layout animation).
+   Settings → Appearance → Animations: Full animations (html[data-motion=full], also overriding a device's reduced-
+   motion request), Reduced motion (data-motion=reduced) or Follow system (data-motion=system, the default when no
+   choice is saved: full unless the device asks for reduced motion). The global rules in styles.css turn motion off;
+   JavaScript checks the same setting (AppView.reducedMotion) before playing or waiting for anything.
+   -------------------------------------------------------------------------- */
+:root {
+  --dur-instant: 100ms; --dur-fast: 140ms; --dur-base: 180ms; --dur-slow: 240ms;
+  --ease-standard: cubic-bezier(.2, 0, 0, 1); --ease-out: cubic-bezier(.2, .8, .2, 1); --ease-in: cubic-bezier(.4, 0, 1, 1);
+  --motion-fast: var(--dur-fast); --motion-base: var(--dur-base);
+  --skeleton-delay: 150ms; /* skeletons appear only if loading takes longer than this (no flicker on fast loads) */
+}
+/* Entrances (existing ones re-tuned to the tokens). */
+.popover, .profile-popover { animation: jarc-pop-in var(--dur-base) var(--ease-out); }
+.modal, .settings-window { animation: jarc-modal-in var(--dur-base) var(--ease-out); }
+.overlay { animation: jarc-fade-in var(--dur-fast) var(--ease-standard); }
+.record-drawer, .settings-drawer { animation: jarc-drawer-in var(--dur-slow) var(--ease-out); }
+.toast { animation: jarc-toast-in var(--dur-base) var(--ease-out); }
+.ui-tooltip { animation: jarc-fade-in var(--dur-fast) var(--ease-standard); }
+/* Navigation: another screen or board, another view, records finished loading. */
+.view-enter { animation: jarc-view-enter var(--dur-base) var(--ease-out); }
+.content-ready { animation: jarc-fade-in var(--dur-base) var(--ease-standard); }
+/* Records: new rows slide in once; deleted rows slide out after the server confirms. */
+tr.row-enter > td { animation: jarc-row-enter var(--dur-slow) var(--ease-out); }
+tr.row-enter > td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+tr.row-exit { pointer-events: none; }
+tr.row-exit > td { animation: jarc-row-exit var(--dur-base) var(--ease-in) forwards; }
+/* Cells: a changed label or tick settles in; everything else changes instantly (typing is never animated). */
+.just-changed .cell-label { animation: jarc-settle var(--dur-base) var(--ease-out); }
+.just-changed .cell-checkbox.is-checked .icon { animation: jarc-tick var(--dur-base) var(--ease-out); }
+.just-changed .person-avatar, .just-changed .chip { animation: jarc-fade-in var(--dur-base) var(--ease-standard); }
+/* Exits: a copy of what closed fades out on an inert layer (AppView.exitGhost); the page itself never waits. */
+.is-exiting.popover, .is-exiting.profile-popover { animation: jarc-pop-out var(--dur-fast) var(--ease-in) forwards; }
+.is-exiting.overlay { animation: jarc-fade-out var(--dur-base) var(--ease-in) forwards; }
+.is-exiting .modal, .is-exiting .settings-window { animation: jarc-modal-out var(--dur-fast) var(--ease-in) forwards; }
+.is-exiting .record-drawer, .is-exiting .settings-drawer { animation: jarc-drawer-out var(--dur-base) var(--ease-in) forwards; }
+.toast.is-leaving { animation: jarc-toast-out var(--dur-base) var(--ease-in) forwards; }
+/* Buttons and menus: quick colour/press feedback. */
+.button, .icon-button, .tool-button, .nav-item, .tree-item, .popover > button, .cell-option, .chooser-option, .file-open { transition: background-color var(--dur-instant) ease, color var(--dur-instant) ease, border-color var(--dur-instant) ease, box-shadow var(--dur-fast) ease, transform var(--dur-instant) ease; }
+.button:active:not(:disabled), .icon-button:active:not(:disabled), .tool-button:active:not(:disabled), .cell-option:active, .popover > button:active:not(:disabled) { transform: scale(.97); }
+/* Save indicator: a spinner while uploading; the status dot settles once when a save is confirmed. */
+.save-spinner { display: inline-block; width: 10px; height: 10px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: jarc-spin .8s linear infinite; vertical-align: -1px; }
+.save-state.just-saved i { animation: jarc-settle var(--dur-slow) var(--ease-out); }
+html[data-motion=reduced] .save-spinner { animation-duration: 2.4s; }
+
+/* Loading placeholders, shaped like the content they stand for. */
+.skeleton-region, .feed-skeleton, .file-list-skeleton { animation: jarc-skeleton-reveal var(--dur-fast) ease var(--skeleton-delay) both; }
+.skeleton-kanban > [role=status] { display: grid; grid-template-columns: repeat(4, minmax(200px, 1fr)); gap: 14px; overflow: hidden; }
+.skeleton-lane { display: grid; align-content: start; gap: 10px; padding: 12px; border-radius: var(--radius-md); background: var(--surface-2); }
+.skeleton-card { display: grid; gap: 8px; padding: 14px 12px; border-radius: var(--radius-md); background: var(--surface); border: 1px solid var(--line); }
+.skeleton-calendar > [role=status] { padding: 0; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
+.skeleton-calendar-head { display: flex; justify-content: space-between; align-items: center; padding: 16px; border-bottom: 1px solid var(--line); }
+.skeleton-agenda { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; padding: 14px 16px; }
+.skeleton-list > [role=status] { display: grid; gap: 8px; }
+.skeleton-list-card { display: grid; gap: 8px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
+.skeleton.is-small, .skeleton-text.is-small { height: 8px; }
+.feed-skeleton { display: grid; gap: 4px; padding: 8px 4px; }
+.feed-skeleton-item { display: flex; gap: 12px; align-items: center; padding: 10px 8px; }
+.feed-skeleton-lines { display: grid; gap: 8px; flex: 1; }
+@media (max-width: 760px) { .skeleton-kanban > [role=status] { grid-template-columns: repeat(2, minmax(160px, 1fr)); } }
+
+/* Files: loading, failure, success and preview states. */
+.file-skeleton { width: 28px; height: 28px; border-radius: 5px; }
+.files-error { position: relative; color: var(--warning); }
+.files-error em { position: absolute; top: -6px; right: -7px; font-size: 10px; font-style: normal; font-weight: 800; }
+.file-list-skeleton .file-row { gap: 10px; }
+.file-list-skeleton .file-thumb { width: 40px; height: 40px; border: 0; }
+.file-load-error { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 8px 8px; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-2); color: var(--text); font-size: var(--fs-sm); }
+.file-row.is-fresh { animation: jarc-row-enter var(--dur-slow) var(--ease-out); }
+.file-done { display: inline-flex; align-items: center; gap: 3px; margin-left: 8px; padding: 1px 6px; border-radius: var(--radius-pill); background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); font-size: 10.5px; font-weight: 650; vertical-align: 1px; }
+.file-done .icon { width: 10px; height: 10px; stroke-width: 3; }
+.file-row.is-uploading .file-thumb { animation: jarc-pulse 1.4s ease-in-out infinite; }
+.file-preview-body { position: relative; }
+.file-preview-status, .file-preview-failed { position: absolute; inset: 0; display: none; place-content: center; justify-items: center; gap: 10px; color: var(--muted); font-size: var(--fs-sm); text-align: center; padding: 24px; }
+.file-preview-body.is-loading .file-preview-status { display: grid; animation: jarc-skeleton-reveal var(--dur-fast) ease var(--skeleton-delay) both; }
+.file-preview-body.is-loading .file-preview-image, .file-preview-body.is-loading .file-preview-frame { opacity: 0; }
+.file-preview-image, .file-preview-frame { transition: opacity var(--dur-base) var(--ease-standard); }
+.file-preview-body[data-preview-state=error] .file-preview-failed { display: grid; }
+.file-preview-body[data-preview-state=error] .file-preview-image { display: none; }
+.file-preview-failed .icon { width: 28px; height: 28px; }
+
+@keyframes jarc-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes jarc-fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes jarc-view-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes jarc-row-enter { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@keyframes jarc-row-exit { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(-12px); } }
+@keyframes jarc-settle { from { opacity: .55; transform: scale(.96); } to { opacity: 1; transform: none; } }
+@keyframes jarc-tick { from { transform: scale(.4); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes jarc-pop-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-4px) scale(.98); } }
+@keyframes jarc-modal-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(6px) scale(.985); } }
+@keyframes jarc-drawer-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(32px); } }
+@keyframes jarc-toast-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(6px); } }
+@keyframes jarc-skeleton-reveal { from { opacity: 0; } to { opacity: 1; } }
