@@ -8,6 +8,7 @@
 // Responses use `id` (string), never `_id`, and ISO 8601 dates. Single resources are wrapped ({ workspace },
 // { board }, { record }); lists are { items } (records add nextCursor and limit).
 const express = require("express");
+const { ObjectId } = require("mongodb");
 const { parseId, versionParam, allowOnly, queryString, fail, isSafeKey, requireBody, isObject } = require("../validation/common");
 const { GROUP_ID, optionsPlan } = require("../domain/board-schema");
 const validate = require("../validation/resources");
@@ -22,6 +23,9 @@ function resourceRoutes({ services, access }) {
   const workspaceId = (req) => parseId(req.params.workspaceId, "workspaceId");
   const boardId = (req) => parseId(req.params.boardId, "boardId");
   const recordId = (req) => parseId(req.params.recordId, "recordId");
+  // Who may be named in a People cell: everyone active under development_shared (and for the local developer),
+  // otherwise the record's workspace's active members — the same people GET /workspaces/:id/people offers.
+  const peopleRule = (req) => ({ everyone: access.shared || req.actor.kind === "development" });
 
   // ---- Workspaces
   // Only the workspaces the caller belongs to (system admins, and everyone under development_shared: all), each with
@@ -91,17 +95,17 @@ function resourceRoutes({ services, access }) {
   router.post("/boards/:boardId/records", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "MEMBER");
     noQuery(req);
-    send(res, 201, { record: recordToApi(await services.records.create(board._id, req.body, req.actor)) });
+    send(res, 201, { record: recordToApi(await services.records.create(board._id, req.body, req.actor, peopleRule(req))) });
   });
   router.post("/boards/:boardId/records/batch", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "MEMBER");
     noQuery(req);
-    send(res, 201, { items: (await services.records.createMany(board._id, req.body, req.actor)).map(recordToApi) });
+    send(res, 201, { items: (await services.records.createMany(board._id, req.body, req.actor, peopleRule(req))).map(recordToApi) });
   });
   router.patch("/boards/:boardId/records", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "MEMBER");
     noQuery(req);
-    send(res, 200, { items: (await services.records.updateMany(board._id, req.body, req.actor)).map(recordToApi) });
+    send(res, 200, { items: (await services.records.updateMany(board._id, req.body, req.actor, peopleRule(req))).map(recordToApi) });
   });
   router.post("/boards/:boardId/records/delete", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "MEMBER");
@@ -165,7 +169,7 @@ function resourceRoutes({ services, access }) {
   router.patch("/records/:recordId", async (req, res) => {
     const { record } = await access.record(req.actor, recordId(req), "MEMBER");
     noQuery(req);
-    send(res, 200, { record: recordToApi(await services.records.update(record._id, req.body, req.actor)) });
+    send(res, 200, { record: recordToApi(await services.records.update(record._id, req.body, req.actor, peopleRule(req))) });
   });
   router.delete("/records/:recordId", async (req, res) => {
     const { record } = await access.record(req.actor, recordId(req), "MEMBER");
@@ -181,6 +185,35 @@ function resourceRoutes({ services, access }) {
     if (!["true", "false"].includes(dryRun)) fail("dryRun must be true or false.");
     const result = await services.imports.run(req.body, { dryRun: dryRun === "true", actor: req.actor });
     send(res, result.dryRun ? 200 : 201, result);
+  });
+
+  // ---- Notification feed: the activity log of every workspace the caller can see, newest first. Each entry names
+  // its actor with the ID and the display-name snapshot stored when the change was made (null for older entries).
+  router.get("/activity", async (req, res) => {
+    allowOnly(req.query, ["limit", "before"], "the query");
+    const limitText = queryString(req.query.limit, "limit"), beforeText = queryString(req.query.before, "before");
+    if (limitText !== undefined && (!/^\d{1,3}$/.test(limitText) || Number(limitText) < 1 || Number(limitText) > 100)) fail("limit must be a whole number from 1 to 100.");
+    const before = beforeText === undefined ? null : new Date(beforeText);
+    if (before && Number.isNaN(before.getTime())) fail("before must be a date and time.");
+    const roles = await access.visibleRoles(req.actor);
+    const workspaceIds = roles ? [...roles.keys()].map((id) => new ObjectId(id)) : null;
+    const items = workspaceIds && !workspaceIds.length ? [] : await services.activity.recent({ workspaceIds, limit: limitText === undefined ? 50 : Number(limitText), before });
+    send(res, 200, { items: items.map(activityToApi) });
+  });
+
+  // ---- People who can be assigned in a workspace (People columns). development_shared, and the local developer:
+  // every active JARC user (all from the configured Microsoft tenant); role_based: the workspace's members.
+  router.get("/workspaces/:workspaceId/people", async (req, res) => {
+    const { workspace } = await access.workspace(req.actor, workspaceId(req), "VIEWER");
+    allowOnly(req.query, ["q"], "the query");
+    const q = (queryString(req.query.q, "q") ?? "").trim().toLowerCase().slice(0, 100);
+    const everyone = access.shared || req.actor.kind === "development";
+    const users = everyone ? await services.people.active() : await services.people.members(workspace._id);
+    const items = users
+      .filter((u) => u.status === "active" && (!q || `${u.displayName || ""} ${u.email || ""}`.toLowerCase().includes(q)))
+      .map((u) => ({ id: `user:${u._id.toHexString()}`, displayName: u.displayName || u.email || "Unnamed user", email: u.email || null, isYou: u._id.equals(req.actor.userId) }))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+    send(res, 200, { items });
   });
 
   return router;

@@ -24,7 +24,7 @@ class WorkspaceService {
     await this.connection.withTransaction(async (session) => {
       await this.repos.workspaces.insert(doc, { session });
       await this.repos.memberships.add({ workspaceId: doc._id, userId: actor.userId, role: "WORKSPACE_ADMIN", now }, { session });
-      await this.repos.activities.append(activityEntry({ workspaceId: doc._id, actorUserId: actor.userId, action: "workspace.created", entityType: "workspace", entityId: doc._id, summary: `Created workspace ${doc.name}`, now }), { session });
+      await this.repos.activities.append(activityEntry({ workspaceId: doc._id, actorUserId: actor.userId, actorName: actor.displayName, action: "workspace.created", entityType: "workspace", entityId: doc._id, summary: `Created workspace ${doc.name}`, now }), { session });
     });
     return doc;
   }
@@ -35,7 +35,7 @@ class WorkspaceService {
     const before = await this.repos.workspaces.updateVersioned(id, expectedVersion, { ...set, updatedAt: now });
     if (!before) throw await missingOrStale(this.repos.workspaces, id, "workspace");
     const after = { ...before, ...set, updatedAt: now, version: before.version + 1 };
-    await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: id, actorUserId: actor.userId, action: "workspace.updated", entityType: "workspace", entityId: id, changes: fieldChanges(before, after, Object.keys(set)), now }));
+    await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: id, actorUserId: actor.userId, actorName: actor.displayName, action: "workspace.updated", entityType: "workspace", entityId: id, changes: fieldChanges(before, after, Object.keys(set)), now }));
     return after;
   }
 
@@ -53,7 +53,7 @@ class WorkspaceService {
       const boards = await this.repos.boards.deleteByWorkspace(id, { session });
       const memberships = await this.repos.memberships.deleteByWorkspace(id, { session });
       if (!await this.repos.workspaces.deleteVersioned(id, expectedVersion, { session })) throw conflict("workspace", workspace);
-      await this.repos.activities.append(activityEntry({ workspaceId: id, actorUserId: actor.userId, action: "workspace.deleted", entityType: "workspace", entityId: id, summary: `Deleted workspace ${workspace.name} with ${boards} boards and ${records} records`, now }), { session });
+      await this.repos.activities.append(activityEntry({ workspaceId: id, actorUserId: actor.userId, actorName: actor.displayName, action: "workspace.deleted", entityType: "workspace", entityId: id, summary: `Deleted workspace ${workspace.name} with ${boards} boards and ${records} records`, now }), { session });
       return { boards, records, memberships };
     });
     removed.records += await sweepAfterCommit(this.logger, "workspace records", () => this.repos.records.deleteByWorkspace(id));

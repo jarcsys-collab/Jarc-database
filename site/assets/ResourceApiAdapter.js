@@ -87,8 +87,8 @@ class ResourceApiAdapter {
   static FULL_LOAD_LIMIT = 2000;   // a board up to this size is loaded completely; larger boards load in steps
   static BATCH_LIMIT = 5000;       // records per batch request (the server's limit)
   static USER_KEY = "jarc-resource-user";
-  static USER_FIELDS = Object.freeze(["currentWorkspaceId", "currentBoardId", "currentView", "screen", "settings", "profile", "notifications", "recentBoards", "recentRecords", "recentCommands"]);
-  static COLUMN_FIELDS = Object.freeze(["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection"]);
+  static USER_FIELDS = Object.freeze(["currentWorkspaceId", "currentBoardId", "currentView", "screen", "settings", "profile", "notifications", "recentBoards", "recentRecords", "recentCommands", "feedSeenAt"]);
+  static COLUMN_FIELDS = Object.freeze(["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection", "colors", "multiple"]);
   static OPTION_TYPES = Object.freeze(["status", "dropdown", "priority"]);
   static FALLBACK_OPTIONS = Object.freeze({ status: ["New", "In Progress", "Waiting", "Completed", "Cancelled", "Review", "Defective", "Clear"], priority: ["Low", "Medium", "High", "Critical"] });
   // Deleting shared data is only expected from these operations. Anything else that would delete server data (for
@@ -234,6 +234,33 @@ class ResourceApiAdapter {
     board.load.cursor = cursor || null;
     return ids;
   }
+  // ---- People who can be assigned in a workspace (People columns): [{ id: "user:<id>", displayName, email, isYou }].
+  async loadPeople(workspaceId) {
+    const id = this.resolve(workspaceId);
+    if (!this.workspaces.has(String(id))) return [];
+    const { items } = await this.request("GET", `/workspaces/${id}/people`);
+    return items;
+  }
+
+  // ---- Notification feed: the shared activity log of every workspace this person can see, newest first. Each item
+  // names who made the change (ID + the display name stored with the change; "Unknown user" for older entries).
+  async loadActivityFeed({ limit = 50 } = {}) {
+    const { items } = await this.request("GET", `/activity?limit=${limit}`);
+    return items.map((e) => {
+      const board = e.boardId ? this.boards.get(e.boardId) : null, workspace = e.workspaceId ? this.workspaces.get(e.workspaceId) : null;
+      return {
+        id: e.id, at: e.createdAt, action: e.action, actorId: e.actorUserId ? `user:${e.actorUserId}` : null, actorName: e.actorName || null,
+        text: ResourceApiAdapter.activityText(e, board), workspaceId: e.workspaceId, workspaceName: workspace?.name || "", boardId: e.boardId, boardName: board?.name || "",
+        recordId: e.recordId, recordName: e.recordId ? String(this.records.get(e.recordId)?.values?.serial ?? "") : "",
+        assigned: (e.changes || []).filter((c) => { const col = board?.columns.find((k) => `values.${k.key}` === c.field); return col?.type === "owner" && Array.isArray(c.to); }).map((c) => ({ to: c.to, from: Array.isArray(c.from) ? c.from : [] }))
+      };
+    });
+  }
+  static activityText(e, board) {
+    const label = (field) => (field.startsWith("values.") ? board?.columns.find((c) => c.key === field.slice(7))?.label || field.slice(7) : field === "groupId" ? "Group" : field.charAt(0).toUpperCase() + field.slice(1));
+    return e.summary || ({ "record.created": "Created a record", "record.deleted": "Deleted a record", "record.updated": e.changes?.length ? `Changed ${e.changes.map((c) => label(c.field)).join(", ")}` : "Updated a record", "workspace.created": "Created the workspace", "workspace.updated": "Updated the workspace", "workspace.deleted": "Deleted the workspace", "board.created": "Created the board", "board.updated": "Updated the board", "board.deleted": "Deleted the board" })[e.action] || e.action.replace(/[._]/g, " ");
+  }
+
   // Board history (read-only). Shown in the board's activity and the record drawer; failures are not fatal.
   async fetchActivity(boardId) {
     const board = this.boards.get(boardId);
@@ -243,7 +270,7 @@ class ResourceApiAdapter {
       const text = (e) => e.summary || ({ "record.created": "Record created", "record.deleted": "Record deleted", "record.updated": e.changes.length ? `Changed ${e.changes.map((c) => label(c.field)).join(", ")}` : "Record updated" })[e.action] || e.action.replace(/[._]/g, " ");
       board.load.activity = items.map((e) => ({ id: e.id, text: text(e), at: e.createdAt }));
       board.load.recordActivity = {};
-      for (const e of [...items].reverse()) if (e.recordId) (board.load.recordActivity[e.recordId] ||= []).push({ at: e.createdAt, text: text(e), by: e.actorName || "" });
+      for (const e of [...items].reverse()) if (e.recordId) (board.load.recordActivity[e.recordId] ||= []).push({ at: e.createdAt, text: text(e), by: e.actorName || "Unknown user" });
     } catch (error) { if (!(error instanceof StorageError)) throw error; }
   }
   async loadBoardRecords(boardId, { more = false } = {}) {
@@ -381,6 +408,8 @@ class ResourceApiAdapter {
       if (out.defaultValue === undefined || out.defaultValue === null || typeof out.defaultValue === "object") out.defaultValue = "";
       out.options = Array.isArray(out.options) ? out.options.map(String) : [];
       out.connection = typeof out.connection === "string" ? out.connection : "";
+      if (!ResourceApiAdapter.OPTION_TYPES.includes(out.type) || !Array.isArray(out.colors)) delete out.colors; else out.colors = out.colors.map((c) => (typeof c === "string" ? c : ""));
+      if (out.multiple === true && out.type === "dropdown") out.multiple = true; else delete out.multiple;
       if (!(typeof out.width === "number" && Number.isFinite(out.width) && out.width >= 0 && out.width <= 5000)) delete out.width;
       return out;
     });
@@ -452,7 +481,8 @@ class ResourceApiAdapter {
     // 2. Type changes → server converts values with the app's rules.
     for (const column of targetColumns) {
       const current = this.boards.get(id).columns.find((c) => c.key === column.key);
-      if (current && current.type !== column.type) { await this.schemaCall("POST", id, `/columns/${encodeURIComponent(column.key)}/type`, { type: column.type }); rewrote = true; }
+      const modeChange = current && current.type === "dropdown" && column.type === "dropdown" && Boolean(current.multiple) !== Boolean(column.multiple);
+      if (current && (current.type !== column.type || modeChange)) { await this.schemaCall("POST", id, `/columns/${encodeURIComponent(column.key)}/type`, { type: column.type, multiple: Boolean(column.multiple) }); rewrote = true; }
     }
     // 3. Options renamed or removed → server rewrites the values that used them.
     for (const column of targetColumns) {
@@ -549,8 +579,10 @@ class ResourceApiAdapter {
     const groupKey = ResourceApiAdapter.groupKey(s.columns);
     return { groupKey, columns: s.columns.filter((c) => c.key !== groupKey), groupIds: new Map(s.groups.map((g) => [g.name, g.id])) };
   }
+  static isMulti(column) { return column.type === "owner" || (column.type === "dropdown" && column.multiple === true); }
   static coerce(column, value) {
     if (value === null) return null;
+    if (ResourceApiAdapter.isMulti(column)) return [...new Set((Array.isArray(value) ? value : [value]).map((v) => String(v ?? "").trim()).filter((v) => v && v !== "Unassigned"))];
     if (column.type === "checkbox") return typeof value === "boolean" ? value : ["true", "yes", "1"].includes(String(value).trim().toLowerCase());
     if (column.type === "number" && typeof value === "number") return value;
     return String(value);
@@ -562,7 +594,7 @@ class ResourceApiAdapter {
       if (row[column.key] === undefined) continue;
       const value = ResourceApiAdapter.coerce(column, row[column.key]);
       values[column.key] = value;
-      if (!current || value !== current.values[column.key]) changed[column.key] = value;
+      if (!current || !resourceSame(value, current.values[column.key] ?? (Array.isArray(value) ? undefined : current.values[column.key]))) changed[column.key] = value;
     }
     const full = { values, archived: Boolean(row.archived), pinned: Boolean(row.pinned) };
     const diff = {};

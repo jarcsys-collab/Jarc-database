@@ -1,7 +1,7 @@
 // Request validation for the resource API. Each function returns a new object containing only allowed, checked
 // fields, so request bodies are never passed to MongoDB as they arrive.
 const { fail, requireBody, allowOnly, text, color, bool, finiteNumber, version, queryString, parseId, isObject, isSafeKey } = require("./common");
-const { normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, groupColumnOf, checkValue, hasValue, PRIMARY_KEY, LIMITS, COLUMN_TYPES } = require("../domain/board-schema");
+const { normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, groupColumnOf, checkValue, hasValue, isMultiColumn, valueList, PRIMARY_KEY, LIMITS, COLUMN_TYPES } = require("../domain/board-schema");
 
 const POSITION = { min: -1e15, max: 1e15 };
 
@@ -62,6 +62,8 @@ function boardPatch(raw, board, { actorId, now }) {
     for (const column of board.columns) {
       if (!next.has(column.key)) fail(`Column "${column.label || column.key}" can't be removed with a board update.`);
       if (next.get(column.key).type !== column.type) fail(`The type of column "${column.label || column.key}" can't be changed with a board update.`);
+      // One value ↔ several values rewrites stored values: POST /boards/:id/columns/:key/type { type, multiple }.
+      if (Boolean(next.get(column.key).multiple) !== Boolean(column.multiple)) fail(`Switching "${column.label || column.key}" between one and several values can't be done with a board update.`);
     }
     if (groupColumnOf(columns)?.key !== groupColumnOf(board.columns)?.key) fail("The board's group column can't be changed with a board update.");
     set.columns = columns;
@@ -100,7 +102,8 @@ function recordValues(values, board, { creating }) {
     // Like the frontend: columns without a value start with their default (checkboxes start unticked).
     for (const column of board.columns) {
       if (column.key === groupKey || clean[column.key] !== undefined) continue;
-      clean[column.key] = column.type === "checkbox" ? false : column.defaultValue ?? "";
+      // People and multi-select Dropdown cells start as an empty list (or their default as a one-item list).
+      clean[column.key] = column.type === "checkbox" ? false : isMultiColumn(column) ? valueList(column.defaultValue) : column.defaultValue ?? "";
       if (column.required && !hasValue(clean[column.key])) fail(`${column.label || column.key} is required.`);
     }
   }
@@ -235,9 +238,10 @@ function columnAdd(raw, board) {
 
 function columnType(raw) {
   const body = requireBody(raw);
-  allowOnly(body, ["expectedVersion", "type"], "the type change");
+  allowOnly(body, ["expectedVersion", "type", "multiple"], "the type change");
   if (!COLUMN_TYPES.includes(body.type)) fail("type is not a supported column type.");
-  return { expectedVersion: version(body.expectedVersion), type: body.type };
+  if (body.multiple !== undefined && typeof body.multiple !== "boolean") fail("multiple must be true or false.");
+  return { expectedVersion: version(body.expectedVersion), type: body.type, multiple: body.multiple === true };
 }
 
 function columnOptions(raw) {
@@ -246,9 +250,11 @@ function columnOptions(raw) {
   if (!Array.isArray(body.items) || body.items.length > LIMITS.options) fail(`items must be a list of at most ${LIMITS.options} options.`);
   const items = body.items.map((item, index) => {
     if (!isObject(item)) fail(`Option ${index + 1} must be an object.`);
-    allowOnly(item, ["from", "to"], `option ${index + 1}`);
+    allowOnly(item, ["from", "to", "color"], `option ${index + 1}`);
     const from = item.from === undefined || item.from === null ? null : text(item.from, `The original text of option ${index + 1}`, { max: LIMITS.optionLength, trim: false });
-    return { from, to: text(item.to ?? "", `Option ${index + 1}`, { max: LIMITS.optionLength, trim: false }) };
+    const clean = { from, to: text(item.to ?? "", `Option ${index + 1}`, { max: LIMITS.optionLength, trim: false }) };
+    if (item.color !== undefined) clean.color = color(item.color, `The colour of option ${index + 1}`);
+    return clean;
   });
   return { expectedVersion: version(body.expectedVersion), items };
 }

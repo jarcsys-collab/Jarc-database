@@ -1,11 +1,13 @@
 // TEST-ONLY server for browser tests of Microsoft Entra sign-in: the real app with AUTH_MODE=entra (ID tokens verified
 // against a LOCAL test key, server sessions) on the fake MongoDB. Never imported by src/ and never started by npm start.
 //
-//   node tests/support/entra-server.js <port>        (sign-in redirect URI: http://localhost:<port>/)
+//   node tests/support/entra-server.js <port> [shared]   (sign-in redirect URI: http://localhost:<port>/)
 //   GET  /__test/id-token?oid=&name=&email=&admin=0|1&nonce=   → a test ID token (what Microsoft would issue)
-//   POST /__test/config { expireSessions, disableEmail, enableEmail } → end every session / disable or enable a user
+//   POST /__test/config { expireSessions, disableEmail, enableEmail, legacyActivity } → end every session / disable or
+//        enable a user / add an old-style activity entry without an actor (legacyActivity: workspace ID)
 //   GET  /__test/stats  → protected API requests, and any that arrived without a session cookie
 const express = require("express");
+const { ObjectId } = require("mongodb");
 const { MongoConnection } = require("../../src/db/connection");
 const { ensureDatabase } = require("../../src/db/bootstrap");
 const { createDataLayer } = require("../../src/data-layer");
@@ -27,7 +29,9 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
   await ensureDatabase(connection.db);
   const dataLayer = createDataLayer({ connection, logger: { error() {} } });
   const verify = createEntraVerifier({ ...entra, keySet: issuer.keySet });
-  const app = createApp({ repository: new MemoryStateRepository(), environment: "test", dataLayer, auth: { mode: "entra", entra, verify }, logger: { error() {} } });
+  // Optional 2nd argument "shared": ACCESS_POLICY=development_shared (as on Railway); default role_based.
+  const accessPolicy = process.argv[3] === "shared" ? "development_shared" : "role_based";
+  const app = createApp({ repository: new MemoryStateRepository(), environment: "test", dataLayer, auth: { mode: "entra", entra, verify }, accessPolicy, logger: { error() {} } });
   const sim = { protected: 0, withSession: 0, withoutSession: [] };
 
   const outer = express();
@@ -42,6 +46,7 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
     for (const [field, status] of [["disableEmail", "disabled"], ["enableEmail", "active"]]) {
       if (req.body[field]) await connection.db.collection("users").updateOne({ emailNormalized: String(req.body[field]).toLowerCase() }, { $set: { status } });
     }
+    if (req.body.legacyActivity) await connection.db.collection("activities").insertOne({ workspaceId: new ObjectId(String(req.body.legacyActivity)), boardId: null, recordId: null, actorUserId: null, action: "legacy.board.activity", entityType: "board", entityId: null, changes: [], summary: "Imported history", createdAt: new Date() });
     res.json({ ok: true });
   });
   outer.get("/__test/stats", (req, res) => res.json(sim));

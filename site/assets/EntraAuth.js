@@ -152,6 +152,7 @@ class EntraSession {
     this.username = me.user.displayName || me.user.email || "Signed-in user";
     this.email = me.user.email || "";
     this.isSystemAdmin = Boolean(me.isSystemAdmin);
+    this.userId = me.user?.id || null; // the signed-in user's JARC ID (People columns, "You" in notifications)
     // ACCESS_POLICY=development_shared: every employee works in every workspace (display only; the server decides).
     this.sharedAccess = me.accessPolicy === "development_shared";
     this.lockedScreen = false; this.error = ""; this.lockSeconds = 0; this.attemptsRemaining = 5; this.sessionMinutesRemaining = 0;

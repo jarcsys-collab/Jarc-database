@@ -11,8 +11,10 @@ async function missingOrStale(repository, id, what) {
   return current ? conflict(what, current) : notFound(what);
 }
 
-function activityEntry({ workspaceId, boardId = null, recordId = null, actorUserId, action, entityType, entityId, changes = [], summary = "", now }) {
-  return { workspaceId, boardId, recordId, actorUserId, action, entityType, entityId, changes, summary, createdAt: now };
+// actorName is a snapshot of the actor's display name when the change was made (from the signed-in session, never
+// from the request), so history stays readable if the person is renamed later. Older entries have none.
+function activityEntry({ workspaceId, boardId = null, recordId = null, actorUserId, actorName = null, action, entityType, entityId, changes = [], summary = "", now }) {
+  return { workspaceId, boardId, recordId, actorUserId, actorName: typeof actorName === "string" && actorName ? actorName.slice(0, 200) : null, action, entityType, entityId, changes, summary, createdAt: now };
 }
 
 // Activity is history, not the source of truth: outside a transaction, a failure to append it is logged and the

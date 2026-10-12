@@ -5,7 +5,12 @@ const { fail, isObject, isPrimitive, isSafeKey, text, color, bool } = require(".
 
 const COLUMN_TYPES = Object.freeze(["text", "number", "status", "dropdown", "checkbox", "priority", "owner", "date", "email", "phone", "link", "group"]);
 const PRIMARY_KEY = "serial"; // the required Item column; its key never changes (label may)
-const COLUMN_FIELDS = ["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection"];
+const COLUMN_FIELDS = ["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection", "colors", "multiple"];
+// Columns whose cells may hold several values (stored as a list of strings): People always (several assignees), and a
+// Dropdown set to "multiple". People entries are "user:<user ID>" for signed-in employees, or (older data) plain text.
+const MAX_MULTI_VALUES = 100;
+const USER_REF = /^user:[0-9a-f]{24}$/;
+const isMultiColumn = (column) => column.type === "owner" || (column.type === "dropdown" && column.multiple === true);
 const LIMITS = Object.freeze({ columns: 200, options: 200, optionLength: 200, groups: 200, savedViews: 50, valueLength: 10000, legacyValueLength: 100000, recordFields: 300 });
 const GROUP_ID = /^grp_[A-Za-z0-9]{6,40}$/;
 const VIEW_ID = /^view_[A-Za-z0-9]{6,40}$/;
@@ -45,6 +50,16 @@ function normalizeColumn(column, where = "a column") {
   if (typeof result.defaultValue === "string" && result.defaultValue.length > LIMITS.valueLength) fail(`Column "${column.key}" has a default value that is too long.`);
   if (!Array.isArray(result.options) || result.options.length > LIMITS.options || !result.options.every((o) => typeof o === "string" && o.length <= LIMITS.optionLength)) fail(`Column "${column.key}" has invalid options.`);
   result.options = [...result.options];
+  // Label colours, in the same order as options ("" = the app's automatic colour). Only for option columns.
+  if (column.colors !== undefined && column.colors !== null) {
+    if (!OPTION_TYPES.includes(result.type) || !Array.isArray(column.colors) || column.colors.length > LIMITS.options) fail(`Column "${column.key}" has invalid label colours.`);
+    result.colors = column.colors.map((value) => color(value, `A label colour of column "${column.key}"`));
+  }
+  if (column.multiple !== undefined && column.multiple !== null) {
+    const multiple = bool(column.multiple, `multiple on column "${column.key}"`);
+    if (multiple && result.type !== "dropdown") fail(`Only Dropdown columns can allow several values ("${column.key}").`);
+    if (multiple) result.multiple = true;
+  }
   if (column.width !== undefined && column.width !== null) {
     if (typeof column.width !== "number" || !Number.isFinite(column.width) || column.width < 0 || column.width > 5000) fail(`Column "${column.key}" has an invalid width.`);
     result.width = column.width;
@@ -129,6 +144,18 @@ function viewState(state, index) {
 function checkValue(column, value, { maxLength = LIMITS.valueLength } = {}) {
   const where = `The value for "${column.label || column.key}"`;
   if (value === null) return;
+  if (Array.isArray(value)) {
+    if (!isMultiColumn(column)) fail(`${where} must be a single value.`);
+    if (value.length > MAX_MULTI_VALUES) fail(`${where} has too many entries.`);
+    const seen = new Set();
+    for (const item of value) {
+      if (typeof item !== "string" || !item.trim() || item.length > LIMITS.optionLength) fail(`${where} must be a list of names.`);
+      if (item.startsWith("user:") && !USER_REF.test(item)) fail(`${where} refers to a person in an invalid way.`);
+      if (seen.has(item)) fail(`${where} lists the same entry twice.`);
+      seen.add(item);
+    }
+    return;
+  }
   if (!isPrimitive(value)) fail(`${where} must be text, a number, true/false or null.`);
   if (typeof value === "string" && value.length > maxLength) fail(`${where} is too long.`);
   if (column.type === "checkbox") { if (typeof value !== "boolean") fail(`${where} must be true or false.`); return; }
@@ -142,7 +169,11 @@ function checkValue(column, value, { maxLength = LIMITS.valueLength } = {}) {
   if (typeof value !== "string") fail(`${where} must be text.`);
 }
 
-const hasValue = (value) => value !== undefined && value !== null && value !== false && String(value).trim() !== "";
+const hasValue = (value) => Array.isArray(value) ? value.length > 0 : value !== undefined && value !== null && value !== false && String(value).trim() !== "";
+// The entries of a cell as a list (a single value becomes a one-item list; empty → []).
+const valueList = (value) => Array.isArray(value) ? value.filter((v) => typeof v === "string" && v.trim()) : hasValue(value) && typeof value !== "boolean" ? [String(value)] : [];
+// Same value? (lists compare item by item).
+const sameValue = (a, b) => Array.isArray(a) || Array.isArray(b) ? JSON.stringify(a ?? null) === JSON.stringify(b ?? null) : a === b;
 
 // ---- Schema-change rules (Stage 11). Exact ports of the frontend's BoardModel rules, so a change made through the
 // API rewrites stored values the same way the browser does.
@@ -158,6 +189,7 @@ function effectiveOptions(column) {
 // Can an existing value be kept when a column becomes `type`? Empty values always fit (BoardModel.valueFits).
 function valueFits(value, type) {
   if (!hasValue(value)) return true;
+  if (Array.isArray(value)) return !["number", "date", "checkbox"].includes(type) || (value.length === 1 && valueFits(value[0], type));
   const text = String(value).trim();
   if (type === "number") return Number.isFinite(Number(text));
   if (type === "date") return DATE.test(text) && !Number.isNaN(new Date(`${text}T00:00:00`).getTime());
@@ -165,27 +197,46 @@ function valueFits(value, type) {
   return typeof value !== "boolean";
 }
 
-// The value a record keeps after its column changes to `type` (BoardModel.changeColumnType).
-function convertValue(value, type) {
+// The value a record keeps after its column changes to `type` (BoardModel.changeColumnType). multiple: the new
+// column allows several values. names: display names for "user:<id>" entries when they become plain text.
+function convertValue(value, type, { multiple = false, names = new Map() } = {}) {
+  const toMulti = type === "owner" || (type === "dropdown" && multiple);
+  if (Array.isArray(value) || toMulti) {
+    const list = valueList(value);
+    if (toMulti) return list;
+    if (!list.length) return type === "checkbox" ? false : "";
+    const plain = list.map((item) => names.get(item) ?? (USER_REF.test(item) ? "Unknown user" : item));
+    if (["number", "date", "checkbox"].includes(type)) return convertValue(plain.length === 1 ? plain[0] : "", type);
+    return ["status", "priority", "dropdown"].includes(type) ? plain[0] : plain.join(", ");
+  }
   const fits = valueFits(value, type);
   if (type === "checkbox") return fits && hasValue(value);
   return !fits || typeof value === "boolean" ? "" : value;
 }
 
-// Option edit plan (BoardModel.optionsEditPlan): items are [{ from: existing option or null, to: new text }];
-// options left out are removed. Uses Maps, so option text can never act as an object key.
+// Option edit plan (BoardModel.optionsEditPlan): items are [{ from: existing option or null, to: new text, color? }]
+// in the new order; options left out are removed. Uses Maps, so option text can never act as an object key.
+// Multi-value cells keep their other entries; a removed option just drops out of the list.
 function optionsPlan(column, items) {
   const previous = effectiveOptions(column);
   const kept = items.filter((item) => String(item.to || "").trim());
   const removed = new Set(previous.filter((option) => !kept.some((item) => item.from === option)));
   const renames = new Map(kept.filter((item) => item.from && item.from !== item.to.trim()).map((item) => [item.from, item.to.trim()]));
-  const options = [...new Set(kept.map((item) => item.to.trim()))];
-  const mapValue = (value) => (renames.has(value) ? renames.get(value) : removed.has(value) ? "" : value);
-  return { options, removed, renames, mapValue };
+  const options = [], colors = [];
+  for (const item of kept) {
+    const name = item.to.trim();
+    if (options.includes(name)) continue;
+    options.push(name);
+    const before = item.from === null ? -1 : previous.indexOf(item.from);
+    colors.push(item.color !== undefined ? item.color : before >= 0 ? (column.colors?.[before] ?? "") : "");
+  }
+  const mapOne = (value) => (renames.has(value) ? renames.get(value) : removed.has(value) ? "" : value);
+  const mapValue = (value) => Array.isArray(value) ? [...new Set(value.map(mapOne).filter(Boolean))] : mapOne(value);
+  return { options, colors: colors.some(Boolean) ? colors : null, removed, renames, mapValue };
 }
 
 module.exports = {
-  COLUMN_TYPES, PRIMARY_KEY, LIMITS, GROUP_ID, VIEW_ID, LEGACY_DEFAULT_COLUMNS, LEGACY_DEFAULT_GROUPS, BLANK_BOARD_COLUMNS, OPTION_TYPES,
+  COLUMN_TYPES, PRIMARY_KEY, LIMITS, GROUP_ID, VIEW_ID, LEGACY_DEFAULT_COLUMNS, LEGACY_DEFAULT_GROUPS, BLANK_BOARD_COLUMNS, OPTION_TYPES, USER_REF,
   newGroupId, newViewId, normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, viewState, groupColumnOf, checkValue, hasValue,
-  effectiveOptions, valueFits, convertValue, optionsPlan
+  valueList, sameValue, isMultiColumn, effectiveOptions, valueFits, convertValue, optionsPlan
 };

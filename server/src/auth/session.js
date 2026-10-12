@@ -78,7 +78,9 @@ function sessionAuthentication({ sessions, users, entra }) {
       if (!sameText(req.get("x-csrf-token"), csrfTokenFor(secret))) return sendError(res, 403, "CSRF_INVALID", "This request couldn't be verified. Reload JARC and try again.");
     }
     if (now - session.lastSeenAt > TOUCH_INTERVAL_MS) await sessions.touch(session._id, now, idleMs);
-    req.actor = Object.freeze({ userId: user._id, kind: "entra", isSystemAdmin: Boolean(session.isSystemAdmin), sessionId: session._id });
+    // displayName comes from the stored user (refreshed from the verified Microsoft token at sign-in), never from the
+    // request; it is snapshotted on activity entries.
+    req.actor = Object.freeze({ userId: user._id, kind: "entra", isSystemAdmin: Boolean(session.isSystemAdmin), sessionId: session._id, displayName: user.displayName || user.email || null });
     req.sessionSecret = secret;
     return next();
   };

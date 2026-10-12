@@ -46,7 +46,7 @@ class BoardService {
       await this.repos.boards.deleteVersioned(doc._id, 1);
       throw notFound("workspace");
     }
-    await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId, boardId: doc._id, actorUserId: actor.userId, action: "board.created", entityType: "board", entityId: doc._id, summary: `Created board ${doc.name}`, now }));
+    await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId, boardId: doc._id, actorUserId: actor.userId, actorName: actor.displayName, action: "board.created", entityType: "board", entityId: doc._id, summary: `Created board ${doc.name}`, now }));
     return doc;
   }
 
@@ -64,7 +64,7 @@ class BoardService {
     if (!before) throw await missingOrStale(this.repos.boards, id, "board");
     const after = { ...before, ...set, updatedAt: now, version: before.version + 1 };
     const changed = fieldChanges(before, after, Object.keys(set)).map((c) => (["columns", "groups", "savedViews"].includes(c.field) ? { field: c.field } : c));
-    await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: board.workspaceId, boardId: id, actorUserId: actor.userId, action: "board.updated", entityType: "board", entityId: id, changes: changed, now }));
+    await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: board.workspaceId, boardId: id, actorUserId: actor.userId, actorName: actor.displayName, action: "board.updated", entityType: "board", entityId: id, changes: changed, now }));
     return after;
   }
 
@@ -79,7 +79,7 @@ class BoardService {
       if (board.version !== expectedVersion) throw conflict("board", board);
       const records = await this.repos.records.deleteByBoard(id, { session });
       if (!await this.repos.boards.deleteVersioned(id, expectedVersion, { session })) throw conflict("board", board);
-      await this.repos.activities.append(activityEntry({ workspaceId: board.workspaceId, boardId: id, actorUserId: actor.userId, action: "board.deleted", entityType: "board", entityId: id, summary: `Deleted board ${board.name} with ${records} records`, now }), { session });
+      await this.repos.activities.append(activityEntry({ workspaceId: board.workspaceId, boardId: id, actorUserId: actor.userId, actorName: actor.displayName, action: "board.deleted", entityType: "board", entityId: id, summary: `Deleted board ${board.name} with ${records} records`, now }), { session });
       return { records };
     });
     removed.records += await sweepAfterCommit(this.logger, "board records", () => this.repos.records.deleteByBoard(id));

@@ -11,6 +11,15 @@ class ActivityRepository {
 
   listByBoard(boardId, { limit = 50 } = {}) { return this.collection.find({ boardId }, { sort: { createdAt: -1, _id: -1 }, limit: Math.min(limit, 200) }).toArray(); }
 
+  // Newest first across several workspaces (null = all), for the notification feed. before: only entries older than
+  // this date (paging).
+  listRecent({ workspaceIds = null, limit = 50, before = null } = {}) {
+    const filter = {};
+    if (workspaceIds) filter.workspaceId = { $in: workspaceIds };
+    if (before) filter.createdAt = { $lt: before };
+    return this.collection.find(filter, { sort: { createdAt: -1, _id: -1 }, limit: Math.min(limit, 100) }).toArray();
+  }
+
   listByWorkspace(workspaceId, { limit = 50 } = {}) { return this.collection.find({ workspaceId }, { sort: { createdAt: -1 }, limit: Math.min(limit, 200) }).toArray(); }
 }
 

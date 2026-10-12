@@ -60,8 +60,11 @@ async function launch(executable = findBrowser()) {
       await this.tap(box.x, box.y, options);
       return true;
     },
+    // A key press as a keyboard sends it (Enter and Space also activate the focused button).
     async key(key, code = key) {
-      for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key, code, windowsVirtualKeyCode: key === "Escape" ? 27 : 0 });
+      const codes = { Escape: 27, Enter: 13, " ": 32, ArrowDown: 40, ArrowUp: 38, Tab: 9 }, text = key === "Enter" ? String.fromCharCode(13) : key === " " ? " " : undefined;
+      await send("Input.dispatchKeyEvent", { type: "keyDown", key, code: key === " " ? "Space" : code, windowsVirtualKeyCode: codes[key] || 0, ...(text ? { text } : {}) });
+      await send("Input.dispatchKeyEvent", { type: "keyUp", key, code: key === " " ? "Space" : code, windowsVirtualKeyCode: codes[key] || 0 });
       await sleep(80);
     },
     async waitFor(expression, timeoutMs = 5000) {

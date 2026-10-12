@@ -101,7 +101,9 @@ function validateLegacyInput(input) {
         for (const [key, value] of Object.entries(r)) {
           if (key === "activity") { if (!flatList(value)) add(`${rw} has invalid history.`); continue; }
           if (!isSafeKey(key)) { add(`${rw} has a field name that can't be stored.`); continue; }
-          if (!isPrimitive(value)) add(`${rw} has an unsupported (nested) value in "${key.slice(0, 40)}".`);
+          // People and multi-select Dropdown cells hold a flat list of names; anything deeper is refused.
+          if (Array.isArray(value)) { if (value.length > 100 || !value.every((v) => typeof v === "string" && v.length <= LIMITS.optionLength)) add(`${rw} has an unsupported list in "${key.slice(0, 40)}".`); }
+          else if (!isPrimitive(value)) add(`${rw} has an unsupported (nested) value in "${key.slice(0, 40)}".`);
           else if (typeof value === "string" && value.length > LIMITS.legacyValueLength) add(`${rw} has a value that is too long.`);
         }
       });

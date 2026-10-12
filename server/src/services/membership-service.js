@@ -34,7 +34,7 @@ class MembershipService {
     let member;
     try { member = await this.repos.memberships.add({ workspaceId, userId: user._id, role: newRole, now }); }
     catch (error) { if (error?.code === 11000) throw new ApiError(409, "CONFLICT", "This person is already a member of the workspace."); throw error; }
-    await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId, actorUserId: actor.userId, action: "member.added", entityType: "member", entityId: member._id, changes: [{ field: "role", from: null, to: newRole }], summary: `Added ${user.displayName || "a member"} as ${newRole}`, now }));
+    await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId, actorUserId: actor.userId, actorName: actor.displayName, action: "member.added", entityType: "member", entityId: member._id, changes: [{ field: "role", from: null, to: newRole }], summary: `Added ${user.displayName || "a member"} as ${newRole}`, now }));
     return { ...member, user };
   }
 
@@ -45,7 +45,7 @@ class MembershipService {
     const member = await this.guarded(workspaceId, memberId, actor, async (member, session, now) => {
       if (member.role === newRole) return member;
       await this.repos.memberships.updateRole(member._id, newRole, now, { session });
-      await this.repos.activities.append(activityEntry({ workspaceId, actorUserId: actor.userId, action: "member.role_changed", entityType: "member", entityId: member._id, changes: [{ field: "role", from: member.role, to: newRole }], now }), { session });
+      await this.repos.activities.append(activityEntry({ workspaceId, actorUserId: actor.userId, actorName: actor.displayName, action: "member.role_changed", entityType: "member", entityId: member._id, changes: [{ field: "role", from: member.role, to: newRole }], now }), { session });
       return { ...member, role: newRole, updatedAt: now };
     }, (current) => current.role === "WORKSPACE_ADMIN" && newRole !== "WORKSPACE_ADMIN");
     return { ...member, user: await this.repos.users.findById(member.userId) };
@@ -54,7 +54,7 @@ class MembershipService {
   async remove(workspaceId, memberId, actor) {
     return this.guarded(workspaceId, memberId, actor, async (member, session, now) => {
       await this.repos.memberships.remove(member._id, { session });
-      await this.repos.activities.append(activityEntry({ workspaceId, actorUserId: actor.userId, action: "member.removed", entityType: "member", entityId: member._id, changes: [{ field: "role", from: member.role, to: null }], now }), { session });
+      await this.repos.activities.append(activityEntry({ workspaceId, actorUserId: actor.userId, actorName: actor.displayName, action: "member.removed", entityType: "member", entityId: member._id, changes: [{ field: "role", from: member.role, to: null }], now }), { session });
       return { removed: true };
     }, (member) => member.role === "WORKSPACE_ADMIN");
   }

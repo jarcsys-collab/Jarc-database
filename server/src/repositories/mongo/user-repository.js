@@ -15,6 +15,9 @@ class UserRepository {
 
   findByIds(ids) { return ids.length ? this.collection.find({ _id: { $in: ids } }, { limit: 5000 }).toArray() : Promise.resolve([]); }
 
+  // Active users (people who can be assigned), at most 2000.
+  listActive() { return this.collection.find({ status: "active" }, { limit: 2000 }).toArray(); }
+
   // Exact, case-insensitive email lookup among signed-in Entra users (to add a member): an equality match on a
   // stored lower-case copy, never a pattern built from input.
   findByEmail(email) { return this.collection.findOne({ source: "entra", emailNormalized: String(email).toLowerCase() }); }

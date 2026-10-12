@@ -232,7 +232,7 @@ class StorageService {
   // (selection, current screen, settings, profile, inbox, recents) that should not become shared company data.
   static SCHEMA_VERSION = 1;
   static SHARED_FIELDS = Object.freeze(["workspaces", "members"]);
-  static USER_FIELDS = Object.freeze(["currentWorkspaceId", "currentBoardId", "currentView", "screen", "settings", "profile", "notifications", "recentBoards", "recentRecords", "recentCommands"]);
+  static USER_FIELDS = Object.freeze(["currentWorkspaceId", "currentBoardId", "currentView", "screen", "settings", "profile", "notifications", "recentBoards", "recentRecords", "recentCommands", "feedSeenAt"]);
 
   // Returns { data, user, source, migrated }. data/user are null when nothing is stored yet.
   // Throws StorageError(INVALID_DATA | STORAGE_UNAVAILABLE). Never deletes or overwrites unreadable data.

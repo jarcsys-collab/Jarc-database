@@ -959,3 +959,76 @@ body.nav-collapsed .sidebar:not(.open) .sidebar-settings span {
   .modal-actions .button, .modal .button, .record-drawer .button { min-height: 44px; }
   .icon-button { min-width: 40px; min-height: 40px; }
 }
+
+/* Column cells and pickers (type-specific editing).
+   -------------------------------------------------------------------------- */
+/* Several labels in one cell (multi-select Dropdown). */
+.chip-list { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; }
+.chip-list .pill { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chip-more { flex: none; font-size: var(--fs-xs); font-weight: 650; color: var(--muted); padding: 0 4px; }
+/* People: overlapping avatars, then one name or "3 people". */
+.avatar-stack { display: inline-flex; flex: none; }
+.avatar-stack .person-avatar + .person-avatar { margin-left: -7px; box-shadow: 0 0 0 2px var(--surface); }
+.person-avatar.is-you { background: var(--accent-strong); }
+.person-avatar.is-more { background: var(--surface-3); color: var(--text); }
+.people-empty { display: inline-flex; color: var(--faint); opacity: .55; }
+.people-empty .icon { width: 16px; height: 16px; }
+.cell-display:hover .people-empty, .cell-display:focus-visible .people-empty { opacity: 1; }
+/* Empty selection cells hint that they can be filled. */
+.cell[data-type=status] .cell-display:hover .cell-empty::before, .cell[data-type=priority] .cell-display:hover .cell-empty::before,
+.cell[data-type=dropdown] .cell-display:hover .cell-empty::before { content: "Select"; color: var(--faint); font-size: var(--fs-sm); }
+.cell-number { font-variant-numeric: tabular-nums; }
+
+/* Picker: optional search, a scrolling list, then Clear / Edit labels / Done. */
+.cell-options-popover { width: 260px; display: flex; flex-direction: column; }
+.cell-options-popover .popover-title small { display: block; color: var(--muted); font-size: var(--fs-xs); font-weight: 500; }
+.option-search { display: flex; align-items: center; gap: 6px; margin: 2px 0 6px; padding: 0 8px; height: 34px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
+.option-search:focus-within { outline: 2px solid var(--focus); outline-offset: 1px; }
+.option-search .icon { width: 14px; height: 14px; color: var(--faint); flex: none; }
+.cell-options-popover .option-search input { flex: 1; min-width: 0; height: 100%; border: 0; border-radius: 0; padding: 0; background: transparent; box-shadow: none; outline: 0; }
+.option-scroll { overflow-y: auto; overscroll-behavior: contain; min-height: 0; flex: 1; }
+.cell-option { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 36px; padding: 5px 8px; border-radius: var(--radius-sm); text-align: left; }
+.cell-option:hover, .cell-option.keyboard-selected { background: var(--hover); }
+.cell-option.is-selected { background: var(--selected); }
+.cell-option:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.popover-footer { display: flex; flex-wrap: wrap; gap: 2px; }
+.popover-footer > .popover-done { margin-left: auto; color: var(--accent-text); font-weight: 650; }
+
+/* Label editor: swatch, name, colour, usage, order, remove — one line per label (two on phones). */
+.option-editor { width: min(560px, calc(100vw - 28px)); }
+.option-row { display: grid; grid-template-columns: 14px minmax(0, 1fr) 112px 64px auto auto; align-items: center; gap: 8px; }
+.option-row .option-name { min-width: 0; }
+.option-row .option-usage { text-align: right; white-space: nowrap; }
+.option-swatch { --tone: #64748b; width: 14px; height: 14px; flex: none; border-radius: 4px; background: var(--tone); }
+.option-swatch[data-tone=blue] { --tone: #3b82f6; } .option-swatch[data-tone=green] { --tone: #1f9d61; } .option-swatch[data-tone=amber] { --tone: #c7900f; }
+.option-swatch[data-tone=red] { --tone: #e5484d; } .option-swatch[data-tone=orange] { --tone: #ea6c1b; } .option-swatch[data-tone=purple] { --tone: #8e4ec6; }
+.option-swatch[data-tone=pink] { --tone: #d6409f; } .option-swatch[data-tone=teal] { --tone: #12a594; } .option-swatch[data-tone=gray] { --tone: #8b8d98; }
+.option-color { width: 100%; }
+@media (max-width: 620px) {
+  .option-row { grid-template-columns: 14px minmax(0, 1fr) auto auto; row-gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+  .option-row .option-color { grid-column: 2; }
+  .option-row .option-usage { grid-column: 3 / 5; text-align: left; }
+}
+.option-order { display: inline-flex; }
+
+/* Record form: People and multi-select fields as tickable chips. */
+.choice-group { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.choice-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px 4px 6px; border: 1px solid var(--line); border-radius: var(--radius-pill); cursor: pointer; }
+.choice-chip:has(input:checked) { border-color: var(--accent); background: var(--selected); }
+.choice-chip input { margin: 0; }
+
+/* Notification feed: who did what, where, when. */
+.notification-item { display: flex; align-items: flex-start; gap: 10px; text-align: left; }
+.actor-avatar { width: 30px; height: 30px; flex: none; font-size: 11px; }
+.actor-avatar.is-unknown { background: var(--surface-3); color: var(--muted); }
+.notification-body { display: grid; gap: 2px; min-width: 0; }
+.notification-body strong { font-weight: 500; color: var(--text); }
+.notification-body .actor-name { font-weight: 700; }
+.notification-where { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notification-item.is-mine .actor-name { color: var(--accent-text); }
+
+@media (hover: none) and (pointer: coarse) {
+  .cell-option { min-height: 44px; }
+  .option-search { height: 44px; }
+  .choice-chip { min-height: 40px; padding: 6px 12px 6px 10px; }
+}

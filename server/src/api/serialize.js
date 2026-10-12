@@ -38,7 +38,8 @@ function activityToApi(doc) {
   return {
     id: hex(doc._id), action: doc.action, entityType: doc.entityType, entityId: plain(doc.entityId),
     workspaceId: hex(doc.workspaceId), boardId: hex(doc.boardId), recordId: hex(doc.recordId), actorUserId: hex(doc.actorUserId),
-    actorName: doc.legacyActor ?? null, summary: doc.summary || "",
+    // The name snapshot taken when the change was made (older entries: the imported legacy name, or none).
+    actorName: doc.actorName ?? doc.legacyActor ?? null, summary: doc.summary || "",
     changes: (doc.changes || []).map((c) => ({ field: c.field, from: plain(c.from), to: plain(c.to) })),
     createdAt: iso(doc.createdAt)
   };

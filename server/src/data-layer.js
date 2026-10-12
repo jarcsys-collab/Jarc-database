@@ -28,7 +28,13 @@ function createDataLayer({ connection, logger = console }) {
   return {
     connection,
     repos,
-    services: { workspaces: new WorkspaceService(deps), boards: new BoardService(deps), records: new RecordService(deps), imports: new ImportService(deps), schema: new BoardSchemaService(deps), members: new MembershipService(deps) }
+    services: { workspaces: new WorkspaceService(deps), boards: new BoardService(deps), records: new RecordService(deps), imports: new ImportService(deps), schema: new BoardSchemaService(deps), members: new MembershipService(deps),
+      // Read-only views used by the notification feed and People columns.
+      activity: { recent: (options) => repos.activities.listRecent(options) },
+      people: {
+        active: () => repos.users.listActive(),
+        members: async (workspaceId) => repos.users.findByIds((await repos.memberships.listByWorkspace(workspaceId)).filter((m) => m.status === "active").map((m) => m.userId))
+      } }
   };
 }
 

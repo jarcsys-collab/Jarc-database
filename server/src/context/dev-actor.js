@@ -22,7 +22,7 @@ async function ensureDevelopmentActor(users, { environment, now = new Date() }) 
 function devActorMiddleware(actorUser, { environment }) {
   assertNotProduction(environment);
   // The single local developer: treated as SYSTEM_ADMIN so every resource is reachable (development only).
-  const actor = Object.freeze({ userId: actorUser._id, kind: "development", isSystemAdmin: true });
+  const actor = Object.freeze({ userId: actorUser._id, kind: "development", isSystemAdmin: true, displayName: actorUser.displayName || null });
   return (req, res, next) => {
     req.actor = actor;
     res.set("X-JARC-Auth", "development-pre-auth");
