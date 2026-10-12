@@ -14,7 +14,8 @@ async function startApp(options = {}) {
   const app = createApp({ repository, environment: "test", logger, ...options });
   const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
   const url = `http://127.0.0.1:${server.address().port}`;
-  return { url, repository, logger, close: () => new Promise((resolve) => server.close(resolve)) };
+  // close(): live-update streams are ended first, or the server would wait for them.
+  return { url, repository, logger, app, close: () => { app.locals.realtime?.closeAll(); return new Promise((resolve) => server.close(resolve)); } };
 }
 
 // The smallest document with the shape the frontend saves.
@@ -70,7 +71,7 @@ const entraEnv = (overrides = {}) => ({ ...TEST_ENTRA, ...overrides });
 
 // The full stack with Microsoft Entra ID sign-in (AUTH_MODE=entra): ID tokens verified against a local test key set,
 // server sessions in the fake MongoDB. No development user exists in this mode.
-async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient(), accessPolicy } = {}) {
+async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient(), accessPolicy, live } = {}) {
   const { createEntraVerifier } = require("../src/auth/entra-token");
   const connection = new MongoConnection({ uri: "mongodb://fake.invalid", dbName: "jarc_database", createClient: () => fake });
   await connection.connect();
@@ -79,7 +80,7 @@ async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient(),
   const dataLayer = createDataLayer({ connection, logger });
   const config = { ...issuer.config, ...entra };
   const verify = createEntraVerifier({ ...config, keySet: issuer.keySet });
-  const started = await startApp({ dataLayer, auth: { mode: "entra", entra: config, verify }, logger, ...(accessPolicy ? { accessPolicy } : {}) });
+  const started = await startApp({ dataLayer, auth: { mode: "entra", entra: config, verify }, logger, ...(accessPolicy ? { accessPolicy } : {}), ...(live ? { live } : {}) });
   return { ...started, fake, connection, dataLayer, db: connection.db, logger, entra: config };
 }
 

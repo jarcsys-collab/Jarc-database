@@ -155,6 +155,14 @@ class BoardModel {
     this.manualSort = Boolean(this.board?.manualOrder);
     const ids = new Set(this.rows.map((row) => row.id)); [...this.selected].forEach((id) => { if (!ids.has(id)) this.selected.delete(id); });
   }
+  // Live updates: someone else's saved change (already read from the server) becomes part of every copy of the state.
+  // Undo history is cleared when that happens — an older snapshot restored later would quietly undo their change.
+  applyRemote(reconcile) {
+    if (!reconcile || reconcile.empty) return false;
+    this.applyReconcile(reconcile);
+    if (this.history.length) { this.history = []; this.undoClearedByRemote = true; }
+    return true;
+  }
   rollback(change, result) {
     this.failure = { text: JSON.stringify(this.toStorageState()), history: this.history.slice(), change, code: result.code };
     this.adoptState(this.persisted.text); this.history = this.persisted.history.slice();

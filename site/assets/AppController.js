@@ -51,6 +51,7 @@ class AppController {
         this.auth = new EntraSession(signIn.entra, signIn.me);
       }
     }
+    this.loadStartedAt = new Date().toISOString(); // live updates replay anything saved while loading
     try { await this.model.init(); }
     catch (error) {
       if (this.entra && error?.code === StorageError.CODES.UNAUTHENTICATED) { this.showEntraGate("expired"); return; }
@@ -64,9 +65,115 @@ class AppController {
     }
     if (this.entra && this.auth.userId) this.model.me = `user:${this.auth.userId}`;
     this.root.onclick = null; this.ready = true; this.update();
-    this.loadPeople(); this.loadFeed();
+    this.loadPeople(); this.loadFeed(); this.startLive();
     if (!this.feedTimer && this.model.storage.adapter.loadActivityFeed) this.feedTimer = setInterval(() => { if (this.ready && document.visibilityState === "visible") this.loadFeed(); }, 60000);
   }
+  // ---- Live updates (resource mode): other people's saved changes appear without a reload --------------------------
+  startLive() {
+    const adapter = this.model.storage.adapter;
+    if (this.live || !adapter.fetchRemote || typeof LiveUpdates === "undefined") return;
+    this.remoteQueue = []; this.liveState = "connecting"; this.saveSeq = 0;
+    window.addEventListener("jarc-save", (event) => { if (event.detail === "saving") this.saveSeq += 1; }); // any save started
+    this.live = new LiveUpdates({
+      baseUrl: adapter.http.baseUrl, since: this.loadStartedAt, request: (method, p) => adapter.http.request(method, p, undefined, { background: true }),
+      onChanges: (events) => { this.remoteQueue.push(...events); this.processRemote(); this.scheduleFeed(); },
+      onResync: () => this.resync(),
+      onSessionEnded: () => { this.stopLive(); window.dispatchEvent(new CustomEvent("jarc-session-expired")); },
+      onState: (state) => { this.liveState = state; this.saveFeedback(); if (state === "live" && this.needsResync) { this.needsResync = false; this.resync(); } }
+    }).start();
+    window.addEventListener("pagehide", () => this.stopLive(), { once: true });
+  }
+  stopLive() { this.live?.stop(); this.live = null; this.liveState = null; clearTimeout(this.remoteTimer); }
+  // Reload everything this tab shows (after a gap the server couldn't replay).
+  resync() {
+    const events = [{ action: "workspace.updated", workspaceId: null }];
+    for (const w of this.model.workspaces) for (const b of w.boards) if (this.model.boardLoadState(b.id).state !== "none") events.push({ action: "board.updated", boardId: b.id, workspaceId: w.id });
+    this.remoteQueue.push(...events); this.processRemote(); this.scheduleFeed();
+  }
+  scheduleFeed() { clearTimeout(this.feedTimerSoon); this.feedTimerSoon = setTimeout(() => this.loadFeed(), Math.max(0, 1500 - (Date.now() - (this.feedAt || 0)))); }
+  // Applies queued changes when nothing of this tab's own is being saved: fetch first (network only), then — if a save
+  // started meanwhile — fetch again later; otherwise update the cached server copy and the model in one step.
+  async processRemote() {
+    if (this.remoteBusy || !this.remoteQueue?.length) return;
+    const saving = () => this.model.pendingSaves > 0 || this.busy;
+    if (saving()) { clearTimeout(this.remoteTimer); this.remoteTimer = setTimeout(() => this.processRemote(), 300); return; }
+    this.remoteBusy = true;
+    const events = this.remoteQueue.splice(0), adapter = this.model.storage.adapter, seq = this.saveSeq;
+    try {
+      const plan = await adapter.fetchRemote(events);
+      // A save started (and maybe even finished) while fetching: what was fetched may predate it. Fetch again.
+      if (saving() || this.saveSeq !== seq) { this.remoteQueue.unshift(...events); return; }
+      const { reconcile, summary } = adapter.commitRemote(plan);
+      const before = this.remoteSnapshot(summary);
+      if (this.model.applyRemote(reconcile)) this.renderRemote(summary, before, events);
+    } catch { this.remoteQueue.unshift(...events); this.needsResync = true; } // e.g. offline: retried when live again
+    finally {
+      this.remoteBusy = false;
+      if (this.remoteQueue.length) { clearTimeout(this.remoteTimer); this.remoteTimer = setTimeout(() => this.processRemote(), 300); }
+    }
+  }
+  remoteSnapshot(summary) { const ids = new Set(summary.records.map((r) => String(r.id))); return new Map(this.model.rows.filter((r) => ids.has(String(r.id))).map((r) => [String(r.id), JSON.parse(JSON.stringify(r))])); }
+  actorFor(events, recordId) { const e = [...events].reverse().find((x) => !recordId || x.recordId === recordId); const p = e?.actorId ? this.model.people.get(`user:${e.actorId}`) : null; return p ? p.displayName : "A colleague"; }
+  // Smallest possible update: changed cells are patched in place (with a brief highlight); added, removed or reordered
+  // records re-render just the board area; structure changes re-render the app once nothing is open or being typed.
+  renderRemote(summary, before, events) {
+    const board = this.model.board, onBoard = this.model.screen === "board" && board;
+    if (this.model.undoClearedByRemote) { this.model.undoClearedByRemote = false; }
+    if (onBoard && summary.removedBoards.has(String(board.id))) { this.view.toast("This board was deleted by a colleague."); this.model.openScreen("home"); this.update(); return; }
+    this.reconcileOpenForm(summary, before, events);
+    if (summary.structure || [...summary.boards].some((id) => String(id) !== String(board?.id)) || !onBoard) { this.refreshWhenIdle(); if (!onBoard || summary.structure) return; }
+    const here = (r) => String(r.boardId) === String(board.id);
+    const filtered = Boolean(this.model.query || this.model.status !== "All" || this.model.columnFilter || this.model.sortKey || this.model.grouped || this.model.quickFilter !== "all" || this.model.showArchived || this.model.currentView !== "table");
+    let region = summary.boards.has(board.id) || summary.boards.has(String(board.id)) || summary.removed.some(here) || summary.records.some((r) => here(r) && (r.isNew || r.order));
+    for (const r of summary.records.filter(here)) {
+      if (r.isNew || r.order) continue;
+      for (const field of r.fields) {
+        const input = this.root.querySelector(`.cell-input[data-id="${CSS.escape(String(r.id))}"][data-field="${CSS.escape(field)}"]`);
+        if (input) { this.markEditorRemote(input, r.id, field, this.actorFor(events, r.id)); continue; }
+        if (filtered) { region = true; continue; }
+        this.patchCell(r.id, field, false);
+        const td = this.root.querySelector(`tr[data-record-context="${CSS.escape(String(r.id))}"] td[data-column-key="${CSS.escape(field)}"]`);
+        td?.classList.add("remote-flash"); setTimeout(() => td?.classList.remove("remote-flash"), 1600);
+      }
+    }
+    if (region) this.refreshBoardWhenIdle();
+  }
+  // Re-renders the board area unless the person is typing in it or a dialog is open (then once they finish).
+  refreshBoardWhenIdle() {
+    const active = document.activeElement, overlay = this.root.querySelector("#overlay-root");
+    if (overlay?.children.length || this.tapping || (active && this.root.contains(active) && active.matches('input:not([type="checkbox"]),textarea,select'))) { this.pendingRefresh = true; return; }
+    this.refreshBoard();
+  }
+  // A colleague changed the cell being edited: keep what's typed, show their value; Save then asks which to keep.
+  markEditorRemote(input, id, field, actor) {
+    const row = this.model.rows.find((r) => String(r.id) === String(id)), column = this.model.board.columns.find((c) => c.key === field);
+    if (!row || !column) return;
+    input.dataset.remoteValue = String(row[field] ?? ""); input.dataset.remoteBy = actor;
+    const td = input.closest("td"); td.classList.add("has-remote-change");
+    let note = td.querySelector(".remote-note"); if (!note) { note = document.createElement("span"); note.className = "remote-note"; note.setAttribute("role", "status"); td.append(note); }
+    note.textContent = `${actor} changed this to “${this.model.valueText(column, row[field]) || "empty"}”`;
+  }
+  // The open record form follows colleagues' changes to fields not yet touched here; touched fields are flagged.
+  reconcileOpenForm(summary, before, events) {
+    const form = this.root.querySelector('form.record-drawer[data-action="record-form"]'); if (!form) return;
+    const id = form.querySelector('[name="id"]')?.value; if (!id) return;
+    if (summary.removed.some((r) => String(r.id) === String(id))) { this.view.formNotice(form, `<strong>${this.view.escape(this.actorFor(events, id))} deleted this record.</strong> Your changes can't be saved.`, "error"); form.querySelector('button.primary[type="submit"], .modal-actions .primary')?.setAttribute("disabled", ""); return; }
+    const change = summary.records.find((r) => String(r.id) === String(id)); if (!change) return;
+    const row = this.model.rows.find((r) => String(r.id) === String(id)); if (!row) return;
+    const initial = JSON.parse(form.dataset.initial || "{}"), now = this.view.formValues(form), conflicts = [];
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    for (const key of change.fields) {
+      if (!(key in initial)) continue;
+      const theirs = this.model.isMultiColumn(this.model.board.columns.find((c) => c.key === key)) ? this.model.valueList(row[key]) : typeof row[key] === "boolean" ? row[key] : String(row[key] ?? "");
+      if (same(now[key], initial[key])) { this.view.setFormValue(form, key, theirs); initial[key] = theirs; }
+      else conflicts.push(key);
+    }
+    form.dataset.initial = JSON.stringify(initial);
+    const actor = this.view.escape(this.actorFor(events, id));
+    if (conflicts.length) { form.dataset.conflicts = JSON.stringify(conflicts); this.view.formNotice(form, `<strong>${actor} also changed ${conflicts.map((k) => this.view.escape(this.model.board.columns.find((c) => c.key === k)?.label || k)).join(", ")}.</strong> Saving will replace their value with yours.`, "warning"); }
+    else this.view.formNotice(form, `<strong>${actor} updated this record.</strong> Fields you haven't changed now show their latest values.`);
+  }
+
   // ---- People columns: the colleagues who can be assigned in the open workspace (server directory, resource mode).
   async loadPeople(force = false) {
     const adapter = this.model.storage.adapter, workspace = this.model.workspace;
@@ -92,9 +199,9 @@ class AppController {
     this.pendingRefresh = false;
     if (this.entra && (this.entraGate || !this.auth.authenticated)) { this.navOpen = false; this.applyNav(); this.view.renderEntraGate(this.entraGate || "signed-out", this.model); return; }
     if (!this.auth.authenticated) this.navOpen = false; // sign-in screens have no drawer
-    const focus = this.focusedControl();
+    const focus = this.focusedControl(), scroll = this.scrollState();
     this.auth.authenticated ? this.view.render(this.model) : this.view.renderLogin(this.auth,this.model); this.applyNav(); this.saveFeedback();
-    this.refocus(focus);
+    this.refocus(focus); this.restoreScroll(scroll);
     if (this.ready && this.model.workspace && this.model.workspace.id !== this.peopleKey) this.loadPeople();
   }
   // Microsoft sign-in screens: "signed-out" | "expired" | "denied" | "error". Shown instead of the app.
@@ -152,6 +259,9 @@ class AppController {
     const toggle = this.root.querySelector('[data-action="toggle-nav"]');
     if (toggle) { toggle.setAttribute("aria-expanded", String(open)); toggle.setAttribute("aria-label", open ? "Close navigation" : "Open navigation"); }
   }
+  // Scroll positions (page and the records table) survive a re-render.
+  scrollState() { const wrap = this.root.querySelector(".table-wrap"); return { x: window.scrollX, y: window.scrollY, left: wrap?.scrollLeft || 0, top: wrap?.scrollTop || 0 }; }
+  restoreScroll(s) { if (!s) return; const wrap = this.root.querySelector(".table-wrap"); if (wrap) { wrap.scrollLeft = s.left; wrap.scrollTop = s.top; } if (window.scrollX !== s.x || window.scrollY !== s.y) window.scrollTo(s.x, s.y); }
   // The focused button, described so the same control can be focused again after a re-render.
   focusedControl() {
     const active = document.activeElement;
@@ -261,12 +371,15 @@ class AppController {
     if (action === "confirm-delete-column") { const key=target.dataset.payload; this.runBusy(target,()=>this.model.deleteColumn(key),()=>{this.view.closeOverlay();this.update();this.view.toast("Column deleted",true);}); }
     // ---- Table interaction (Stage 4)
     if (action === "cell-open") { this.openCell(target); return; }
+    if (action === "conflict-keep-mine") { const c=this.conflict; this.conflict=null; this.conflictState=false; this.view.closeOverlay(); if(c){this.model.updateCell(c.id,c.field,c.mine);this.patchCell(c.id,c.field,true);this.view.toast("Your value was saved");} this.saveFeedback(); return; }
+    if (action === "close-overlay" && this.conflict) { this.conflict=null; this.conflictState=false; this.saveFeedback(); }
     if (action === "toggle-cell-option") {
       const id=this.model.idOf(target.dataset.id), field=target.dataset.field, row=this.model.rows.find((r)=>r.id===id), column=this.model.board.columns.find((c)=>c.key===field); if(!row||!column)return;
       const list=this.model.valueList(row[field]), value=target.dataset.value, next=list.includes(value)?list.filter((v)=>v!==value):[...list,value];
       const query=this.root.querySelector('[data-action="cell-option-search"]')?.value||"";
       this.model.updateCell(id,field,next); this.patchCell(id,field,false);
       this.view.showCellOptions(this.model,this.model.rows.find((r)=>r.id===id),column,{query}); this.markPanel(`cell-${id}-${field}`);
+      const reopened=this.root.querySelector(".cell-options-popover"); if(reopened)reopened.style.animation="none"; // same picker, updated: no pop-in
       this.root.querySelector(`.cell-option[data-value="${CSS.escape(value)}"]`)?.focus({preventScroll:true});
       return;
     }
@@ -386,7 +499,10 @@ class AppController {
     }
     if(action==="sort-form"){this.model.sortKey=data.key;this.model.sortDirection=data.direction;this.model.manualSort=false;this.model.board.manualOrder=false;this.model.save({op:"updateBoard",boardId:this.model.board.id});this.model.activeSavedViewId=null;this.update();return;}
     if(action==="confirm-import-form"){let result;this.runBusy(event.submitter,()=>{result=this.model.importRows(this.pendingImport,data);},()=>{this.pendingImport=null;this.view.closeOverlay();this.update();this.view.toast(result.valid.length+" records imported"+(result.issues.length?" · "+result.issues.length+" skipped":""),true);});return;}
-    if (action === "record-form") { const edit=Boolean(data.id); const fd=new FormData(event.target); this.model.board.columns.filter((column)=>this.model.isMultiColumn(column)&&event.target.querySelector(`[name="${CSS.escape(column.key)}"]`)).forEach((column)=>{data[column.key]=fd.getAll(column.key);}); this.model.board.columns.filter((column)=>column.type==="checkbox").forEach((column)=>{data[column.key]=Boolean(data[column.key]);}); this.runBusy(event.submitter,()=>{this.model.upsert(data);},()=>{this.view.closeOverlay();this.update();this.view.toast(edit?"Record updated":"Record added");}); }
+    if (action === "record-form" && data.id && event.target.dataset.conflicts && !event.target.dataset.conflictsSeen) { event.target.dataset.conflictsSeen="1"; this.view.formNotice(event.target, event.target.querySelector(".form-live-notice")?.innerHTML.replace("Saving will replace", "Save again to replace")||"A colleague changed this record. Save again to keep your values.","warning"); return; }
+    if (action === "record-form") { const edit=Boolean(data.id); const fd=new FormData(event.target); this.model.board.columns.filter((column)=>this.model.isMultiColumn(column)&&event.target.querySelector(`[name="${CSS.escape(column.key)}"]`)).forEach((column)=>{data[column.key]=fd.getAll(column.key);}); this.model.board.columns.filter((column)=>column.type==="checkbox").forEach((column)=>{data[column.key]=Boolean(data[column.key]);});
+      // Editing: send only what changed in this form, so fields a colleague updated meanwhile aren't overwritten.
+      if(edit&&event.target.dataset.initial){const initial=JSON.parse(event.target.dataset.initial),now=this.view.formValues(event.target);for(const key of Object.keys(initial))if(JSON.stringify(initial[key])===JSON.stringify(now[key]))delete data[key];} this.runBusy(event.submitter,()=>{this.model.upsert(data);},()=>{this.view.closeOverlay();this.update();this.view.toast(edit?"Record updated":"Record added");}); }
     if (action === "board-form") { this.runBusy(event.submitter,()=>{if(data.id){this.model.renameBoard(data.id,data.name);const b=this.model.workspace.boards.find(b=>b.id===data.id);b.description=data.description;this.model.save({op:"updateBoard",boardId:data.id});}else{this.model.currentWorkspaceId=data.workspace;this.model.createBoard(data.name,data.description,data.template);}},()=>{this.view.closeOverlay();this.update();this.view.toast(data.id?"Board renamed":"Board created");}); }
     if (action === "invite-form") { if(this.model.addMember(data)){this.view.closeOverlay();this.update();this.view.toast("Member added");}else this.view.showMessage("Member not added","Use a unique email address."); }
     if (action === "global-search-form") this.globalSearch(data.term);
@@ -525,7 +641,12 @@ class AppController {
     const button=this.root.querySelector(".save-state");if(!button)return;
     const state=this.model.saveState||"saved";button.classList.toggle("save-error",state==="error");
     const offline=window.jarcStorage?.connection==="offline"; document.body.classList.toggle("storage-offline",offline);
-    button.innerHTML=offline?"Offline — changes can't be saved":state==="error"?"Couldn't save · Retry":state==="saving"?"Saving…":`<i></i> ${["api","resource"].includes(this.model.storage.adapter.mode)?"Saved":navigator.onLine?"Saved locally":"Offline · saved locally"}`;
+    const live=this.liveState, server=["api","resource"].includes(this.model.storage.adapter.mode);
+    const shown=offline||live==="offline"?"offline":this.conflictState?"conflict":state==="error"?"error":state==="saving"?"saving":live==="reconnecting"||live==="connecting"?"reconnecting":live==="polling"?"polling":live==="live"?"live":"saved";
+    button.dataset.state=shown;
+    const labels={offline:"Offline — changes can't be saved",conflict:"Conflict — review the change",error:"Couldn't save · Retry",saving:"Saving…",reconnecting:"<i></i> Saved · Reconnecting…",polling:"<i></i> Saved · Checking for updates",live:"<i></i> Saved · Live",saved:`<i></i> ${server?"Saved":navigator.onLine?"Saved locally":"Offline · saved locally"}`};
+    const tips={offline:"No connection. Changes can't be saved until you're back online.",conflict:"Someone else changed what you were editing.",error:"The last change wasn't saved. Click to try again.",saving:"Saving to JARC…",reconnecting:"Everything is saved. Reconnecting to live updates…",polling:"Everything is saved. Live updates are unavailable, so JARC checks for changes every 20 seconds.",live:"Everything is saved. Colleagues' changes appear automatically.",saved:server?"Everything is saved.":"Saved in this browser."};
+    button.innerHTML=labels[shown]; button.title=tips[shown]; button.setAttribute("aria-label",tips[shown]);
 
 
   }
@@ -644,7 +765,9 @@ class AppController {
   }
   refreshBoard(){
     const region=this.root.querySelector(".board-view-region"); if(!region||this.model.screen!=="board"){this.update();return;}
+    const focus=this.focusedControl(), scroll=this.scrollState();
     region.innerHTML=this.view.boardView(this.model);
+    this.refocus(focus); this.restoreScroll(scroll);
     const active=this.model.rows.filter((r)=>!r.archived).length, count=this.root.querySelector(".board-nav.selected .nav-count");
     if(count)count.textContent=active;
     this.root.querySelector('.board-actions [data-action="export"]')?.toggleAttribute("disabled",!this.model.rows.length);
@@ -673,6 +796,13 @@ class AppController {
     if(input.dataset.done)return; input.dataset.done="1";
     const id=this.model.idOf(input.dataset.id), field=input.dataset.field, column=this.model.board.columns.find((c)=>c.key===field), value=input.value;
     let note="";
+    if(column&&value!==input.dataset.original&&input.dataset.remoteValue!==undefined&&value!==input.dataset.remoteValue&&input.checkValidity()){
+      this.patchCell(id,field,false); this.conflict={id,field,mine:value};
+      const theirs=this.model.valueText(column,this.model.rows.find((r)=>r.id===id)?.[field]);
+      this.view.showConfirm(`${input.dataset.remoteBy} changed ${column.label}`,`While you were editing, ${input.dataset.remoteBy} changed it to “${theirs||"empty"}”. Keep your value “${value}” instead? Cancel keeps ${input.dataset.remoteBy}’s value.`,"conflict-keep-mine","",`Keep mine`);
+      this.conflictState=true; this.saveFeedback();
+      return;
+    }
     if(column&&value!==input.dataset.original){
       if(column.required&&!value.trim())note=`${column.label} can't be empty`;
       else if(!input.checkValidity())note=`${column.label} not saved: ${input.validationMessage}`;

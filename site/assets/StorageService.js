@@ -166,13 +166,15 @@ class ApiAdapter {
 
   // One request with a timeout. Resolves with the parsed JSON body; rejects only with StorageError (safe messages,
   // the raw failure kept in `cause`). Nothing is ever retried automatically.
-  async request(method, path, body) {
+  // background: the app's own refreshes (not something the person did) — the server doesn't extend the session's
+  // idle timeout for them.
+  async request(method, path, body, { background = false } = {}) {
     const url = this.baseUrl + path;
     const csrf = this.csrfToken && !(method === "GET" || method === "HEAD") && this.isSameOrigin(url) ? this.csrfToken : null;
-    return this.send(method, url, body, csrf);
+    return this.send(method, url, body, csrf, background);
   }
 
-  async send(method, url, body, csrf) {
+  async send(method, url, body, csrf, background = false) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     const fail = (code, message, cause) => new StorageError(code, message || StorageError.describe(code).message, cause);
@@ -181,6 +183,7 @@ class ApiAdapter {
       try {
         const headers = body === undefined ? { Accept: "application/json" } : { Accept: "application/json", "Content-Type": "application/json" };
         if (csrf) headers["X-CSRF-Token"] = csrf;
+        if (background) headers["X-JARC-Background"] = "1";
         response = await this.fetch(url, { method, body, signal: controller.signal, credentials: "same-origin", cache: "no-store", headers });
       } catch (error) {
         if (controller.signal.aborted) throw fail(StorageError.CODES.SERVICE_UNAVAILABLE, "The JARC server took too long to respond. Try again in a moment.", error);

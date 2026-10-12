@@ -23,9 +23,13 @@ const COLUMNS = [
 
 describe("Columns and notifications (real app, headless browser)", { skip: BROWSER ? false : "no Chrome or Edge installed" }, () => {
   let server, base, ana, ben, ws, board;
+  // Each test person keeps the same Microsoft object ID, so signing in again is the same JARC user.
+  const OIDS = { "ana@example.invalid": "0a0a0a0a-0000-4000-8000-000000000001", "ben@example.invalid": "0b0b0b0b-0000-4000-8000-000000000002" };
+  // Signing in from a page that isn't the app (the health endpoint): no app request with an old cookie is in flight
+  // whose 401 response would clear the new session cookie.
   const signIn = (b, name, email) => b.evaluate(`(async () => {
     const start = await (await fetch("/api/v1/auth/sign-in/start", { method: "POST" })).json();
-    const { token } = await (await fetch("/__test/id-token?oid=" + crypto.randomUUID() + "&name=${encodeURIComponent(name)}&email=${email}&nonce=" + start.nonce)).json();
+    const { token } = await (await fetch("/__test/id-token?oid=${OIDS[email]}&name=${encodeURIComponent(name)}&email=${email}&nonce=" + start.nonce)).json();
     await fetch("/api/v1/auth/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ idToken: token }) });
   })()`);
   const api = (b, method, p, body) => b.evaluate(`(async () => { const { csrfToken } = await (await fetch("/api/v1/auth/session")).json(); const r = await fetch("/api/v1${p}", { method: "${method}", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken }${body ? `, body: ${JSON.stringify(JSON.stringify(body))}` : ""} }); return { status: r.status, body: await r.json() }; })()`);
@@ -37,8 +41,10 @@ describe("Columns and notifications (real app, headless browser)", { skip: BROWS
   const openBoard = async (b, width = 1280) => {
     await b.open(`${base}/`, { width, height: 860 });
     await b.waitFor("!!document.querySelector('.app-shell')", 8000);
+    assert.ok(await b.waitFor("!!document.querySelector('#sidebar .tree-item') || !!document.querySelector('.entra-login')", 15000), "app shown");
+    assert.equal(await b.evaluate("!!document.querySelector('.entra-login')"), false, "signed in (not the sign-in screen)");
     await b.evaluate("[...document.querySelectorAll('#sidebar .tree-item')].find((el) => el.textContent.includes('Jobs'))?.click()");
-    assert.ok(await b.waitFor("!!document.querySelector('.editable-table tbody tr td.cell')", 8000), "board table loaded");
+    assert.ok(await b.waitFor("!!document.querySelector('.editable-table tbody tr td.cell')", 15000), "board table loaded");
     await sleep(300);
   };
   const saved = (b) => b.waitFor("!document.querySelector('.save-state')?.textContent.includes('Saving')", 5000).then(() => sleep(250));
@@ -50,7 +56,7 @@ describe("Columns and notifications (real app, headless browser)", { skip: BROWS
     server = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port), "shared"], { stdio: "ignore" });
     for (let i = 0; i < 100; i += 1) { try { await fetch(`${base}/api/v1/health`); break; } catch { await sleep(100); } }
     ana = await launch(BROWSER); ben = await launch(BROWSER);
-    for (const [b, name, email] of [[ana, "Ana Reyes", "ana@example.invalid"], [ben, "Ben Cruz", "ben@example.invalid"]]) { await b.open(`${base}/`, { width: 1280 }); await signIn(b, name, email); }
+    for (const [b, name, email] of [[ana, "Ana Reyes", "ana@example.invalid"], [ben, "Ben Cruz", "ben@example.invalid"]]) { await b.open(`${base}/api/v1/health`, { width: 1280 }); await signIn(b, name, email); }
     ws = (await api(ana, "POST", "/workspaces", { name: "Operations" })).body.workspace;
     board = (await api(ana, "POST", `/workspaces/${ws.id}/boards`, { name: "Jobs", columns: COLUMNS })).body.board;
   });
@@ -197,6 +203,8 @@ describe("Columns and notifications (real app, headless browser)", { skip: BROWS
     assert.deepEqual((await record(ana, "E-1")).values.owner, [], "nothing saved (a new record starts with no one assigned)");
     assert.equal(await ana.evaluate(`document.querySelector(${JSON.stringify(cell("E-1", "owner"))} + " .people-stack") === null`), true, "the cell shows what is stored");
     await ana.evaluate("fetch('/__test/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enableEmail: 'ben@example.invalid' }) })");
+    // While Ben was disabled, his open (live) tab touched the API, so his session ended — as it should. Sign him back in.
+    await ben.open(`${base}/api/v1/health`, { width: 1280 }); await signIn(ben, "Ben Cruz", "ben@example.invalid");
   });
 
   test("an empty board: add a Status column and a record from the UI, then use the picker", async () => {

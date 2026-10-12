@@ -45,6 +45,7 @@ async function main() {
 
   let stopping = false;
   const shutdown = () => {
+    app.locals.realtime?.closeAll(); // open live-update streams would otherwise keep the server from closing
     if (stopping) return;
     stopping = true;
     server.close(async () => {

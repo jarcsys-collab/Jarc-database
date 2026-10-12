@@ -15,6 +15,8 @@ const { devActorMiddleware } = require("./context/dev-actor");
 const { sessionAuthentication } = require("./auth/session");
 const { Access } = require("./auth/access");
 const { apiNotFound, errorHandler, sendError } = require("./middleware/errors");
+const { ActivityStream } = require("./realtime/activity-stream");
+const { eventRoutes, entraSessionCheck } = require("./routes/events");
 const { version } = require("../package.json");
 
 // Larger than any state the frontend can produce today: browser storage caps at roughly 5 MB, and backup and CSV
@@ -39,7 +41,7 @@ function resourceModeIndex(siteDir) {
 //   auth = { mode: "entra", entra, verify }   Microsoft Entra ID sign-in → server session cookie (required in production)
 //   enableDevResourceApi + devActor            the fixed development user (development and test only)
 // accessPolicy: "role_based" (default) or "development_shared" (see auth/access.js).
-function createApp({ repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", siteDir = DEFAULT_SITE_DIR, logger = console } = {}) {
+function createApp({ repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", live = {}, siteDir = DEFAULT_SITE_DIR, logger = console } = {}) {
   if (environment === "production" && (enableDevStateApi || enableDevResourceApi)) {
     throw new Error("Development (pre-auth) APIs can't be enabled in production.");
   }
@@ -66,6 +68,10 @@ function createApp({ repository, environment = "development", enableDevStateApi 
     // Everything after `identify` requires a caller (in Entra mode, a valid session — including unknown paths).
     if (auth) api.use(identify, sessionRoutes({ repos: dataLayer.repos, access }));
     api.use(identify, meRoutes({ repos: dataLayer.repos, mode: auth ? "entra" : "dev", access }), memberRoutes({ services: dataLayer.services, access }), resourceRoutes({ services: dataLayer.services, access }));
+    // Live updates (Server-Sent Events) from the activity log; live: { pollMs, overlapMs, timings } for tests.
+    const stream = new ActivityStream({ activities: dataLayer.repos.activities, logger, ...(live.pollMs ? { pollMs: live.pollMs } : {}), ...(live.overlapMs ? { overlapMs: live.overlapMs } : {}) });
+    app.locals.realtime = stream;
+    api.use(identify, eventRoutes({ stream, access, repos: dataLayer.repos, sessionCheck: auth ? entraSessionCheck({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users }) : null, timings: live.timings }));
   }
   api.use(apiNotFound);
   app.use("/api/v1", api);

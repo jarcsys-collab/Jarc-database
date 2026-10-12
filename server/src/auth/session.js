@@ -9,6 +9,10 @@
 //   identity bound to the verified tenant ID + object ID at sign-in; re-checked against the configured tenant and the
 //            session's user on every request (a mismatch ends the session).
 //   user     re-checked on every request: a disabled user's session ends immediately (403 ACCOUNT_DISABLED).
+//   idle     only requests made by the person extend the idle timeout. Background traffic — the live-update stream
+//            (GET /events) and requests marked X-JARC-Background: 1 (notification feed, people list, live refreshes,
+//            polling) — is authenticated the same way but doesn't count as activity, so an open but unused tab still
+//            times out. (The header can only make a session end sooner.)
 // Nothing here logs the cookie, the CSRF token or any token.
 const crypto = require("crypto");
 const { sendError } = require("../middleware/errors");
@@ -77,7 +81,8 @@ function sessionAuthentication({ sessions, users, entra }) {
       if (!originAllowed(req, entra.appOrigin)) return sendError(res, 403, "CSRF_INVALID", "This request didn't come from JARC.");
       if (!sameText(req.get("x-csrf-token"), csrfTokenFor(secret))) return sendError(res, 403, "CSRF_INVALID", "This request couldn't be verified. Reload JARC and try again.");
     }
-    if (now - session.lastSeenAt > TOUCH_INTERVAL_MS) await sessions.touch(session._id, now, idleMs);
+    const background = req.get("x-jarc-background") === "1" || (req.method === "GET" && req.path === "/events");
+    if (!background && now - session.lastSeenAt > TOUCH_INTERVAL_MS) await sessions.touch(session._id, now, idleMs);
     // displayName comes from the stored user (refreshed from the verified Microsoft token at sign-in), never from the
     // request; it is snapshotted on activity entries.
     req.actor = Object.freeze({ userId: user._id, kind: "entra", isSystemAdmin: Boolean(session.isSystemAdmin), sessionId: session._id, displayName: user.displayName || user.email || null });

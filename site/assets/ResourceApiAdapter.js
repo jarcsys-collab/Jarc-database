@@ -49,6 +49,8 @@ class ResourceReconcile {
   removeBoard(boardId) { this.ops.push((ws) => { for (const w of ws) w.boards = (w.boards || []).filter((b) => String(b.id) !== String(boardId)); }); }
   replaceWorkspace(id, fields) { this.ops.push((ws) => { const w = ws.find((x) => String(x.id) === String(id)); if (w) Object.assign(w, resourceClone(fields)); }); }
   removeWorkspace(id) { this.ops.push((ws) => { const i = ws.findIndex((x) => String(x.id) === String(id)); if (i >= 0) ws.splice(i, 1); }); }
+  addWorkspace(workspace) { this.ops.push((ws) => { if (!ws.some((x) => String(x.id) === String(workspace.id))) ws.push(resourceClone(workspace)); }); }
+  addBoard(workspaceId, board) { this.ops.push((ws) => { const w = ws.find((x) => String(x.id) === String(workspaceId)); if (w && !ResourceReconcile.board(ws, board.id)) (w.boards ||= []).push(resourceClone(board)); }); }
   addGroup(boardId, name) { this.ops.push((ws) => { const b = ResourceReconcile.board(ws, boardId); if (b && !b.groups.includes(name)) b.groups.push(name); }); }
 }
 
@@ -134,6 +136,8 @@ class ResourceApiAdapter {
     try { return await this.http.request(method, path, body === undefined ? undefined : JSON.stringify(body)); }
     catch (error) { if (context && error && typeof error === "object") error.context = context; throw error; }
   }
+  // The app's own refreshes (feed, people, live updates): authenticated as usual, but not counted as activity.
+  background(path) { return this.http.request("GET", path, undefined, { background: true }); }
   resolve(id) { return id === null || id === undefined ? id : this.aliases.has(String(id)) ? this.aliases.get(String(id)) : id; }
   alias(from, to, reconcile) { if (String(from) === String(to)) return; this.aliases.set(String(from), to); reconcile.mapId(from, to); }
 
@@ -238,14 +242,14 @@ class ResourceApiAdapter {
   async loadPeople(workspaceId) {
     const id = this.resolve(workspaceId);
     if (!this.workspaces.has(String(id))) return [];
-    const { items } = await this.request("GET", `/workspaces/${id}/people`);
+    const { items } = await this.background(`/workspaces/${id}/people`);
     return items;
   }
 
   // ---- Notification feed: the shared activity log of every workspace this person can see, newest first. Each item
   // names who made the change (ID + the display name stored with the change; "Unknown user" for older entries).
   async loadActivityFeed({ limit = 50 } = {}) {
-    const { items } = await this.request("GET", `/activity?limit=${limit}`);
+    const { items } = await this.background(`/activity?limit=${limit}`);
     return items.map((e) => {
       const board = e.boardId ? this.boards.get(e.boardId) : null, workspace = e.workspaceId ? this.workspaces.get(e.workspaceId) : null;
       return {
@@ -259,6 +263,125 @@ class ResourceApiAdapter {
   static activityText(e, board) {
     const label = (field) => (field.startsWith("values.") ? board?.columns.find((c) => c.key === field.slice(7))?.label || field.slice(7) : field === "groupId" ? "Group" : field.charAt(0).toUpperCase() + field.slice(1));
     return e.summary || ({ "record.created": "Created a record", "record.deleted": "Deleted a record", "record.updated": e.changes?.length ? `Changed ${e.changes.map((c) => label(c.field)).join(", ")}` : "Updated a record", "workspace.created": "Created the workspace", "workspace.updated": "Updated the workspace", "workspace.deleted": "Deleted the workspace", "board.created": "Created the board", "board.updated": "Updated the board", "board.deleted": "Deleted the board" })[e.action] || e.action.replace(/[._]/g, " ");
+  }
+
+  // ---- Live updates: other people's saved changes -----------------------------------------------------------------
+  // Two steps so a save can never interleave with an update of the cached server copy:
+  //   fetchRemote(events)  network only — reads what the events point at; changes nothing here.
+  //   commitRemote(plan)   synchronous — updates the cached server copy and returns { reconcile, summary } for the
+  //                        model. The caller only commits when no save is in flight (otherwise it fetches again later).
+  // Changes this tab made itself come back with the version already known here, and are skipped (no echo).
+  static RECORD_ACTIONS = new Set(["record.created", "record.updated", "record.deleted"]);
+  static STRUCTURE_ACTIONS = /^(member\.|workspace\.|board\.(created|deleted|moved)$)/;
+  async fetchRemote(events) {
+    const plan = { structure: null, boards: new Map(), records: new Map() };
+    const structure = new Set(), boardIds = new Set(), recordsByBoard = new Map();
+    for (const e of events) {
+      if (ResourceApiAdapter.STRUCTURE_ACTIONS.test(e.action)) { structure.add(e.workspaceId); if (e.boardId) boardIds.add(e.boardId); }
+      else if (ResourceApiAdapter.RECORD_ACTIONS.has(e.action) && e.recordId && e.boardId) (recordsByBoard.get(e.boardId) || recordsByBoard.set(e.boardId, new Set()).get(e.boardId)).add(e.recordId);
+      else if (e.boardId) boardIds.add(e.boardId);
+    }
+    const get = async (path) => { try { return await this.background(path); } catch (error) { if (error instanceof StorageError && error.code === StorageError.CODES.NOT_FOUND) return null; throw error; } };
+    if (structure.size) {
+      const { items } = await this.background("/workspaces");
+      const boards = new Map();
+      for (const w of items) if (structure.has(w.id) || !this.workspaces.has(w.id) || this.workspaces.get(w.id).version !== w.version) boards.set(w.id, (await this.background(`/workspaces/${w.id}/boards`)).items);
+      plan.structure = { workspaces: items, boards };
+    }
+    for (const boardId of boardIds) {
+      if (!this.boards.has(boardId)) continue; // new boards arrive with the workspace refresh above
+      const board = await get(`/boards/${boardId}`);
+      plan.boards.set(boardId, { board: board?.board || null, records: board && this.boards.get(boardId).load.state !== "none" ? await this.fetchAllRecords(boardId) : null });
+    }
+    for (const [boardId, ids] of recordsByBoard) {
+      const cached = this.boards.get(boardId);
+      if (!cached || cached.load.state === "none" || plan.boards.has(boardId)) continue; // not open here, or reloaded whole
+      if (ids.size > 25) { plan.boards.set(boardId, { board: (await get(`/boards/${boardId}`))?.board || null, records: await this.fetchAllRecords(boardId) }); continue; }
+      plan.records.set(boardId, await Promise.all([...ids].map(async (id) => ({ id, record: (await get(`/records/${id}`))?.record || null }))));
+    }
+    return plan;
+  }
+  async fetchAllRecords(boardId) {
+    const wanted = Math.max(this.boardRecords(boardId).length, 1), out = [];
+    let cursor = null;
+    do {
+      const page = await this.background(`/boards/${boardId}/records?limit=${ResourceApiAdapter.PAGE_SIZE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+      out.push(...page.items); cursor = page.nextCursor;
+    } while (cursor && out.length < Math.max(wanted, ResourceApiAdapter.FULL_LOAD_LIMIT));
+    return { items: out, partial: Boolean(cursor) };
+  }
+  commitRemote(plan) {
+    const reconcile = new ResourceReconcile();
+    const summary = { records: [], removed: [], boards: new Set(), removedBoards: new Set(), structure: false };
+    const fields = (a, b) => [...new Set([...Object.keys(a?.values || {}), ...Object.keys(b?.values || {})])].filter((k) => !resourceSame(a?.values?.[k], b?.values?.[k]));
+    // Workspaces and board lists.
+    if (plan.structure) {
+      const listed = new Set(plan.structure.workspaces.map((w) => w.id));
+      for (const id of [...this.workspaces.keys()]) if (!listed.has(id)) {
+        for (const b of [...this.boards.values()].filter((x) => x.workspaceId === id)) { this.forgetBoard(b.id); summary.removedBoards.add(b.id); }
+        this.workspaces.delete(id); reconcile.removeWorkspace(id); summary.structure = true;
+      }
+      for (const w of plan.structure.workspaces) {
+        const known = this.workspaces.get(w.id);
+        const newer = !known || w.version > known.version;
+        if (newer) { this.workspaces.set(w.id, this.workspaceFrom(w)); summary.structure = true; }
+        const boards = plan.structure.boards.get(w.id);
+        if (!known) {
+          for (const b of boards || []) this.boards.set(b.id, this.boardFrom(b));
+          const { boards: modelBoards, ...rest } = this.modelWorkspaces().find((x) => x.id === w.id);
+          reconcile.addWorkspace({ ...rest, boards: modelBoards });
+          continue;
+        }
+        if (newer) { const { boards: _ignored, ...rest } = this.modelWorkspaces().find((x) => x.id === w.id); reconcile.replaceWorkspace(w.id, rest); }
+        if (!boards) continue;
+        const ids = new Set(boards.map((b) => b.id));
+        for (const b of [...this.boards.values()].filter((x) => x.workspaceId === w.id && !ids.has(x.id))) { this.forgetBoard(b.id); reconcile.removeBoard(b.id); summary.removedBoards.add(b.id); summary.structure = true; }
+        for (const b of boards) {
+          const cached = this.boards.get(b.id);
+          if (!cached || cached.workspaceId !== w.id) {
+            if (cached) reconcile.removeBoard(b.id); // moved here from another workspace
+            this.boards.set(b.id, this.boardFrom(b));
+            reconcile.addBoard(w.id, this.modelBoard(this.boards.get(b.id)));
+            summary.structure = true;
+          } else if (b.version > cached.version) { this.boards.set(b.id, this.boardFrom(b)); reconcile.replaceBoard(b.id, this.modelBoardFields(this.boards.get(b.id))); summary.boards.add(b.id); }
+        }
+      }
+    }
+    // Whole boards (columns, groups, views, batches).
+    for (const [boardId, { board, records }] of plan.boards) {
+      if (!this.boards.has(boardId)) continue;
+      if (!board) { this.forgetBoard(boardId); reconcile.removeBoard(boardId); summary.removedBoards.add(boardId); continue; }
+      let changed = false;
+      if (board.version > this.boards.get(boardId).version) { this.boards.set(boardId, this.boardFrom(board)); reconcile.replaceBoard(boardId, this.modelBoardFields(this.boards.get(boardId))); changed = true; }
+      if (records) {
+        const before = new Map(this.boardRecords(boardId).map((r) => [r.id, r.version]));
+        const same = before.size === records.items.length && records.items.every((r) => before.get(r.id) === r.version);
+        const older = records.items.some((r) => before.has(r.id) && r.version < before.get(r.id)); // fetched before a newer save here
+        if (!same && !older) {
+          for (const r of this.boardRecords(boardId)) this.records.delete(r.id);
+          for (const r of records.items) this.records.set(r.id, this.recordFrom(r));
+          const b = this.boards.get(boardId); b.load.state = records.partial ? "partial" : "full"; b.recordCount = records.items.filter((r) => !r.archived).length;
+          reconcile.replaceBoardRecords(boardId, this.boardRecords(boardId).map((r) => this.modelRow(r, b)));
+          changed = true;
+        }
+      }
+      if (changed) summary.boards.add(boardId);
+    }
+    // Single records.
+    for (const [boardId, items] of plan.records) {
+      const b = this.boards.get(boardId); if (!b) continue;
+      for (const { id, record } of items) {
+        const cached = this.records.get(id);
+        if (!record) { if (cached) { this.records.delete(id); reconcile.removeRecord(boardId, id); summary.removed.push({ boardId, id }); } continue; }
+        if (record.boardId !== boardId) continue;
+        if (cached && record.version <= cached.version) continue; // already known (often this tab's own save) or older than what's here
+        const next = this.recordFrom(record);
+        this.records.set(id, next);
+        reconcile.replaceRecord(boardId, this.modelRow(next, b));
+        summary.records.push({ boardId, id, isNew: !cached, fields: cached ? fields(cached, next) : [], order: Boolean(cached && (cached.position !== next.position || cached.groupId !== next.groupId || cached.archived !== next.archived || cached.pinned !== next.pinned)) });
+      }
+    }
+    return { reconcile, summary };
   }
 
   // Board history (read-only). Shown in the board's activity and the record drawer; failures are not fatal.

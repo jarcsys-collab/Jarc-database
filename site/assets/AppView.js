@@ -29,6 +29,14 @@ const icon = (name) => `<svg class="icon" aria-hidden="true" viewBox="0 0 24 24"
 // Label colours offered for Status, Priority and Dropdown options (the app's pill tones).
 const LABEL_COLORS = Object.freeze([["#3b82f6","Blue"],["#12a594","Teal"],["#1f9d61","Green"],["#c7900f","Amber"],["#ea6c1b","Orange"],["#e5484d","Red"],["#d6409f","Pink"],["#8e4ec6","Purple"],["#64748b","Slate"],["#8b8d98","Grey"]]);
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+// Formatters are expensive to create (tens of µs each) and a large board formats thousands of cells: create once.
+const FORMATS = Object.freeze({
+  date: new Intl.DateTimeFormat("en", { month: "short", day: "numeric", year: "numeric" }),
+  number: new Intl.NumberFormat(undefined, { maximumFractionDigits: 10 }),
+  stamp: new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }),
+  time: new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+});
+const DATE_CACHE = new Map(); // "2026-10-05" → "Oct 5, 2026" (bounded)
 
 class AppView {
   constructor(root) { this.root = root; }
@@ -146,7 +154,7 @@ class AppView {
   // Resource mode loads a board's records when it opens: loading, failed and partly loaded (large board) states.
   boardView(model) {
     const load=model.boardLoadState();
-    if(load.state==="loading"||load.state==="none")return `<section class="empty-state board-loading" role="status" aria-live="polite"><span class="empty-symbol">${icon("records")}</span><h2>Loading records…</h2><p>Getting this board's records from the server.</p></section>`;
+    if(load.state==="loading"||load.state==="none")return this.skeletonRows(model);
     if(load.state==="error")return `<section class="empty-state" role="alert"><span class="empty-symbol">${icon("records")}</span><h2>Records couldn't load</h2><p>${this.escape(model.boardLoadError||"Try again in a moment.")}</p><button class="button secondary" data-action="retry-board-load">Try again</button></section>`;
     const partial=load.state==="partial"?`<div class="notice partial-notice" role="status"><span>Showing the first ${Number(load.loaded||0).toLocaleString()} of ${Number(load.total||0).toLocaleString()} records. Search, filters and sorting apply to the loaded records.</span> <button class="button secondary" data-action="load-more-records">Load more</button></div>`:"";
     return partial+this.boardRecordsView(model);
@@ -191,7 +199,7 @@ class AppView {
     return `<span class="person people-stack" title="${this.escape(names.join(", "))}"><span class="avatar-stack">${avatars}${names.length>3?`<span class="person-avatar is-more" aria-hidden="true">+${names.length-3}</span>`:""}</span><span class="person-name">${this.escape(names.length===1?model.personLabel(list[0]):`${names.length} people`)}</span></span>`;
   }
   // Numbers: grouped for reading (1,234.5); the stored value is unchanged.
-  number(value){const n=Number(value);return Number.isFinite(n)&&String(value).trim()!==""?new Intl.NumberFormat(undefined,{maximumFractionDigits:10}).format(n):String(value);}
+  number(value){const n=Number(value);return Number.isFinite(n)&&String(value).trim()!==""?FORMATS.number.format(n):String(value);}
   initials(name){ const parts=String(name||"").trim().split(/\s+/).filter(Boolean); return ((parts[0]?.[0]||"")+(parts.length>1?parts[1][0]:parts[0]?.[1]||"")).toUpperCase()||"?"; }
   person(name){ return `<span class="person"><span class="person-avatar" aria-hidden="true">${this.escape(this.initials(name))}</span><span class="person-name">${this.escape(name)}</span></span>`; }
   isChoiceColumn(column){ return ["status","priority","dropdown","group","owner"].includes(column.type); }
@@ -229,6 +237,7 @@ class AppView {
   // Cell picker. Single-value columns: choosing an option saves and closes. People and multi-select Dropdowns: each
   // tap adds or removes that value (saved straight away) and the picker stays open; Done closes it.
   showCellOptions(model,row,column,{query="",loading=false}={}){
+    if(loading&&column.type==="owner"){document.querySelector("#overlay-root").innerHTML=`<div class="popover cell-options-popover" role="menu" aria-label="${this.escape(column.label)}" aria-busy="true" data-cell="${this.attr(row.id)}:${this.attr(column.key)}"><div class="popover-title"><strong>${this.escape(column.label)}</strong><small>Loading people…</small></div><div class="option-scroll" role="status">${Array.from({length:3},()=>'<span class="skeleton-option"><span class="skeleton skeleton-avatar"></span><span class="skeleton skeleton-text"></span></span>').join("")}<span class="sr-only">Loading people…</span></div></div>`;return;}
     const multi=model.isMultiColumn(column), chosen=multi?model.valueList(row[column.key]):[String(row[column.key]??"")].filter(Boolean);
     const options=this.cellOptions(model,column), list=[...new Set([...chosen.filter((v)=>!options.includes(v)),...options])];
     const label=(o)=>column.type==="owner"?model.personLabel(o):o;
@@ -341,7 +350,7 @@ class AppView {
 
   feedItem(model,n){
     const mine=Boolean(n.actorId&&n.actorId===model.me), who=mine?"You":n.actorName||"Unknown user", where=[n.boardName||n.workspaceName,n.recordName].filter(Boolean).join(" · ");
-    const when=new Date(n.at), full=Number.isNaN(when.getTime())?"":new Intl.DateTimeFormat(undefined,{dateStyle:"medium",timeStyle:"short"}).format(when);
+    const when=new Date(n.at), full=Number.isNaN(when.getTime())?"":FORMATS.stamp.format(when);
     return `<button class="notification-item ${model.feedUnread(n)?"unread":""} ${mine?"is-mine":""}" data-action="open-notification" data-board="${this.attr(n.boardId||"")}" data-workspace="${this.attr(n.workspaceId||"")}"><span class="person-avatar actor-avatar ${n.actorName?"":"is-unknown"} ${mine?"is-you":""}" aria-hidden="true">${this.escape(n.actorName?this.initials(n.actorName):"?")}</span><span class="notification-body"><strong><span class="actor-name">${this.escape(who)}</span> ${this.escape(n.text.charAt(0).toLowerCase()+n.text.slice(1))}</strong>${where?`<small class="notification-where">${this.escape(where)}</small>`:""}<small><time datetime="${this.attr(n.at)}" title="${this.attr(full)}">${this.relative(n.at)}</time></small></span></button>`;
   }
   showFeed(model,filter="all",{loading=false}={}){
@@ -394,8 +403,35 @@ class AppView {
     }).join("");
     const schemaHint=!editing&&columns.length===1?`<p class="record-form-hint">This board has one column. <button type="button" class="link-button" data-action="add-column">Add a column</button> to capture more details.</p>`:"";
     this.overlay(`<form class="record-drawer" data-action="record-form"><div class="modal-head"><div><div class="eyebrow">${this.escape(model.board.name)}</div><h2>${editing?"Record details":"New record"}</h2></div><div class="drawer-navigation">${editing?`<button class="icon-button" type="button" data-action="adjacent-record" data-id="${this.attr(row.id)}" data-direction="-1" aria-label="Previous record">${icon("left")}</button><button class="icon-button" type="button" data-action="adjacent-record" data-id="${this.attr(row.id)}" data-direction="1" aria-label="Next record">${icon("right")}</button>`:""}${this.closeButton()}</div></div><input type="hidden" name="id" value="${this.attr(row?.id||"")}"><div class="drawer-body"><div class="record-form-grid">${fields}</div>${schemaHint}<datalist id="record-owners">${owners.map(o=>`<option value="${this.escape(o)}"></option>`).join("")}</datalist>${editing?`<section class="record-activity"><h3>Activity</h3>${(row.activity||[]).slice().reverse().slice(0,8).map(a=>`<div><span class="activity-dot"></span><span><strong>${this.escape(a.text)}</strong><small>${this.escape(a.by||"")} · ${this.relative(a.at)}</small></span></div>`).join("")||'<p>History is recorded from your next change.</p>'}${row.createdAt?`<small>Created ${this.time(row.createdAt)}</small>`:""}${row.updatedAt?`<small>Updated ${this.time(row.updatedAt)}</small>`:""}</section>`:""}</div><div class="modal-actions">${editing?`<button type="button" class="icon-button danger" data-action="delete" data-id="${this.attr(row.id)}" aria-label="Delete record">${icon("trash")}</button><button type="button" class="button secondary" data-action="archive-item" data-id="${this.attr(row.id)}">${row.archived?"Restore":"Archive"}</button>`:""}<span class="modal-spacer"></span><button type="button" class="button secondary" data-action="close-overlay">Cancel</button><button class="button primary">${editing?"Save changes":"Create record"}</button></div></form>`,"drawer-overlay");
+    // What each field showed when the form opened: saving an existing record sends only fields changed here.
+    const form=document.querySelector('#overlay-root form.record-drawer'); if(form)form.dataset.initial=JSON.stringify(this.formValues(form));
   }
 
+  // The record form's current values, keyed by column (lists for multi-value fields).
+  formValues(form){
+    const out={};
+    for(const field of form.querySelectorAll("[data-column-key]")){
+      const key=field.dataset.columnKey, inputs=[...field.querySelectorAll(`[name="${CSS.escape(key)}"]`)];
+      if(!inputs.length)continue;
+      if(field.querySelector(".choice-group"))out[key]=inputs.filter(i=>i.checked).map(i=>i.value);
+      else if(inputs[0].type==="checkbox")out[key]=inputs[0].checked;
+      else out[key]=inputs[0].value;
+    }
+    return out;
+  }
+  // Puts a value into one record-form field (used when a colleague changes a field you haven't touched).
+  setFormValue(form,key,value){
+    const field=form.querySelector(`[data-column-key="${CSS.escape(key)}"]`); if(!field)return;
+    const inputs=[...field.querySelectorAll(`[name="${CSS.escape(key)}"]`)];
+    if(field.querySelector(".choice-group")){const list=Array.isArray(value)?value:[];inputs.forEach(i=>{i.checked=list.includes(i.value);});return;}
+    if(inputs[0]?.type==="checkbox"){inputs[0].checked=Boolean(value);return;}
+    if(inputs[0]?.tagName==="SELECT"&&value&&![...inputs[0].options].some(o=>o.value===value))inputs[0].add(new Option(value,value));
+    if(inputs[0])inputs[0].value=value??"";
+  }
+  formNotice(form,html,kind="info"){let box=form.querySelector(".form-live-notice");if(!box){box=document.createElement("div");box.className="form-live-notice";box.setAttribute("role","status");form.querySelector(".drawer-body")?.prepend(box);}box.dataset.kind=kind;box.innerHTML=html;}
+
+  // Skeleton rows while a board's records load (shape of the table, no flashing spinner).
+  skeletonRows(model,count=6){const cols=model.visibleColumns.length;return `<section class="data-region" aria-busy="true"><div class="group-title"><span class="skeleton skeleton-text" style="width:110px"></span></div><div class="table-wrap skeleton-table" role="status" aria-label="Loading records">${Array.from({length:count},(_,i)=>`<div class="skeleton-row">${Array.from({length:Math.min(cols,6)},(_,j)=>`<span class="skeleton skeleton-text" style="width:${[70,55,40,62,48,35][(i+j)%6]}%"></span>`).join("")}</div>`).join("")}</div><span class="sr-only">Loading records…</span></section>`;}
   showDensityMenu(model){document.querySelector("#overlay-root").innerHTML=`<div class="popover density-popover"><div class="popover-title"><strong>Table density</strong></div><button data-action="set-density" data-value="comfortable" class="${model.settings.density==="comfortable"?"selected":""}">Comfortable</button><button data-action="set-density" data-value="compact" class="${model.settings.density==="compact"?"selected":""}">Compact</button></div>`;}
   showViewOverflow(model){document.querySelector("#overlay-root").innerHTML=`<div class="popover view-overflow"><button data-action="manage-columns">${icon("columns")} Columns</button><button data-action="density-menu">${icon("list")} Density</button><button data-action="import">${icon("import")} Import records</button><button data-action="export" ${model.rows.length?"":"disabled"}>${icon("export")} Export records</button><button data-action="saved-views">${icon("star")} Saved views</button><button data-action="manage-groups">${icon("group")} Manage groups</button><button data-action="undo" ${model.canUndo?"":"disabled"}>Undo last change</button><button data-action="clear-filters">Reset view</button></div>`;}
   closeOverlay() { const root=document.querySelector("#overlay-root"); if(root) { root.innerHTML = ""; delete root.dataset.open; } }
@@ -408,7 +444,7 @@ class AppView {
   }
   // ---- Async UI helpers (Stage 8)
   renderLoading() {
-    this.root.innerHTML=`<main class="app-loading" role="status" aria-live="polite"><span class="brand-mark" aria-hidden="true">J</span><span class="loading-spinner" aria-hidden="true"></span><p>Loading your workspace…</p></main>`;
+    this.root.innerHTML=`<div class="app-skeleton" role="status" aria-live="polite" aria-busy="true"><aside class="sidebar skeleton-sidebar" aria-hidden="true"><div class="brand"><span class="brand-mark">J</span></div>${Array.from({length:5},(_,i)=>`<span class="skeleton skeleton-nav" style="width:${[70,55,62,48,58][i]}%"></span>`).join("")}</aside><main class="workspace"><header class="topbar" aria-hidden="true"><span class="skeleton skeleton-text" style="width:180px"></span></header><div class="home-content" aria-hidden="true"><span class="skeleton skeleton-title"></span><span class="skeleton skeleton-text" style="width:40%"></span><div class="skeleton-cards">${Array.from({length:4},()=>'<span class="skeleton skeleton-card"></span>').join("")}</div>${Array.from({length:4},()=>'<span class="skeleton skeleton-line"></span>').join("")}</div><p class="sr-only">Loading your workspace…</p></main></div>`;
   }
   // Busy state for a button running a pessimistic operation: disabled, spinner, same width, aria-busy.
   setBusy(button,busy) {
@@ -426,9 +462,9 @@ class AppView {
   }
   clearDialogError() { document.querySelector("#overlay-root .dialog-error")?.remove(); }
 
-  date(value){if(!value)return "—";const d=new Date(String(value).slice(0,10)+"T00:00:00");return Number.isNaN(d.getTime())?String(value):new Intl.DateTimeFormat("en",{month:"short",day:"numeric",year:"numeric"}).format(d);}
+  date(value){if(!value)return "—";const key=String(value).slice(0,10);let text=DATE_CACHE.get(key);if(text===undefined){const d=new Date(key+"T00:00:00");text=Number.isNaN(d.getTime())?String(value):FORMATS.date.format(d);if(DATE_CACHE.size>2000)DATE_CACHE.clear();DATE_CACHE.set(key,text);}return text;}
 
-  time(value) { return new Intl.DateTimeFormat("en",{month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}).format(new Date(value)); }
+  time(value) { return FORMATS.time.format(new Date(value)); }
   cap(value) { return value[0].toUpperCase()+value.slice(1); }
   // ---- Output helpers (Stage 5). Use the one that matches where the value lands:
   //   escape(v)    text content between tags

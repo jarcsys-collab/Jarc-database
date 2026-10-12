@@ -53,7 +53,10 @@ const INDEXES = Object.freeze({
   activities: [
     { name: "workspace_created", key: { workspaceId: 1, createdAt: -1 } },
     { name: "board_created", key: { boardId: 1, createdAt: -1 } },
-    { name: "record_created", key: { recordId: 1, createdAt: -1 } }
+    { name: "record_created", key: { recordId: 1, createdAt: -1 } },
+    // Live updates and the notification feed read the log by time across workspaces.
+    { name: "created", key: { createdAt: 1 } },
+    { name: "logged", key: { loggedAt: 1 } }
   ],
   sessions: [
     { name: "expires", key: { expiresAt: 1 }, expireAfterSeconds: 0 },

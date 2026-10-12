@@ -1032,3 +1032,71 @@ body.nav-collapsed .sidebar:not(.open) .sidebar-settings span {
   .option-search { height: 44px; }
   .choice-chip { min-height: 40px; padding: 6px 12px 6px 10px; }
 }
+
+/* Save and connection state (one indicator in the top bar): Saved · Live, Reconnecting, Checking for updates,
+   Saving, Couldn't save, Conflict, Offline. Only a server-confirmed save shows "Saved".
+   -------------------------------------------------------------------------- */
+.save-state { transition: color .18s ease, background-color .18s ease; }
+.save-state i { transition: background-color .18s ease, box-shadow .18s ease; }
+.save-state[data-state=live] i { box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 22%, transparent); }
+.save-state[data-state=reconnecting] i, .save-state[data-state=polling] i { background: var(--warning); animation: jarc-pulse 1.6s ease-in-out infinite; }
+.save-state[data-state=saving] { color: var(--text); }
+.save-state[data-state=error], .save-state[data-state=conflict] { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.save-state[data-state=offline] { color: var(--warning); }
+@keyframes jarc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+/* Phones: the indicator stays visible as a coloured dot (its full text is the accessible name and tooltip). */
+@media (max-width: 760px) {
+  .topbar .save-state { display: inline-grid !important; place-items: center; width: 32px; height: 32px; padding: 0; font-size: 0; }
+  .topbar .save-state i { width: 8px; height: 8px; }
+  .topbar .save-state:not(:has(i))::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+}
+
+/* Live updates: a colleague's change briefly highlights the cell; a cell being edited shows their value. */
+.remote-flash { animation: jarc-remote-flash 1.6s ease-out; }
+@keyframes jarc-remote-flash { 0% { background: color-mix(in srgb, var(--accent) 22%, transparent); } 100% { background: transparent; } }
+.has-remote-change .cell-input { outline: 2px solid var(--warning); outline-offset: -2px; }
+.remote-note { display: block; margin: 2px 4px 0; font-size: var(--fs-xs); color: var(--warning); }
+.form-live-notice { margin: 0 0 14px; padding: 10px 12px; border-radius: var(--radius-md); font-size: var(--fs-sm); line-height: 1.45; background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }
+.form-live-notice[data-kind=warning] { background: color-mix(in srgb, var(--warning) 12%, var(--surface)); border-color: color-mix(in srgb, var(--warning) 45%, var(--line)); }
+.form-live-notice[data-kind=error] { background: color-mix(in srgb, var(--danger) 10%, var(--surface)); border-color: color-mix(in srgb, var(--danger) 40%, var(--line)); }
+
+/* Skeletons: the shape of what's loading, without a flashing spinner. */
+.skeleton { display: block; border-radius: var(--radius-sm); background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 37%, var(--surface-2) 63%); background-size: 400% 100%; animation: jarc-shimmer 1.4s ease infinite; }
+@keyframes jarc-shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+.skeleton-text { height: 12px; margin: 4px 0; }
+.skeleton-title { height: 24px; width: 45%; margin: 6px 0 12px; }
+.skeleton-line { height: 46px; margin: 10px 0; border-radius: var(--radius-md); }
+.skeleton-nav { height: 14px; margin: 14px 10px; }
+.skeleton-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin: 24px 0; }
+.skeleton-card { height: 76px; border-radius: var(--radius-lg); }
+.skeleton-table { padding: 6px 0; }
+.skeleton-row { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 16px; align-items: center; height: 42px; padding: 0 14px; border-bottom: 1px solid var(--line); }
+.skeleton-row:last-child { border-bottom: 0; }
+.skeleton-option { display: flex; align-items: center; gap: 10px; padding: 8px; }
+.skeleton-option .skeleton-text { flex: 1; }
+.skeleton-avatar { width: 24px; height: 24px; border-radius: 50%; flex: none; }
+/* Startup skeleton: the app's layout (not .app-shell, which means "the app has loaded"). */
+.app-skeleton { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 100vh; }
+.app-skeleton .topbar { display: flex; align-items: center; }
+@media (max-width: 1024px) { .app-skeleton { grid-template-columns: 64px minmax(0, 1fr); } .app-skeleton .skeleton-nav { margin: 14px 6px; } }
+@media (max-width: 620px) { .app-skeleton { display: block; } .app-skeleton .sidebar { display: none; } .app-skeleton .workspace { padding-top: 58px; } }
+
+/* Motion system: short, transform/opacity only (120–220 ms). Turned off by "reduce motion" (system or JARC
+   setting) through the global rules in styles.css. */
+:root { --ease-out: cubic-bezier(.2, .8, .2, 1); --motion-fast: 120ms; --motion-base: 180ms; }
+.popover, .profile-popover { animation: jarc-pop-in var(--motion-base) var(--ease-out); transform-origin: top left; }
+.modal, .settings-window { animation: jarc-modal-in var(--motion-base) var(--ease-out); }
+.overlay { animation: fade-in var(--motion-fast) ease; }
+.record-drawer, .settings-drawer { animation: jarc-drawer-in 220ms var(--ease-out); }
+.sidebar { transition: transform 200ms var(--ease-out), width .18s ease, box-shadow .2s ease; }
+.toast { animation: jarc-toast-in var(--motion-base) var(--ease-out); }
+/* The empty-workspace welcome fades in; boards and home don't, so live re-renders never flicker. */
+.no-workspace { animation: jarc-view-in 160ms ease; }
+.editable-table tbody tr { transition: background-color var(--motion-fast) ease; }
+.nav-item, .tree-item, .button, .icon-button, .cell-display, .cell-option, .tool-button, .popover > button { transition: background-color var(--motion-fast) ease, color var(--motion-fast) ease, box-shadow var(--motion-fast) ease; }
+.button:active:not(:disabled), .icon-button:active:not(:disabled), .cell-option:active { transform: scale(.98); }
+@keyframes jarc-pop-in { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes jarc-modal-in { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: none; } }
+@keyframes jarc-drawer-in { from { opacity: .4; transform: translateX(24px); } to { opacity: 1; transform: none; } }
+@keyframes jarc-toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes jarc-view-in { from { opacity: .4; } to { opacity: 1; } }

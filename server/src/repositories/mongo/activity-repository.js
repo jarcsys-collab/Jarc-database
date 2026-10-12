@@ -5,11 +5,21 @@ const { COLLECTIONS } = require("../../db/bootstrap");
 class ActivityRepository {
   constructor(db) { this.collection = db.collection(COLLECTIONS.activities); }
 
-  async append(entry, { session } = {}) { await this.collection.insertOne(entry, { session }); return entry; }
+  // loggedAt: when the entry was written (createdAt is when the change began; a long transaction can be seconds apart).
+  // Live updates read by loggedAt, so a slow change can't fall behind the stream's read position.
+  async append(entry, { session } = {}) { entry.loggedAt = new Date(); await this.collection.insertOne(entry, { session }); return entry; }
 
-  async appendMany(entries, { session } = {}) { if (entries.length) await this.collection.insertMany(entries, { session }); return entries.length; }
+  async appendMany(entries, { session } = {}) { const at = new Date(); for (const e of entries) e.loggedAt = at; if (entries.length) await this.collection.insertMany(entries, { session }); return entries.length; }
 
   listByBoard(boardId, { limit = 50 } = {}) { return this.collection.find({ boardId }, { sort: { createdAt: -1, _id: -1 }, limit: Math.min(limit, 200) }).toArray(); }
+
+  findById(id) { return this.collection.findOne({ _id: id }); }
+
+  // Oldest first by when entries were written (older entries without loggedAt: by createdAt), for the live update
+  // stream and its replay after a reconnect.
+  listSince(since, { limit = 500 } = {}) {
+    return this.collection.find({ $or: [{ loggedAt: { $gte: since } }, { loggedAt: { $exists: false }, createdAt: { $gte: since } }] }, { sort: { loggedAt: 1, createdAt: 1, _id: 1 }, limit: Math.min(limit, 2000) }).toArray();
+  }
 
   // Newest first across several workspaces (null = all), for the notification feed. before: only entries older than
   // this date (paging).
