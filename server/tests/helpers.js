@@ -14,6 +14,9 @@ async function startApp(options = {}) {
   const repository = options.repository || new MemoryStateRepository();
   const app = createApp({ repository, environment: "test", logger, ...options });
   const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+  // Idle connections outlive the test client's keep-alive (about 4 s): otherwise, under load, a request can be sent on a
+  // socket the server is closing at that moment (ECONNRESET; fetch does not retry POSTs).
+  server.keepAliveTimeout = 30000; server.headersTimeout = 31000;
   const url = `http://127.0.0.1:${server.address().port}`;
   // close(): live-update streams are ended first, or the server would wait for them.
   return { url, repository, logger, app, close: () => { app.locals.realtime?.closeAll(); return new Promise((resolve) => server.close(resolve)); } };
@@ -73,13 +76,13 @@ const entraEnv = (overrides = {}) => ({ ...TEST_ENTRA, ...overrides });
 
 // The full stack with Microsoft Entra ID sign-in (AUTH_MODE=entra): ID tokens verified against a local test key set,
 // server sessions in the fake MongoDB. No development user exists in this mode.
-async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient(), accessPolicy, live, fileStore = new MemoryFileStore() } = {}) {
+async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient(), accessPolicy, live, fileStore = new MemoryFileStore(), monday = null, fetch = undefined } = {}) {
   const { createEntraVerifier } = require("../src/auth/entra-token");
   const connection = new MongoConnection({ uri: "mongodb://fake.invalid", dbName: "jarc_database", createClient: () => fake });
   await connection.connect();
   await ensureDatabase(connection.db);
   const logger = { errors: [], error(...args) { this.errors.push(args.map(String).join(" ")); } };
-  const dataLayer = createDataLayer({ connection, logger, fileStore });
+  const dataLayer = createDataLayer({ connection, logger, fileStore, monday, ...(fetch ? { fetch } : {}) });
   const config = { ...issuer.config, ...entra };
   const verify = createEntraVerifier({ ...config, keySet: issuer.keySet });
   const started = await startApp({ dataLayer, auth: { mode: "entra", entra: config, verify }, logger, ...(accessPolicy ? { accessPolicy } : {}), ...(live ? { live } : {}) });

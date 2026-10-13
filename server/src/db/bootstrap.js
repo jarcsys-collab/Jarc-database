@@ -20,7 +20,13 @@ const COLLECTIONS = Object.freeze({
   // Files columns: one metadata document per attachment, and the GridFS bucket "attachmentFiles" holding the bytes.
   attachments: "attachments",
   attachmentFiles: "attachmentFiles.files",
-  attachmentChunks: "attachmentFiles.chunks"
+  attachmentChunks: "attachmentFiles.chunks",
+  // monday.com integration (see repositories/mongo/integration-repository.js).
+  integrations: "integrations",
+  integrationOAuthStates: "integrationOAuthStates",
+  integrationMappings: "integrationMappings",
+  integrationJobs: "integrationJobs",
+  integrationEvents: "integrationEvents"
 });
 
 const present = { $exists: true };
@@ -80,6 +86,23 @@ const INDEXES = Object.freeze({
   // The indexes the MongoDB driver itself expects on a GridFS bucket (same names, so it never creates duplicates).
   "attachmentFiles.files": [
     { name: "filename_1_uploadDate_1", key: { filename: 1, uploadDate: 1 } }
+  ],
+  integrationOAuthStates: [
+    { name: "expires", key: { expiresAt: 1 }, expireAfterSeconds: 0 }
+  ],
+  integrationMappings: [
+    { name: "uniq_source", key: { provider: 1, kind: 1, sourceId: 1 }, unique: true },
+    { name: "target", key: { provider: 1, kind: 1, targetId: 1 } },
+    { name: "board", key: { boardId: 1 } }
+  ],
+  integrationJobs: [
+    { name: "due", key: { status: 1, runAfter: 1 } },
+    { name: "lease", key: { status: 1, lockedUntil: 1 } },
+    { name: "history", key: { provider: 1, type: 1, createdAt: -1 } }
+  ],
+  integrationEvents: [
+    { name: "uniq_event", key: { provider: 1, eventId: 1 }, unique: true },
+    { name: "expires", key: { receivedAt: 1 }, expireAfterSeconds: 30 * 24 * 3600 }
   ],
   "attachmentFiles.chunks": [
     { name: "files_id_1_n_1", key: { files_id: 1, n: 1 }, unique: true }

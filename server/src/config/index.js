@@ -58,6 +58,7 @@ function loadConfig(env = process.env) {
     // An ACCESS_POLICY value that wasn't recognised (role_based is used instead); reported at startup.
     accessPolicyIgnored,
     maxFileStorageBytes: maxFileStorageMb * 1024 * 1024,
+    monday: loadMondayConfig(env),
     // GET/PUT /api/v1/state is a transitional development endpoint with no authentication. Never in production.
     enableDevStateApi: preAuth,
     // AUTH_MODE=dev: the resource API attributes every change to the fixed development user (DEVELOPMENT / PRE-AUTH).
@@ -123,6 +124,28 @@ function loadAuthConfig(env, nodeEnv, dataStore) {
 // Only the exact value development_shared turns sharing on; unset, empty or anything else is role_based (fails safe).
 const ACCESS_POLICIES = ["role_based", "development_shared"];
 
+// monday.com integration (one-way into JARC). Off unless MONDAY_INTEGRATION_ENABLED=true; usable only when the OAuth
+// app credentials, redirect URI and token-encryption key are all set. Secrets are non-enumerable (never in JSON or logs).
+function loadMondayConfig(env) {
+  const httpsUrl = (value, name) => { let url; try { url = new URL(value); } catch { throw new ConfigError(`${name} must be a full URL.`); } if (url.protocol !== "https:" && url.hostname !== "localhost") throw new ConfigError(`${name} must use https.`); return url.toString(); };
+  let tokenKey = null;
+  if (env.MONDAY_TOKEN_KEY) { tokenKey = Buffer.from(env.MONDAY_TOKEN_KEY, "base64"); if (tokenKey.length !== 32) throw new ConfigError("MONDAY_TOKEN_KEY must be 32 random bytes, base64-encoded (for example: openssl rand -base64 32)."); }
+  const redirectUri = env.MONDAY_REDIRECT_URI ? httpsUrl(env.MONDAY_REDIRECT_URI, "MONDAY_REDIRECT_URI") : null;
+  if (env.MONDAY_API_VERSION && !/^\d{4}-\d{2}$/.test(env.MONDAY_API_VERSION)) throw new ConfigError("MONDAY_API_VERSION must look like 2026-07.");
+  const required = { MONDAY_CLIENT_ID: env.MONDAY_CLIENT_ID, MONDAY_CLIENT_SECRET: env.MONDAY_CLIENT_SECRET, MONDAY_REDIRECT_URI: redirectUri, MONDAY_TOKEN_KEY: tokenKey };
+  const missing = Object.entries(required).filter(([, v]) => !v).map(([k]) => k);
+  const config = {
+    enabled: env.MONDAY_INTEGRATION_ENABLED === "true", configured: missing.length === 0, missing,
+    clientId: env.MONDAY_CLIENT_ID || null, redirectUri, apiVersion: env.MONDAY_API_VERSION || null,
+    scopes: env.MONDAY_SCOPES || "me:read boards:read workspaces:read",
+    // monday.com's documented OAuth flow (tokens don't expire). Its newer OAuth 2.1 flow (expiring tokens, refresh, PKCE)
+    // is not supported yet.
+    oauth: { authorizeUrl: "https://auth.monday.com/oauth2/authorize", tokenUrl: "https://auth.monday.com/oauth2/token" }
+  };
+  Object.defineProperties(config, { clientSecret: { value: env.MONDAY_CLIENT_SECRET || null, enumerable: false }, signingSecret: { value: env.MONDAY_SIGNING_SECRET || null, enumerable: false }, tokenKey: { value: tokenKey, enumerable: false } });
+  return Object.freeze(config);
+}
+
 function loadAccessPolicy(env) {
   const value = env.ACCESS_POLICY;
   if (value === "development_shared") return { accessPolicy: "development_shared", accessPolicyIgnored: false };
@@ -146,4 +169,4 @@ function assertMongoUri(uri) {
   if (pathDb && pathDb !== JARC_DB_NAME) throw new ConfigError(`MONGODB_URI names a different database in its path. Remove it (or use "${JARC_DB_NAME}"); the database always comes from MONGODB_DB_NAME.`);
 }
 
-module.exports = { loadConfig, assertJarcDatabaseName, ConfigError, JARC_DB_NAME, ACCESS_POLICIES };
+module.exports = { loadConfig, loadMondayConfig, assertJarcDatabaseName, ConfigError, JARC_DB_NAME, ACCESS_POLICIES };

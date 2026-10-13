@@ -19,6 +19,7 @@ const { ActivityStream } = require("./realtime/activity-stream");
 const { eventRoutes, entraSessionCheck } = require("./routes/events");
 const { fileRoutes } = require("./routes/files");
 const { searchRoutes } = require("./routes/search");
+const { integrationRoutes, integrationPublicRoutes } = require("./routes/integrations");
 const { version } = require("../package.json");
 
 // Larger than any state the frontend can produce today: browser storage caps at roughly 5 MB, and backup and CSV
@@ -65,6 +66,8 @@ function createApp({ repository, environment = "development", enableDevStateApi 
     if (!dataLayer) throw new Error("createApp needs a data layer for the resource API.");
     if (enableDevResourceApi && !devActor) throw new Error("createApp needs the development actor for the development resource API.");
     const access = new Access(dataLayer.repos, { policy: accessPolicy });
+    // monday.com OAuth return and webhooks: no JARC session (each has its own protection).
+    if (dataLayer.services?.integration) api.use(integrationPublicRoutes({ integration: dataLayer.services.integration }));
     if (auth) api.use(signInRoutes({ entra: auth.entra, verify: auth.verify, repos: dataLayer.repos, access }));
     const identify = auth ? sessionAuthentication({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users, entra: auth.entra }) : devActorMiddleware(devActor, { environment });
     // Everything after `identify` requires a caller (in Entra mode, a valid session — including unknown paths).
@@ -74,6 +77,7 @@ function createApp({ repository, environment = "development", enableDevStateApi 
     if (dataLayer.services?.files) api.use(identify, fileRoutes({ services: dataLayer.services, access }));
     // Global search across the boards the caller may see.
     if (dataLayer.services?.search) api.use(identify, searchRoutes({ services: dataLayer.services, access }));
+    if (dataLayer.services?.integration) api.use(identify, integrationRoutes({ integration: dataLayer.services.integration, access }));
     // Live updates (Server-Sent Events) from the activity log; live: { pollMs, overlapMs, timings } for tests.
     const stream = new ActivityStream({ activities: dataLayer.repos.activities, logger, ...(live.pollMs ? { pollMs: live.pollMs } : {}), ...(live.overlapMs ? { overlapMs: live.overlapMs } : {}) });
     app.locals.realtime = stream;

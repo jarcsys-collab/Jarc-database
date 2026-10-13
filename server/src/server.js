@@ -23,7 +23,7 @@ async function main() {
     connection = new MongoConnection({ uri: config.mongo.uri, dbName: config.mongo.dbName });
     await connection.connect();
     const { createdCollections } = await ensureDatabase(connection.db);
-    dataLayer = createDataLayer({ connection, maxFileStorageBytes: config.maxFileStorageBytes });
+    dataLayer = createDataLayer({ connection, maxFileStorageBytes: config.maxFileStorageBytes, monday: config.monday });
     if (config.enableDevResourceApi) devActor = await ensureDevelopmentActor(dataLayer.repos.users, { environment: config.nodeEnv });
     console.log(`MongoDB connected (database ${config.mongo.dbName}).${createdCollections.length ? ` Created collections: ${createdCollections.join(", ")}.` : ""}`);
   }
@@ -49,9 +49,14 @@ async function main() {
   const firstSweep = files ? setTimeout(() => files.sweep(), 60 * 1000) : null;
   sweep?.unref(); firstSweep?.unref();
 
+  // monday.com jobs: only when the integration is enabled on this server (each pass also checks it is connected).
+  const { IntegrationWorker } = require("./integrations/monday/worker");
+  const integrationWorker = dataLayer && config.monday.enabled ? new IntegrationWorker({ integration: dataLayer.services.integration, repos: dataLayer.repos }) : null;
+  integrationWorker?.start();
+
   let stopping = false;
   const shutdown = () => {
-    clearInterval(sweep); clearTimeout(firstSweep);
+    clearInterval(sweep); clearTimeout(firstSweep); integrationWorker?.stop();
     app.locals.realtime?.closeAll(); // open live-update streams would otherwise keep the server from closing
     if (stopping) return;
     stopping = true;

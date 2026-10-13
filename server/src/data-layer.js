@@ -10,6 +10,8 @@ const { AttachmentRepository } = require("./repositories/mongo/attachment-reposi
 const { GridFsFileStore } = require("./files/file-store");
 const { FileService } = require("./services/file-service");
 const { SearchService } = require("./services/search-service");
+const { IntegrationRepository } = require("./repositories/mongo/integration-repository");
+const { MondayIntegration } = require("./integrations/monday/service");
 const { WorkspaceService } = require("./services/workspace-service");
 const { BoardService } = require("./services/board-service");
 const { RecordService } = require("./services/record-service");
@@ -19,7 +21,9 @@ const { MembershipService } = require("./services/membership-service");
 
 // fileStore: where attachment bytes go (default GridFS in the same database; tests pass a MemoryFileStore).
 // maxFileStorageBytes: the cap on all attachments together (see services/file-service.js).
-function createDataLayer({ connection, logger = console, fileStore = new GridFsFileStore(connection.db), maxFileStorageBytes } = {}) {
+// monday: the monday.com integration settings (config.monday; off when absent); fetch: for the monday.com API (tests
+// pass a mock — tests never reach monday.com).
+function createDataLayer({ connection, logger = console, fileStore = new GridFsFileStore(connection.db), maxFileStorageBytes, monday = null, fetch = globalThis.fetch } = {}) {
   const db = connection.db;
   const repos = {
     users: new UserRepository(db),
@@ -29,7 +33,8 @@ function createDataLayer({ connection, logger = console, fileStore = new GridFsF
     records: new RecordRepository(db),
     activities: new ActivityRepository(db),
     sessions: new SessionRepository(db),
-    attachments: new AttachmentRepository(db)
+    attachments: new AttachmentRepository(db),
+    integrations: new IntegrationRepository(db)
   };
   const deps = { repos, connection, logger };
   return {
@@ -37,6 +42,7 @@ function createDataLayer({ connection, logger = console, fileStore = new GridFsF
     repos,
     services: { workspaces: new WorkspaceService(deps), boards: new BoardService(deps), records: new RecordService(deps), imports: new ImportService(deps), schema: new BoardSchemaService(deps), members: new MembershipService(deps),
       search: new SearchService({ repos }),
+      integration: new MondayIntegration({ repos, connection, config: monday, fetch, logger }),
       files: new FileService({ repos, store: fileStore, logger, ...(maxFileStorageBytes ? { maxTotalBytes: maxFileStorageBytes } : {}) }),
       // Read-only views used by the notification feed and People columns.
       activity: { recent: (options) => repos.activities.listRecent(options) },

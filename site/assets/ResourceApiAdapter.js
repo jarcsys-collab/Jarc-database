@@ -148,6 +148,7 @@ class ResourceApiAdapter {
       id: b.id, workspaceId: b.workspaceId, name: b.name, description: b.description, icon: b.icon, archived: b.archived, position: b.position,
       manualOrder: b.manualOrder, nextItemNumber: b.nextItemNumber, columns: resourceClone(b.columns), groups: resourceClone(b.groups),
       savedViews: resourceClone(b.savedViews), version: b.version, createdAt: b.createdAt, updatedAt: b.updatedAt,
+      source: b.source ? resourceClone(b.source) : null,
       recordCount: b.recordCount ?? previous?.recordCount ?? 0,
       load: previous?.load || { state: "none", cursor: null, activity: [], recordActivity: {} }
     };
@@ -165,7 +166,7 @@ class ResourceApiAdapter {
   }
   modelBoardFields(b) {
     // nextItemNumber is not shared: the model derives it from the board's "New item N" names when it loads.
-    return { name: b.name, description: b.description, icon: b.icon, archived: b.archived, manualOrder: b.manualOrder, columns: resourceClone(b.columns), groups: b.groups.map((g) => g.name), savedViews: b.savedViews.map((v) => ({ ...resourceClone(v.state), id: v.id, name: v.name })), createdAt: b.createdAt, updatedAt: b.updatedAt, recordCount: b.recordCount };
+    return { source: b.source ? resourceClone(b.source) : null, name: b.name, description: b.description, icon: b.icon, archived: b.archived, manualOrder: b.manualOrder, columns: resourceClone(b.columns), groups: b.groups.map((g) => g.name), savedViews: b.savedViews.map((v) => ({ ...resourceClone(v.state), id: v.id, name: v.name })), createdAt: b.createdAt, updatedAt: b.updatedAt, recordCount: b.recordCount };
   }
   modelBoard(b, pref = {}) {
     return { id: b.id, ...this.modelBoardFields(b), records: this.boardRecords(b.id).map((r) => this.modelRow(r, b)), activity: resourceClone(b.load.activity), favorite: Boolean(pref.favorite), ...(pref.lastView ? { lastView: pref.lastView } : {}), openCount: pref.openCount || 0 };

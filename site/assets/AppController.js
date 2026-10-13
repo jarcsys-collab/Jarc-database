@@ -1,6 +1,7 @@
 class AppController {
   constructor(root) {
     this.root = root; this.auth = new AuthModel(); this.model = new BoardModel(); this.view = new AppView(root);this.view.onUndo=()=>{if(this.busy)return;const label=this.model.undo();this.update();this.view.toast(label);};
+    this.integrations = typeof IntegrationsPanel === "function" ? new IntegrationsPanel(this) : null; this.view.integrations = this.integrations;
     root.addEventListener("click", (event) => this.guard(()=>this.onClick(event)));
     root.addEventListener("input", (event) => this.onInput(event));
     root.addEventListener("change", (event) => this.guard(()=>this.onChange(event)));
@@ -71,7 +72,7 @@ class AppController {
       if (this.model.profile.name !== this.auth.username || this.model.profile.email !== this.auth.email || this.model.profile.role !== role) this.model.updateProfile({ name: this.auth.username, email: this.auth.email, role });
     }
     if (this.entra && this.auth.userId) this.model.me = `user:${this.auth.userId}`;
-    this.root.onclick = null; this.ready = true; this.update();
+    this.root.onclick = null; this.ready = true; this.update(); this.integrations?.afterStart();
     this.loadPeople(); this.loadFeed(); this.startLive();
     if (!this.feedTimer && this.model.storage.adapter.loadActivityFeed) this.feedTimer = setInterval(() => { if (this.ready && document.visibilityState === "visible") this.loadFeed(); }, 60000);
   }
@@ -295,6 +296,7 @@ class AppController {
 
   // With no workspaces (a new shared database) the full layout is shown, but most actions need a workspace. These work
   // without one; anything else opens "Create workspace" instead of acting on a workspace that doesn't exist.
+  static READ_ONLY_BLOCKED = new Set(["add-column","add-group-column","add-group-form","cell-open","set-cell-option","inline-add","open-form","new-item","import","choose-import-file","duplicate-record","duplicate-column","delete","archive-item","pin-item","rename-column","edit-column-options","column-editor","edit-description","manage-groups","request-delete-column","request-delete-group","move-record-board","move-column","edit","files-input","request-remove-file","board-title-inline"]);
   static NO_WORKSPACE_ACTIONS = new Set(["create-workspace","close-overlay","nav","toggle-nav","collapse-nav","toggle-workspace-section","command-palette","run-command","retry-save","dismiss-hint","notifications","notification-filter","mark-notifications","profile-menu","profile-settings","choose-avatar","remove-avatar","set-presence","settings","settings-section","setting","theme","shortcuts","request-logout","confirm-logout","lock-session"]);
   static NO_WORKSPACE_COMMANDS = new Set(["home","mywork","theme","settings","notifications","shortcuts"]);
   needsWorkspace(allowed) {
@@ -308,6 +310,9 @@ class AppController {
     if (action === "entra-sign-in" && this.entra) { this.entraSignIn(); return; }
     if (action === "entra-sign-out" && this.entra) { this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true, signingOut: true }); this.entra.signOut(); return; }
     if (window.jarcStorage?.connection === "offline" && ["cell-open","set-cell-option","inline-add","open-form","new-item","new-board","add-column","create-workspace","import"].includes(action)) { this.view.toast(StorageError.describe(StorageError.CODES.OFFLINE).message); return; }
+    if (action.startsWith("integration-") && this.integrations) { if (target.tagName !== "SELECT") this.integrations.onAction(action, target); return; }
+    // Boards synchronized from monday.com are read-only (the server refuses changes too; this avoids starting them).
+    if (this.model.screen === "board" && this.model.board?.source?.readOnly && AppController.READ_ONLY_BLOCKED.has(action)) { this.view.toast("This board is synced from monday.com and is read-only"); return; }
     if(action==="login-theme-choice"){this.model.updateSetting("theme",target.dataset.theme);this.view.applyDisplay(this.model);this.root.querySelectorAll('[data-action="login-theme-choice"]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.theme===target.dataset.theme)));return;}
     this.lastTrigger=target;
     if(action==="toggle-nav"){this.setNav(!this.navOpen);return;}
@@ -524,6 +529,7 @@ class AppController {
     const input=document.querySelector('[data-action="search"]'); input?.focus(); input?.setSelectionRange(cursor,cursor);
   }
   onChange(event) {
+    if (event.target.dataset?.action === "integration-wizard-workspace") { this.integrations?.onAction("integration-wizard-workspace", event.target); return; }
     // Display columns: show/hide one column, or all of them (Item always stays).
     if (event.target.dataset?.action === "column-toggle" || event.target.dataset?.action === "column-toggle-all") {
       const all=event.target.dataset.action==="column-toggle-all";
@@ -549,6 +555,7 @@ class AppController {
   }
   onSubmit(event) {
     event.preventDefault(); const action=event.target.dataset.action; const data=Object.fromEntries(new FormData(event.target));
+    if (action?.startsWith("integration-")) { this.integrations?.onSubmit(action, data, event.target); return; }
     if (action === "workspace-form") { this.runBusy(event.submitter,()=>this.model.createWorkspace(data)?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast("Workspace created");}); return; }
     if(action==="login-form"){
       data.username=String(data.username||"").trim();

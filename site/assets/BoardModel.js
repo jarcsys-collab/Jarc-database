@@ -386,7 +386,7 @@ class BoardModel {
   }
 
   renameBoard(id, name) { const board = this.workspace.boards.find((item) => item.id === id); if (board && name.trim()) { this.snapshot("Board rename undone"); board.name = name.trim(); this.log("Board renamed"); this.save({op:"updateBoard",boardId:id}); } }
-  duplicateBoard(id) { const source = this.workspace.boards.find((item) => item.id === id); if (!source) return; this.snapshot("Board duplication undone"); const copy = JSON.parse(JSON.stringify(source)); copy.id = `board-${Date.now()}`; copy.name = `${source.name} copy`; copy.activity = [{ id: Date.now(), text: `Duplicated from ${source.name}`, at: new Date().toISOString() }]; this.workspace.boards.push(copy); this.openBoard(copy.id); this.save({op:"createBoard",boardId:copy.id,workspaceId:this.workspace.id}); }
+  duplicateBoard(id) { const source = this.workspace.boards.find((item) => item.id === id); if (!source) return; this.snapshot("Board duplication undone"); const copy = JSON.parse(JSON.stringify(source)); delete copy.source; copy.id = `board-${Date.now()}`; copy.name = `${source.name} copy`; copy.activity = [{ id: Date.now(), text: `Duplicated from ${source.name}`, at: new Date().toISOString() }]; this.workspace.boards.push(copy); this.openBoard(copy.id); this.save({op:"createBoard",boardId:copy.id,workspaceId:this.workspace.id}); }
   deleteBoard(id) {
     this.snapshot("Board deletion undone"); this.workspace.boards=this.workspace.boards.filter(b=>b.id!==id);
     if(this.currentBoardId===id){this.currentBoardId=this.workspace.boards.find(b=>!b.archived)?.id||"";this.screen="home";} this.save({op:"deleteBoard",boardId:id,workspaceId:this.workspace.id});

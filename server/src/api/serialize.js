@@ -20,6 +20,7 @@ function boardToApi(doc) {
     savedViews: doc.savedViews.map((v) => ({ id: v.id, ...(v.legacyId === undefined ? {} : { legacyId: v.legacyId }), name: v.name, state: v.state, createdBy: hex(v.createdBy), createdAt: iso(v.createdAt) })),
     ...(doc.nextItemNumber === undefined ? {} : { nextItemNumber: doc.nextItemNumber }),
     ...(doc.recordCount === undefined ? {} : { recordCount: doc.recordCount }),
+    ...(doc.source ? { source: { provider: doc.source.provider, sourceBoardId: doc.source.sourceBoardId, readOnly: Boolean(doc.source.readOnly) } } : {}),
     createdBy: hex(doc.createdBy), createdAt: iso(doc.createdAt), updatedAt: iso(doc.updatedAt), version: doc.version
   });
 }

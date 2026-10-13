@@ -6,6 +6,8 @@
 //   POST /__test/config { expireSessions, disableEmail, enableEmail, legacyActivity } → end every session / disable or
 //        enable a user / add an old-style activity entry without an actor (legacyActivity: workspace ID)
 //   GET  /__test/stats  → protected API requests, and any that arrived without a session cookie
+//   JARC_TEST_MONDAY=1: the monday.com integration is configured against the MOCK monday.com (tests/support/mock-monday)
+//   POST /__test/monday { connect, run }  → store a (mock) connection directly / run due integration jobs once
 const express = require("express");
 const { ObjectId } = require("mongodb");
 const { MongoConnection } = require("../../src/db/connection");
@@ -28,7 +30,10 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
   const connection = new MongoConnection({ uri: "mongodb://fake.invalid", dbName: "jarc_database", createClient: () => fake });
   await connection.connect();
   await ensureDatabase(connection.db);
-  const dataLayer = createDataLayer({ connection, logger: { error() {} }, fileStore: new MemoryFileStore() });
+  const monday = process.env.JARC_TEST_MONDAY === "1" ? require("./mock-monday") : null;
+  const mock = monday?.mockMonday();
+  const mondayConfig = monday ? require("../../src/config").loadMondayConfig(monday.ENV) : null;
+  const dataLayer = createDataLayer({ connection, logger: { error() {} }, fileStore: new MemoryFileStore(), monday: mondayConfig, ...(mock ? { fetch: mock.fetch } : {}) });
   const verify = createEntraVerifier({ ...entra, keySet: issuer.keySet });
   // Optional 2nd argument "shared": ACCESS_POLICY=development_shared (as on Railway); default role_based.
   const accessPolicy = process.argv[3] === "shared" ? "development_shared" : "role_based";
@@ -51,6 +56,14 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
     res.json({ ok: true });
   });
   outer.get("/__test/stats", (req, res) => res.json(sim));
+  outer.post("/__test/monday", express.json(), async (req, res) => {
+    if (!monday) return res.status(404).json({ error: "monday mock not enabled" });
+    const { encrypt } = require("../../src/integrations/monday/secrets");
+    if (req.body.connect) await connection.db.collection("integrations").updateOne({ _id: "monday" }, { $set: { token: encrypt(monday.ACCESS_TOKEN, mondayConfig.tokenKey), status: "connected", accountName: "Mock Account", accountUser: "Test Admin", connectedAt: new Date(), syncEnabled: false, paused: false, webhookSecret: "test-webhook-secret-0123456789" } }, { upsert: true });
+    let ran = 0;
+    if (req.body.run) { const { IntegrationWorker } = require("../../src/integrations/monday/worker"); ran = (await new IntegrationWorker({ integration: dataLayer.services.integration, repos: dataLayer.repos, logger: { error() {} } }).tick({ max: 20 })).ran; }
+    res.json({ ok: true, ran, outside: mock.outside });
+  });
   outer.use("/api/v1", (req, res, next) => {
     if (!PUBLIC.has(`${req.method} ${req.path}`)) {
       sim.protected += 1;

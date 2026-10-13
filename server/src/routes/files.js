@@ -67,6 +67,7 @@ function fileRoutes({ services, access, limiter = uploadLimiter() }) {
     const length = req.get("content-length") === undefined ? NaN : Number(req.get("content-length"));
     const refuse = () => { if (!req.complete) { if (!(length <= MAX_FILE_BYTES)) res.set("Connection", "close"); req.resume(); } };
     const board = await services.records.board(record.boardId);
+    if (board.source?.readOnly) { refuse(); return sendError(res, 403, "READ_ONLY_BOARD", "This board is synchronized from monday.com and is read-only in JARC."); }
     const plan = await files.prepare({ record, board, columnKey, type: String(req.get("content-type") || "").split(";")[0].trim().toLowerCase(), name: req.get("x-file-name"), length, uploadKey: req.get("x-upload-key") ?? null }).catch((error) => { refuse(); throw error; });
     if (plan.existing) { req.resume(); return send(res, 200, { attachment: attachmentToApi(plan.existing), repeated: true }); }
     const release = limiter.acquire(req.actor.userId.toHexString());
@@ -107,6 +108,7 @@ function fileRoutes({ services, access, limiter = uploadLimiter() }) {
     allowOnly(req.query, [], "the query");
     const attachment = await files.get(parseId(req.params.attachmentId, "attachmentId"));
     await access.record(req.actor, attachment.recordId, "MEMBER");
+    if ((await services.records.board(attachment.boardId)).source?.readOnly) return sendError(res, 403, "READ_ONLY_BOARD", "This board is synchronized from monday.com and is read-only in JARC.");
     await files.remove(attachment, req.actor);
     send(res, 200, { deleted: true });
   });
