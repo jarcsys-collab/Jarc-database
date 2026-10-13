@@ -276,6 +276,8 @@ class ResourceApiAdapter {
       xhr.send(blob);
     });
   }
+  // Global search across every board this person may see (the server applies the access rules).
+  async searchRecords(q, { limit = 20 } = {}) { return this.request("GET", `/search?q=${encodeURIComponent(q)}&limit=${limit}`); }
   async loadPeople(workspaceId) {
     const id = this.resolve(workspaceId);
     if (!this.workspaces.has(String(id))) return [];
@@ -349,7 +351,8 @@ class ResourceApiAdapter {
   }
   commitRemote(plan) {
     const reconcile = new ResourceReconcile();
-    const summary = { records: [], removed: [], boards: new Set(), removedBoards: new Set(), structure: false };
+    // boardConfig: boards whose own document (name, columns, views…) changed — not just their records.
+    const summary = { records: [], removed: [], boards: new Set(), boardConfig: new Set(), removedBoards: new Set(), structure: false };
     const fields = (a, b) => [...new Set([...Object.keys(a?.values || {}), ...Object.keys(b?.values || {})])].filter((k) => !resourceSame(a?.values?.[k], b?.values?.[k]));
     // Workspaces and board lists.
     if (plan.structure) {
@@ -380,7 +383,7 @@ class ResourceApiAdapter {
             this.boards.set(b.id, this.boardFrom(b));
             reconcile.addBoard(w.id, this.modelBoard(this.boards.get(b.id)));
             summary.structure = true;
-          } else if (b.version > cached.version) { this.boards.set(b.id, this.boardFrom(b)); reconcile.replaceBoard(b.id, this.modelBoardFields(this.boards.get(b.id))); summary.boards.add(b.id); }
+          } else if (b.version > cached.version) { this.boards.set(b.id, this.boardFrom(b)); reconcile.replaceBoard(b.id, this.modelBoardFields(this.boards.get(b.id))); summary.boards.add(b.id); summary.boardConfig.add(b.id); }
         }
       }
     }
@@ -389,7 +392,7 @@ class ResourceApiAdapter {
       if (!this.boards.has(boardId)) continue;
       if (!board) { this.forgetBoard(boardId); reconcile.removeBoard(boardId); summary.removedBoards.add(boardId); continue; }
       let changed = false;
-      if (board.version > this.boards.get(boardId).version) { this.boards.set(boardId, this.boardFrom(board)); reconcile.replaceBoard(boardId, this.modelBoardFields(this.boards.get(boardId))); changed = true; }
+      if (board.version > this.boards.get(boardId).version) { this.boards.set(boardId, this.boardFrom(board)); reconcile.replaceBoard(boardId, this.modelBoardFields(this.boards.get(boardId))); changed = true; summary.boardConfig.add(boardId); }
       if (records) {
         const before = new Map(this.boardRecords(boardId).map((r) => [r.id, r.version]));
         const same = before.size === records.items.length && records.items.every((r) => before.get(r.id) === r.version);

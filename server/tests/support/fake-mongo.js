@@ -69,6 +69,9 @@ function matches(doc, filter = {}) {
         $lt: () => comparable && compare(value, arg) < 0, $lte: () => comparable && compare(value, arg) <= 0,
         $in: () => arg.some((x) => eq(value, x)), $nin: () => !arg.some((x) => eq(value, x)),
         $exists: () => (value !== undefined) === Boolean(arg),
+        // Like MongoDB: a regex matches a string, or any string in an array; $options handled with it.
+        $regex: () => { const re = new RegExp(arg, cond.$options || ""); return (Array.isArray(value) ? value : [value]).some((v) => typeof v === "string" && re.test(v)); },
+        $options: () => true,
         $type: () => ({ string: typeof value === "string", number: typeof value === "number", bool: typeof value === "boolean", objectId: value instanceof ObjectId, date: value instanceof Date })[arg]
       }[op];
       if (!ok) throw new Error(`fake-mongo: unsupported query operator ${op}`);

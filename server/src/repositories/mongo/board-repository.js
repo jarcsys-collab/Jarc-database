@@ -7,6 +7,11 @@ const MAX_BOARDS_PER_WORKSPACE = 1000;
 class BoardRepository extends VersionedRepository {
   constructor(db) { super(db.collection(COLLECTIONS.boards)); }
 
+  // Global search: the non-archived boards of the given workspaces (null = all), only the fields search needs.
+  listForSearch(workspaceIds, { limit }) {
+    return this.collection.find({ archived: false, ...(workspaceIds ? { workspaceId: { $in: workspaceIds } } : {}) }, { sort: { workspaceId: 1, position: 1, _id: 1 }, limit, projection: { _id: 1, workspaceId: 1, columns: 1 } }).toArray();
+  }
+
   listByWorkspace(workspaceId) {
     return this.collection.find({ workspaceId }, { sort: { position: 1, _id: 1 }, limit: MAX_BOARDS_PER_WORKSPACE }).toArray();
   }

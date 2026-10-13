@@ -18,6 +18,7 @@ const { apiNotFound, errorHandler, sendError } = require("./middleware/errors");
 const { ActivityStream } = require("./realtime/activity-stream");
 const { eventRoutes, entraSessionCheck } = require("./routes/events");
 const { fileRoutes } = require("./routes/files");
+const { searchRoutes } = require("./routes/search");
 const { version } = require("../package.json");
 
 // Larger than any state the frontend can produce today: browser storage caps at roughly 5 MB, and backup and CSV
@@ -71,6 +72,8 @@ function createApp({ repository, environment = "development", enableDevStateApi 
     api.use(identify, meRoutes({ repos: dataLayer.repos, mode: auth ? "entra" : "dev", access }), memberRoutes({ services: dataLayer.services, access }), resourceRoutes({ services: dataLayer.services, access }));
     // Files columns (attachments in GridFS).
     if (dataLayer.services?.files) api.use(identify, fileRoutes({ services: dataLayer.services, access }));
+    // Global search across the boards the caller may see.
+    if (dataLayer.services?.search) api.use(identify, searchRoutes({ services: dataLayer.services, access }));
     // Live updates (Server-Sent Events) from the activity log; live: { pollMs, overlapMs, timings } for tests.
     const stream = new ActivityStream({ activities: dataLayer.repos.activities, logger, ...(live.pollMs ? { pollMs: live.pollMs } : {}), ...(live.overlapMs ? { overlapMs: live.overlapMs } : {}) });
     app.locals.realtime = stream;

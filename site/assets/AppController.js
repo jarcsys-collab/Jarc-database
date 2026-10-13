@@ -7,6 +7,7 @@ class AppController {
     root.addEventListener("submit", (event) => { if(this.busy)event.preventDefault(); this.guard(()=>this.onSubmit(event)); }); // never a native submit, even while busy
     root.addEventListener("pointerdown", () => this.auth.touch());
     for (const type of ["dragover", "dragleave", "drop"]) root.addEventListener(type, (event) => this.onFileDrag(event));
+    window.addEventListener("resize", () => { cancelAnimationFrame(this.fitFrame); this.fitFrame = requestAnimationFrame(() => this.view.fitBoard()); });
     this.uploads = new Map(); this.filesConfirm = null; this.filesNotice = null; this.freshFiles = new Set(); this.fileSeq = new Map();
     root.addEventListener("keyup", (event) => { if (event.target.dataset?.action === "password-input") { const warning=document.querySelector("#caps-warning"); if(warning) warning.hidden=!event.getModifierState("CapsLock"); } });
     document.addEventListener("keydown", (event) => this.onKeydown(event));
@@ -66,7 +67,7 @@ class AppController {
       if (this.model.profile.name !== this.auth.username || this.model.profile.email !== this.auth.email || this.model.profile.role !== role) this.model.updateProfile({ name: this.auth.username, email: this.auth.email, role });
     }
     if (this.entra && this.auth.userId) this.model.me = `user:${this.auth.userId}`;
-    this.root.onclick = null; this.ready = true; this.update(); this.offerMotion();
+    this.root.onclick = null; this.ready = true; this.update();
     this.loadPeople(); this.loadFeed(); this.startLive();
     if (!this.feedTimer && this.model.storage.adapter.loadActivityFeed) this.feedTimer = setInterval(() => { if (this.ready && document.visibilityState === "visible") this.loadFeed(); }, 60000);
   }
@@ -131,6 +132,9 @@ class AppController {
     if (onBoard && summary.removedBoards.has(String(board.id))) { this.view.toast("This board was deleted by a colleague."); this.model.openScreen("home"); this.update(); return; }
     this.reconcileOpenForm(summary, before, events);
     if (summary.structure || [...summary.boards].some((id) => String(id) !== String(board?.id)) || !onBoard) { this.refreshWhenIdle(); if (!onBoard || summary.structure) return; }
+    // The open board's own settings changed (name, views, columns…): redraw the whole screen once nothing is being
+    // edited. Record changes keep the in-place cell updates below.
+    if (summary.boardConfig?.has(board.id) || summary.boardConfig?.has(String(board.id))) { this.refreshWhenIdle(); return; }
     const here = (r) => String(r.boardId) === String(board.id);
     const filtered = Boolean(this.model.query || this.model.status !== "All" || this.model.columnFilter || this.model.sortKey || this.model.grouped || this.model.quickFilter !== "all" || this.model.showArchived || this.model.currentView !== "table");
     let region = summary.boards.has(board.id) || summary.boards.has(String(board.id)) || summary.removed.some(here) || summary.records.some((r) => here(r) && (r.isNew || r.order));
@@ -141,8 +145,7 @@ class AppController {
         if (input) { this.markEditorRemote(input, r.id, field, this.actorFor(events, r.id)); continue; }
         if (filtered) { region = true; continue; }
         this.patchCell(r.id, field, false);
-        const td = this.root.querySelector(`tr[data-record-context="${CSS.escape(String(r.id))}"] td[data-column-key="${CSS.escape(field)}"]`);
-        td?.classList.add("remote-flash"); setTimeout(() => td?.classList.remove("remote-flash"), 1600);
+        this.flashCell(r.id, field);
       }
     }
     if (region) this.refreshBoardWhenIdle();
@@ -206,13 +209,15 @@ class AppController {
   }
   update() {
     this.pendingRefresh = false;
+    // The open view was deleted (here or by a colleague): back to Main Table.
+    if (this.model.screen === "board" && this.model.board && this.model.activeSavedViewId !== null && this.model.activeSavedViewId !== undefined && !this.model.activeView) this.model.openMainTable();
     if (this.entra && (this.entraGate || !this.auth.authenticated)) { this.navOpen = false; this.applyNav(); this.view.renderEntraGate(this.entraGate || "signed-out", this.model); return; }
     if (!this.auth.authenticated) this.navOpen = false; // sign-in screens have no drawer
     const focus = this.focusedControl(), scroll = this.scrollState();
     this.auth.authenticated ? this.view.render(this.model) : this.view.renderLogin(this.auth,this.model); this.applyNav(); this.saveFeedback();
     this.refocus(focus); this.restoreScroll(scroll);
     if (this.ready && this.model.workspace && this.model.workspace.id !== this.peopleKey) this.loadPeople();
-    this.ensureAttachments(); this.trackRows();
+    this.ensureAttachments(); this.trackRows(); this.reapplyFlashes();
   }
   // Microsoft sign-in screens: "signed-out" | "expired" | "denied" | "error". Shown instead of the app.
   showEntraGate(state, options = {}) { this.entraGate = state; this.navOpen = false; this.applyNav(); this.view.renderEntraGate(state, this.model, options); }
@@ -313,7 +318,7 @@ class AppController {
     if(action==="home-create-record"||action==="home-import"){this.chooseBoardAction(action==="home-import"?"import":"record");return;}
     if(action==="choose-board-action"){this.model.openBoard(target.dataset.id,target.dataset.workspace);this.update();target.dataset.mode==="import"?this.view.showImport(this.model):this.view.showRecordForm(this.model);return;}
     if(action==="favorite-board"){this.view.closeOverlay();this.model.toggleFavorite(target.dataset.id);this.update();return;}
-    if(action==="remove-filter"){this.model[target.dataset.key]=target.dataset.key==="status"?"All":target.dataset.key==="quickFilter"?"all":"";this.model.activeSavedViewId=null;this.update();return;}
+    if(action==="remove-filter"){this.model[target.dataset.key]=target.dataset.key==="status"?"All":target.dataset.key==="quickFilter"?"all":"";this.update();return;}
     if(action==="archive-workspace"){this.model.archiveWorkspace(target.dataset.id,target.dataset.archived==="1");this.update();this.view.showSettings(this.model,"workspace");return;}
     if(action==="restore-backup"){const backup=this.pendingBackup;this.runBusy(target,()=>{this.model.restoreBackup(backup);},()=>{this.pendingBackup=null;this.update();this.view.toast("Backup restored",true);});return;}
     if(action==="move-record-board"){this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>Move record to…</h2>${this.view.closeButton()}</div><p>Existing field values and missing columns will be preserved.</p><div class="choice-list">${this.model.workspaces.filter(w=>!w.archived).flatMap(w=>w.boards.filter(b=>!b.archived&&b.id!==this.model.board.id).map(b=>`<button data-action="confirm-move-record" data-id="${this.view.attr(target.dataset.id)}" data-board="${this.view.attr(b.id)}">${this.view.escape(w.name)} / ${this.view.escape(b.name)}</button>`)).join("")||"<p>Create another board first.</p>"}</div></div>`);return;}
@@ -330,13 +335,25 @@ class AppController {
     if (action === "create-workspace") this.view.showWorkspaceForm();
     if (action === "record-menu") this.togglePanel(`record-${target.dataset.id}`,()=>this.view.showRecordMenu(this.model.rows.find((row)=>row.id===this.model.idOf(target.dataset.id))));
     if (action === "switch-workspace") { this.model.switchWorkspace(target.dataset.id); this.view.closeOverlay(); this.update(); }
-    if(action==="board-menu"){this.boardMenuWorkspace=target.dataset.workspace||this.model.currentWorkspaceId;const ws=this.model.workspaces.find(w=>w.id===this.boardMenuWorkspace);this.togglePanel(`board-${target.dataset.id}`,()=>this.view.showBoardMenu(ws.boards.find(b=>b.id===target.dataset.id)));}
+    if(action==="board-menu"){this.boardMenuWorkspace=target.dataset.workspace||this.model.currentWorkspaceId;const ws=this.model.workspaces.find(w=>w.id===this.boardMenuWorkspace);this.togglePanel(`board-${target.dataset.id}`,()=>this.view.showBoardMenu(ws.boards.find(b=>b.id===target.dataset.id),{current:target.dataset.current==="1",archivedCount:this.model.archivedCount}));}
     if (action === "new-board") this.view.showBoardForm(null);
     if (action === "rename-board") this.view.showBoardForm(this.model.workspace.boards.find((board) => board.id === target.dataset.id));
     if (action === "duplicate-board") { this.model.duplicateBoard(target.dataset.id); this.view.closeOverlay(); this.update(); this.view.toast("Board duplicated"); }
     if (action === "delete-board") { const board=this.model.workspaces.flatMap((w)=>w.boards).find((x)=>String(x.id)===String(target.dataset.id)), files=board?.columns?.some((c)=>c.type==="files"); this.view.showConfirm("Delete board?",files?"The board and its records will be removed, and files in its Files columns are deleted permanently. Undo can restore the board but not the files.":"The board and its records will be removed. You can still use Undo afterward.","confirm-delete-board",target.dataset.id); }
     if (action === "confirm-delete-board") this.deleteBoard(target.dataset.payload,target);
-    if (action === "archived-view") { this.model.showArchived=true; this.model.activeSavedViewId=null; this.model.selected.clear(); this.update(); }
+    if (action === "archived-view") { this.view.closeOverlay(); this.model.resetMainView(); this.model.currentView="table"; this.model.showArchived=true; this.model.selected.clear(); this.update(); }
+    // ---- Views (Phase 5)
+    if (action === "main-table") { this.view.closeOverlay(); this.model.openMainTable(); this.update(); return; }
+    if (action === "open-view") { this.view.closeOverlay(); this.model.applyView(target.dataset.id); this.update(); return; }
+    if (action === "views-menu") { this.togglePanel("views-menu",()=>this.view.showViewsMenu(this.model)); return; }
+    if (action === "new-view") { this.view.showNewView(this.model,target.dataset.type); return; }
+    if (action === "view-menu") { this.togglePanel(`view-${target.dataset.id}`,()=>this.view.showViewMenu(this.model,target.dataset.id)); return; }
+    if (action === "duplicate-view") { this.view.closeOverlay(); const copy=target.dataset.id?this.model.duplicateView(target.dataset.id):this.model.createView(this.model.uniqueViewName("Main Table copy"),"table"); if(copy){this.update();this.view.toast(`View "${copy.name}" created`);} return; }
+    if (action === "column-picker") { this.togglePanel("column-picker",()=>this.view.showColumnPicker(this.model)); return; }
+    if (action === "rename-view") { this.view.showRenameView(this.model,target.dataset.id); return; }
+    if (action === "request-delete-view") { const v=this.model.board.savedViews.find((x)=>String(x.id)===String(target.dataset.id)); if(v)this.view.showConfirm(`Delete the "${v.name}" view?`,"The view is removed for everyone on this board. Its records are not affected.","confirm-delete-view",String(v.id),"Delete view"); return; }
+    if (action === "confirm-delete-view") { this.model.deleteView(target.dataset.payload); this.view.closeOverlay(); this.update(); this.view.toast("View deleted"); return; }
+    if (action === "save-active-view") { if(this.model.saveActiveView()){this.view.closeOverlay();this.update();this.view.toast("View saved");} return; }
     if (["open-form","new-item"].includes(action)) this.view.showRecordForm(this.model);
     if (action === "edit") this.view.showRecordForm(this.model,this.model.rows.find((row)=>row.id===this.model.idOf(target.dataset.id)));
     if (action === "duplicate-record") { const id=this.model.duplicateRecord(target.dataset.id); this.update(); if(id)this.focusItem(id); this.view.toast("Item duplicated"); }
@@ -347,7 +364,7 @@ class AppController {
     if (action === "confirm-delete-records") this.deleteRecords(target.dataset.payload.split(",").map((id)=>this.model.idOf(id)),target);
     if (action === "clear-selection") { this.model.selected.clear(); this.update(); }
     if(action==="sort")this.view.showSort(this.model);
-    if (action === "group") { if(!this.model.groupColumn){this.togglePanel("group-help",()=>this.view.showGroupHelp());return;} this.model.grouped = !this.model.grouped; this.model.activeSavedViewId=null; this.update(); }
+    if (action === "group") { if(!this.model.groupColumn){this.togglePanel("group-help",()=>this.view.showGroupHelp());return;} this.model.grouped = !this.model.grouped; this.update(); }
     if (action === "clear-filters") { this.model.resetMainView(); this.update(); }
     if (action === "toggle-favorite") { this.model.toggleFavorite(this.model.currentBoardId); this.update(); this.view.toast(this.model.board.favorite?"Board added to favorites":"Board removed from favorites"); }
     if (action === "edit-description") this.view.showDescription(this.model);
@@ -369,7 +386,7 @@ class AppController {
     if (action === "confirm-remove-file") { target.disabled=true; this.removeFile(target.dataset.id,target.dataset.field,target.dataset.file); return; }
     if (action === "retry-upload" || action === "dismiss-upload") { const cell=this.filesCellKey(target.dataset.id,target.dataset.field), u=(this.uploads.get(cell)||[]).find((x)=>x.id===target.dataset.upload); if(u){ if(action==="retry-upload")this.startUpload(target.dataset.id,target.dataset.field,u); else this.uploads.set(cell,this.uploads.get(cell).filter((x)=>x!==u)); this.refreshFiles(target.dataset.id,target.dataset.field); } return; }
     if (action === "column-info") { this.togglePanel(`info-${target.dataset.key}`,()=>this.view.showColumnInfo(this.model,target.dataset.key)); return; }
-    if (action === "column-width") { const column=this.model.board.columns.find((c)=>c.key===target.dataset.key); if(column)this.view.overlay(`<form class="modal small-modal" data-action="column-width-form"><div class="modal-head"><div><div class="eyebrow">${this.view.escape(column.label)}</div><h2>Column width</h2></div>${this.view.closeButton()}</div><input type="hidden" name="key" value="${this.view.attr(column.key)}"><label>Width in pixels<input name="width" type="number" min="100" max="600" step="10" required value="${Math.round(column.width||180)}"></label><p class="field-note">Between 100 and 600. You can also drag the edge of the column header.</p><div class="modal-actions"><button type="button" class="button secondary" data-action="close-overlay">Cancel</button><button class="button primary">Save width</button></div></form>`); return; }
+    if (action === "column-width") { const column=this.model.board.columns.find((c)=>c.key===target.dataset.key); if(column)this.view.overlay(`<form class="modal small-modal" data-action="column-width-form"><div class="modal-head"><div><div class="eyebrow">${this.view.escape(column.label)}</div><h2>Column width</h2></div>${this.view.closeButton()}</div><input type="hidden" name="key" value="${this.view.attr(column.key)}"><label>Width in pixels<input name="width" type="number" min="100" max="600" step="10" required value="${Math.round(this.view.colWidth(column))}"></label><p class="field-note">Between 100 and 600. You can also drag the edge of the column header.</p><div class="modal-actions"><button type="button" class="button secondary" data-action="close-overlay">Cancel</button><button class="button primary">Save width</button></div></form>`); return; }
     if (action === "toggle-column-multiple") {
       const column=this.model.board.columns.find((c)=>c.key===target.dataset.key); if(!column)return;
       const crowded=column.multiple?this.model.rows.filter((r)=>this.model.valueList(r[column.key]).length>1).length:0;
@@ -409,9 +426,9 @@ class AppController {
     if (action === "sort-column") { this.applySort(target.dataset.key,target.dataset.direction); return; }
     if (action === "clear-sort") { this.applySort("","desc"); return; }
     if (action === "filter-column") { this.view.showColumnFilter(this.model,target.dataset.key); return; }
-    if (action === "clear-column-filter") { this.model.columnFilter=null; this.model.activeSavedViewId=null; this.view.closeOverlay(); this.update(); return; }
+    if (action === "clear-column-filter") { this.model.columnFilter=null; this.view.closeOverlay(); this.update(); return; }
     if (action === "move-column-menu") { const moved=this.model.moveColumn(target.dataset.key,target.dataset.direction); this.view.closeOverlay(); this.update(); if(moved){this.view.toast("Column moved",true);this.root.querySelector(`[data-action="column-menu"][data-key="${CSS.escape(target.dataset.key)}"]`)?.focus();} return; }
-    if (action === "show-column" || action === "show-all-columns") { const keys=action==="show-column"?[target.dataset.key]:this.model.board.columns.filter((c)=>c.visible===false).map((c)=>c.key); this.model.updateColumnConfig(Object.fromEntries(keys.map((key)=>[key,{visible:true}]))); this.update(); this.view.showColumnManager(this.model); this.markPanel("columns"); this.view.toast(keys.length===1?"Column shown":`${keys.length} columns shown`,true); return; }
+    if (action === "show-column" || action === "show-all-columns") { const keys=action==="show-column"?[target.dataset.key]:this.model.board.columns.filter((c)=>!this.model.columnShown(c)).map((c)=>c.key); if(this.model.activeView)keys.forEach((key)=>this.model.setColumnVisible(key,true)); else this.model.updateColumnConfig(Object.fromEntries(keys.map((key)=>[key,{visible:true}]))); this.update(); this.view.showColumnManager(this.model); this.markPanel("columns"); this.view.toast(keys.length===1?"Column shown":`${keys.length} columns shown`,true); return; }
     if (action === "column-menu") this.togglePanel(`column-menu-${target.dataset.key}`,()=>this.view.showColumnMenu(this.model,target.dataset.key));
     if (action === "choose-column-type") { this.view.showColumnNameStep(this.model,target.dataset.type); this.selectOverlayInput('[name="label"]'); }
     if (action === "rename-column") { this.view.showRenameColumn(this.model,target.dataset.key); this.selectOverlayInput('[name="label"]'); }
@@ -463,7 +480,8 @@ class AppController {
     if (action === "command-palette") this.view.showCommandPalette(this.model);
     if (action === "palette-workspace") { this.model.switchWorkspace(target.dataset.id); this.view.closeOverlay(); this.update(); }
     if (action === "palette-board") { this.model.openBoard(target.dataset.id,target.dataset.workspace); this.view.closeOverlay(); this.update(); }
-    if (action === "palette-record") { this.model.openBoard(target.dataset.board,target.dataset.workspace); const row=this.model.rows.find(r=>r.id===this.model.idOf(target.dataset.id)); this.update(); this.view.showRecordForm(this.model,row); }
+    if (action === "palette-record") { this.openSearchResult(target.dataset.board,target.dataset.workspace,target.dataset.id,target.dataset.title); return; }
+    if (action === "search-retry") { const q=document.querySelector("[data-action=command-search]")?.value||""; this.serverSearch=null; this.scheduleServerSearch(q,0); return; }
     if (action === "run-command") this.runCommand(target.dataset.command);
     if (action === "global-search") this.view.showGlobalSearch();
     if(action==="move-board"){const choices=this.model.workspaces.filter(w=>w.id!==this.model.currentWorkspaceId&&!w.archived);this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>Move board to workspace</h2>${this.view.closeButton()}</div><div class="choice-list">${choices.map(w=>`<button data-action="apply-move-board" data-id="${this.view.attr(target.dataset.id)}" data-workspace="${this.view.attr(w.id)}">${this.view.escape(w.name)}</button>`).join("")||"<p>Create another workspace to move this board.</p>"}</div></div>`);}
@@ -480,7 +498,8 @@ class AppController {
   onInput(event) {
     if (event.target.dataset.action === "cell-option-search") { this.view.filterOptions(event.target.closest(".cell-options-popover"),event.target.value); return; }
     if (event.target.dataset.action === "workspace-search") { const term=event.target.value.toLowerCase(); document.querySelectorAll(".workspace-list > button").forEach((button)=>{button.hidden=!button.textContent.toLowerCase().includes(term);}); return; }
-    if (event.target.dataset.action === "command-search") { this.view.showCommandPalette(this.model,event.target.value); return; }
+    if (event.target.dataset.action === "column-picker-search") { this.view.showColumnPicker(this.model,event.target.value); return; }
+    if (event.target.dataset.action === "command-search") { clearTimeout(this.searchTimer); const value=event.target.value; this.searchTimer=setTimeout(()=>{ if(document.querySelector(".command-modal")) this.view.showCommandPalette(this.model,value,this.serverSearchFor(value)); },90); this.scheduleServerSearch(value); return; }
     if (event.target.dataset.action === "column-type-search") {
       const term=event.target.value.trim().toLowerCase(), modal=event.target.closest(".column-chooser"), options=[...modal.querySelectorAll(".chooser-option")];
       options.forEach((b)=>{b.hidden=Boolean(term)&&!b.dataset.search.includes(term);});
@@ -488,22 +507,28 @@ class AppController {
       modal.querySelector(".chooser-empty").hidden=options.some((b)=>!b.hidden); return;
     }
     if (event.target.dataset.action !== "search") return;
-    const cursor=event.target.selectionStart; this.model.query=event.target.value; this.model.activeSavedViewId=null; this.update();
+    const cursor=event.target.selectionStart; this.model.query=event.target.value; this.update();
     const input=document.querySelector('[data-action="search"]'); input?.focus(); input?.setSelectionRange(cursor,cursor);
   }
   onChange(event) {
+    // Display columns: show/hide one column, or all of them (Item always stays).
+    if (event.target.dataset?.action === "column-toggle" || event.target.dataset?.action === "column-toggle-all") {
+      const all=event.target.dataset.action==="column-toggle-all";
+      const changed=all?this.model.setAllColumnsVisible(event.target.checked):this.model.setColumnVisible(event.target.dataset.key,event.target.checked);
+      if(changed!==false)this.refreshViewChrome();
+      return;
+    }
     if (event.target.dataset?.action === "files-input") { const input=event.target, files=[...input.files]; input.value=""; this.addFiles(input.dataset.id,input.dataset.field,files); return; }
     const action=event.target.dataset.action;
     if(action==="login-theme"){this.model.updateSetting("theme",event.target.value);this.view.applyDisplay(this.model);return;}
     if(action==="home-sort"){this.model.updateSetting("homeSort",event.target.value);this.update();return;}
-    if(action==="quick-view"){this.model.quickFilter=event.target.value;this.model.showArchived=false;this.model.activeSavedViewId=null;this.update();return;}
+    if(action==="quick-view"){this.model.quickFilter=event.target.value;this.model.showArchived=false;this.update();return;}
     if(action==="import-mapping"){const data=Object.fromEntries(new FormData(event.target.form));this.view.showImportPreview(this.model,this.pendingImport,data);return;}
-    if (action === "filter") { this.model.status=event.target.value; this.model.activeSavedViewId=null; this.update(); }
+    if (action === "filter") { this.model.status=event.target.value; this.update(); }
     if (action === "select") { this.model.toggleRow(this.model.idOf(event.target.dataset.id)); this.update(); }
     if (action === "select-all") { this.model.visibleRows.forEach((row)=>event.target.checked?this.model.selected.add(row.id):this.model.selected.delete(row.id)); this.update(); }
     if (action === "density") { this.model.updateSetting("density",event.target.checked?"compact":"comfortable"); document.documentElement.dataset.density=this.model.settings.density; }
     if (action === "setting") { this.model.updateSetting(event.target.dataset.key,event.target.checked); this.update(); this.view.showSettings(this.model); }
-    if (action === "motion-preference") { if(this.model.setMotionPreference(event.target.value)){this.view.applyDisplay(this.model);this.update();this.view.showSettings(this.model,"appearance");this.view.toast(event.target.value==="full"?"Full animations on":event.target.value==="reduced"?"Reduced motion on":"Following your device's motion setting");} return; }
     if (action === "setting-select") { const key=event.target.dataset.key; const value=["density","fontSize"].includes(key)?event.target.value.toLowerCase():event.target.value; this.model.updateSetting(key,value); this.update(); this.view.showSettings(this.model,this.model.settings.settingsSection); }
     if (action === "board-title-inline") { this.model.renameBoard(this.model.currentBoardId,event.target.value); this.update(); this.view.toast("Board name saved"); }
     if (action === "import-file") this.importData(event.target.files[0]);
@@ -520,7 +545,7 @@ class AppController {
       const signedIn=this.auth.login(data.username,data.password,Boolean(data.rememberSession),Boolean(data.rememberUsername));
       if(signedIn)this.model.syncUsername(data.username);this.update();return;
     }
-    if(action==="sort-form"){this.model.sortKey=data.key;this.model.sortDirection=data.direction;this.model.manualSort=false;this.model.board.manualOrder=false;this.model.save({op:"updateBoard",boardId:this.model.board.id});this.model.activeSavedViewId=null;this.update();return;}
+    if(action==="sort-form"){this.model.sortKey=data.key;this.model.sortDirection=data.direction;this.model.manualSort=false;this.model.board.manualOrder=false;this.model.save({op:"updateBoard",boardId:this.model.board.id});this.update();return;}
     if(action==="confirm-import-form"){let result;this.runBusy(event.submitter,()=>{result=this.model.importRows(this.pendingImport,data);},()=>{this.pendingImport=null;this.view.closeOverlay();this.update();this.view.toast(result.valid.length+" records imported"+(result.issues.length?" · "+result.issues.length+" skipped":""),true);});return;}
     if (action === "record-form" && data.id && event.target.dataset.conflicts && !event.target.dataset.conflictsSeen) { event.target.dataset.conflictsSeen="1"; this.view.formNotice(event.target, event.target.querySelector(".form-live-notice")?.innerHTML.replace("Saving will replace", "Save again to replace")||"A colleague changed this record. Save again to keep your values.","warning"); return; }
     if (action === "record-form") { const edit=Boolean(data.id); const fd=new FormData(event.target); this.model.board.columns.filter((column)=>this.model.isMultiColumn(column)&&event.target.querySelector(`[name="${CSS.escape(column.key)}"]`)).forEach((column)=>{data[column.key]=fd.getAll(column.key);}); this.model.board.columns.filter((column)=>column.type==="checkbox").forEach((column)=>{data[column.key]=Boolean(data[column.key]);});
@@ -536,13 +561,15 @@ class AppController {
       if(op==="in"&&!value.length)this.model.columnFilter=null;
       else if(!noValue&&value===""){form.querySelector('[name="value"]')?.focus();this.view.toast("Enter a value to filter by");return;}
       else this.model.columnFilter={key,op,value:noValue?"":value};
-      this.model.activeSavedViewId=null; this.view.closeOverlay(); this.update(); return;
+      this.view.closeOverlay(); this.update(); return;
     }
     if (action === "create-column-form") { let column; this.runBusy(event.submitter,()=>{column=this.model.addColumn({label:data.label,type:data.type,options:data.options||"",multiple:data.multiple==="on"});return column?undefined:false;},()=>{this.view.closeOverlay();this.update();this.root.querySelector(`th[data-column-key="${CSS.escape(column.key)}"]`)?.scrollIntoView({block:"nearest",inline:"nearest"});this.view.toast(`${column.label} column added`,true);}); }
     if (action === "rename-column-form") { this.runBusy(event.submitter,()=>this.model.editColumn(data.key,{label:data.label,description:data.description})?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast("Column updated",true);}); }
     if (action === "column-options-form") { this.pendingOptions={key:data.key,items:[...event.target.querySelectorAll(".option-row")].map((row)=>{const input=row.querySelector(".option-name");return {from:input.dataset.from||null,to:input.value,color:row.querySelector(".option-color")?.value||""};})}; this.applyColumnOptions(false,event.submitter); }
-    if (action === "column-width-form") { const width=Number(data.width); if(!Number.isFinite(width))return; this.runBusy(event.submitter,()=>{this.model.resizeColumn(data.key,width);},()=>{this.view.closeOverlay();this.update();this.view.toast("Column width saved");}); }
+    if (action === "column-width-form") { const width=Number(data.width); if(!Number.isFinite(width))return; this.runBusy(event.submitter,()=>{this.model.resizeColumn(data.key,width);},()=>{this.view.closeOverlay();this.update();this.view.toast(this.model.activeView?"Width changed in this view. Save to this view to keep it.":"Column width saved");}); }
     if (action === "edit-column-form") { const column=this.model.board.columns.find((c)=>c.key===data.key); const description=String(data.description||"").trim().slice(0,500); this.model.renameColumn(data.key,data.label); this.model.updateColumnConfig({[data.key]:{visible:data.key==="serial"?true:Boolean(data.visible),required:data.key==="serial"?true:Boolean(data.required),connection:data.connection||"",...("defaultValue" in data?{defaultValue:data.defaultValue||""}:{}),...(description?{description}:{})}}); if(column&&!description)delete column.description; this.view.closeOverlay(); this.update(); this.view.toast("Column updated"); }
+    if (action === "create-view-form") { const view=this.model.createView(data.name,data.type); if(view){this.view.closeOverlay();this.update();this.view.toast(`View "${view.name}" created`);} return; }
+    if (action === "rename-view-form") { if(this.model.renameView(data.id,data.name)){this.view.closeOverlay();this.update();this.view.toast("View renamed");} return; }
     if (action === "save-view-form") { if (this.model.saveView(data.name)) { this.view.closeOverlay(); this.update(); this.view.toast("View saved"); } }
     if (action === "profile-form") { data.name=this.auth.username; this.model.updateProfile(data); this.view.closeOverlay(); this.update(); this.view.toast("Profile updated"); }
     if (action === "description-form") { this.model.updateBoardDescription(data.description); this.view.closeOverlay(); this.update(); this.view.toast("Description saved"); }
@@ -587,7 +614,7 @@ class AppController {
         else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}
       }return;
     }
-    if(event.target.dataset.action==="resize-column"&&["ArrowLeft","ArrowRight"].includes(event.key)){event.preventDefault();const c=this.model.board.columns.find(c=>c.key===event.target.dataset.key);this.model.resizeColumn(c.key,(c.width||180)+(event.key==="ArrowRight"?20:-20));this.update();return;}
+    if(event.target.dataset.action==="resize-column"&&["ArrowLeft","ArrowRight"].includes(event.key)){event.preventDefault();const c=this.model.board.columns.find(c=>c.key===event.target.dataset.key);this.model.resizeColumn(c.key,(this.view.colWidth(c))+(event.key==="ArrowRight"?20:-20));this.update();return;}
     if(event.target.dataset.action==="board-title-inline"&&event.key==="Enter"){event.preventDefault();event.target.blur();return;}
     if(!editing&&!event.ctrlKey&&!event.metaKey&&!event.altKey){
       if(event.key==="/"){event.preventDefault();if(this.model.screen==="board")document.querySelector("#board-search")?.focus();else this.view.showCommandPalette(this.model);}
@@ -792,6 +819,7 @@ class AppController {
     if(!row||!column||!td)return;
     td.outerHTML=this.view.cell(row,column,this.model); this.saveFeedback();
     this.view.play(this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"] td[data-column-key="${CSS.escape(field)}"]`),"just-changed");
+    this.reapplyFlashes();
     if(focus)this.cellButton(id,field)?.focus();
   }
   refreshBoard(){
@@ -802,7 +830,7 @@ class AppController {
     const busy=Boolean(region.querySelector('[aria-busy="true"]'));
     if(wasBusy&&!busy)this.view.play(region,"content-ready"); // records finished loading: fade them in
     if(this.view.motionKeys)this.view.motionKeys.busy=busy;
-    this.refocus(focus); this.restoreScroll(scroll); this.trackRows();
+    this.refocus(focus); this.restoreScroll(scroll); this.trackRows(); this.view.fitBoard(); this.reapplyFlashes();
     const active=this.model.rows.filter((r)=>!r.archived).length, count=this.root.querySelector(".board-nav.selected .nav-count");
     if(count)count.textContent=active;
     this.root.querySelector('.board-actions [data-action="export"]')?.toggleAttribute("disabled",!this.model.rows.length);
@@ -921,8 +949,7 @@ class AppController {
       if(this.model.screen!=="board"||!this.model.board)continue;
       for(const column of this.model.board.columns.filter((c)=>c.type==="files")){
         this.refreshFiles(recordId,column.key);
-        const td=this.root.querySelector(`tr[data-record-context="${CSS.escape(String(recordId))}"] td[data-column-key="${CSS.escape(column.key)}"]`);
-        td?.classList.add("remote-flash");setTimeout(()=>td?.classList.remove("remote-flash"),1600);
+        this.flashCell(recordId,column.key);
       }
     }
   }
@@ -938,13 +965,6 @@ class AppController {
     if(!zone)return;
     const [id,field]=zone.matches(".file-drop")?zone.dataset.dropCell.split(":"):[zone.querySelector(".cell-display")?.dataset.id,zone.dataset.columnKey];
     if(id&&field)this.addFiles(id,field,[...event.dataTransfer.files]);
-  }
-  // Animations are on by default. A device that asks for reduced motion is respected until the person knowingly
-  // chooses Full animations: once (never again after any choice or dismissal) they are offered that choice.
-  offerMotion(){
-    if(!this.auth.authenticated||this.model.motionPreference()||this.model.settings.motionPromptSeen||!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches)return;
-    this.model.updateSetting("motionPromptSeen",true);
-    this.view.toast("Your device asks for reduced motion, so JARC shows fewer animations.",{label:"Use full animations",onClick:()=>{this.model.setMotionPreference("full");this.view.applyDisplay(this.model);this.view.toast("Full animations on. Change this any time in Settings → Appearance.");}});
   }
   // ---- Motion (Phase 4). New rows (yours, a colleague's, an undo) slide in once; rows confirmed deleted by the server
   // slide out before the table re-renders. Nothing waits for an animation before saving.
@@ -974,6 +994,64 @@ class AppController {
     media.addEventListener("error",()=>settle("error"),{once:true});
   }
   activeUploads(){let n=0;for(const list of this.uploads?.values()||[])n+=list.filter((u)=>u.state==="uploading").length;return n;}
+  // After a column is shown or hidden from the Display columns popover: redraw the table, the views bar and the toolbar,
+  // keep the popover open (with its search text) and its keyboard focus.
+  refreshViewChrome(){
+    const picker=document.querySelector("#overlay-root .column-picker"), query=picker?.querySelector("[data-action=column-picker-search]")?.value||"", focusKey=document.activeElement?.dataset?.key, focusAll=document.activeElement?.dataset?.action==="column-toggle-all";
+    this.refreshBoard();
+    const tabs=this.root.querySelector(".view-tabs"); if(tabs)tabs.outerHTML=this.view.tabs(this.model);
+    const tools=this.root.querySelector(".board-tools"); if(tools)tools.outerHTML=this.view.toolbar(this.model);
+    if(picker){this.view.showColumnPicker(this.model,query);const back=focusAll?document.querySelector('#overlay-root [data-action="column-toggle-all"]'):focusKey?document.querySelector(`#overlay-root [data-action="column-toggle"][data-key="${CSS.escape(focusKey)}"]`):null;back?.focus();}
+    this.view.fitBoard();
+  }
+  // ---- Global search (server part): debounced, only the latest query's answer is shown, failures are reported.
+  serverSearchFor(value){const q=String(value||"").trim();return this.serverSearch&&this.serverSearch.q===q?this.serverSearch:null;}
+  scheduleServerSearch(value,delay=250){
+    clearTimeout(this.serverSearchTimer);
+    const q=String(value||"").trim(), adapter=this.model.storage.adapter;
+    if(!adapter.searchRecords||q.length<2||q.length>100){this.serverSearch=null;return;}
+    if(this.serverSearch?.q===q&&this.serverSearch.status!=="error")return;
+    this.serverSearch={q,status:"loading",items:[]};
+    this.serverSearchTimer=setTimeout(async()=>{
+      const seq=(this.serverSearchSeq=(this.serverSearchSeq||0)+1);
+      let next;
+      try{const res=await adapter.searchRecords(q,{limit:20});next={q,status:"done",items:res.items||[],more:Boolean(res.more),partial:Boolean(res.partial)};}
+      catch(error){next={q,status:"error",items:[],message:error?.code==="RATE_LIMITED"?"Too many searches just now.":error?.code==="OFFLINE"?"You're offline, so other boards can't be searched.":"Couldn't search all boards."};}
+      if(seq!==this.serverSearchSeq)return; // a newer search started meanwhile
+      this.serverSearch=next;
+      const input=document.querySelector(".command-modal [data-action=command-search]");
+      if(input&&input.value.trim()===q)this.view.showCommandPalette(this.model,q,next);
+    },delay);
+    if(document.querySelector(".command-modal"))this.view.showCommandPalette(this.model,q,this.serverSearch);
+  }
+  // Opens a record found by search, also on a board not opened yet (waits for its records, then opens the record).
+  async openSearchResult(boardId,workspaceId,recordId,title=""){
+    this.view.closeOverlay();
+    try{this.model.openBoard(boardId,workspaceId);}catch{this.view.toast("That board is no longer available.");return;}
+    this.update();
+    const find=()=>this.model.rows.find((r)=>String(r.id)===String(recordId)||String(this.model.serverId(r.id))===String(recordId));
+    for(let i=0;i<100&&!find()&&["loading","none"].includes(this.model.boardLoadState().state);i+=1)await new Promise((r)=>setTimeout(r,100));
+    const row=find();
+    if(row){this.update();this.view.showRecordForm(this.model,row);return;}
+    // Not among the records loaded here (e.g. a very large board): show the board searched for it instead.
+    if(title){this.model.query=title;this.update();this.view.toast(`Showing records matching “${title}”`);}
+  }
+  // A colleague's change highlights its cell for 1.6 s. The highlight is remembered, so a redraw of the table in that
+  // time (e.g. other live changes arriving) keeps showing it instead of wiping it.
+  flashCell(id,field){
+    (this.flashes ||= new Map()).set(`${id}|${field}`,Date.now()+1600);
+    this.reapplyFlashes();
+    setTimeout(()=>this.reapplyFlashes(),1650);
+  }
+  reapplyFlashes(){
+    if(!this.flashes?.size)return;
+    const now=Date.now();
+    for(const [key,until] of this.flashes){
+      const [id,field]=key.split("|"), td=this.root.querySelector(`tr[data-record-context="${CSS.escape(id)}"] td[data-column-key="${CSS.escape(field)}"]`);
+      if(until<=now){this.flashes.delete(key);td?.classList.remove("remote-flash");continue;}
+      td?.classList.add("remote-flash");
+    }
+  }
   openCell(button){
     const id=this.model.idOf(button.dataset.id), field=button.dataset.field, row=this.model.rows.find((r)=>r.id===id), column=this.model.board.columns.find((c)=>c.key===field);
     if(!row||!column)return;
@@ -1073,7 +1151,7 @@ class AppController {
   applySort(key,direction){
     this.model.sortKey=key; this.model.sortDirection=direction||"desc";
     this.model.manualSort=key?false:Boolean(this.model.board.manualOrder);
-    this.model.activeSavedViewId=null; this.view.closeOverlay(); this.update();
+    this.view.closeOverlay(); this.update();
   }
   // Drag a column header to reorder (mouse/pen). Touch and keyboard use Move left / Move right in the column menu.
   startColumnDrag(event){

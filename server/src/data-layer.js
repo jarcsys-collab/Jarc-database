@@ -9,6 +9,7 @@ const { SessionRepository } = require("./repositories/mongo/session-repository")
 const { AttachmentRepository } = require("./repositories/mongo/attachment-repository");
 const { GridFsFileStore } = require("./files/file-store");
 const { FileService } = require("./services/file-service");
+const { SearchService } = require("./services/search-service");
 const { WorkspaceService } = require("./services/workspace-service");
 const { BoardService } = require("./services/board-service");
 const { RecordService } = require("./services/record-service");
@@ -35,6 +36,7 @@ function createDataLayer({ connection, logger = console, fileStore = new GridFsF
     connection,
     repos,
     services: { workspaces: new WorkspaceService(deps), boards: new BoardService(deps), records: new RecordService(deps), imports: new ImportService(deps), schema: new BoardSchemaService(deps), members: new MembershipService(deps),
+      search: new SearchService({ repos }),
       files: new FileService({ repos, store: fileStore, logger, ...(maxFileStorageBytes ? { maxTotalBytes: maxFileStorageBytes } : {}) }),
       // Read-only views used by the notification feed and People columns.
       activity: { recent: (options) => repos.activities.listRecent(options) },

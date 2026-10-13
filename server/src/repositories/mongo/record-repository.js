@@ -26,6 +26,12 @@ class RecordRepository extends VersionedRepository {
   }
 
   // New records go first, like the frontend (which adds new rows to the top).
+  // Global search: non-archived records matching any clause ({ boardId, $or: [field regexes] } per board), only the
+  // projected fields, at most `limit` documents, and never running longer than maxTimeMS on the server.
+  searchText(clauses, { projection, limit, maxTimeMS }) {
+    return this.collection.find({ archived: false, $or: clauses }, { projection, limit, maxTimeMS }).toArray();
+  }
+
   async firstPosition(boardId) {
     const first = await this.collection.findOne({ boardId }, { sort: { position: 1 }, projection: { position: 1 } });
     return first ? first.position - 1000 : 0;

@@ -55,7 +55,17 @@ describe("Motion, loading states and feedback (real app, headless browser)", { s
     assert.ok(await b.waitFor("!!document.querySelector('.editable-table tbody tr td.cell')", 15000), `${name} loaded`);
     await sleep(300);
   };
-  const reduced = (b, on) => b.evaluate(`document.documentElement.dataset.motion = ${on ? '"reduced"' : '"system"'}`); // JARC's own setting
+  // Reduced motion is the device's accessibility setting (JARC has no setting of its own).
+  const reduced = (b, on) => b.motionPreference(on ? "reduce" : "no-preference");
+  // Creates a view through + Views (type: table | list | kanban | calendar).
+  const createView = async (b, type, name) => {
+    await click(b, '[data-action="views-menu"]');
+    assert.ok(await b.waitFor(`!!document.querySelector('[data-action="new-view"][data-type="${type}"]')`, 2000));
+    await click(b, `[data-action="new-view"][data-type="${type}"]`);
+    assert.ok(await b.waitFor("!!document.querySelector('form[data-action=create-view-form]')", 2000));
+    await b.evaluate(`document.querySelector('form[data-action=create-view-form] input[name=name]').value = ${JSON.stringify(name)}`);
+    await click(b, 'form[data-action="create-view-form"] .button.primary');
+  };
 
   before(async () => {
     const port = await freePort();
@@ -78,11 +88,11 @@ describe("Motion, loading states and feedback (real app, headless browser)", { s
     assert.ok((await seen(ana)).some((s) => s.c === "view-enter" && !/topbar/.test(s.cls)), "opening a board fades the content in");
     assert.equal((await seen(ana)).filter((s) => s.c === "view-enter" && /topbar/.test(s.cls)).length, 0, "the top bar never animates");
     await instrument(ana);
-    await click(ana, '[data-action="set-view"][data-view="kanban"]');
+    await createView(ana, "kanban", "Motion kanban");
     await ana.waitFor("!!document.querySelector('.kanban-board')", 3000);
     const viewSwitch = (await seen(ana)).filter((s) => s.c === "view-enter");
     assert.deepEqual(viewSwitch.map((s) => /board-view-region/.test(s.cls)), [true], "only the records area animates on a view switch");
-    await click(ana, '[data-action="set-view"][data-view="table"]');
+    await click(ana, '[data-action="main-table"]');
     await ana.waitFor("!!document.querySelector('.editable-table')", 3000);
     await sleep(300);
     await instrument(ana);
@@ -111,7 +121,6 @@ describe("Motion, loading states and feedback (real app, headless browser)", { s
 
   test("skeletons: shaped like the view, delayed so fast loads never flash, replaced by an error (not stuck) when loading fails, and Try again works", async () => {
     await openApp(ana);
-    await click(ana, '[data-action="set-view"][data-view="kanban"]').catch(() => {});
     await shape(ana, [{ match: `/boards/${beta.id}/records`, fail: true }]);
     await ana.evaluate(`[...document.querySelectorAll('#sidebar .tree-item')].find((el) => el.textContent.includes("Beta board"))?.click()`);
     assert.ok(await ana.waitFor("!!document.querySelector('[data-action=\"retry-board-load\"]')", 8000), "the failure is shown");
@@ -126,7 +135,6 @@ describe("Motion, loading states and feedback (real app, headless browser)", { s
     assert.ok(await ana.waitFor(`!!document.querySelector('.kanban-board') || !!document.querySelector(${JSON.stringify(cell("B-1", "notes"))})`, 8000), "records appear when the load finishes");
     assert.ok((await seen(ana)).some((s) => s.c === "content-ready"), "records fade in once loaded");
     await shape(ana, []);
-    await click(ana, '[data-action="set-view"][data-view="table"]');
     // With reduced motion the skeleton is visible at once (no delay).
     await reduced(ana, true);
     const visible = await ana.evaluate(`(() => { const d = document.createElement("div"); d.innerHTML = '<section class="data-region skeleton-region" aria-busy="true"></section>'; document.body.append(d); const s = getComputedStyle(d.firstChild); const out = { name: s.animationName, opacity: s.opacity }; d.remove(); return out; })()`);
@@ -263,7 +271,7 @@ describe("Motion, loading states and feedback (real app, headless browser)", { s
 
   test("accessibility: visible keyboard focus, loading regions announced as busy, the exit layer hidden from assistive technology", async () => {
     await openApp(ana); await openBoard(ana, "Alpha board");
-    await ana.evaluate("document.querySelector('[data-action=\"set-view\"][data-view=\"table\"]').focus()");
+    await ana.evaluate("document.querySelector('[data-action=\"main-table\"]').focus()");
     await ana.key("Tab");
     const outline = await ana.evaluate("(() => { const s = getComputedStyle(document.activeElement); return s.outlineStyle !== 'none' && parseFloat(s.outlineWidth) >= 2; })()");
     assert.ok(outline, "keyboard focus is visible");

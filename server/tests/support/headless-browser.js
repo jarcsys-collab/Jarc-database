@@ -16,15 +16,22 @@ const findBrowser = () => CANDIDATES.find((p) => p && fs.existsSync(p)) || null;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const freePort = () => new Promise((resolve) => { const s = net.createServer().listen(0, "127.0.0.1", () => { const { port } = s.address(); s.close(() => resolve(port)); }); });
 
-async function launch(executable = findBrowser()) {
-  const port = await freePort();
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "jarc-browser-"));
-  const proc = spawn(executable, ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--allow-file-access-from-files", `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, "about:blank"], { stdio: "ignore" });
-  let target;
-  for (let i = 0; i < 100 && !target; i += 1) {
-    try { target = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find((t) => t.type === "page"); } catch { await sleep(100); }
+async function launch(executable = findBrowser(), { attempts = 2, startupMs = 60000 } = {}) {
+  let port, profile, proc, target;
+  // Waits (on every try) until the browser's debugging endpoint lists a page. Under heavy load (many browsers starting
+  // in parallel) the endpoint can answer before the page exists, so a short or try-counted wait gave up too early.
+  for (let attempt = 1; attempt <= attempts && !target; attempt += 1) {
+    port = await freePort();
+    profile = fs.mkdtempSync(path.join(os.tmpdir(), "jarc-browser-"));
+    proc = spawn(executable, ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--allow-file-access-from-files", `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, "about:blank"], { stdio: "ignore" });
+    const deadline = Date.now() + startupMs;
+    while (!target && Date.now() < deadline) {
+      try { target = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find((t) => t.type === "page"); } catch { /* not listening yet */ }
+      if (!target) await sleep(100);
+    }
+    if (!target) { proc.kill(); try { fs.rmSync(profile, { recursive: true, force: true }); } catch { /* still locked */ } }
   }
-  if (!target) { proc.kill(); throw new Error("The headless browser didn't start."); }
+  if (!target) throw new Error("The headless browser didn't start.");
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => { ws.addEventListener("open", resolve, { once: true }); ws.addEventListener("error", reject, { once: true }); });
   let id = 0; const pending = new Map();

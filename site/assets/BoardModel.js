@@ -314,7 +314,7 @@ class BoardModel {
   get rows() { return this.board?.records || []; }
   get allRecords() { return this.workspaces.flatMap((space) => space.boards.flatMap((board) => { const byType=(type)=>board.columns?.find((column)=>column.type===type)?.key; return board.records.map((record) => ({ ...record, owner:record[byType("owner")]??record.owner, status:record[byType("status")]??record.status, priority:record[byType("priority")]??record.priority, dueDate:record[this.dueColumn(board)?.key]??record.dueDate, boardId: board.id, boardName: board.name, workspaceId: space.id, workspaceName:space.name, boardArchived:Boolean(board.archived), workspaceArchived:Boolean(space.archived) })); })); }
   get myWork() { return this.allRecords.filter((record) => !record.archived && !record.boardArchived && !record.workspaceArchived && this.isMine(record.owner)); }
-  get visibleColumns() { return this.board.columns.filter((column) => column.visible !== false); }
+  get visibleColumns() { return this.orderedColumns.filter((column) => this.columnShown(column)); }
   get statusColumn() { return this.board.columns.find((column)=>column.type==="status"); }
   get groupColumn() { return this.board.columns.find((column)=>column.type==="group"); }
   get ownerColumn() { return this.board.columns.find((column)=>column.type==="owner"); }
@@ -344,7 +344,7 @@ class BoardModel {
     const board = space?.boards.find(b=>b.id===boardId);
     if (!board) throw Error("This board is no longer available.");
     this.currentWorkspaceId=workspaceId; this.currentBoardId=boardId; this.screen="board";
-    this.currentView=board.lastView || "table"; this.resetMainView(); this.selected.clear();
+    this.currentView="table"; this.resetMainView(); this.selected.clear(); // Main Table is always the board's first view
     board.openCount=(board.openCount||0)+1;
     this.recentBoards=[{boardId,workspaceId,openedAt:new Date().toISOString()},...this.recentBoards.filter(r=>r.boardId!==boardId||r.workspaceId!==workspaceId)].slice(0,10);
     this.save({op:"updateUserState",boardId,workspaceId});
@@ -415,7 +415,7 @@ class BoardModel {
     // Replace only visible slots. Hidden and archived records retain their positions.
     const ids=new Set(visible.map(r=>r.id));let index=0;
     this.board.records=this.rows.map(r=>ids.has(r.id)?reordered[index++]:r);
-    this.manualSort=true;this.board.manualOrder=true;this.activeSavedViewId=null;
+    this.manualSort=true;this.board.manualOrder=true;
     this.save({op:"reorderRecords",boardId:this.board.id});return true;
   }
 
@@ -427,19 +427,81 @@ class BoardModel {
   editColumn(key,{label,description=""}){const column=this.board.columns.find((item)=>item.key===key);const clean=String(label||"").trim();if(!column||!clean)return false;const text=String(description||"").trim().slice(0,500);if(column.label===clean&&(column.description||"")===text)return false;this.snapshot("Column edit undone");column.label=clean;if(text)column.description=text;else delete column.description;this.log(`Edited column ${clean}`);this.save({op:"updateColumns",boardId:this.board.id,columnKey:key});return true;}
   renameColumn(key, label) { const column=this.board.columns.find((item)=>item.key===key); const clean=String(label||"").trim(); if(!column||!clean)return false; this.snapshot("Column rename undone"); column.label=clean; this.log(`Renamed column to ${clean}`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key}); return true; }
   deleteColumn(key) { if(key==="serial")return false; const index=this.board.columns.findIndex((item)=>item.key===key); if(index<0)return false; this.snapshot("Column deletion undone"); const [column]=this.board.columns.splice(index,1); this.rows.forEach((row)=>{delete row[key];}); this.log(`Deleted ${column.label} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,affectsRecords:true}); return true; }
-  moveColumn(key, direction) { const index=this.board.columns.findIndex((item)=>item.key===key); const target=index+(direction==="left"?-1:1); if(key==="serial"||index<0||target<1||target>=this.board.columns.length)return false; this.snapshot("Column reorder undone"); [this.board.columns[index],this.board.columns[target]]=[this.board.columns[target],this.board.columns[index]]; this.save({op:"updateColumns",boardId:this.board.id,columnKey:key}); return true; }
+  moveColumn(key, direction) { if(this.activeView){const order=this.orderedColumns.map((c)=>c.key),i=order.indexOf(key),t=i+(direction==="left"?-1:1);if(key==="serial"||i<0||t<1||t>=order.length)return false;[order[i],order[t]]=[order[t],order[i]];this.viewOrder=order;return true;} const index=this.board.columns.findIndex((item)=>item.key===key); const target=index+(direction==="left"?-1:1); if(key==="serial"||index<0||target<1||target>=this.board.columns.length)return false; this.snapshot("Column reorder undone"); [this.board.columns[index],this.board.columns[target]]=[this.board.columns[target],this.board.columns[index]]; this.save({op:"updateColumns",boardId:this.board.id,columnKey:key}); return true; }
   duplicateColumn(key) { const source=this.board.columns.find((item)=>item.key===key); if(!source)return false; this.snapshot("Column duplication undone"); const copy={...source,key:`custom_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,label:`${source.label} copy`,required:false,options:[...source.options],...(source.colors?{colors:[...source.colors]}:{})}; this.board.columns.splice(this.board.columns.indexOf(source)+1,0,copy); this.rows.forEach((row)=>{row[copy.key]=Array.isArray(row[source.key])?[...row[source.key]]:row[source.key]??copy.defaultValue;}); this.log(`Duplicated ${source.label} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:copy.key,copyFrom:source.key,affectsRecords:true}); return copy; }
   updateColumnConfig(config) { this.snapshot("Column settings undone"); Object.entries(config).forEach(([key, value]) => { const column=this.board.columns.find((item)=>item.key===key); if(column)Object.assign(column,value); }); this.save({op:"updateColumns",boardId:this.board.id,columnKeys:Object.keys(config)}); }
   saveView(name) { const clean = name.trim(); if (!clean) return false; const view={ id: Date.now(), name: clean, status: this.status, query: this.query, grouped: this.grouped, sortDirection: this.sortDirection, view:this.currentView, visibleColumns:this.board.columns.filter(c=>c.visible!==false).map(c=>c.key), density:this.settings.density, sortKey:this.sortKey,quickFilter:this.quickFilter,showArchived:this.showArchived,columnOrder:this.board.columns.map(c=>c.key),columnWidths:Object.fromEntries(this.board.columns.map(c=>[c.key,c.width])) }; this.board.savedViews.push(view); this.activeSavedViewId=view.id; this.save({op:"updateViews",boardId:this.board.id}); return true; }
-  applyView(id) { const view = this.board.savedViews.find((item) => item.id === this.idOf(id)); if (!view) return; Object.assign(this, { status: view.status, query: view.query, grouped: view.grouped, sortDirection: view.sortDirection }); if(view.view)this.currentView=view.view; if(view.visibleColumns){this.board.columns.forEach(c=>c.visible=view.visibleColumns.includes(c.key));} if(view.density)this.settings.density=view.density; this.sortKey=view.sortKey||"";this.quickFilter=view.quickFilter||"all";this.showArchived=Boolean(view.showArchived);if(view.columnOrder)this.board.columns.sort((a,b)=>{const ai=view.columnOrder.indexOf(a.key),bi=view.columnOrder.indexOf(b.key);return (ai<0?999:ai)-(bi<0?999:bi);});if(view.columnWidths)this.board.columns.forEach(c=>c.width=view.columnWidths[c.key]||c.width);this.manualSort=false; this.activeSavedViewId=view.id;this.save({op:"updateColumns",boardId:this.board.id,viewId:view.id}); }
-  resetMainView() { this.sortKey="";this.quickFilter="all";this.columnFilter=null;this.query=""; this.status="All"; this.grouped=false; this.sortDirection="desc"; this.activeSavedViewId=null; this.showArchived=false; this.manualSort=Boolean(this.board?.manualOrder); }
+  // Opens a view: its type, filters, sorting, grouping and (if it has its own) visible columns. The board's columns —
+  // order, widths, visibility in Main Table — are never changed by opening a view (older views that stored a column
+  // order or widths simply use the board's).
+  applyView(id) { const view = this.board.savedViews.find((item) => String(item.id) === String(this.idOf(id))); if (!view) return; Object.assign(this, { status: view.status||"All", query: view.query||"", grouped: Boolean(view.grouped), sortDirection: view.sortDirection||"desc" }); this.currentView=["table","list","kanban","calendar"].includes(view.view)?view.view:"table"; this.viewHidden=this.hiddenFrom(view); this.viewOrder=Array.isArray(view.columnOrder)?[...view.columnOrder]:null; this.viewWidths=view.columnWidths&&typeof view.columnWidths==="object"?Object.fromEntries(Object.entries(view.columnWidths).filter(([,w])=>Number.isFinite(w)&&w>0)):null; this.sortKey=view.sortKey||"";this.quickFilter=view.quickFilter||"all";this.showArchived=false;this.columnFilter=null;this.manualSort=false; this.activeSavedViewId=view.id; this.selected?.clear?.(); this.save({op:"updateUserState",boardId:this.board.id}); }
+  resetMainView() { this.viewHidden=null; this.viewOrder=null; this.viewWidths=null; this.sortKey="";this.quickFilter="all";this.columnFilter=null;this.query=""; this.status="All"; this.grouped=false; this.sortDirection="desc"; this.activeSavedViewId=null; this.showArchived=false; this.manualSort=Boolean(this.board?.manualOrder); }
   deleteView(id) { this.board.savedViews = this.board.savedViews.filter((view) => view.id !== this.idOf(id)); if(this.activeSavedViewId===this.idOf(id))this.resetMainView(); this.save({op:"updateViews",boardId:this.board.id}); }
   toggleRow(id) { this.selected.has(id) ? this.selected.delete(id) : this.selected.add(id); }
   log(text) { if (!this.board) return; const at = new Date().toISOString(); this.board.updatedAt=at; this.board.activity.unshift({ id: Date.now(), text, at }); this.board.activity = this.board.activity.slice(0, 80); if(!this.settings.muteActivity)this.notifications.unshift({ id: Date.now() + 1, text, boardId: this.board.id, workspaceId: this.workspace.id, at, read: false }); this.notifications = this.notifications.slice(0,50); }
-  // Animations: "full" | "reduced" | "system", or null when the person hasn't chosen (then: full animations unless
-  // their device asks for reduced motion). An earlier "Reduce motion" choice (reduceMotion: true) counts as Reduced.
-  motionPreference(){const m=this.settings.motion;return ["full","reduced","system"].includes(m)?m:this.settings.reduceMotion===true?"reduced":null;}
-  setMotionPreference(value){if(!["full","reduced","system"].includes(value))return false;this.settings.motion=value;this.settings.reduceMotion=value==="reduced";this.settings.motionPromptSeen=true;this.save({op:"updateUserState"});return true;}
+  // ---- Views (Phase 5): "Main Table" plus the board's saved views (the existing board.savedViews, shared with
+  // everyone who can see the board), shown as tabs. A view is mainly a column configuration of the SAME records:
+  // which columns are hidden, their order and widths, plus filters and sorting; optionally a List, Kanban or Calendar
+  // layout. While a view is open these apply on top of the board (overlay): the board's columns and data are never
+  // changed by a view. Changes made in a view stay on this screen until "Save to this view".
+  //   saved state: hiddenColumns [keys], columnOrder [keys] (optional), columnWidths {key: px} (optional), status,
+  //   query, grouped, sortDirection, sortKey, quickFilter, view (layout). Older views stored visibleColumns instead
+  //   of hiddenColumns; they are read as "every other column hidden".
+  // New columns added to the board appear in every view (a view lists what it hides), at the end of a custom order.
+  get activeView(){return this.activeSavedViewId!==null&&this.activeSavedViewId!==undefined&&this.board?this.board.savedViews.find((v)=>String(v.id)===String(this.activeSavedViewId))||null:null;}
+  columnShown(c){if(this.activeView)return c.key==="serial"||!(this.viewHidden||[]).includes(c.key);return c.visible!==false;}
+  // Columns in display order (a view's own order, if it has one; Item always first).
+  get orderedColumns(){
+    const cols=this.board.columns;
+    if(!this.activeView||!Array.isArray(this.viewOrder))return cols;
+    const pos=new Map(this.viewOrder.map((k,i)=>[k,i])), rank=(c)=>c.key==="serial"?-1:pos.has(c.key)?pos.get(c.key):10000+cols.indexOf(c);
+    return [...cols].sort((a,b)=>rank(a)-rank(b));
+  }
+  columnWidthFor(c){const w=this.activeView&&this.viewWidths?this.viewWidths[c.key]:null;return Number.isFinite(w)&&w>0?w:null;}
+  hiddenFrom(view){
+    if(Array.isArray(view.hiddenColumns))return view.hiddenColumns.filter((k)=>k!=="serial");
+    if(Array.isArray(view.visibleColumns))return this.board.columns.filter((c)=>c.key!=="serial"&&!view.visibleColumns.includes(c.key)).map((c)=>c.key);
+    return [];
+  }
+  viewSnapshot(){
+    const keys=new Set(this.board.columns.map((c)=>c.key));
+    return {status:this.status||"All",query:this.query||"",grouped:Boolean(this.grouped),sortDirection:this.sortDirection||"desc",sortKey:this.sortKey||"",quickFilter:this.quickFilter||"all",view:this.currentView||"table",
+      hiddenColumns:[...new Set(this.viewHidden||[])].filter((k)=>keys.has(k)).sort(),
+      ...(Array.isArray(this.viewOrder)?{columnOrder:this.viewOrder.filter((k)=>keys.has(k))}:{}),
+      ...(this.viewWidths&&Object.keys(this.viewWidths).length?{columnWidths:Object.fromEntries(Object.entries(this.viewWidths).filter(([k,w])=>keys.has(k)&&Number.isFinite(w)).sort(([a],[b])=>a.localeCompare(b)))}:{})};
+  }
+  savedSnapshot(v){
+    const keys=new Set(this.board.columns.map((c)=>c.key)), widths=v.columnWidths&&typeof v.columnWidths==="object"?Object.entries(v.columnWidths).filter(([k,w])=>keys.has(k)&&Number.isFinite(w)):[];
+    return {status:v.status||"All",query:v.query||"",grouped:Boolean(v.grouped),sortDirection:v.sortDirection||"desc",sortKey:v.sortKey||"",quickFilter:v.quickFilter||"all",view:v.view||"table",
+      hiddenColumns:[...new Set(this.hiddenFrom(v))].filter((k)=>keys.has(k)).sort(),
+      ...(Array.isArray(v.columnOrder)?{columnOrder:v.columnOrder.filter((k)=>keys.has(k))}:{}),
+      ...(widths.length?{columnWidths:Object.fromEntries(widths.sort(([a],[b])=>a.localeCompare(b)))}:{})};
+  }
+  // The open view differs from what is saved (offers "Save to this view").
+  get viewChanged(){const v=this.activeView;return v?JSON.stringify(this.viewSnapshot())!==JSON.stringify(this.savedSnapshot(v)):false;}
+  static VIEW_TYPES=Object.freeze([["table","Table","layout"],["list","List","list"],["kanban","Kanban board","board"],["calendar","Calendar","calendar"]]);
+  // A new view starts from Main Table's columns (or from another view's configuration when duplicating).
+  createView(name,type="table",{from=null}={}){
+    const clean=String(name||"").trim().slice(0,60);
+    if(!this.board||!clean||!["table","list","kanban","calendar"].includes(type)||this.board.savedViews.length>=50)return null;
+    const base=from?this.savedSnapshot(from):{status:"All",query:"",grouped:false,sortDirection:"desc",sortKey:"",quickFilter:"all",view:type,hiddenColumns:this.board.columns.filter((c)=>c.key!=="serial"&&c.visible===false).map((c)=>c.key)};
+    const view={id:Date.now(),name:clean,...base,view:from?base.view:type};
+    this.board.savedViews.push(view);this.save({op:"updateViews",boardId:this.board.id});
+    this.applyView(view.id);return view;
+  }
+  duplicateView(id){const v=this.board?.savedViews.find((x)=>String(x.id)===String(this.idOf(id)));return v?this.createView(this.uniqueViewName(`${v.name} copy`),v.view||"table",{from:v}):null;}
+  openMainTable(){this.resetMainView();this.currentView="table";this.selected?.clear?.();this.save({op:"updateUserState",boardId:this.board?.id});}
+  renameView(id,name){const v=this.board?.savedViews.find((x)=>String(x.id)===String(this.idOf(id)));const clean=String(name||"").trim().slice(0,60);if(!v||!clean)return false;if(v.name===clean)return true;v.name=clean;this.save({op:"updateViews",boardId:this.board.id});return true;}
+  // Saves the open view's configuration into it (shared with the board: a versioned board update, so a colleague's
+  // simultaneous change is never silently overwritten).
+  saveActiveView(){const v=this.activeView;if(!v)return false;const snap=this.viewSnapshot();for(const k of ["visibleColumns","columnOrder","columnWidths","density","showArchived"])delete v[k];Object.assign(v,snap);this.save({op:"updateViews",boardId:this.board.id});return true;}
+  // Show or hide every column (Item always stays) — in the open view, or in Main Table for everyone.
+  setAllColumnsVisible(visible){
+    if(this.activeView){this.viewHidden=visible?[]:this.board.columns.filter((c)=>c.key!=="serial").map((c)=>c.key);return true;}
+    const changes=Object.fromEntries(this.board.columns.filter((c)=>c.key!=="serial"&&(c.visible!==false)!==visible).map((c)=>[c.key,{visible}]));
+    if(!Object.keys(changes).length)return false;this.updateColumnConfig(changes);return true;
+  }
+  uniqueViewName(base){const names=new Set((this.board?.savedViews||[]).map((v)=>v.name.toLowerCase()));if(!names.has(base.toLowerCase()))return base;for(let i=2;;i+=1)if(!names.has(`${base} ${i}`.toLowerCase()))return `${base} ${i}`;}
   updateSetting(key, value) { this.settings[key] = value; this.save({op:"updateUserState"}); }
   updateProfile(values) { Object.assign(this.profile, values); const parts=this.profile.name.trim().split(/\s+/); this.profile.initials=(parts[0]?.[0] || "U") + (parts[1]?.[0] || ""); this.profile.initials=this.profile.initials.toUpperCase(); this.save({op:"updateUserState"}); }
   syncUsername(username) { const name=String(username || "medtek").trim().toLowerCase(); this.profile.name=name; this.profile.initials=(name[0] || "M").toUpperCase(); this.save({op:"updateUserState"}); }
@@ -494,7 +556,7 @@ class BoardModel {
   moveRecordToBoard(id,boardId){const row=this.rows.find(r=>r.id===this.idOf(id));const target=this.workspaces.flatMap(w=>w.boards).find(b=>b.id===boardId);if(!row||!target||target===this.board)return false;this.snapshot("Record move undone");this.board.columns.forEach(c=>{if(!target.columns.some(t=>t.key===c.key))target.columns.push(JSON.parse(JSON.stringify(c)));});if(target.records.some(r=>r.id===row.id))row.id=this.nextRecordId();target.records.push(row);this.board.records=this.rows.filter(r=>r!==row);this.recordActivity(row,"Moved to "+target.name);this.log("Moved record to "+target.name);this.save({op:"moveRecord",boardId:this.board.id,targetBoardId:boardId,recordId:row.id});return true;}
   rememberRecord(row){this.recentRecords=[{id:row.id,boardId:this.board.id,workspaceId:this.workspace.id},...this.recentRecords.filter(r=>r.id!==row.id||r.boardId!==this.board.id)].slice(0,8);this.save({op:"updateUserState"});}
   rememberCommand(command){this.recentCommands=[command,...this.recentCommands.filter(c=>c!==command)].slice(0,5);this.save({op:"updateUserState"});}
-  resizeColumn(key,width){const column=this.board.columns.find(c=>c.key===key);if(column){column.width=Math.max(100,Math.min(600,width));this.save({op:"updateColumns",boardId:this.board.id,columnKey:key});}}
+  resizeColumn(key,width){if(this.activeView){if(this.board.columns.some((c)=>c.key===key))this.viewWidths={...(this.viewWidths||{}),[key]:Math.max(100,Math.min(600,width))};return;}const column=this.board.columns.find(c=>c.key===key);if(column){column.width=Math.max(100,Math.min(600,width));this.save({op:"updateColumns",boardId:this.board.id,columnKey:key});}}
 
   // --- Backup validation (Stage 5). Checks the whole file before anything is applied and explains the first problem.
   // Accepts the current backup format (version 11) and older backups without a version or without board columns.
@@ -744,12 +806,15 @@ class BoardModel {
   }
   // Drag-to-reorder: only columns[] order changes; the primary column always stays first.
   moveColumnTo(key,targetKey,position="before"){
+    if(this.activeView){const order=this.orderedColumns.map((c)=>c.key),from=order.indexOf(key),target=order.indexOf(targetKey);if(key==="serial"||from<0||target<0||key===targetKey)return false;let to=target+(position==="after"?1:0);if(from<to)to-=1;to=Math.max(1,to);if(to===from)return false;order.splice(to,0,...order.splice(from,1));this.viewOrder=order;return true;}
     const cols=this.board.columns, from=cols.findIndex((c)=>c.key===key), target=cols.findIndex((c)=>c.key===targetKey);
     if(key==="serial"||from<0||target<0||key===targetKey)return false;
     let to=target+(position==="after"?1:0); if(from<to)to-=1; to=Math.max(1,to); if(to===from)return false;
     this.snapshot("Column reorder undone"); const [column]=cols.splice(from,1); cols.splice(to,0,column); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key}); return true;
   }
-  setColumnVisible(key,visible){if(key==="serial"&&!visible)return false;const column=this.board.columns.find((c)=>c.key===key);if(!column)return false;this.updateColumnConfig({[key]:{visible:Boolean(visible)}});return true;}
+  setColumnVisible(key,visible){if(key==="serial"&&!visible)return false;
+    // In a view only that view changes (until "Save to this view"); in Main Table the board's column, for everyone.
+    if(this.activeView){if(!this.board.columns.some((c)=>c.key===key))return false;const hidden=new Set(this.viewHidden||[]);if(visible)hidden.delete(key);else hidden.add(key);this.viewHidden=[...hidden];return true;}const column=this.board.columns.find((c)=>c.key===key);if(!column)return false;this.updateColumnConfig({[key]:{visible:Boolean(visible)}});return true;}
 
 
 }

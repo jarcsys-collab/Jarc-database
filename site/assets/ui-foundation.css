@@ -876,7 +876,6 @@ th.col-drop-after { box-shadow: inset -3px 0 0 var(--accent); }
 body.storage-offline .save-state { color: var(--warning); }
 body.storage-offline .editable-table .cell-display { cursor: not-allowed; }
 @keyframes jarc-spin { to { transform: rotate(360deg); } }
-html[data-motion=reduced] .loading-spinner, html[data-motion=reduced] .is-busy::after { animation-duration: 2.4s; }
 /* No workspaces yet (empty shared database): an invitation inside the normal layout (AppView.noWorkspaces). */
 .no-workspace { display: grid; place-items: center; padding: var(--space-8) var(--space-6) 56px; min-height: calc(100vh - 140px); box-sizing: border-box; }
 .no-workspace-card { width: 100%; max-width: 560px; text-align: center; padding: 36px 32px 28px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); }
@@ -938,7 +937,7 @@ body.nav-collapsed .sidebar:not(.open) .sidebar-settings span {
   .nav-toggle[aria-expanded="true"] .nav-toggle-open { display: none; }
   .nav-toggle[aria-expanded="true"] .nav-toggle-close { display: inline; }
 }
-@media (prefers-reduced-motion: reduce) { html:not([data-motion=full]).nav-drawer-open .nav-backdrop { animation: none; } }
+@media (prefers-reduced-motion: reduce) { html.nav-drawer-open .nav-backdrop { animation: none; } }
 
 /* Touch devices (phones, tablets): no hover, coarse pointer. Desktop is unaffected.
    - Text fields use at least 16 px: iOS Safari zooms the whole page when a smaller field gets focus, and doesn't
@@ -1192,10 +1191,9 @@ td.cell[data-type=files].is-drop-target, .file-drop.is-drop-target { outline: 2p
 /* Phase 4 — motion system.
    Tokens: every animation below uses these. Durations follow the size of what moves (hover 100–140 ms, menus
    140–180 ms, drawers 220–240 ms, screens 180 ms). Only opacity and transform animate (no layout animation).
-   Settings → Appearance → Animations: Full animations (html[data-motion=full], also overriding a device's reduced-
-   motion request), Reduced motion (data-motion=reduced) or Follow system (data-motion=system, the default when no
-   choice is saved: full unless the device asks for reduced motion). The global rules in styles.css turn motion off;
-   JavaScript checks the same setting (AppView.reducedMotion) before playing or waiting for anything.
+   Animations are always on, except when the device's accessibility setting asks for reduced motion
+   (prefers-reduced-motion): then the global rule in styles.css turns them off and JavaScript (AppView.reducedMotion)
+   skips playing or waiting for any animation. Essential feedback (Saving…, Uploading…, errors) stays as text.
    -------------------------------------------------------------------------- */
 :root {
   --dur-instant: 100ms; --dur-fast: 140ms; --dur-base: 180ms; --dur-slow: 240ms;
@@ -1234,7 +1232,6 @@ tr.row-exit > td { animation: jarc-row-exit var(--dur-base) var(--ease-in) forwa
 /* Save indicator: a spinner while uploading; the status dot settles once when a save is confirmed. */
 .save-spinner { display: inline-block; width: 10px; height: 10px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: jarc-spin .8s linear infinite; vertical-align: -1px; }
 .save-state.just-saved i { animation: jarc-settle var(--dur-slow) var(--ease-out); }
-html[data-motion=reduced] .save-spinner { animation-duration: 2.4s; }
 
 /* Loading placeholders, shaped like the content they stand for. */
 .skeleton-region, .feed-skeleton, .file-list-skeleton { animation: jarc-skeleton-reveal var(--dur-fast) ease var(--skeleton-delay) both; }
@@ -1284,3 +1281,116 @@ html[data-motion=reduced] .save-spinner { animation-duration: 2.4s; }
 @keyframes jarc-drawer-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(32px); } }
 @keyframes jarc-toast-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(6px); } }
 @keyframes jarc-skeleton-reveal { from { opacity: 0; } to { opacity: 1; } }
+
+/* Phase 5 — desktop workspace.
+   Views bar (all widths: the markup changed): Main Table, the board's views as tabs, "+ Views".
+   -------------------------------------------------------------------------- */
+.view-tab { position: relative; display: inline-flex; align-items: center; border-radius: 6px 6px 0 0; transition: background-color var(--dur-instant) ease; }
+.view-tab > button { display: flex; align-items: center; gap: 6px; white-space: nowrap; padding: 8px 10px; color: var(--muted); font-size: var(--fs-sm); border-radius: 6px 6px 0 0; }
+.view-tab > button:hover, .add-view-button:hover { color: var(--text); background: var(--hover); }
+.view-tab.active > button:first-child { color: var(--text); font-weight: 650; }
+.view-tab.active { box-shadow: inset 0 -2px var(--accent); }
+.view-tab .icon { width: 15px; height: 15px; }
+.view-tab-menu { padding: 6px 6px 6px 0 !important; }
+.view-tab-menu .icon { width: 13px; height: 13px; }
+.add-view-button { display: flex; align-items: center; gap: 5px; margin-left: 4px; padding: 6px 10px; border-radius: 6px; color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; transition: background-color var(--dur-instant) ease, color var(--dur-instant) ease; }
+.add-view-button .icon { width: 14px; height: 14px; }
+.view-save-button { margin-left: auto; align-self: center; height: 28px; padding: 0 10px; border-radius: 6px; font-size: var(--fs-sm); font-weight: 600; color: var(--accent-text, var(--accent)); background: var(--accent-soft); animation: jarc-fade-in var(--dur-base) var(--ease-standard); }
+.archived-tab small { margin-left: 2px; }
+.views-menu { min-width: 230px; }
+.menu-count { margin-left: auto; color: var(--faint); font-size: var(--fs-xs); }
+.quick-view-control select { border: 0; background: transparent; color: inherit; font: inherit; }
+
+/* Global search results: highlighted matches, context lines. */
+.command-results mark { background: color-mix(in srgb, var(--accent) 28%, transparent); color: inherit; border-radius: 2px; padding: 0 1px; }
+.command-results button small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.command-hint .command-status { margin-left: auto; color: var(--muted); }
+.search-empty { padding: 28px 16px; }
+
+/* Desktop (≥ 1025 px): compact chrome, the board as the focus. Mobile keeps its own layout. */
+@media (min-width: 1025px) {
+  /* Top bar: location left, global search centred, status + notifications + profile right. */
+  .topbar { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 520px) minmax(0, 1fr); gap: 16px; height: 52px; padding: 0 16px 0 20px; }
+  .workspace { padding-top: 52px; }
+  .top-context { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .global-search-button { grid-column: 2; justify-self: stretch; width: auto; margin: 0; height: 34px; font-size: var(--fs-sm); transition: border-color var(--dur-fast) ease, background-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease; }
+  .global-search-button:hover { border-color: var(--line-strong); background: var(--surface); }
+  .global-search-button:focus-visible { box-shadow: 0 0 0 3px var(--ring); }
+  .global-search-button kbd { margin-left: auto; }
+  .top-actions { grid-column: 3; justify-self: end; }
+  .sidebar .nav-item[data-action="command-palette"] { display: none; } /* one global search: the top bar */
+
+  /* Board header: name + description on one line, actions on the right. */
+  .board-head { padding: 10px 20px 0; }
+  .title-row { align-items: center; gap: 12px; }
+  .title-row > div:first-child { display: flex; align-items: baseline; gap: 10px; min-width: 0; flex: 1; }
+  .board-title-input { font-size: 20px; width: auto; min-width: 120px; max-width: 46vw; field-sizing: content; padding: 2px 4px; margin-left: -4px; }
+  .board-description { margin: 0; padding: 2px 6px; font-size: var(--fs-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 36vw; }
+  .board-description.is-empty { display: none; }
+  .board-actions { padding-top: 0; gap: 4px; flex-shrink: 0; }
+  .board-actions .header-action { min-height: 30px; height: 30px; padding: 0 10px; font-size: var(--fs-sm); border-color: var(--line); }
+  .board-actions .header-action .icon { width: 15px; height: 15px; }
+  .board-actions [data-action="open-form"] { display: none; } /* New record is the toolbar's first button */
+
+  /* Views bar */
+  .view-tabs { margin-top: 6px; gap: 2px; }
+
+  /* Toolbar: New record first; quiet buttons until hovered. */
+  .board-tools { padding: 8px 20px 8px; gap: 6px; align-items: center; justify-content: flex-start; flex-wrap: wrap; }
+  .board-tools .tool-left, .board-tools .tool-right { display: contents; } /* one row; New record first, More last */
+  .board-tools .compact-primary { order: -1; }
+  .board-tools [data-action="view-overflow"] { order: 99; margin-left: auto; }
+  .board-tools .compact-primary { min-height: 32px; height: 32px; padding: 0 12px; font-size: var(--fs-sm); border-radius: 7px; }
+  .board-tools .search-field { height: 32px; width: 220px; border-radius: 7px; }
+  .board-tools .select-control { height: 32px; border-radius: 7px; border-color: var(--line); font-size: var(--fs-sm); }
+  .board-tools .tool-button { min-height: 32px; height: 32px; padding: 0 10px; border-color: transparent; background: transparent; border-radius: 7px; font-size: var(--fs-sm); }
+  .board-tools .tool-button:hover { background: var(--hover); border-color: transparent; }
+  .board-tools .tool-button.active { background: var(--accent-soft); color: var(--text); }
+  .board-tools .tool-button .icon { width: 15px; height: 15px; }
+
+  /* Records: close to the toolbar, full width, the table scrolls inside the board (sticky header). */
+  .data-region { padding: 0 20px 14px; }
+  .group-title { padding: 2px 0 6px; font-size: var(--fs-sm); }
+  .table-wrap { max-height: calc(100vh - var(--table-top, 240px) - 14px); }
+  /* Columns keep exactly the widths set for them (by type, or by resizing); long headers and values truncate. Spare
+     width goes to the trailing "add column" cell; wider boards scroll sideways inside the board. */
+  .editable-table { table-layout: fixed; width: 100%; }
+  .editable-table th.check-col { width: 72px; min-width: 72px; }
+  .editable-table th.add-column-col { width: auto; min-width: 56px; }
+  .editable-table td { overflow: hidden; }
+  .column-info-button { display: none; }
+  th:hover .column-info-button, th:focus-within .column-info-button { display: inline-grid; }
+  .filter-chips { padding: 0 20px 6px; }
+  .bulk-bar { margin: 0 20px 8px; }
+}
+
+/* Display columns popover (toolbar → Columns): searchable, one checkbox per column, count and Save to this view. */
+.column-picker { width: 300px; max-height: min(520px, calc(100vh - 24px)); display: flex; flex-direction: column; padding: 6px; }
+.column-picker-search { display: flex; align-items: center; gap: 8px; margin: 4px 6px 6px; padding: 0 10px; height: 34px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.column-picker-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
+.column-picker-search input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text); font: inherit; font-size: var(--fs-sm); outline: none; }
+.column-picker-search .icon { width: 15px; height: 15px; color: var(--faint); }
+.column-pick-list { overflow-y: auto; min-height: 0; }
+.column-pick { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 6px; font-size: var(--fs-sm); cursor: pointer; transition: background-color var(--dur-instant) ease; }
+.column-pick:hover { background: var(--hover); }
+.column-pick input { width: 16px; height: 16px; accent-color: var(--accent-strong); flex: none; cursor: pointer; }
+.column-pick input:disabled { cursor: not-allowed; }
+.column-pick-icon { display: inline-grid; color: var(--faint); }
+.column-pick-icon .icon { width: 15px; height: 15px; }
+.column-pick-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.column-pick-label mark { background: color-mix(in srgb, var(--accent) 28%, transparent); color: inherit; border-radius: 2px; }
+.column-pick small { color: var(--faint); font-size: var(--fs-xs); }
+.column-pick.is-primary { cursor: default; }
+.column-pick-all { border-bottom: 1px solid var(--line); border-radius: 6px 6px 0 0; margin-bottom: 4px; font-weight: 600; }
+.column-picker-footer { border-top: 1px solid var(--line); margin-top: 4px; padding: 8px 8px 4px; display: grid; gap: 6px; }
+.column-picker-count { font-size: var(--fs-xs); color: var(--muted); }
+.column-picker-note { margin: 0; font-size: var(--fs-xs); color: var(--faint); }
+.column-picker-save { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: var(--fs-xs); color: var(--text); animation: jarc-fade-in var(--dur-base) var(--ease-standard); }
+.tool-count { margin-left: 4px; padding: 1px 6px; border-radius: var(--radius-pill); background: var(--accent-soft); color: var(--text); font-size: 10.5px; font-weight: 650; }
+.views-menu-primary { align-items: flex-start !important; }
+.views-menu-primary > span { display: grid; gap: 1px; text-align: left; }
+.views-menu-primary strong { font-weight: 600; }
+.views-menu-primary small { color: var(--faint); font-size: var(--fs-xs); font-weight: 400; }
+.search-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 4px 10px 8px; color: var(--muted); font-size: var(--fs-sm); }
+.search-status .loading-spinner { width: 14px; height: 14px; }
+.search-status.is-error { color: var(--text); }
