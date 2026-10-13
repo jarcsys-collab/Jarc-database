@@ -1604,3 +1604,9 @@ tr:hover .comment-indicator, .comment-indicator:focus-visible, .comment-indicato
 .see-more { margin-top: 4px; font-size: 13px; }
 .composer-at { width: 30px; height: 30px; min-height: 30px; font-weight: 700; color: var(--muted); }
 .composer-at:hover { color: var(--text); }
+
+/* Beta collaboration note (Settings) and the No group move action */
+.beta-indicator { display: flex; gap: 10px; align-items: flex-start; margin: 0 0 16px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--accent-soft, var(--surface-2)); font-size: 13px; color: var(--text); }
+.beta-indicator .icon { width: 16px; height: 16px; flex: none; margin-top: 2px; }
+.loose-move { margin-left: 6px; min-height: 26px; height: 26px; padding: 0 10px; font-size: 12px; display: inline-flex; align-items: center; gap: 6px; }
+.loose-move .icon { width: 14px; height: 14px; }

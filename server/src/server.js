@@ -31,7 +31,7 @@ async function main() {
   // Entra mode: the sign-in ID token is checked once against this tenant's published signing keys, then a server
   // session cookie is used. No client secret is involved.
   const auth = config.authMode === "entra" ? { mode: "entra", entra: config.entra, verify: createEntraVerifier(config.entra) } : null;
-  const app = createApp({ repository, environment: config.nodeEnv, enableDevStateApi: config.enableDevStateApi, dataLayer, devActor, auth, enableDevResourceApi: config.enableDevResourceApi, accessPolicy: config.accessPolicy });
+  const app = createApp({ repository, environment: config.nodeEnv, enableDevStateApi: config.enableDevStateApi, dataLayer, devActor, auth, enableDevResourceApi: config.enableDevResourceApi, accessPolicy: config.accessPolicy, betaOpenEditing: config.betaOpenEditing });
   const server = app.listen(config.port, config.host, () => {
     const { port } = server.address();
     console.log(`JARC Database server (${config.nodeEnv}) on http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${port}/`);
@@ -40,6 +40,7 @@ async function main() {
     if (config.enableDevResourceApi) console.log("Resource API enabled for DEVELOPMENT / PRE-AUTH use: no authentication; every change is attributed to the local development actor.");
     if (auth) console.log(`Microsoft Entra ID sign-in enabled: sessions last up to ${config.entra.sessionMaxHours} h (${config.entra.sessionIdleMinutes} min idle).`);
     if (config.accessPolicyIgnored) console.warn("ACCESS_POLICY has an unrecognised value; using role_based (workspace memberships and the JARC.Admin role).");
+    if (config.betaOpenEditing) console.warn("JARC_BETA_OPEN_EDITING=true: BETA collaboration — every signed-in employee can create, edit and delete content in every workspace. Administration, integrations, membership changes, comment moderation and read-only synced boards stay restricted.");
     if (config.accessPolicy === "development_shared") console.warn("ACCESS_POLICY=development_shared: every signed-in employee can create, edit and delete every workspace, board and record. Development collaboration only — set ACCESS_POLICY=role_based before production rollout.");
   });
 

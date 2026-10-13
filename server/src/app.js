@@ -44,8 +44,9 @@ function resourceModeIndex(siteDir) {
 // as in Stage 9. Who may use the resource API:
 //   auth = { mode: "entra", entra, verify }   Microsoft Entra ID sign-in → server session cookie (required in production)
 //   enableDevResourceApi + devActor            the fixed development user (development and test only)
-// accessPolicy: "role_based" (default) or "development_shared" (see auth/access.js).
-function createApp({ repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", live = {}, siteDir = DEFAULT_SITE_DIR, logger = console } = {}) {
+// accessPolicy: "role_based" (default) or "development_shared" (see auth/access.js). betaOpenEditing: temporary
+// beta collaboration (JARC_BETA_OPEN_EDITING), see auth/access.js.
+function createApp({ repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, live = {}, siteDir = DEFAULT_SITE_DIR, logger = console } = {}) {
   if (environment === "production" && (enableDevStateApi || enableDevResourceApi)) {
     throw new Error("Development (pre-auth) APIs can't be enabled in production.");
   }
@@ -66,7 +67,7 @@ function createApp({ repository, environment = "development", enableDevStateApi 
   if (enableDevResourceApi || auth) {
     if (!dataLayer) throw new Error("createApp needs a data layer for the resource API.");
     if (enableDevResourceApi && !devActor) throw new Error("createApp needs the development actor for the development resource API.");
-    const access = new Access(dataLayer.repos, { policy: accessPolicy });
+    const access = new Access(dataLayer.repos, { policy: accessPolicy, betaOpenEditing });
     // monday.com OAuth return and webhooks: no JARC session (each has its own protection).
     if (dataLayer.services?.integration) api.use(integrationPublicRoutes({ integration: dataLayer.services.integration }));
     if (auth) api.use(signInRoutes({ entra: auth.entra, verify: auth.verify, repos: dataLayer.repos, access }));

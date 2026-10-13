@@ -13,6 +13,13 @@
 //                       WORKSPACE_ADMIN in every workspace and can create and delete workspaces. Unchanged: imports stay
 //                       SYSTEM_ADMIN only, and membership changes still need a real WORKSPACE_ADMIN membership (or
 //                       SYSTEM_ADMIN), so nothing granted here survives a switch back to role_based.
+//
+// JARC_BETA_OPEN_EDITING=true (TEMPORARY beta testing; off unless exactly "true"): with either policy, every signed-in
+// employee of the configured tenant may create, edit, organise and delete content in every workspace — the same open
+// access as development_shared, granted at check time and never stored. Unchanged even then: JARC administrator
+// actions (imports, integrations), membership changes and comment moderation (both need a real membership or the
+// JARC.Admin role), read-only synchronized boards, version checks, CSRF, validation and rate limits. Turning it off
+// restores the configured policy immediately.
 const { ApiError } = require("../middleware/errors");
 const { notFound } = require("../services/shared");
 
@@ -21,11 +28,13 @@ const ACCESS_POLICIES = Object.freeze(["role_based", "development_shared"]);
 const forbidden = (message = "You don't have permission to do this in this workspace.") => new ApiError(403, "FORBIDDEN", message);
 
 class Access {
-  constructor(repos, { policy = "role_based" } = {}) {
+  constructor(repos, { policy = "role_based", betaOpenEditing = false } = {}) {
     if (!ACCESS_POLICIES.includes(policy)) throw new Error(`Unknown access policy: ${policy}`);
     this.repos = repos;
     this.policy = policy;
-    this.shared = policy === "development_shared";
+    this.betaOpenEditing = betaOpenEditing === true;
+    // Open access: development_shared, or beta open editing.
+    this.shared = policy === "development_shared" || this.betaOpenEditing;
   }
 
   // A role the caller holds in every workspace without a membership (null: memberships decide).

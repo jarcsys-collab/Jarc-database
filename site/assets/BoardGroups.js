@@ -20,18 +20,19 @@ Object.assign(AppView.prototype, {
     const table = bodies ? this.table(shown, model, "", bodies) : `<div class="quiet-empty">${icon("records")}<span><strong>No records match</strong></span></div>`;
     return `<section class="data-region board-groups">${table}${footer}</section>`;
   },
-  groupHeaderRow(model, { name, label, color, count, collapsed, loose = false, editable = true, note = "", toggle = true }) {
+  groupHeaderRow(model, { name, label, color, count, collapsed, loose = false, editable = true, note = "", toggle = true, ids = [] }) {
     const span = model.visibleColumns.length + 3;
     return `<tr class="group-header-row"><th colspan="${span}" scope="rowgroup"><div class="group-header">
       ${toggle ? `<button type="button" class="group-toggle" data-action="group-toggle" data-group="${this.attr(name)}" aria-expanded="${!collapsed}" aria-label="${collapsed ? "Expand" : "Collapse"} ${this.attr(label)}" ${loose ? "disabled" : ""}>${icon("chevron")}</button>` : `<span class="group-toggle is-static" aria-hidden="true">${icon("group")}</span>`}
       <h3 class="group-name">${!loose && editable && toggle ? `<button type="button" data-action="group-rename" data-group="${this.attr(name)}" title="Rename group">${this.escape(label)}</button>` : `<span>${this.escape(label)}</span>`}</h3>
       <span class="group-count">${count} record${count === 1 ? "" : "s"}</span>${note ? `<small class="group-note">${note}</small>` : ""}
+      ${loose && editable && count && model.activeGroups.length ? `<button type="button" class="button secondary small loose-move" data-action="group-pick" data-ids="${this.attr(ids.join(","))}" title="Records saved without a group. Choose where they belong — nothing moves until you pick a group.">${icon("group")} Move to a group…</button>` : ""}
       ${!loose && toggle ? `<button type="button" class="icon-button group-menu-button" data-action="group-menu" data-group="${this.attr(name)}" aria-haspopup="menu" aria-label="Actions for group ${this.attr(label)}" title="Group actions">${icon("more")}</button>` : ""}
     </div></th></tr>`;
   },
   groupSection(model, name, rows, { editable, loose = false }) {
     const collapsed = !loose && model.isGroupCollapsed(name), color = loose ? "#94a3b8" : model.groupColor(name), label = loose ? "No group" : name;
-    const head = this.groupHeaderRow(model, { name, label, color, count: rows.length, collapsed, loose, editable });
+    const head = this.groupHeaderRow(model, { name, label, color, count: rows.length, collapsed, loose, editable, ids: loose ? rows.map((r) => r.id) : [], note: loose ? "Saved without a group" : "" });
     const body = collapsed ? "" : rows.map((row) => this.row(row, model)).join("") + (editable && !loose ? this.quickAddRow(model, name, !rows.length) : "");
     return `<tbody class="board-group ${collapsed ? "is-collapsed" : ""} ${loose ? "is-loose" : ""}" style="--group-color:${this.cssColor(color)}" data-group="${this.attr(name)}" aria-label="${this.attr(label)}, ${rows.length} record${rows.length === 1 ? "" : "s"}">${head}${body}</tbody>`;
   },
@@ -126,7 +127,7 @@ class BoardGroupActions {
       case "group-archive": if (model.archiveGroup(name, true)) this.done(`Archived ${name}`); else this.view.toast("A board keeps at least one visible group"); return;
       case "group-restore": if (model.archiveGroup(name, false)) this.done(`Restored ${name}`); return;
       case "group-delete": return this.view.showGroupDelete(model, name);
-      case "group-pick": { const ids = target.dataset.id ? [target.dataset.id] : [...model.selected].map(String); if (ids.length) this.c.togglePanel("group-pick", () => this.view.showGroupPicker(model, ids)); return; }
+      case "group-pick": { const ids = target.dataset.id ? [target.dataset.id] : target.dataset.ids ? target.dataset.ids.split(",").filter(Boolean) : [...model.selected].map(String); if (ids.length) this.c.togglePanel("group-pick", () => this.view.showGroupPicker(model, ids)); return; }
       case "group-move-records": { const ids = String(target.dataset.ids || "").split(",").filter(Boolean); const n = model.moveToGroup(ids, name); if (n) model.selected.clear(); return this.done(n ? `Moved ${n} record${n === 1 ? "" : "s"} to ${name}` : ""); }
       case "toolbar-menu": return this.c.togglePanel(`toolbar-${target.dataset.menu}`, () => this.view.showToolbarMenu(model, target.dataset.menu));
       case "toolbar-choose": {

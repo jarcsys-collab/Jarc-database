@@ -22,7 +22,7 @@ const { sendError } = require("../middleware/errors");
 
 const SIGN_IN_ATTEMPT_MS = 10 * 60 * 1000;
 const SCOPES = Object.freeze(["openid", "profile", "email"]);
-const permissionsOf = (access, actor) => ({ accessPolicy: access.policy, canCreateWorkspaces: access.canManageWorkspaces(actor) });
+const permissionsOf = (access, actor) => ({ accessPolicy: access.policy, betaOpenEditing: Boolean(access.betaOpenEditing), canCreateWorkspaces: access.canManageWorkspaces(actor) });
 
 function authConfigRoutes({ mode, entra }) {
   const router = express.Router();

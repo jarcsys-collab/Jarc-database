@@ -60,6 +60,8 @@ class AppController {
         this.entra = signIn.entra;
         if (signIn.state !== "signed-in") { this.showEntraGate(signIn.state); return; }
         this.auth = new EntraSession(signIn.entra, signIn.me);
+        // From the server (shown in Settings); the server alone decides what is allowed.
+        this.model.permissions = { accessPolicy: signIn.me?.accessPolicy, betaOpenEditing: Boolean(signIn.me?.betaOpenEditing), canCreateWorkspaces: Boolean(signIn.me?.canCreateWorkspaces) };
       }
     }
     this.loadStartedAt = new Date().toISOString(); // live updates replay anything saved while loading

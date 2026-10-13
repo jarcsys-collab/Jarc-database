@@ -59,6 +59,8 @@ function loadConfig(env = process.env) {
     accessPolicyIgnored,
     maxFileStorageBytes: maxFileStorageMb * 1024 * 1024,
     monday: loadMondayConfig(env),
+    // TEMPORARY beta collaboration (see auth/access.js). Only the exact value "true" turns it on.
+    betaOpenEditing: env.JARC_BETA_OPEN_EDITING === "true",
     // GET/PUT /api/v1/state is a transitional development endpoint with no authentication. Never in production.
     enableDevStateApi: preAuth,
     // AUTH_MODE=dev: the resource API attributes every change to the fixed development user (DEVELOPMENT / PRE-AUTH).
