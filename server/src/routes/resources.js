@@ -33,6 +33,8 @@ function resourceRoutes({ services, access }) {
   // Files of deleted records, boards, workspaces and columns are removed after the delete (never fails the request;
   // the file sweep catches anything missed).
   const purgeFiles = (filter) => services.files?.purge(filter);
+  // A deleted record, board or workspace takes its discussion with it (column changes never touch comments).
+  const purgeComments = (filter) => services.comments?.repos.comments.purge(filter);
   const peopleRule = (req) => ({ everyone: access.shared || req.actor.kind === "development" });
 
   // ---- Workspaces
@@ -67,7 +69,7 @@ function resourceRoutes({ services, access }) {
     // be out of date after a board move.
     const boardIds = (await services.boards.listByWorkspace(workspace._id)).map((b) => b._id);
     const removed = await services.workspaces.delete(workspace._id, deleteQuery(req), req.actor);
-    if (boardIds.length) await purgeFiles({ boardId: { $in: boardIds } });
+    if (boardIds.length) { await purgeFiles({ boardId: { $in: boardIds } }); await purgeComments({ boardId: { $in: boardIds } }); }
     send(res, 200, { deleted: true, removed });
   });
 
@@ -99,6 +101,7 @@ function resourceRoutes({ services, access }) {
     const { board } = await access.board(req.actor, boardId(req), "WORKSPACE_ADMIN");
     const removed = await services.boards.delete(board._id, deleteQuery(req), req.actor);
     await purgeFiles({ boardId: board._id });
+    await purgeComments({ boardId: board._id });
     if (board.source) await services.integration?.forgetBoard(board._id);
     send(res, 200, { deleted: true, removed });
   });
@@ -134,7 +137,7 @@ function resourceRoutes({ services, access }) {
     const result = await services.records.deleteMany(board._id, req.body, req.actor);
     const ids = validate.recordBatchDelete(req.body).map((i) => i.id);
     const gone = (await Promise.all(ids.map(async (id) => (await services.records.exists(id)) ? null : id))).filter(Boolean);
-    if (gone.length) await purgeFiles({ boardId: board._id, recordId: { $in: gone } });
+    if (gone.length) { await purgeFiles({ boardId: board._id, recordId: { $in: gone } }); await purgeComments({ boardId: board._id, recordId: { $in: gone } }); }
     send(res, 200, result);
   });
 
@@ -188,6 +191,7 @@ function resourceRoutes({ services, access }) {
     await access.workspace(req.actor, target, "WORKSPACE_ADMIN");
     const result = await services.schema.moveBoard(board._id, req.body, req.actor);
     await services.files?.moveBoard(board._id, target);
+    await services.comments?.repos.comments.moveBoard(board._id, target);
     send(res, 200, { board: boardToApi(result.board), recordsMoved: result.records });
   });
   router.get("/boards/:boardId/activity", async (req, res) => {
@@ -211,6 +215,7 @@ function resourceRoutes({ services, access }) {
     writable(await services.records.board(record.boardId));
     await services.records.delete(record._id, deleteQuery(req), req.actor);
     await purgeFiles({ recordId: record._id });
+    await purgeComments({ recordId: record._id });
     send(res, 200, { deleted: true });
   });
 

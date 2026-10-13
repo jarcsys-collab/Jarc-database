@@ -29,7 +29,7 @@ async function model({ empty = false, screen = "home" } = {}) {
 function markup(m) {
   const document = { documentElement: { dataset: {}, style: { setProperty() {} } }, querySelector: () => null };
   const context = vm.createContext({ window: {}, document, console, Intl, Date, URL, encodeURIComponent });
-  vm.runInContext(fs.readFileSync(path.join(ASSETS, "AppView.js"), "utf8"), context);
+  for (const file of ["AppView.js", "BoardGroups.js", "CommentsPanel.js"]) vm.runInContext(fs.readFileSync(path.join(ASSETS, file), "utf8"), context); // as the page loads them
   const root = { innerHTML: "" };
   new context.window.AppView(root).render(m);
   return root.innerHTML;

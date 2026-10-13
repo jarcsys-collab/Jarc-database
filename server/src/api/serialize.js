@@ -16,7 +16,7 @@ function boardToApi(doc) {
     id: hex(doc._id), workspaceId: hex(doc.workspaceId), name: doc.name, description: doc.description, icon: doc.icon,
     archived: doc.archived, position: doc.position, manualOrder: doc.manualOrder,
     columns: doc.columns.map((c) => ({ ...c, options: [...c.options] })),
-    groups: doc.groups.map(({ id, name, color, position }) => ({ id, name, color, position })),
+    groups: doc.groups.map(({ id, name, color, archived, position }) => ({ id, name, color, archived: Boolean(archived), position })),
     savedViews: doc.savedViews.map((v) => ({ id: v.id, ...(v.legacyId === undefined ? {} : { legacyId: v.legacyId }), name: v.name, state: v.state, createdBy: hex(v.createdBy), createdAt: iso(v.createdAt) })),
     ...(doc.nextItemNumber === undefined ? {} : { nextItemNumber: doc.nextItemNumber }),
     ...(doc.recordCount === undefined ? {} : { recordCount: doc.recordCount }),

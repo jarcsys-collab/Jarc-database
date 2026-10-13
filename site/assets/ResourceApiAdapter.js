@@ -89,7 +89,7 @@ class ResourceApiAdapter {
   static FULL_LOAD_LIMIT = 2000;   // a board up to this size is loaded completely; larger boards load in steps
   static BATCH_LIMIT = 5000;       // records per batch request (the server's limit)
   static USER_KEY = "jarc-resource-user";
-  static USER_FIELDS = Object.freeze(["currentWorkspaceId", "currentBoardId", "currentView", "screen", "settings", "profile", "notifications", "recentBoards", "recentRecords", "recentCommands", "feedSeenAt"]);
+  static USER_FIELDS = Object.freeze(["currentWorkspaceId", "currentBoardId", "currentView", "screen", "settings", "profile", "notifications", "recentBoards", "recentRecords", "recentCommands", "feedSeenAt", "collapsedGroups"]);
   static COLUMN_FIELDS = Object.freeze(["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection", "colors", "multiple", "description"]);
   static OPTION_TYPES = Object.freeze(["status", "dropdown", "priority"]);
   static FALLBACK_OPTIONS = Object.freeze({ status: ["New", "In Progress", "Waiting", "Completed", "Cancelled", "Review", "Defective", "Clear"], priority: ["Low", "Medium", "High", "Critical"] });
@@ -161,12 +161,14 @@ class ResourceApiAdapter {
   modelRow(record, board) {
     const row = { id: record.id, ...resourceClone(record.values) };
     const groupKey = ResourceApiAdapter.groupKey(board.columns);
-    if (groupKey) row[groupKey] = board.groups.find((g) => g.id === record.groupId)?.name ?? "";
+    const groupName = board.groups.find((g) => g.id === record.groupId)?.name ?? "";
+    if (groupKey) row[groupKey] = groupName;
+    row["@group"] = groupName; // the record's group even without a group column (BoardModel.groupField)
     return { ...row, archived: record.archived, pinned: record.pinned, createdAt: record.createdAt, updatedAt: record.updatedAt, activity: resourceClone(board.load.recordActivity[record.id] || []) };
   }
   modelBoardFields(b) {
     // nextItemNumber is not shared: the model derives it from the board's "New item N" names when it loads.
-    return { source: b.source ? resourceClone(b.source) : null, name: b.name, description: b.description, icon: b.icon, archived: b.archived, manualOrder: b.manualOrder, columns: resourceClone(b.columns), groups: b.groups.map((g) => g.name), savedViews: b.savedViews.map((v) => ({ ...resourceClone(v.state), id: v.id, name: v.name })), createdAt: b.createdAt, updatedAt: b.updatedAt, recordCount: b.recordCount };
+    return { source: b.source ? resourceClone(b.source) : null, name: b.name, description: b.description, icon: b.icon, archived: b.archived, manualOrder: b.manualOrder, columns: resourceClone(b.columns), groups: b.groups.map((g) => g.name), groupMeta: Object.fromEntries(b.groups.map((g) => [g.name, { color: g.color || "", archived: Boolean(g.archived) }])), savedViews: b.savedViews.map((v) => ({ ...resourceClone(v.state), id: v.id, name: v.name })), createdAt: b.createdAt, updatedAt: b.updatedAt, recordCount: b.recordCount };
   }
   modelBoard(b, pref = {}) {
     return { id: b.id, ...this.modelBoardFields(b), records: this.boardRecords(b.id).map((r) => this.modelRow(r, b)), activity: resourceClone(b.load.activity), favorite: Boolean(pref.favorite), ...(pref.lastView ? { lastView: pref.lastView } : {}), openCount: pref.openCount || 0 };
@@ -248,6 +250,13 @@ class ResourceApiAdapter {
     catch (error) { if (error instanceof StorageError && error.code === StorageError.CODES.NOT_FOUND) return []; throw error; }
   }
   attachmentUrl(id, { download = false } = {}) { return `${this.http.baseUrl}/attachments/${encodeURIComponent(id)}/content${download ? "?download=1" : ""}`; }
+  // ---- Record updates (comments). IDs are the server's; the model's record IDs are resolved first.
+  listComments(recordId) { return this.request("GET", `/records/${encodeURIComponent(this.resolve(recordId))}/comments`).then((r) => r.items); }
+  mentionable(recordId) { return this.background(`/records/${encodeURIComponent(this.resolve(recordId))}/mentionable`).then((r) => r.items); }
+  postComment(recordId, body) { return this.request("POST", `/records/${encodeURIComponent(this.resolve(recordId))}/comments`, body).then((r) => r.comment); }
+  editComment(id, body) { return this.request("PATCH", `/comments/${encodeURIComponent(id)}`, body).then((r) => r.comment); }
+  deleteComment(id) { return this.request("DELETE", `/comments/${encodeURIComponent(id)}`); }
+  commentCounts(boardId) { return this.background(`/boards/${encodeURIComponent(this.resolve(boardId))}/comment-counts`).then((r) => r.counts || {}); }
   async deleteAttachment(id) { await this.request("DELETE", `/attachments/${encodeURIComponent(id)}`); }
   isSavedRecord(recordId) { return this.records.has(String(this.resolve(recordId))); }
   isSavedBoard(boardId) { return this.boards.has(String(this.resolve(boardId))); }
@@ -295,6 +304,7 @@ class ResourceApiAdapter {
       return {
         id: e.id, at: e.createdAt, action: e.action, actorId: e.actorUserId ? `user:${e.actorUserId}` : null, actorName: e.actorName || null,
         text: ResourceApiAdapter.activityText(e, board), workspaceId: e.workspaceId, workspaceName: workspace?.name || "", boardId: e.boardId, boardName: board?.name || "",
+        mentions: (e.changes || []).find((c) => c.field === "mentions")?.to || [], replyTo: (e.changes || []).find((c) => c.field === "replyTo")?.to || null,
         recordId: e.recordId, recordName: e.recordId ? String(this.records.get(e.recordId)?.values?.serial ?? "") : "",
         assigned: (e.changes || []).filter((c) => { const col = board?.columns.find((k) => `values.${k.key}` === c.field); return col?.type === "owner" && Array.isArray(c.to); }).map((c) => ({ to: c.to, from: Array.isArray(c.from) ? c.from : [] }))
       };
@@ -697,21 +707,25 @@ class ResourceApiAdapter {
       if (doomed && !ResourceApiAdapter.groupNames(b.groups).includes(hint.remove)) {
         const moveTo = s.groups.find((g) => g.name === hint.moveTo && g.id !== doomed.id);
         await this.schemaCall("DELETE", id, `/groups/${doomed.id}?moveTo=${moveTo ? moveTo.id : "none"}`);
-        for (const r of this.boardRecords(id)) if (r.groupId === doomed.id) r.groupId = moveTo ? moveTo.id : null;
+        // The server moved the group's records (new versions): refresh them so a following change or deletion of those
+        // records (e.g. deleting a group together with its records) sends current versions.
+        await this.refreshBoardRecords(id);
         s = this.boards.get(id);
       }
     }
     const names = await this.ensureGroups(b, reconcile, { dryRun: true });
+    // Colour and archived state come from the model's groupMeta (by name); unknown names keep the server's values.
+    const meta = (name) => { const m = b.groupMeta?.[name]; if (!m) return {}; return { ...(typeof m.color === "string" ? { color: m.color } : {}), ...(m.archived !== undefined ? { archived: Boolean(m.archived) } : {}) }; };
     const desired = names.map((name) => {
       const same = s.groups.find((g) => g.name === name);
-      if (same) return { ...same };
-      if (hint?.to === name && hint.from && !names.includes(hint.from)) { const old = s.groups.find((g) => g.name === hint.from); if (old) return { ...old, name }; }
-      return { name };
+      if (same) return { ...same, ...meta(name) };
+      if (hint?.to === name && hint.from && !names.includes(hint.from)) { const old = s.groups.find((g) => g.name === hint.from); if (old) return { ...old, name, ...meta(name) }; }
+      return { name, ...meta(name) };
     });
     const removed = s.groups.filter((g) => !desired.some((d) => d.id === g.id));
     const phase1 = [...desired, ...removed]; // removed groups stay until their records have moved
-    const groupsPayload = (list) => list.map((g) => (g.id ? { id: g.id, name: g.name, color: g.color ?? "" } : { name: g.name }));
-    const comparable = (list) => list.map((g) => ({ id: g.id ?? null, name: g.name, color: g.color ?? "" }));
+    const groupsPayload = (list) => list.map((g) => ({ ...(g.id ? { id: g.id } : {}), name: g.name, color: g.color ?? "", archived: Boolean(g.archived) }));
+    const comparable = (list) => list.map((g) => ({ id: g.id ?? null, name: g.name, color: g.color ?? "", archived: Boolean(g.archived) }));
 
     // 6. Board fields, column settings, groups and saved views in one versioned PATCH.
     const set = {};
@@ -746,11 +760,11 @@ class ResourceApiAdapter {
     const s = this.boards.get(b.id);
     const names = ResourceApiAdapter.groupNames(b.groups);
     const groupKey = s ? ResourceApiAdapter.groupKey(s.columns) : ResourceApiAdapter.groupKey(b.columns || []);
-    if (groupKey) for (const row of b.records || []) { const name = String(row[groupKey] ?? "").trim(); if (name && !names.includes(name)) names.push(name); }
+    for (const row of b.records || []) { const name = String((groupKey ? row[groupKey] : row["@group"]) ?? "").trim(); if (name && !names.includes(name)) names.push(name); }
     if (dryRun || !s) return names;
     const missing = names.filter((n) => !s.groups.some((g) => g.name === n));
     if (missing.length) {
-      await this.patchBoard(b.id, { groups: [...s.groups.map((g) => ({ id: g.id, name: g.name, color: g.color ?? "" })), ...missing.map((name) => ({ name }))] });
+      await this.patchBoard(b.id, { groups: [...s.groups.map((g) => ({ id: g.id, name: g.name, color: g.color ?? "", archived: Boolean(g.archived) })), ...missing.map((name) => ({ name }))] });
       for (const name of missing) if (!ResourceApiAdapter.groupNames(b.groups).includes(name)) reconcile.addGroup(b.id, name);
     }
     return names;
@@ -781,8 +795,8 @@ class ResourceApiAdapter {
     const full = { values, archived: Boolean(row.archived), pinned: Boolean(row.pinned) };
     const diff = {};
     if (Object.keys(changed).length) diff.values = changed;
-    if (groupKey) {
-      const name = String(row[groupKey] ?? "").trim();
+    if (groupKey || row["@group"] !== undefined) {
+      const name = String((groupKey ? row[groupKey] : row["@group"]) ?? "").trim();
       full.groupId = name ? groupIds.get(name) ?? null : null;
       if (current && full.groupId !== (current.groupId ?? null)) diff.groupId = full.groupId;
     }

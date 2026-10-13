@@ -20,6 +20,7 @@ const { ObjectId } = require("mongodb");
 const { ApiError } = require("../middleware/errors");
 const { assertSafeJson, isObject, isPrimitive, isSafeKey } = require("../validation/common");
 const { validateState, SCHEMA_VERSION } = require("../validation/state");
+const GROUP_FIELD = "@group"; // a record's group when its board has no group column (browser state, Phase 8)
 const { normalizeColumns, normalizeGroups, viewState, groupColumnOf, hasValue, newViewId, LEGACY_DEFAULT_COLUMNS, LEGACY_DEFAULT_GROUPS, LIMITS } = require("../domain/board-schema");
 
 const IMPORT_LIMITS = Object.freeze({ workspaces: 1000, boardsPerWorkspace: 1000, records: 50000, errors: 50 });
@@ -100,6 +101,8 @@ function validateLegacyInput(input) {
         recordIds.add(r.id);
         for (const [key, value] of Object.entries(r)) {
           if (key === "activity") { if (!flatList(value)) add(`${rw} has invalid history.`); continue; }
+          // The browser's group of a record on a board without a group column (see BoardModel.groupField).
+          if (key === GROUP_FIELD) { if (value !== null && typeof value !== "string") add(`${rw} has an invalid group.`); continue; }
           if (!isSafeKey(key)) { add(`${rw} has a field name that can't be stored.`); continue; }
           // People and multi-select Dropdown cells hold a flat list of names; anything deeper is refused.
           if (Array.isArray(value)) { if (value.length > 100 || !value.every((v) => typeof v === "string" && v.length <= LIMITS.optionLength)) add(`${rw} has an unsupported list in "${key.slice(0, 40)}".`); }
@@ -154,7 +157,7 @@ function buildImportPlan(input, { actorId, now = new Date(), importId = crypto.r
       counters.extraGroupColumns += Math.max(0, columns.filter((c) => c.type === "group").length - 1);
       // Every group name used by a record becomes a group; names not in the board's list are added and reported.
       for (const r of b.records) {
-        const name = groupKey && hasValue(r[groupKey]) ? String(r[groupKey]).trim() : "";
+        const name = groupKey && hasValue(r[groupKey]) ? String(r[groupKey]).trim() : !groupKey && hasValue(r[GROUP_FIELD]) ? String(r[GROUP_FIELD]).trim() : "";
         if (name && !groupNames.includes(name)) { groupNames.push(name); counters.unknownGroupsCreated.push(`${label(b.name)}: ${label(name)}`); }
       }
       const groups = normalizeGroups(groupNames.map((name) => ({ name })));
@@ -183,11 +186,11 @@ function buildImportPlan(input, { actorId, now = new Date(), importId = crypto.r
         const recordId = new ObjectId();
         const values = {};
         for (const [key, value] of Object.entries(r)) {
-          if (RECORD_SYSTEM_FIELDS.has(key) || key === groupKey) continue;
+          if (RECORD_SYSTEM_FIELDS.has(key) || key === groupKey || key === GROUP_FIELD) continue;
           if (!keys.has(key)) counters.valuesWithoutColumn += 1; // kept as-is: never drop data silently
           values[key] = value;
         }
-        const groupName = groupKey && hasValue(r[groupKey]) ? String(r[groupKey]).trim() : "";
+        const groupName = groupKey && hasValue(r[groupKey]) ? String(r[groupKey]).trim() : !groupKey && hasValue(r[GROUP_FIELD]) ? String(r[GROUP_FIELD]).trim() : "";
         const createdAt = dateOr(r.createdAt, now);
         plan.records.push({
           _id: recordId, legacyId: r.id, workspaceId, boardId, values, groupId: groupName ? groupIdByName.get(groupName) : null,

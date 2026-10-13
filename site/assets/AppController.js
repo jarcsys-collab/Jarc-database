@@ -2,6 +2,9 @@ class AppController {
   constructor(root) {
     this.root = root; this.auth = new AuthModel(); this.model = new BoardModel(); this.view = new AppView(root);this.view.onUndo=()=>{if(this.busy)return;const label=this.model.undo();this.update();this.view.toast(label);};
     this.integrations = typeof IntegrationsPanel === "function" ? new IntegrationsPanel(this) : null; this.view.integrations = this.integrations;
+    this.groupActions = typeof BoardGroupActions === "function" ? new BoardGroupActions(this) : null;
+    this.comments = typeof CommentsPanel === "function" ? new CommentsPanel(this) : null;
+    this.view.onRecordDrawer = (row) => this.comments?.open(row.id);
     root.addEventListener("click", (event) => this.guard(()=>this.onClick(event)));
     root.addEventListener("input", (event) => this.onInput(event));
     root.addEventListener("change", (event) => this.guard(()=>this.onChange(event)));
@@ -86,7 +89,9 @@ class AppController {
       baseUrl: adapter.http.baseUrl, since: this.loadStartedAt, request: (method, p) => adapter.http.request(method, p, undefined, { background: true }),
       onChanges: (events) => {
         // File changes never alter records: they refresh only the files of the records concerned.
-        const files = events.filter((e) => /^attachment\./.test(e.action)), rest = events.filter((e) => !/^attachment\./.test(e.action));
+        const comments = events.filter((e) => /^comment\./.test(e.action));
+        if (comments.length) this.comments?.onRemote(comments);
+        const files = events.filter((e) => /^attachment\./.test(e.action)), rest = events.filter((e) => !/^(attachment|comment)\./.test(e.action));
         if (files.length) this.applyRemoteFiles(files);
         if (rest.length) { this.remoteQueue.push(...rest); this.processRemote(); }
         this.scheduleFeed();
@@ -214,13 +219,18 @@ class AppController {
   }
   update() {
     this.pendingRefresh = false;
+    this.view.commentsEnabled = Boolean(this.comments?.available);
+    if (this.view.commentsEnabled && this.model.screen === "board" && this.model.board && this.countsBoardId !== this.model.board.id) { this.countsBoardId = this.model.board.id; this.model.commentCounts = {}; this.comments.loadCounts(this.model.board.id); }
     // The open view was deleted (here or by a colleague): back to Main Table.
     if (this.model.screen === "board" && this.model.board && this.model.activeSavedViewId !== null && this.model.activeSavedViewId !== undefined && !this.model.activeView) this.model.openMainTable();
     if (this.entra && (this.entraGate || !this.auth.authenticated)) { this.navOpen = false; this.applyNav(); this.view.renderEntraGate(this.entraGate || "signed-out", this.model); return; }
     if (!this.auth.authenticated) this.navOpen = false; // sign-in screens have no drawer
     const focus = this.focusedControl(), scroll = this.scrollState();
     this.auth.authenticated ? this.view.render(this.model) : this.view.renderLogin(this.auth,this.model); this.applyNav(); this.saveFeedback();
-    this.refocus(focus); this.restoreScroll(scroll);
+    // A different screen or board starts at the top; re-renders of the same one keep their scroll position.
+    const place = `${this.model.screen}:${this.model.screen === "board" ? this.model.board?.id : ""}`;
+    this.refocus(focus); if (place === this.lastPlace) this.restoreScroll(scroll); else if (this.lastPlace !== undefined) window.scrollTo(0, 0);
+    this.lastPlace = place;
     if (this.ready && this.model.workspace && this.model.workspace.id !== this.peopleKey) this.loadPeople();
     this.ensureAttachments(); this.trackRows(); this.reapplyFlashes();
   }
@@ -311,6 +321,10 @@ class AppController {
     if (action === "entra-sign-out" && this.entra) { this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true, signingOut: true }); this.entra.signOut(); return; }
     if (window.jarcStorage?.connection === "offline" && ["cell-open","set-cell-option","inline-add","open-form","new-item","new-board","add-column","create-workspace","import"].includes(action)) { this.view.toast(StorageError.describe(StorageError.CODES.OFFLINE).message); return; }
     if (action.startsWith("integration-") && this.integrations) { if (target.tagName !== "SELECT") this.integrations.onAction(action, target); return; }
+    if ((action.startsWith("group-") || action.startsWith("toolbar-")) && this.groupActions) { this.lastTrigger = target; this.groupActions.onAction(action, target); return; }
+    if (action.startsWith("comment-") && this.comments && action !== "comment-input") { this.comments.onAction(action, target); return; }
+    if (action === "drawer-tab") { this.view.selectDrawerTab(target.dataset.tab); if (target.dataset.tab === "updates") document.querySelector('#overlay-root textarea[data-role="new"]')?.focus(); return; }
+    if (action === "open-updates") { const row = this.model.rows.find((r) => String(r.id) === String(this.model.idOf(target.dataset.id))); if (row) this.view.showRecordForm(this.model, row, { tab: "updates" }); return; }
     // Boards synchronized from monday.com are read-only (the server refuses changes too; this avoids starting them).
     if (this.model.screen === "board" && this.model.board?.source?.readOnly && AppController.READ_ONLY_BLOCKED.has(action)) { this.view.toast("This board is synced from monday.com and is read-only"); return; }
     if(action==="login-theme-choice"){this.model.updateSetting("theme",target.dataset.theme);this.view.applyDisplay(this.model);this.root.querySelectorAll('[data-action="login-theme-choice"]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.theme===target.dataset.theme)));return;}
@@ -514,6 +528,7 @@ class AppController {
   }
 
   onInput(event) {
+    if (event.target.dataset?.action === "comment-input") { this.comments?.onInput(event.target); return; }
     if (event.target.dataset.action === "cell-option-search") { this.view.filterOptions(event.target.closest(".cell-options-popover"),event.target.value); return; }
     if (event.target.dataset.action === "workspace-search") { const term=event.target.value.toLowerCase(); document.querySelectorAll(".workspace-list > button").forEach((button)=>{button.hidden=!button.textContent.toLowerCase().includes(term);}); return; }
     if (event.target.dataset.action === "column-picker-search") { this.view.showColumnPicker(this.model,event.target.value); return; }
@@ -529,6 +544,7 @@ class AppController {
     const input=document.querySelector('[data-action="search"]'); input?.focus(); input?.setSelectionRange(cursor,cursor);
   }
   onChange(event) {
+    if (event.target.dataset?.action === "comment-input") return;
     if (event.target.dataset?.action === "integration-wizard-workspace") { this.integrations?.onAction("integration-wizard-workspace", event.target); return; }
     // Display columns: show/hide one column, or all of them (Item always stays).
     if (event.target.dataset?.action === "column-toggle" || event.target.dataset?.action === "column-toggle-all") {
@@ -556,6 +572,7 @@ class AppController {
   onSubmit(event) {
     event.preventDefault(); const action=event.target.dataset.action; const data=Object.fromEntries(new FormData(event.target));
     if (action?.startsWith("integration-")) { this.integrations?.onSubmit(action, data, event.target); return; }
+    if ((action === "group-form" || action === "group-delete-form") && this.groupActions) { this.groupActions.onSubmit(action, data, event.target); return; }
     if (action === "workspace-form") { this.runBusy(event.submitter,()=>this.model.createWorkspace(data)?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast("Workspace created");}); return; }
     if(action==="login-form"){
       data.username=String(data.username||"").trim();
@@ -598,6 +615,7 @@ class AppController {
     if (action === "workspace-settings-form") { this.model.updateWorkspace(this.model.currentWorkspaceId,data); this.update();this.view.showSettings(this.model,"workspace"); this.view.toast("Workspace updated"); }
   }
   onKeydown(event) {
+    if (event.target.dataset?.action === "comment-input" && this.comments?.onKeydown(event)) return;
     if(this.busy)return;
     if(event.target.dataset?.action==="row-drag"&&event.altKey&&["ArrowUp","ArrowDown"].includes(event.key)&&this.rowDragBlocked()){event.preventDefault();this.view.toast(this.rowDragBlocked());return;}
     if(event.target.dataset?.action==="row-drag"&&event.altKey&&["ArrowUp","ArrowDown"].includes(event.key)){
@@ -802,6 +820,7 @@ class AppController {
     if(pop&&this.lastTrigger?.isConnected){const r=this.lastTrigger.getBoundingClientRect();panel.style.left=Math.max(8,Math.min(r.left,innerWidth-panel.offsetWidth-12))+"px";panel.style.top=Math.max(8,Math.min(r.bottom+6,innerHeight-panel.offsetHeight-12))+"px";panel.style.right="auto";}
     requestAnimationFrame(()=>{const focus=panel.querySelector('[autofocus]')||panel.querySelector('input:not([type="hidden"]),select,textarea')||panel.querySelector('button');focus?.focus();});
   }
+  refreshCommentIndicators(){document.querySelectorAll('[data-action="open-updates"]').forEach((b)=>{const row=this.model.rows.find((r)=>String(r.id)===b.dataset.id);if(row)b.outerHTML=this.view.commentButton(this.model,row);});}
   guard(action){if(this.busy)return;try{action();}catch(error){this.view.showMessage("Action could not be completed",error.message);}}
 
   // ---- Async persistence (Stage 8)
@@ -1257,7 +1276,7 @@ class AppController {
     if(input.dataset.done)return; input.dataset.done="1";
     const tr=input.closest("tr"), name=input.value.trim(), group=tr?.dataset.group||"";
     if(!name){tr?.remove();return;}
-    const record={serial:name}; if(group&&this.model.groupColumn)record[this.model.groupColumn.key]=group;
+    const record={serial:name}; if(group&&this.model.board.groups.includes(group))record[this.model.groupField]=group;
     const saved=this.model.upsert(record); this.refreshBoard();
     if(again){const trigger=this.root.querySelector(`.quick-add-row [data-action="inline-add"][data-group="${CSS.escape(group)}"]`);if(trigger)this.startInlineAdd(trigger);}
     else if(next){const first=this.cellButton(saved.id,"serial"),following=this.adjacentCell(first,"ArrowRight");(following||first)?.focus();}

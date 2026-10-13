@@ -26,7 +26,9 @@ const COLLECTIONS = Object.freeze({
   integrationOAuthStates: "integrationOAuthStates",
   integrationMappings: "integrationMappings",
   integrationJobs: "integrationJobs",
-  integrationEvents: "integrationEvents"
+  integrationEvents: "integrationEvents",
+  // Record discussions (see repositories/mongo/comment-repository.js).
+  comments: "comments"
 });
 
 const present = { $exists: true };
@@ -86,6 +88,11 @@ const INDEXES = Object.freeze({
   // The indexes the MongoDB driver itself expects on a GridFS bucket (same names, so it never creates duplicates).
   "attachmentFiles.files": [
     { name: "filename_1_uploadDate_1", key: { filename: 1, uploadDate: 1 } }
+  ],
+  comments: [
+    { name: "record_time", key: { recordId: 1, createdAt: 1 } },
+    { name: "board_live", key: { boardId: 1, deletedAt: 1 } },
+    { name: "workspace", key: { workspaceId: 1 } }
   ],
   integrationOAuthStates: [
     { name: "expires", key: { expiresAt: 1 }, expireAfterSeconds: 0 }

@@ -48,6 +48,10 @@ class BoardModel {
     this.status = "All";
     this.sortDirection = "desc"; this.sortKey = ""; this.quickFilter = "all"; this.columnFilter = null;
     this.grouped = false;
+    // View-level Group by (presentation only): "" shows the board's own groups; a column key groups this view by
+    // that column's values without changing any record. personFilter: one person's records ("user:…" or a name).
+    this.groupBy = ""; this.personFilter = "";
+    this.commentCounts = {}; // recordId → number of updates (resource mode; refreshed live)
     this.selected = new Set();
     this.history = [];
     this.activeSavedViewId = null;
@@ -91,6 +95,7 @@ class BoardModel {
     this.settings = { theme: "dark", density: "comfortable", accentColor: "#0f9489", fontSize: "normal", highContrast: false, reduceMotion: false, stickyFirstColumn: true, showInvoiceDate: true, showOwner: true, showPriority: true, showBoardCounts: true, showIcons: true, dateFormat: "DD/MM/YYYY", language: "English", autosave: true, settingsSection: "appearance", ...(saved.settings || {}) };
     this.profile = { name: "medtek", email: "", role: "Workspace admin", initials: "M", avatar: "", color: "#0f9489", presence: "Available", startScreen: "Home", ...(saved.profile || {}) };
     this.notifications = saved.notifications || [];
+    this.collapsedGroups = saved.collapsedGroups && typeof saved.collapsedGroups === "object" ? saved.collapsedGroups : {}; // boardId → [group names]
     this.members = saved.members || [{id:"member-admin",name:this.profile.name,email:this.profile.email||"",role:"Owner",status:"Active"}];
     this.recentBoards = saved.recentBoards || []; this.recentRecords = saved.recentRecords || []; this.recentCommands = saved.recentCommands || [];
     this.feedSeenAt = typeof saved.feedSeenAt === "string" ? saved.feedSeenAt : "";
@@ -119,7 +124,7 @@ class BoardModel {
   toStorageState() {
     return {
       data: { workspaces: this.workspaces, members: this.members },
-      user: { currentWorkspaceId: this.currentWorkspaceId, currentBoardId: this.currentBoardId, currentView: this.currentView, screen: this.screen, settings: this.settings, profile: this.profile, notifications: this.notifications, recentBoards: this.recentBoards, recentRecords: this.recentRecords, recentCommands: this.recentCommands, feedSeenAt: this.feedSeenAt }
+      user: { currentWorkspaceId: this.currentWorkspaceId, currentBoardId: this.currentBoardId, currentView: this.currentView, screen: this.screen, settings: this.settings, profile: this.profile, notifications: this.notifications, recentBoards: this.recentBoards, recentRecords: this.recentRecords, recentCommands: this.recentCommands, feedSeenAt: this.feedSeenAt, collapsedGroups: this.collapsedGroups }
     };
   }
 
@@ -302,6 +307,7 @@ class BoardModel {
       board.records ||= []; board.activity ||= [];
       board.groups ||= ["New", "Working", "Done"];
       board.savedViews ||= [];
+      board.groupMeta = board.groupMeta && typeof board.groupMeta === "object" ? board.groupMeta : {};
       board.favorite ||= false;
       board.description ||= "";
       board.columns ||= this.defaultColumns.map((column) => ({ ...column, visible: board.columnConfig?.[column.key]?.visible !== false, connection: board.columnConfig?.[column.key]?.connection || "", required: column.key === "serial", defaultValue: "", options: [] }));
@@ -333,6 +339,7 @@ class BoardModel {
       .filter((row) => this.showArchived ? row.archived : !row.archived)
       .filter((row) => this.status === "All" || !this.statusColumn || row[this.statusColumn.key] === this.status)
       .filter((row) => this.matchesQuickFilter(row))
+      .filter((row) => !this.personFilter || !this.ownerColumn || this.valueList(row[this.ownerColumn.key]).includes(this.personFilter))
       .filter((row) => this.matchesColumnFilter(row))
       .filter((row) => !query || this.board.columns.some((column) => this.valueText(column, row[column.key]).toLowerCase().includes(query)))
       .sort((a, b) => { if(Boolean(a.pinned)!==Boolean(b.pinned))return a.pinned?-1:1; if(this.manualSort)return this.rows.indexOf(a)-this.rows.indexOf(b); const key=this.sortKey || this.sortColumn?.key; if(!key)return this.rows.indexOf(a)-this.rows.indexOf(b); const column=this.board.columns.find((c)=>c.key===key), x=this.sortText(column,a[key]), y=this.sortText(column,b[key]); return this.sortDirection === "desc" ? y.localeCompare(x,undefined,{numeric:true}) : x.localeCompare(y,undefined,{numeric:true}); });
@@ -397,6 +404,7 @@ class BoardModel {
     const id = record.id ? this.idOf(record.id) : this.nextRecordId();
     const prior=this.rows.find(r=>r.id===id);
     const at=new Date().toISOString();
+    if(!prior&&!(this.groupField in record)&&this.activeGroups.length)record={...record,[this.groupField]:this.activeGroups[0]}; // new records without a group join the first one
     const clean = { ...prior, ...record, id, createdAt:prior?.createdAt || at, updatedAt:at, activity:[...(prior?.activity||[]),{at,text:prior?"Record updated":"Record created",by:this.profile.name}].slice(-50) };
     this.board.columns.forEach((column)=>{ if(clean[column.key] === undefined) clean[column.key]=column.type==="checkbox"?false:this.isMultiColumn(column)?this.valueList(column.defaultValue):column.defaultValue; else if(this.isMultiColumn(column)) clean[column.key]=this.valueList(clean[column.key]); });
     const index = this.rows.findIndex((row) => row.id === id);
@@ -407,17 +415,22 @@ class BoardModel {
   moveRecord(id, updates) { const row = this.rows.find((item) => item.id === this.idOf(id)); if (!row) return; this.snapshot("Record move undone"); Object.assign(row, updates); this.log(`Moved ${row.serial} to ${updates.status || updates.group}`); this.save({op:"updateRecord",boardId:this.board.id,recordId:row.id,fields:Object.keys(updates)}); }
   remove(ids) { this.snapshot("Record deletion undone"); const removeIds = new Set(ids.map((id)=>this.idOf(id))); const names = this.rows.filter((row) => removeIds.has(row.id)).map((row) => row.serial); this.board.records = this.rows.filter((row) => !removeIds.has(row.id)); removeIds.forEach((id) => this.selected.delete(id)); this.log(`Deleted ${names.join(", ")}`); this.save({op:"deleteRecords",boardId:this.board.id,recordIds:[...removeIds]}); }
   duplicateRecord(id) { const source = this.rows.find((row) => row.id === this.idOf(id)); if (!source) return false; this.snapshot("Item duplication undone"); const copy = { ...source, id: Date.now()*1000+Math.floor(Math.random()*1000), serial: `${source.serial} copy`, archived:false }; this.rows.unshift(copy); this.manualSort=true; this.log(`Duplicated ${source.serial}`); this.save({op:"createRecord",boardId:this.board.id,recordId:copy.id}); return copy.id; }
-  quickAdd() { this.snapshot("Quick add undone"); const id = this.nextRecordId(); const row={id,archived:false,pinned:false}; this.board.columns.forEach((column)=>{ if(column.type==="checkbox")row[column.key]=false; else if(column.type==="group")row[column.key]=column.defaultValue||this.board.groups[0]; else if(column.type==="status")row[column.key]=column.defaultValue||column.options[0]||"Review"; else if(column.type==="owner")row[column.key]=this.valueList(column.defaultValue); else if(this.isMultiColumn(column))row[column.key]=this.valueList(column.defaultValue); else if(column.type==="priority")row[column.key]=column.defaultValue||"Medium"; else row[column.key]=column.defaultValue; }); const used=new Set(this.rows.map((item)=>String(item.serial||"").toLowerCase())); let number=this.board.nextItemNumber||1,name=number===1?"New item":`New item ${number}`; while(used.has(name.toLowerCase())){number+=1;name=`New item ${number}`;} this.board.nextItemNumber=number+1; row.serial=name; this.rows.unshift(row); this.showArchived=false; this.manualSort=true; this.log(`Added ${name}`); this.save({op:"createRecord",boardId:this.board.id,recordId:id}); return id; }
+  quickAdd(group=null) { this.snapshot("Quick add undone"); const id = this.nextRecordId(); const row={id,archived:false,pinned:false}; this.board.columns.forEach((column)=>{ if(column.type==="checkbox")row[column.key]=false; else if(column.type==="group")row[column.key]=column.defaultValue||this.board.groups[0]; else if(column.type==="status")row[column.key]=column.defaultValue||column.options[0]||"Review"; else if(column.type==="owner")row[column.key]=this.valueList(column.defaultValue); else if(this.isMultiColumn(column))row[column.key]=this.valueList(column.defaultValue); else if(column.type==="priority")row[column.key]=column.defaultValue||"Medium"; else row[column.key]=column.defaultValue; }); const used=new Set(this.rows.map((item)=>String(item.serial||"").toLowerCase())); let number=this.board.nextItemNumber||1,name=number===1?"New item":`New item ${number}`; while(used.has(name.toLowerCase())){number+=1;name=`New item ${number}`;} this.board.nextItemNumber=number+1; row.serial=name; { const g=group&&this.board.groups.includes(group)?group:this.groupOf(row)||this.activeGroups[0]; if(g)row[this.groupField]=g; } this.rows.unshift(row); this.showArchived=false; this.manualSort=true; this.log(`Added ${name}`); this.save({op:"createRecord",boardId:this.board.id,recordId:id}); return id; }
   togglePin(id) { const row=this.rows.find((item)=>item.id===this.idOf(id)); if(!row)return; this.snapshot("Pin change undone"); row.pinned=!row.pinned; this.log(`${row.pinned?"Pinned":"Unpinned"} ${row.serial}`); this.save({op:"updateRecord",boardId:this.board.id,recordId:row.id,fields:["pinned"]}); }
   archiveItem(id, archived=true) { const row=this.rows.find((item)=>item.id===this.idOf(id)); if(!row)return; this.snapshot(archived?"Archive undone":"Restore undone"); row.archived=archived; this.recordActivity(row,archived?"Record archived":"Record restored"); this.selected.delete(row.id); this.log(`${archived?"Archived":"Restored"} ${row.serial}`); this.save({op:"updateRecord",boardId:this.board.id,recordId:row.id,fields:["archived"]}); }
   reorderRecord(id,targetId,position="before") {
     const visible=this.visibleRows, source=visible.find(r=>r.id===this.idOf(id)), target=visible.find(r=>r.id===this.idOf(targetId));
     if(!source||!target||source===target||!["before","after"].includes(position))return false;
     if(Boolean(source.pinned)!==Boolean(target.pinned))return false;
-    if(this.grouped&&this.groupColumn&&(source[this.groupColumn.key]||"")!==(target[this.groupColumn.key]||""))return false;
+    // Grouped by a column (presentation): rows stay in their own section. Board groups: dropping on a row of another
+    // group moves the record into that group.
+    const viewGroup=this.groupByColumn;
+    if(viewGroup&&this.groupValue(source,viewGroup)!==this.groupValue(target,viewGroup))return false;
+    const regroup=!viewGroup&&this.groupOf(source)!==this.groupOf(target)&&this.board.groups.includes(this.groupOf(target))?this.groupOf(target):null;
     const reordered=visible.filter(r=>r!==source);reordered.splice(reordered.indexOf(target)+(position==="after"?1:0),0,source);
-    if(reordered.every((r,i)=>r===visible[i]))return false;
-    this.snapshot("Row order restored");
+    if(!regroup&&reordered.every((r,i)=>r===visible[i]))return false;
+    this.snapshot(regroup?"Move to group undone":"Row order restored");
+    if(regroup){source[this.groupField]=regroup;this.recordActivity(source,`Moved to group ${regroup}`);}
     // Replace only visible slots. Hidden and archived records retain their positions.
     const ids=new Set(visible.map(r=>r.id));let index=0;
     this.board.records=this.rows.map(r=>ids.has(r.id)?reordered[index++]:r);
@@ -425,9 +438,58 @@ class BoardModel {
     this.save({op:"reorderRecords",boardId:this.board.id});return true;
   }
 
-  addGroup(name) { const clean = name.trim(); if (!clean || this.board.groups.includes(clean)) return false; this.snapshot("Group creation undone"); this.board.groups.push(clean); this.log(`Created group ${clean}`); this.save({op:"updateGroups",boardId:this.board.id}); return true; }
-  renameGroup(oldName, newName) { const clean = newName.trim(); if (!clean || this.board.groups.includes(clean)) return false; this.snapshot("Group rename undone"); this.board.groups = this.board.groups.map((name) => name === oldName ? clean : name); if(this.groupColumn)this.rows.forEach((row) => { if (row[this.groupColumn.key] === oldName) row[this.groupColumn.key] = clean; }); this.log(`Renamed group ${oldName} to ${clean}`); this.save({op:"updateGroups",boardId:this.board.id,affectsRecords:true,group:{from:oldName,to:clean}}); return true; }
-  deleteGroup(name, moveTo) { if (this.board.groups.length <= 1) return false; this.snapshot("Group deletion undone"); if(this.groupColumn)this.rows.forEach((row) => { if (row[this.groupColumn.key] === name) row[this.groupColumn.key] = moveTo; }); this.board.groups = this.board.groups.filter((group) => group !== name); this.log(`Deleted group ${name}`); this.save({op:"updateGroups",boardId:this.board.id,affectsRecords:true,group:{remove:name,moveTo}}); return true; }
+  // ---- Permanent board groups. A record's group is its group column's value when the board has one, otherwise
+  // row["@group"] (filled from the record's groupId; "@" can't appear in a column key or a stored field name check). groupMeta keeps each group's
+  // colour and archived flag by name. Collapsing is a per-person view preference (user state), never board data.
+  static GROUP_COLORS = Object.freeze([{name:"Blue",value:"#3b82f6"},{name:"Green",value:"#16a34a"},{name:"Purple",value:"#8b5cf6"},{name:"Orange",value:"#f97316"},{name:"Pink",value:"#ec4899"},{name:"Red",value:"#ef4444"},{name:"Teal",value:"#0d9488"},{name:"Yellow",value:"#ca8a04"},{name:"Indigo",value:"#6366f1"},{name:"Gray",value:"#64748b"}]);
+  static isGroupColor(c){return /^#[0-9a-f]{6}$/i.test(String(c||""));}
+  get groupField(){return this.groupColumn?.key||"@group";}
+  groupOf(row){return String(row?.[this.groupField]??"").trim();}
+  get activeGroups(){const meta=this.board?.groupMeta||{};return (this.board?.groups||[]).filter((g)=>!meta[g]?.archived);}
+  get archivedGroupNames(){const meta=this.board?.groupMeta||{};return (this.board?.groups||[]).filter((g)=>meta[g]?.archived);}
+  groupColor(name){const own=this.board?.groupMeta?.[name]?.color;if(BoardModel.isGroupColor(own))return own;const i=Math.max(0,(this.board?.groups||[]).indexOf(name));return BoardModel.GROUP_COLORS[i%BoardModel.GROUP_COLORS.length].value;}
+  nextGroupColor(){const used=new Set(this.board.groups.map((g)=>this.groupColor(g)));return (BoardModel.GROUP_COLORS.find((c)=>!used.has(c.value))||BoardModel.GROUP_COLORS[this.board.groups.length%BoardModel.GROUP_COLORS.length]).value;}
+  setGroupMeta(name,patch){this.board.groupMeta||={};this.board.groupMeta[name]={...(this.board.groupMeta[name]||{}),...patch};}
+  uniqueGroupName(base){const stem=String(base||"").trim().slice(0,190)||"New group";let name=stem,i=2;while(this.board.groups.includes(name))name=`${stem} ${i++}`;return name;}
+  groupRows(name,rows=this.rows){return rows.filter((r)=>this.groupOf(r)===name);}
+  isGroupCollapsed(name){return (this.collapsedGroups[this.board?.id]||[]).includes(name);}
+  toggleGroupCollapsed(name,force){const id=this.board.id,set=new Set(this.collapsedGroups[id]||[]);const on=force??!set.has(name);if(on)set.add(name);else set.delete(name);this.collapsedGroups[id]=[...set].filter((g)=>this.board.groups.includes(g));this.save({op:"updateUserState"});return on;}
+  collapseAllGroups(collapsed){this.collapsedGroups[this.board.id]=collapsed?[...this.board.groups]:[];this.save({op:"updateUserState"});}
+  setGroupColor(name,color){if(!this.board.groups.includes(name)||!BoardModel.isGroupColor(color)||this.groupColor(name)===color)return false;this.snapshot("Group colour change undone");this.setGroupMeta(name,{color});this.log(`Changed the colour of group ${name}`);this.save({op:"updateGroups",boardId:this.board.id});return true;}
+  moveGroup(name,delta){const list=this.board.groups,i=list.indexOf(name),j=i+Number(delta);if(i<0||j<0||j>=list.length||i===j)return false;this.snapshot("Group move undone");list.splice(i,1);list.splice(j,0,name);this.log(`Moved group ${name}`);this.save({op:"updateGroups",boardId:this.board.id});return true;}
+  // Archived groups disappear from the table (their records keep their group) and can be restored. The last visible
+  // group can't be archived.
+  archiveGroup(name,archived=true){if(!this.board.groups.includes(name)||Boolean(this.board.groupMeta?.[name]?.archived)===archived)return false;if(archived&&this.activeGroups.length<=1)return false;this.snapshot(archived?"Group archive undone":"Group restore undone");this.setGroupMeta(name,{archived});this.log(`${archived?"Archived":"Restored"} group ${name}`);this.save({op:"updateGroups",boardId:this.board.id});return true;}
+  // Duplicate: the group's structure (name, colour, position after the original). withRecords also copies its
+  // records' values as new records — never their files, updates (comments) or history.
+  duplicateGroup(name,{withRecords=false}={}){
+    if(!this.board.groups.includes(name))return null;
+    const copyName=this.uniqueGroupName(`${name} copy`);
+    this.snapshot("Group duplication undone");
+    this.board.groups.splice(this.board.groups.indexOf(name)+1,0,copyName);this.setGroupMeta(copyName,{color:this.groupColor(name),archived:false});
+    let copies=[];
+    if(withRecords){
+      const files=new Set(this.board.columns.filter((c)=>c.type==="files").map((c)=>c.key)), base=Date.now()*1000;
+      copies=this.groupRows(name).filter((r)=>!r.archived).map((s,i)=>{const copy=JSON.parse(JSON.stringify(s));for(const k of ["version","createdAt","updatedAt"])delete copy[k];for(const k of files)delete copy[k];return {...copy,id:base+i,[this.groupField]:copyName,archived:false,pinned:false,activity:[]};});
+      const last=this.rows.reduce((at,r,i)=>this.groupOf(r)===name?i:at,-1);this.rows.splice(last+1,0,...copies);
+    }
+    this.log(`Duplicated group ${name}${copies.length?` with ${copies.length} records`:""}`);
+    this.save({op:copies.length?"createRecords":"updateGroups",boardId:this.board.id,...(copies.length?{recordIds:copies.map((c)=>c.id)}:{})});
+    return copyName;
+  }
+  // Move records into a group (record menu, bulk "Move to group").
+  moveToGroup(ids,name){if(!this.board.groups.includes(name))return 0;const set=new Set(ids.map((id)=>this.idOf(id))),rows=this.rows.filter((r)=>set.has(r.id)&&this.groupOf(r)!==name);if(!rows.length)return 0;this.snapshot(`Move to ${name} undone`);rows.forEach((r)=>{r[this.groupField]=name;this.recordActivity(r,`Moved to group ${name}`);});this.log(`Moved ${rows.length} record${rows.length===1?"":"s"} to ${name}`);this.save({op:"updateRecords",boardId:this.board.id,recordIds:rows.map((r)=>r.id)});return rows.length;}
+  // A new record placed directly in a group (group "Add record", the New record menu).
+  addRecordToGroup(name){if(name&&!this.board.groups.includes(name))return null;return this.quickAdd(name);}
+  // View Group by: the columns a view may group by (presentation only).
+  get groupByColumns(){return this.board.columns.filter((c)=>["status","priority","owner","checkbox"].includes(c.type)||(c.type==="dropdown"&&!c.multiple));}
+  get groupByColumn(){return this.groupBy?this.groupByColumns.find((c)=>c.key===this.groupBy)||null:null;}
+  groupValue(row,column){const v=row[column.key];if(column.type==="checkbox")return v?"Checked":"Unchecked";if(column.type==="owner"){const list=this.valueList(v);return list.length?this.personLabel(list[0]):"Unassigned";}return String(v??"").trim()||"(empty)";}
+  commentCount(id){return Number(this.commentCounts[String(id)]||0);}
+  addGroup(name, { color = "", at = null } = {}) { const clean = String(name||"").trim().slice(0,200); if (!clean || this.board.groups.includes(clean)) return false; this.snapshot("Group creation undone"); const index=at===null?this.board.groups.length:Math.max(0,Math.min(at,this.board.groups.length)); this.board.groups.splice(index,0,clean); this.setGroupMeta(clean,{color:BoardModel.isGroupColor(color)?color:this.nextGroupColor(),archived:false}); this.log(`Created group ${clean}`); this.save({op:"updateGroups",boardId:this.board.id}); return true; }
+  renameGroup(oldName, newName) { const clean = newName.trim(); if (!clean || this.board.groups.includes(clean)) return false; this.snapshot("Group rename undone"); this.board.groups = this.board.groups.map((name) => name === oldName ? clean : name); this.rows.forEach((row) => { if (this.groupOf(row) === oldName) row[this.groupField] = clean; }); if(this.board.groupMeta?.[oldName]){this.board.groupMeta[clean]=this.board.groupMeta[oldName];delete this.board.groupMeta[oldName];} const folded=this.collapsedGroups[this.board.id]; if(folded?.includes(oldName))this.collapsedGroups[this.board.id]=folded.map((n)=>n===oldName?clean:n); this.log(`Renamed group ${oldName} to ${clean}`); this.save({op:"updateGroups",boardId:this.board.id,affectsRecords:true,group:{from:oldName,to:clean}}); return true; }
+  // deleteRecords: the group's records are deleted with it (otherwise they move to moveTo).
+  deleteGroup(name, moveTo, { deleteRecords = false } = {}) { if (this.board.groups.length <= 1 || !this.board.groups.includes(name)) return false; if(!deleteRecords&&(moveTo===name||!this.board.groups.includes(moveTo)))return false; this.snapshot("Group deletion undone"); if(deleteRecords){const doomed=new Set(this.rows.filter((r)=>this.groupOf(r)===name).map((r)=>r.id));this.board.records=this.rows.filter((r)=>!doomed.has(r.id));doomed.forEach((id)=>this.selected.delete(id));delete this.board.groupMeta?.[name];this.board.groups=this.board.groups.filter((g)=>g!==name);this.log(`Deleted group ${name} and its records`);this.save({op:"deleteRecords",boardId:this.board.id,group:{remove:name,moveTo:null}});return true;} this.rows.forEach((row) => { if (this.groupOf(row) === name) row[this.groupField] = moveTo; }); delete this.board.groupMeta?.[name]; this.board.groups = this.board.groups.filter((group) => group !== name); this.log(`Deleted group ${name}`); this.save({op:"updateGroups",boardId:this.board.id,affectsRecords:true,group:{remove:name,moveTo}}); return true; }
   addColumn({ label, type, required = false, defaultValue = "", options = "", multiple = false }) { const clean=String(label||"").trim(); if(!clean||!this.columnTypes.some((item)=>item.type===type))return false; this.snapshot("Column creation undone"); const key=`custom_${Date.now()}_${Math.random().toString(36).slice(2,8)}`; let optionList=[...new Set((Array.isArray(options)?options:String(options).split(",")).map((item)=>String(item).trim()).filter(Boolean))]; if(!optionList.length)optionList=this.newColumnOptions(type); const column={ key, label:clean, type, visible:true, connection:"", required:Boolean(required), defaultValue:String(defaultValue||""), options:optionList, ...(type==="dropdown"&&multiple?{multiple:true}:{}) }; this.board.columns.push(column); this.rows.forEach((row)=>{row[key]=column.type==="checkbox"?false:this.isMultiColumn(column)?this.valueList(column.defaultValue):column.defaultValue;}); this.log(`Added ${clean} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,affectsRecords:true}); return column; }
   // Name and description together (one change, one save).
   editColumn(key,{label,description=""}){const column=this.board.columns.find((item)=>item.key===key);const clean=String(label||"").trim();if(!column||!clean)return false;const text=String(description||"").trim().slice(0,500);if(column.label===clean&&(column.description||"")===text)return false;this.snapshot("Column edit undone");column.label=clean;if(text)column.description=text;else delete column.description;this.log(`Edited column ${clean}`);this.save({op:"updateColumns",boardId:this.board.id,columnKey:key});return true;}
@@ -440,8 +502,8 @@ class BoardModel {
   // Opens a view: its type, filters, sorting, grouping and (if it has its own) visible columns. The board's columns —
   // order, widths, visibility in Main Table — are never changed by opening a view (older views that stored a column
   // order or widths simply use the board's).
-  applyView(id) { const view = this.board.savedViews.find((item) => String(item.id) === String(this.idOf(id))); if (!view) return; Object.assign(this, { status: view.status||"All", query: view.query||"", grouped: Boolean(view.grouped), sortDirection: view.sortDirection||"desc" }); this.currentView=["table","list","kanban","calendar"].includes(view.view)?view.view:"table"; this.viewHidden=this.hiddenFrom(view); this.viewOrder=Array.isArray(view.columnOrder)?[...view.columnOrder]:null; this.viewWidths=view.columnWidths&&typeof view.columnWidths==="object"?Object.fromEntries(Object.entries(view.columnWidths).filter(([,w])=>Number.isFinite(w)&&w>0)):null; this.sortKey=view.sortKey||"";this.quickFilter=view.quickFilter||"all";this.showArchived=false;this.columnFilter=null;this.manualSort=false; this.activeSavedViewId=view.id; this.selected?.clear?.(); this.save({op:"updateUserState",boardId:this.board.id}); }
-  resetMainView() { this.viewHidden=null; this.viewOrder=null; this.viewWidths=null; this.sortKey="";this.quickFilter="all";this.columnFilter=null;this.query=""; this.status="All"; this.grouped=false; this.sortDirection="desc"; this.activeSavedViewId=null; this.showArchived=false; this.manualSort=Boolean(this.board?.manualOrder); }
+  applyView(id) { const view = this.board.savedViews.find((item) => String(item.id) === String(this.idOf(id))); if (!view) return; Object.assign(this, { status: view.status||"All", query: view.query||"", grouped: Boolean(view.grouped), groupBy: typeof view.groupBy==="string"?view.groupBy:"", personFilter: typeof view.personFilter==="string"?view.personFilter:"", sortDirection: view.sortDirection||"desc" }); this.currentView=["table","list","kanban","calendar"].includes(view.view)?view.view:"table"; this.viewHidden=this.hiddenFrom(view); this.viewOrder=Array.isArray(view.columnOrder)?[...view.columnOrder]:null; this.viewWidths=view.columnWidths&&typeof view.columnWidths==="object"?Object.fromEntries(Object.entries(view.columnWidths).filter(([,w])=>Number.isFinite(w)&&w>0)):null; this.sortKey=view.sortKey||"";this.quickFilter=view.quickFilter||"all";this.showArchived=false;this.columnFilter=null;this.manualSort=false; this.activeSavedViewId=view.id; this.selected?.clear?.(); this.save({op:"updateUserState",boardId:this.board.id}); }
+  resetMainView() { this.viewHidden=null; this.viewOrder=null; this.viewWidths=null; this.sortKey="";this.quickFilter="all";this.columnFilter=null;this.query=""; this.status="All"; this.grouped=false; this.groupBy=""; this.personFilter=""; this.sortDirection="desc"; this.activeSavedViewId=null; this.showArchived=false; this.manualSort=Boolean(this.board?.manualOrder); }
   deleteView(id) { this.board.savedViews = this.board.savedViews.filter((view) => view.id !== this.idOf(id)); if(this.activeSavedViewId===this.idOf(id))this.resetMainView(); this.save({op:"updateViews",boardId:this.board.id}); }
   toggleRow(id) { this.selected.has(id) ? this.selected.delete(id) : this.selected.add(id); }
   log(text) { if (!this.board) return; const at = new Date().toISOString(); this.board.updatedAt=at; this.board.activity.unshift({ id: Date.now(), text, at }); this.board.activity = this.board.activity.slice(0, 80); if(!this.settings.muteActivity)this.notifications.unshift({ id: Date.now() + 1, text, boardId: this.board.id, workspaceId: this.workspace.id, at, read: false }); this.notifications = this.notifications.slice(0,50); }
@@ -471,14 +533,14 @@ class BoardModel {
   }
   viewSnapshot(){
     const keys=new Set(this.board.columns.map((c)=>c.key));
-    return {status:this.status||"All",query:this.query||"",grouped:Boolean(this.grouped),sortDirection:this.sortDirection||"desc",sortKey:this.sortKey||"",quickFilter:this.quickFilter||"all",view:this.currentView||"table",
+    return {status:this.status||"All",query:this.query||"",grouped:Boolean(this.grouped),groupBy:this.groupBy||"",personFilter:this.personFilter||"",sortDirection:this.sortDirection||"desc",sortKey:this.sortKey||"",quickFilter:this.quickFilter||"all",view:this.currentView||"table",
       hiddenColumns:[...new Set(this.viewHidden||[])].filter((k)=>keys.has(k)).sort(),
       ...(Array.isArray(this.viewOrder)?{columnOrder:this.viewOrder.filter((k)=>keys.has(k))}:{}),
       ...(this.viewWidths&&Object.keys(this.viewWidths).length?{columnWidths:Object.fromEntries(Object.entries(this.viewWidths).filter(([k,w])=>keys.has(k)&&Number.isFinite(w)).sort(([a],[b])=>a.localeCompare(b)))}:{})};
   }
   savedSnapshot(v){
     const keys=new Set(this.board.columns.map((c)=>c.key)), widths=v.columnWidths&&typeof v.columnWidths==="object"?Object.entries(v.columnWidths).filter(([k,w])=>keys.has(k)&&Number.isFinite(w)):[];
-    return {status:v.status||"All",query:v.query||"",grouped:Boolean(v.grouped),sortDirection:v.sortDirection||"desc",sortKey:v.sortKey||"",quickFilter:v.quickFilter||"all",view:v.view||"table",
+    return {status:v.status||"All",query:v.query||"",grouped:Boolean(v.grouped),groupBy:typeof v.groupBy==="string"?v.groupBy:"",personFilter:typeof v.personFilter==="string"?v.personFilter:"",sortDirection:v.sortDirection||"desc",sortKey:v.sortKey||"",quickFilter:v.quickFilter||"all",view:v.view||"table",
       hiddenColumns:[...new Set(this.hiddenFrom(v))].filter((k)=>keys.has(k)).sort(),
       ...(Array.isArray(v.columnOrder)?{columnOrder:v.columnOrder.filter((k)=>keys.has(k))}:{}),
       ...(widths.length?{columnWidths:Object.fromEntries(widths.sort(([a],[b])=>a.localeCompare(b)))}:{})};
@@ -541,7 +603,8 @@ class BoardModel {
     const files=this.boardFileCount?this.boardFileCount(this.board,{recordIds:[...set]}):0;
     return this.workspaces.filter((w)=>!w.archived).flatMap((w)=>w.boards.filter((b)=>b!==this.board&&!b.archived).map((b)=>{
       const missing=used.filter((c)=>!(b.columns||[]).some((t)=>t.key===c.key&&t.type===c.type&&Boolean(t.multiple)===Boolean(c.multiple)));
-      const reason=files?"Records with files can't move between boards yet.":missing.length?`Needs matching column${missing.length===1?"":"s"}: ${missing.map((c)=>c.label).join(", ")}`:"";
+      const discussed=[...set].some((id)=>this.commentCount(id)>0);
+      const reason=files?"Records with files can't move between boards yet.":discussed?"Records with updates can't move between boards yet.":missing.length?`Needs matching column${missing.length===1?"":"s"}: ${missing.map((c)=>c.label).join(", ")}`:"";
       return {board:b,workspace:w,reason};
     }));
   }

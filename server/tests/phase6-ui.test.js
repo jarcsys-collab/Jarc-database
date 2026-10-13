@@ -63,7 +63,7 @@ describe("Phase 6: bulk actions, spreadsheet editing, undo/redo, record drawer (
     await click(ana, rowCheck("R-06"), ", shiftKey: true");
     assert.ok(await ana.waitFor("document.querySelector('.bulk-bar .bulk-count')?.textContent === '4'", 2000), "4 rows selected by Shift-click");
     const bar = await ana.evaluate("(() => { const b = document.querySelector('.bulk-bar'); const r = b.getBoundingClientRect(); return { actions: [...b.querySelectorAll('.bulk-action span')].map((s) => s.textContent), fixed: getComputedStyle(b).position, nearBottom: innerHeight - r.bottom < 60 }; })()");
-    assert.deepEqual(bar.actions, ["Status", "Duplicate", "Export", "Archive", "Move to", "Delete"]);
+    assert.deepEqual(bar.actions, ["Status", "Duplicate", "Export", "Archive", "Group", "Move to", "Delete"], "Group (Phase 8) moves records between board groups");
     assert.deepEqual([bar.fixed, bar.nearBottom], ["fixed", true], "floats at the bottom of the window");
     assert.equal(await ana.evaluate("document.querySelectorAll('tr.is-selected').length"), 4);
     await click(ana, '.bulk-bar [data-action="clear-selection"]');

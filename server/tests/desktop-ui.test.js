@@ -219,7 +219,10 @@ describe("Desktop workspace (real app, headless browser, role_based)", { skip: B
     await createView(mia, "table", "Finance view");
     await openPicker(mia);
     for (const key of ["notes", "due"]) await toggleColumn(mia, key);
-    await mia.evaluate("(() => { const s = document.querySelector('select[data-action=filter]'); s.value = 'Done'; s.dispatchEvent(new Event('change', { bubbles: true })); })()");
+    // Status filter: the toolbar's themed menu (Phase 8 replaced the native select).
+    await click(mia, '[data-action="toolbar-menu"][data-menu="status"]');
+    assert.ok(await mia.waitFor("!!document.querySelector('.toolbar-menu-popover [data-value=Done]')", 3000));
+    await click(mia, '.toolbar-menu-popover [data-value="Done"]');
     await sleep(300);
     await click(mia, '[data-action="save-active-view"]');
     await waitSaved(mia);
@@ -229,13 +232,13 @@ describe("Desktop workspace (real app, headless browser, role_based)", { skip: B
     const switchTo = async (name) => { await mia.evaluate(`[...document.querySelectorAll('.view-tabs [role=tab]')].find((t) => t.textContent.trim() === ${JSON.stringify(name)})?.click()`); await sleep(350); };
     await switchTo("Sales view");
     assert.deepEqual(await shownColumns(mia), ["serial", "status", "notes", "done", "due"], "Sales: everything but Files");
-    assert.equal(await mia.evaluate("document.querySelector('select[data-action=filter]').value"), "All", "Sales has no status filter");
+    assert.equal(await mia.evaluate("(() => { const b = document.querySelector('[data-action=toolbar-menu][data-menu=status]'); return b.classList.contains('active') ? b.querySelector('span').textContent.trim() : 'All'; })()"), "All", "Sales has no status filter");
     await switchTo("Finance view");
     assert.deepEqual(await shownColumns(mia), ["serial", "status", "done", "docs"], "Finance: its own columns");
-    assert.equal(await mia.evaluate("document.querySelector('select[data-action=filter]').value"), "Done");
+    assert.equal(await mia.evaluate("(() => { const b = document.querySelector('[data-action=toolbar-menu][data-menu=status]'); return b.classList.contains('active') ? b.querySelector('span').textContent.trim() : 'All'; })()"), "Done");
     await switchTo("Main Table");
     assert.deepEqual(await shownColumns(mia), COLUMNS.map((c) => c.key), "Main Table: all columns, no filter");
-    assert.equal(await mia.evaluate("document.querySelector('select[data-action=filter]').value"), "All");
+    assert.equal(await mia.evaluate("(() => { const b = document.querySelector('[data-action=toolbar-menu][data-menu=status]'); return b.classList.contains('active') ? b.querySelector('span').textContent.trim() : 'All'; })()"), "All");
     // After a reload (a new session in the same browser) everything is still there.
     await openApp(mia); await openBoard(mia, "Service jobs");
     assert.deepEqual(await tabs(mia), ["Main Table", "Sales view", "Finance view"]);

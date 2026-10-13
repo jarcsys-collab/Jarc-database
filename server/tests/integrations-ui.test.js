@@ -107,8 +107,8 @@ describe("Phase 7: Integrations page (real app, mock monday.com)", { skip: BROWS
     await click('[data-action="integration-open-board"]');
     assert.ok(await b.waitFor("!!document.querySelector('.readonly-banner')", 10000), "read-only banner");
     assert.ok(await b.waitFor("!!document.querySelector('.editable-table tbody tr td.cell')", 10000));
-    await click('[data-action="new-item"], [data-action="inline-add"]');
-    assert.match(await toast(), /read-only/);
+    // Read-only boards offer no way to add records or groups (Phase 8 hides them; the server refuses anyway).
+    assert.equal(await has('.board-tools [data-action="open-form"], [data-action="inline-add"], [data-action="group-new"]'), false);
     const boardId = (await api("GET", "/integrations/monday")).body.importedBoards[0].boardId;
     assert.equal((await api("POST", `/boards/${boardId}/records`, { values: { serial: "x" } })).body.error.code, "READ_ONLY_BOARD");
   });

@@ -11,6 +11,8 @@ const { GridFsFileStore } = require("./files/file-store");
 const { FileService } = require("./services/file-service");
 const { SearchService } = require("./services/search-service");
 const { IntegrationRepository } = require("./repositories/mongo/integration-repository");
+const { CommentRepository } = require("./repositories/mongo/comment-repository");
+const { CommentService } = require("./services/comment-service");
 const { MondayIntegration } = require("./integrations/monday/service");
 const { WorkspaceService } = require("./services/workspace-service");
 const { BoardService } = require("./services/board-service");
@@ -34,7 +36,8 @@ function createDataLayer({ connection, logger = console, fileStore = new GridFsF
     activities: new ActivityRepository(db),
     sessions: new SessionRepository(db),
     attachments: new AttachmentRepository(db),
-    integrations: new IntegrationRepository(db)
+    integrations: new IntegrationRepository(db),
+    comments: new CommentRepository(db)
   };
   const deps = { repos, connection, logger };
   return {
@@ -42,6 +45,8 @@ function createDataLayer({ connection, logger = console, fileStore = new GridFsF
     repos,
     services: { workspaces: new WorkspaceService(deps), boards: new BoardService(deps), records: new RecordService(deps), imports: new ImportService(deps), schema: new BoardSchemaService(deps), members: new MembershipService(deps),
       search: new SearchService({ repos }),
+      // access is attached when the routes are mounted (it depends on the access policy).
+      comments: new CommentService({ repos, connection, logger }),
       integration: new MondayIntegration({ repos, connection, config: monday, fetch, logger }),
       files: new FileService({ repos, store: fileStore, logger, ...(maxFileStorageBytes ? { maxTotalBytes: maxFileStorageBytes } : {}) }),
       // Read-only views used by the notification feed and People columns.

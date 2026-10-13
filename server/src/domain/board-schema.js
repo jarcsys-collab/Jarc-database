@@ -91,21 +91,22 @@ function normalizeColumns(columns) {
 // The column whose value is the record's group. Records store it as groupId (a stable group ID), not in values.
 const groupColumnOf = (columns) => columns.find((c) => c.type === "group") || null;
 
-// Groups: [{ id, name, color, position }] in display order. Missing IDs are assigned; names must be unique.
+// Groups: [{ id, name, color, archived, position }] in display order. Missing IDs are assigned; names must be unique.
 function normalizeGroups(groups) {
   if (!Array.isArray(groups)) fail("groups must be a list.");
   if (groups.length > LIMITS.groups) fail(`A board can have at most ${LIMITS.groups} groups.`);
   const ids = new Set(), names = new Set();
   return groups.map((group, index) => {
     if (!isObject(group)) fail(`Group ${index + 1} must be an object with a name.`);
-    for (const key of Object.keys(group)) if (!["id", "name", "color"].includes(key)) fail(`Group ${index + 1} has an unknown field "${key.slice(0, 40)}".`);
+    for (const key of Object.keys(group)) if (!["id", "name", "color", "archived"].includes(key)) fail(`Group ${index + 1} has an unknown field "${key.slice(0, 40)}".`);
     const id = group.id === undefined ? newGroupId() : group.id;
     if (typeof id !== "string" || !GROUP_ID.test(id)) fail(`Group ${index + 1} has an invalid ID.`);
     const name = text(group.name, `The name of group ${index + 1}`, { max: 200, required: true });
     if (ids.has(id)) fail(`Group ID "${id}" is used twice.`);
     if (names.has(name)) fail(`Group name "${name.slice(0, 60)}" is used twice.`);
     ids.add(id); names.add(name);
-    return { id, name, color: group.color === undefined ? "" : color(group.color, `The colour of group "${name.slice(0, 60)}"`), position: (index + 1) * 1000 };
+    if (group.archived !== undefined && typeof group.archived !== "boolean") fail(`Group "${name.slice(0, 60)}": archived must be true or false.`);
+    return { id, name, color: group.color === undefined ? "" : color(group.color, `The colour of group "${name.slice(0, 60)}"`), archived: Boolean(group.archived), position: (index + 1) * 1000 };
   });
 }
 
