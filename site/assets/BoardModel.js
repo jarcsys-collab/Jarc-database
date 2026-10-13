@@ -167,12 +167,12 @@ class BoardModel {
   applyRemote(reconcile) {
     if (!reconcile || reconcile.empty) return false;
     this.applyReconcile(reconcile);
-    if (this.history.length) { this.history = []; this.undoClearedByRemote = true; }
+    if (this.history.length || this.future?.length) { this.history = []; this.future = []; this.undoClearedByRemote = true; }
     return true;
   }
   rollback(change, result) {
     this.failure = { text: JSON.stringify(this.toStorageState()), history: this.history.slice(), change, code: result.code };
-    this.adoptState(this.persisted.text); this.history = this.persisted.history.slice();
+    this.adoptState(this.persisted.text); this.history = this.persisted.history.slice(); this.future = [];
     this.applyReconcile(result.reconcile);
     // Someone else changed (or deleted) it: the latest server version is now shown. Nothing is pending and Retry
     // must not re-send the stale change, so the failed attempt is dropped instead of kept for Retry.
@@ -322,6 +322,7 @@ class BoardModel {
   get sortColumn() { return this.board.columns.find((column)=>column.type==="date"); }
   get archivedCount() { return this.rows.filter((row)=>row.archived).length; }
   get canUndo() { return this.history.length > 0; }
+  get canRedo() { return Boolean(this.future?.length); }
   get unreadCount() { return this.feed ? this.feed.filter((item) => this.feedUnread(item)).length : this.notifications.filter((item) => !item.read).length; }
   get favoriteBoards() { return this.workspaces.flatMap((space) => space.boards.filter((board) => board.favorite && !board.archived && !space.archived).map((board) => ({ ...board, workspaceId: space.id, workspaceName: space.name }))); }
   get recentBoardItems() { return this.recentBoards.map((recent) => { const space = this.workspaces.find((item) => item.id === recent.workspaceId); const board = space?.boards.find((item) => item.id === recent.boardId); return board && !board.archived && !space.archived ? { ...board, workspaceId: space.id, workspaceName: space.name, openedAt: recent.openedAt } : null; }).filter(Boolean).slice(0,5); }
@@ -367,8 +368,13 @@ class BoardModel {
   addMember({email,role="Editor"}) { const clean=String(email||"").trim(); if(!clean)return false; if(this.members.some((m)=>m.email.toLowerCase()===clean.toLowerCase()))return false; this.members.push({id:`member-${Date.now()}`,name:clean.split("@")[0],email:clean,role,status:"Local contact"}); this.save({op:"updateMembers"}); return true; }
   removeMember(id) { this.members=this.members.filter((m)=>m.id!==id); this.save({op:"updateMembers"}); }
 
-  snapshot(label) { this.history.push({ label, workspaces: JSON.stringify(this.workspaces), currentWorkspaceId: this.currentWorkspaceId, currentBoardId: this.currentBoardId, manualSort:this.manualSort, sortKey:this.sortKey, sortDirection:this.sortDirection }); this.history = this.history.slice(-30); }
-  undo() { const entry = this.history.pop(); if (!entry) return "Nothing to undo"; this.workspaces = JSON.parse(entry.workspaces); this.currentWorkspaceId = entry.currentWorkspaceId; this.currentBoardId = entry.currentBoardId; this.normalizeBoards(); this.manualSort=entry.manualSort??Boolean(this.board?.manualOrder); this.sortKey=entry.sortKey??this.sortKey;this.sortDirection=entry.sortDirection??this.sortDirection; this.save({op:"replaceAll",reason:"undo"}); return entry.label; }
+  snapshot(label) { this.future = []; this.history.push({ label, workspaces: JSON.stringify(this.workspaces), currentWorkspaceId: this.currentWorkspaceId, currentBoardId: this.currentBoardId, manualSort:this.manualSort, sortKey:this.sortKey, sortDirection:this.sortDirection }); this.history = this.history.slice(-30); }
+  captureState(label) { return { label, workspaces: JSON.stringify(this.workspaces), currentWorkspaceId: this.currentWorkspaceId, currentBoardId: this.currentBoardId, manualSort:this.manualSort, sortKey:this.sortKey, sortDirection:this.sortDirection }; }
+  restoreEntry(entry) { this.workspaces = JSON.parse(entry.workspaces); this.currentWorkspaceId = entry.currentWorkspaceId; this.currentBoardId = entry.currentBoardId; this.normalizeBoards(); this.manualSort=entry.manualSort??Boolean(this.board?.manualOrder); this.sortKey=entry.sortKey??this.sortKey;this.sortDirection=entry.sortDirection??this.sortDirection; this.save({op:"replaceAll",reason:"undo"}); }
+  // Undo / redo restore whole snapshots and save them like any change (version-checked: a colleague's newer change is
+  // a conflict, never overwritten). A colleague's change arriving, a failed save or a new change clears redo.
+  undo() { const entry = this.history.pop(); if (!entry) return "Nothing to undo"; (this.future ||= []).push(this.captureState(entry.label)); this.future = this.future.slice(-30); this.restoreEntry(entry); return entry.label; }
+  redo() { const entry = this.future?.pop(); if (!entry) return "Nothing to redo"; this.history.push(this.captureState(entry.label)); this.restoreEntry(entry); return entry.label.replace(/ undone$/, " redone"); }
 
   createBoard(name="Untitled board", description="", template="blank") {
     this.snapshot("Board creation undone");
@@ -502,6 +508,96 @@ class BoardModel {
     if(!Object.keys(changes).length)return false;this.updateColumnConfig(changes);return true;
   }
   uniqueViewName(base){const names=new Set((this.board?.savedViews||[]).map((v)=>v.name.toLowerCase()));if(!names.has(base.toLowerCase()))return base;for(let i=2;;i+=1)if(!names.has(`${base} ${i}`.toLowerCase()))return `${base} ${i}`;}
+  // ---- Phase 6: bulk actions and spreadsheet editing. Each action is one undo step and one save (version-checked on
+  // the server, so a colleague's newer change is reported as a conflict, never overwritten).
+  selectRange(fromId,toId,on=true){const rows=this.visibleRows,a=rows.findIndex((r)=>String(r.id)===String(this.idOf(fromId))),b=rows.findIndex((r)=>String(r.id)===String(this.idOf(toId)));if(a<0||b<0)return 0;const [s,e]=a<b?[a,b]:[b,a];for(let i=s;i<=e;i+=1){if(on)this.selected.add(rows[i].id);else this.selected.delete(rows[i].id);}return e-s+1;}
+  bulkArchive(ids,archived=true){
+    const set=new Set(ids.map((id)=>this.idOf(id))), rows=this.rows.filter((r)=>set.has(r.id)&&Boolean(r.archived)!==archived);
+    if(!rows.length)return 0;
+    this.snapshot(archived?`Archive of ${rows.length} record${rows.length===1?"":"s"} undone`:`Restore of ${rows.length} record${rows.length===1?"":"s"} undone`);
+    for(const r of rows){r.archived=archived;this.recordActivity(r,archived?"Record archived":"Record restored");this.selected.delete(r.id);}
+    this.log(`${archived?"Archived":"Restored"} ${rows.length} records`);
+    this.save({op:"updateRecords",boardId:this.board.id,recordIds:rows.map((r)=>r.id),fields:["archived"]});
+    return rows.length;
+  }
+  // Copies the records' values (not their files, which belong to the original records).
+  bulkDuplicate(ids){
+    const set=new Set(ids.map((id)=>this.idOf(id))), sources=this.rows.filter((r)=>set.has(r.id));
+    if(!sources.length)return [];
+    this.snapshot(`Duplication of ${sources.length} record${sources.length===1?"":"s"} undone`);
+    const base=Date.now()*1000, copies=sources.map((s,i)=>{const copy=JSON.parse(JSON.stringify(s));delete copy.version;delete copy.createdAt;delete copy.updatedAt;return {...copy,id:base+i,serial:`${s.serial} copy`,archived:false,pinned:false,activity:[]};});
+    for(const c of [...copies].reverse())this.rows.unshift(c);
+    this.manualSort=true;this.selected.clear();copies.forEach((c)=>this.selected.add(c.id));
+    this.log(`Duplicated ${copies.length} records`);
+    this.save({op:"createRecords",boardId:this.board.id,recordIds:copies.map((c)=>c.id)});
+    return copies.map((c)=>c.id);
+  }
+  // Boards the selected records can move to: only where every column holding their data exists with the same type
+  // (the target board's columns are never changed), and only records without files (files belong to the record and
+  // can't move between boards yet).
+  moveTargets(ids){
+    const set=new Set(ids.map((id)=>this.idOf(id))), rows=this.rows.filter((r)=>set.has(r.id));
+    const used=this.board.columns.filter((c)=>c.key!=="serial"&&c.type!=="files"&&rows.some((r)=>this.hasValue(r[c.key])));
+    const files=this.boardFileCount?this.boardFileCount(this.board,{recordIds:[...set]}):0;
+    return this.workspaces.filter((w)=>!w.archived).flatMap((w)=>w.boards.filter((b)=>b!==this.board&&!b.archived).map((b)=>{
+      const missing=used.filter((c)=>!(b.columns||[]).some((t)=>t.key===c.key&&t.type===c.type&&Boolean(t.multiple)===Boolean(c.multiple)));
+      const reason=files?"Records with files can't move between boards yet.":missing.length?`Needs matching column${missing.length===1?"":"s"}: ${missing.map((c)=>c.label).join(", ")}`:"";
+      return {board:b,workspace:w,reason};
+    }));
+  }
+  bulkMove(ids,boardId){
+    const target=this.moveTargets(ids).find((t)=>String(t.board.id)===String(boardId));
+    if(!target||target.reason)return 0;
+    const set=new Set(ids.map((id)=>this.idOf(id))), rows=this.rows.filter((r)=>set.has(r.id));
+    this.snapshot(`Move of ${rows.length} record${rows.length===1?"":"s"} undone`);
+    for(const r of rows){if(target.board.records.some((x)=>x.id===r.id))r.id=this.nextRecordId();target.board.records.push(r);this.recordActivity(r,"Moved to "+target.board.name);}
+    this.board.records=this.rows.filter((r)=>!rows.includes(r));this.selected.clear();
+    this.log(`Moved ${rows.length} records to ${target.board.name}`);
+    this.save({op:"moveRecord",boardId:this.board.id,targetBoardId:target.board.id,recordIds:rows.map((r)=>r.id)});
+    return rows.length;
+  }
+  // Several cells at once (paste, clear): changes = [{ id, field, value }] with values already validated.
+  updateCells(changes,label="Paste undone"){
+    const byId=new Map(this.rows.map((r)=>[String(r.id),r])), cols=new Set(this.board.columns.map((c)=>c.key));
+    const valid=changes.filter((c)=>byId.has(String(this.idOf(c.id)))&&cols.has(c.field));
+    if(!valid.length)return 0;
+    this.snapshot(label);
+    const ids=new Set(), fields=new Set();
+    for(const c of valid){const row=byId.get(String(this.idOf(c.id)));row[c.field]=c.value;ids.add(row.id);fields.add(c.field);}
+    for(const id of ids)this.recordActivity(byId.get(String(id)),`Changed ${[...fields].map((f)=>this.board.columns.find((c)=>c.key===f)?.label||f).join(", ")}`);
+    this.log(`Updated ${valid.length} cells`);
+    this.save({op:"updateRecords",boardId:this.board.id,recordIds:[...ids],fields:[...fields]});
+    return valid.length;
+  }
+  static INVALID=Symbol("invalid");
+  // Pasted text → a value for this column, or BoardModel.INVALID. Labels must already exist (paste never creates them);
+  // People, Files and Group cells can't be pasted into.
+  pasteValue(column,text){
+    const bad=BoardModel.INVALID, t=String(text??"").replace(/\r/g,"").trim();
+    if(["owner","files","group"].includes(column.type))return bad;
+    if(t==="")return column.type==="checkbox"?false:this.isMultiColumn(column)?[]:"";
+    switch(column.type){
+      case "number":{const n=Number(t.replace(/[,\s]/g,""));return Number.isFinite(n)?String(n):bad;}
+      case "date":{if(/^\d{4}-\d{2}-\d{2}$/.test(t)&&!Number.isNaN(Date.parse(`${t}T00:00:00Z`)))return t;const d=new Date(t);return Number.isNaN(d.getTime())?bad:`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;}
+      case "checkbox":return /^(true|yes|y|1|x|checked|done)$/i.test(t)?true:/^(false|no|n|0|unchecked)$/i.test(t)?false:bad;
+      case "status":case "priority":case "dropdown":{
+        const opts=this.effectiveOptions(column), pick=(v)=>opts.find((o)=>o.toLowerCase()===v.trim().toLowerCase());
+        if(this.isMultiColumn(column)){const hits=t.split(/[,;]/).map((s)=>s.trim()).filter(Boolean).map(pick);return hits.length&&hits.every(Boolean)?[...new Set(hits)]:bad;}
+        return pick(t)||bad;
+      }
+      case "email":return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(t)?t:bad;
+      case "link":return /^https?:\/\/\S+$/i.test(t)?t:bad;
+      case "phone":return /^[+()\d\s.-]{3,40}$/.test(t)?t:bad;
+      default:return t.slice(0,10000);
+    }
+  }
+  copyValue(row,column){
+    const v=row?.[column.key];
+    if(column.type==="checkbox")return v?"TRUE":"FALSE";
+    if(column.type==="files")return (this.attachmentsFor?.(row.id,column.key)||[]).map((a)=>a.name).join(", ");
+    if(this.isMultiColumn(column)||Array.isArray(v))return this.valueText(column,v);
+    return String(v??"").replace(/[\t\n]+/g," ");
+  }
   updateSetting(key, value) { this.settings[key] = value; this.save({op:"updateUserState"}); }
   updateProfile(values) { Object.assign(this.profile, values); const parts=this.profile.name.trim().split(/\s+/); this.profile.initials=(parts[0]?.[0] || "U") + (parts[1]?.[0] || ""); this.profile.initials=this.profile.initials.toUpperCase(); this.save({op:"updateUserState"}); }
   syncUsername(username) { const name=String(username || "medtek").trim().toLowerCase(); this.profile.name=name; this.profile.initials=(name[0] || "M").toUpperCase(); this.save({op:"updateUserState"}); }

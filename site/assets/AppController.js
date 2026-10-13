@@ -7,6 +7,10 @@ class AppController {
     root.addEventListener("submit", (event) => { if(this.busy)event.preventDefault(); this.guard(()=>this.onSubmit(event)); }); // never a native submit, even while busy
     root.addEventListener("pointerdown", () => this.auth.touch());
     for (const type of ["dragover", "dragleave", "drop"]) root.addEventListener(type, (event) => this.onFileDrag(event));
+    // A cell range ends when focus moves to a cell outside it (click, Tab, plain arrows).
+    root.addEventListener("focusin", (event) => { if (this.cellRange && !this.extendingRange && event.target.classList?.contains("cell-display") && !event.target.closest("td")?.classList.contains("cell-in-range")) this.clearRange(); });
+    document.addEventListener("copy", (event) => this.onCopy(event));
+    document.addEventListener("paste", (event) => this.onPaste(event));
     window.addEventListener("resize", () => { cancelAnimationFrame(this.fitFrame); this.fitFrame = requestAnimationFrame(() => this.view.fitBoard()); });
     this.uploads = new Map(); this.filesConfirm = null; this.filesNotice = null; this.freshFiles = new Set(); this.fileSeq = new Map();
     root.addEventListener("keyup", (event) => { if (event.target.dataset?.action === "password-input") { const warning=document.querySelector("#caps-warning"); if(warning) warning.hidden=!event.getModifierState("CapsLock"); } });
@@ -360,7 +364,16 @@ class AppController {
     if (action === "pin-item") { this.model.togglePin(target.dataset.id); this.update(); this.view.toast("Pin updated"); }
     if (action === "archive-item") { const row=this.model.rows.find((item)=>item.id===this.model.idOf(target.dataset.id)); const archive=!row.archived; this.model.archiveItem(target.dataset.id,archive); this.update(); this.view.toast(archive?"Record archived":"Record restored",true); }
     if (action === "delete") this.requestDeleteRecords([this.model.idOf(target.dataset.id)]);
-    if (action === "delete-selected") this.requestDeleteRecords([...this.model.selected]);
+    if (action === "delete-selected") { const ids=[...this.model.selected]; if(ids.length>=10){this.pendingBulkDelete=ids;this.view.showBulkDeleteConfirm(ids.length,this.model.boardFileCount(this.model.board,{recordIds:ids}));} else this.requestDeleteRecords(ids); return; }
+    // ---- Phase 6 bulk actions (Shift-click selects a range).
+    if (action === "select") { const id=this.model.idOf(target.dataset.id); if(event.shiftKey&&this.lastSelected!==undefined&&this.lastSelected!==null&&this.model.visibleRows.some((r)=>r.id===this.lastSelected))this.model.selectRange(this.lastSelected,id,target.checked); else if(target.checked)this.model.selected.add(id); else this.model.selected.delete(id); this.lastSelected=id; this.update(); return; }
+    if (action === "bulk-archive" || action === "bulk-restore") { const n=this.model.bulkArchive([...this.model.selected],action==="bulk-archive"); this.update(); if(n)this.view.toast(`${n} record${n===1?"":"s"} ${action==="bulk-archive"?"archived · restore them from Archived records":"restored"}`,true); return; }
+    if (action === "bulk-duplicate") { const ids=this.model.bulkDuplicate([...this.model.selected]); this.update(); if(ids.length)this.view.toast(`${ids.length} record${ids.length===1?"":"s"} duplicated (files are not copied)`,true); return; }
+    if (action === "bulk-export") { this.exportCsv(this.model.visibleRows.filter((r)=>this.model.selected.has(r.id))); return; }
+    if (action === "bulk-move") { this.togglePanel("bulk-move",()=>this.view.showMoveTargets(this.model)); return; }
+    if (action === "apply-bulk-move") { const board=this.model.workspaces.flatMap((w)=>w.boards).find((b)=>String(b.id)===target.dataset.board); const n=this.model.bulkMove([...this.model.selected],target.dataset.board); this.view.closeOverlay(); this.update(); if(n)this.view.toast(`${n} record${n===1?"":"s"} moved to ${board?.name||"the board"}`,true); return; }
+    if (action === "confirm-paste") { this.view.closeOverlay(); this.applyPaste(); return; }
+    if (action === "drawer-files") { this.view.closeOverlay(); this.lastTrigger=this.cellButton(target.dataset.id,target.dataset.field)||this.lastTrigger; this.openFiles(target.dataset.id,target.dataset.field); return; }
     if (action === "confirm-delete-records") this.deleteRecords(target.dataset.payload.split(",").map((id)=>this.model.idOf(id)),target);
     if (action === "clear-selection") { this.model.selected.clear(); this.update(); }
     if(action==="sort")this.view.showSort(this.model);
@@ -525,7 +538,7 @@ class AppController {
     if(action==="quick-view"){this.model.quickFilter=event.target.value;this.model.showArchived=false;this.update();return;}
     if(action==="import-mapping"){const data=Object.fromEntries(new FormData(event.target.form));this.view.showImportPreview(this.model,this.pendingImport,data);return;}
     if (action === "filter") { this.model.status=event.target.value; this.update(); }
-    if (action === "select") { this.model.toggleRow(this.model.idOf(event.target.dataset.id)); this.update(); }
+    if (action === "select") return; // handled on click (Shift-click selects a range)
     if (action === "select-all") { this.model.visibleRows.forEach((row)=>event.target.checked?this.model.selected.add(row.id):this.model.selected.delete(row.id)); this.update(); }
     if (action === "density") { this.model.updateSetting("density",event.target.checked?"compact":"comfortable"); document.documentElement.dataset.density=this.model.settings.density; }
     if (action === "setting") { this.model.updateSetting(event.target.dataset.key,event.target.checked); this.update(); this.view.showSettings(this.model); }
@@ -568,6 +581,7 @@ class AppController {
     if (action === "column-options-form") { this.pendingOptions={key:data.key,items:[...event.target.querySelectorAll(".option-row")].map((row)=>{const input=row.querySelector(".option-name");return {from:input.dataset.from||null,to:input.value,color:row.querySelector(".option-color")?.value||""};})}; this.applyColumnOptions(false,event.submitter); }
     if (action === "column-width-form") { const width=Number(data.width); if(!Number.isFinite(width))return; this.runBusy(event.submitter,()=>{this.model.resizeColumn(data.key,width);},()=>{this.view.closeOverlay();this.update();this.view.toast(this.model.activeView?"Width changed in this view. Save to this view to keep it.":"Column width saved");}); }
     if (action === "edit-column-form") { const column=this.model.board.columns.find((c)=>c.key===data.key); const description=String(data.description||"").trim().slice(0,500); this.model.renameColumn(data.key,data.label); this.model.updateColumnConfig({[data.key]:{visible:data.key==="serial"?true:Boolean(data.visible),required:data.key==="serial"?true:Boolean(data.required),connection:data.connection||"",...("defaultValue" in data?{defaultValue:data.defaultValue||""}:{}),...(description?{description}:{})}}); if(column&&!description)delete column.description; this.view.closeOverlay(); this.update(); this.view.toast("Column updated"); }
+    if (action === "confirm-bulk-delete") { if(String(data.confirm||"").trim().toUpperCase()!=="DELETE"){this.view.showDialogError("Type DELETE to confirm.");return;} const ids=this.pendingBulkDelete||[]; this.pendingBulkDelete=null; this.deleteRecords(ids,event.submitter); return; }
     if (action === "create-view-form") { const view=this.model.createView(data.name,data.type); if(view){this.view.closeOverlay();this.update();this.view.toast(`View "${view.name}" created`);} return; }
     if (action === "rename-view-form") { if(this.model.renameView(data.id,data.name)){this.view.closeOverlay();this.update();this.view.toast("View renamed");} return; }
     if (action === "save-view-form") { if (this.model.saveView(data.name)) { this.view.closeOverlay(); this.update(); this.view.toast("View saved"); } }
@@ -578,6 +592,7 @@ class AppController {
   }
   onKeydown(event) {
     if(this.busy)return;
+    if(event.target.dataset?.action==="row-drag"&&event.altKey&&["ArrowUp","ArrowDown"].includes(event.key)&&this.rowDragBlocked()){event.preventDefault();this.view.toast(this.rowDragBlocked());return;}
     if(event.target.dataset?.action==="row-drag"&&event.altKey&&["ArrowUp","ArrowDown"].includes(event.key)){
       event.preventDefault();const id=this.model.idOf(event.target.dataset.id),rows=this.model.visibleRows,index=rows.findIndex(r=>r.id===id),up=event.key==="ArrowUp",target=rows[index+(up?-1:1)];
       if(target&&this.model.reorderRecord(id,target.id,up?"before":"after")){this.update();this.root.querySelector('[data-action="row-drag"][data-id="'+id+'"]')?.focus();this.view.toast("Row moved",true);}return;
@@ -587,6 +602,8 @@ class AppController {
     if(event.target.dataset?.action==="cell-input"){this.cellInputKey(event);return;}
     if(event.target.dataset?.action==="draft-input"){this.draftKey(event);return;}
     if(event.target.classList?.contains("cell-display")&&!document.querySelector("#overlay-root")?.children.length&&this.cellKey(event))return;
+    // Undo / redo for board changes — never inside text fields (their own undo stays native) or open dialogs.
+    if((event.ctrlKey||event.metaKey)&&!event.altKey&&["z","y"].includes(event.key.toLowerCase())&&!editing&&!document.querySelector("#overlay-root")?.children.length&&this.model.screen==="board"){event.preventDefault();this.undoRedo(event.key.toLowerCase()==="y"||event.shiftKey);return;}
     if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="k"){event.preventDefault();this.view.showCommandPalette(this.model);return;}
     if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="b"&&!editing){event.preventDefault();this.toggleSidebar();return;}
     if(event.target.dataset?.action==="column-type-search"&&event.key==="Enter"){event.preventDefault();event.target.closest(".column-chooser")?.querySelector(".chooser-option:not([hidden]):not(:disabled)")?.click();return;}
@@ -648,7 +665,7 @@ class AppController {
   // exported with a leading apostrophe. Plain numbers in Number columns (e.g. -5) are left as numbers.
   csvCell(value,column=null){ let text=String(value??""); const plainNumber=column?.type==="number"&&/^-?\d+(\.\d+)?$/.test(text.trim()); if(!plainNumber&&/^[=+\-@\t\r]/.test(text))text="'"+text; return `"${text.replaceAll('"','""')}"`; }
   // Exports are async-shaped so a future server-generated export can replace them without changing callers.
-  async exportCsv() { const fields=this.model.board.columns; const csv=[fields.map((field)=>this.csvCell(field.label)).join(","),...this.model.visibleRows.map((row)=>fields.map((field)=>this.csvCell(this.model.isMultiColumn(field)?this.model.valueText(field,row[field.key]):row[field.key],field)).join(","))].join("\n"); if(this.download(new Blob([csv],{type:"text/csv"}),`${this.model.board.name.toLowerCase().replace(/[^a-z0-9]+/g,"-")||"board"}.csv`))this.view.toast("Board exported"); }
+  async exportCsv(rows=this.model.visibleRows) { const fields=this.model.board.columns; const csv=[fields.map((field)=>this.csvCell(field.label)).join(","),...rows.map((row)=>fields.map((field)=>this.csvCell(this.model.isMultiColumn(field)?this.model.valueText(field,row[field.key]):row[field.key],field)).join(","))].join("\n"); if(this.download(new Blob([csv],{type:"text/csv"}),`${this.model.board.name.toLowerCase().replace(/[^a-z0-9]+/g,"-")||"board"}.csv`))this.view.toast("Board exported"); }
   async exportBackup() { const backup=JSON.stringify(this.model.createBackup(),null,2); if(this.download(new Blob([backup],{type:"application/json"}),"jarc-database-backup.json"))this.view.toast("Full backup exported"); }
   async importData(file) {
     if(!file)return;
@@ -720,6 +737,7 @@ class AppController {
     const handle=event.target.closest('[data-action="row-drag"]');
     if(!row||event.button!==0||(!handle&&event.target.closest('input,textarea,select,button,a,[contenteditable]')))return;
     if(!handle&&event.pointerType==='touch')return;
+    const blocked=this.rowDragBlocked(); if(blocked){ if(handle){event.preventDefault();this.view.toast(blocked);} return; }
     event.preventDefault();
     const id=this.model.idOf(row.dataset.recordContext),board=this.model.board,startX=event.clientX,startY=event.clientY,wrap=row.closest('.table-wrap');
     let active=false,ghost=null,target=null,position='before',x=startX,y=startY,frame;
@@ -1052,6 +1070,99 @@ class AppController {
       td?.classList.add("remote-flash");
     }
   }
+  // ---- Phase 6: undo / redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y outside text fields), cell ranges, copy / paste / clear.
+  undoRedo(redo=false){
+    if(this.busy)return;
+    const label=redo?this.model.redo():this.model.undo();
+    this.update();
+    this.view.toast(label);
+  }
+  coord(cell){return cell?{id:cell.dataset.id,field:cell.dataset.field}:null;}
+  // Visible grid order: rows as shown, columns as shown.
+  gridOrder(){
+    const trs=[...this.root.querySelectorAll(".editable-table tbody tr[data-record-context]")];
+    return {rows:trs.map((tr)=>tr.dataset.recordContext),cols:[...(trs[0]?.querySelectorAll(".cell-display")||[])].map((c)=>c.dataset.field)};
+  }
+  clearRange(){this.cellRange=null;this.root.querySelectorAll(".cell-in-range").forEach((td)=>td.classList.remove("cell-in-range"));}
+  // The selected rectangle: { rows: [ids], cols: [fields] } (just the focused cell when there is no range).
+  rangeCells(focused){
+    const {rows,cols}=this.gridOrder(), a=this.cellRange?.anchor||this.coord(focused), b=this.cellRange?.focus||a;
+    if(!a)return {rows:[],cols:[]};
+    const r=[rows.indexOf(String(a.id)),rows.indexOf(String(b.id))].sort((x,y)=>x-y), c=[cols.indexOf(a.field),cols.indexOf(b.field)].sort((x,y)=>x-y);
+    if(r[0]<0||c[0]<0)return {rows:[],cols:[]};
+    return {rows:rows.slice(r[0],r[1]+1),cols:cols.slice(c[0],c[1]+1)};
+  }
+  paintRange(){
+    this.root.querySelectorAll(".cell-in-range").forEach((td)=>td.classList.remove("cell-in-range"));
+    if(!this.cellRange?.focus)return;
+    const {rows,cols}=this.rangeCells(null);
+    for(const id of rows)for(const field of cols)this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"] td[data-column-key="${CSS.escape(field)}"]`)?.classList.add("cell-in-range");
+  }
+  extendRange(cell,key){
+    const next=this.adjacentCell(cell,key);if(!next)return;
+    if(!this.cellRange)this.cellRange={anchor:this.coord(cell)};
+    this.cellRange.focus=this.coord(next);this.paintRange();this.extendingRange=true;next.focus();this.extendingRange=false;
+  }
+  focusedCell(){const el=document.activeElement;return el?.classList?.contains("cell-display")&&this.root.contains(el)?el:null;}
+  onCopy(event){
+    const cell=this.focusedCell();if(!cell||window.getSelection()?.toString())return;
+    const {rows,cols}=this.rangeCells(cell);if(!rows.length)return;
+    const columns=cols.map((f)=>this.model.board.columns.find((c)=>c.key===f)), byId=new Map(this.model.rows.map((r)=>[String(r.id),r]));
+    const tsv=rows.map((id)=>columns.map((c)=>c?this.model.copyValue(byId.get(String(id)),c):"").join("\t")).join("\n");
+    event.clipboardData.setData("text/plain",tsv);event.preventDefault();
+    const n=rows.length*cols.length;this.view.toast(n===1?"Copied":`Copied ${n} cells`);
+  }
+  // Pasting: tab-separated text from JARC or a spreadsheet, from the focused cell (a single value fills a selected
+  // range). Each value is checked against its column; invalid ones are skipped and reported. Replacing more than one
+  // filled cell asks first. One undo step.
+  onPaste(event){
+    const cell=this.focusedCell();if(!cell||this.model.screen!=="board")return;
+    const text=event.clipboardData?.getData("text/plain");if(typeof text!=="string")return;
+    event.preventDefault();
+    const grid=text.replace(/\r/g,"").replace(/\n$/,"").split("\n").map((line)=>line.split("\t"));
+    const {rows,cols}=this.gridOrder(), range=this.rangeCells(cell), single=grid.length===1&&grid[0].length===1;
+    const startRow=rows.indexOf(range.rows[0]), startCol=cols.indexOf(range.cols[0]);
+    const targets=[];
+    if(single&&this.cellRange?.focus){for(const id of range.rows)for(const field of range.cols)targets.push({id,field,text:grid[0][0]});}
+    else grid.forEach((line,ri)=>line.forEach((value,ci)=>{const id=rows[startRow+ri],field=cols[startCol+ci];if(id!==undefined&&field!==undefined)targets.push({id,field,text:value});}));
+    const byId=new Map(this.model.rows.map((r)=>[String(r.id),r])), changes=[];
+    let skipped=0, overwrites=0;
+    for(const t of targets){
+      const row=byId.get(String(t.id)), column=this.model.board.columns.find((c)=>c.key===t.field);
+      if(!row||!column){skipped+=1;continue;}
+      const value=this.model.pasteValue(column,t.text);
+      if(value===BoardModel.INVALID||(column.required&&!this.model.hasValue(value))){skipped+=1;continue;}
+      if(JSON.stringify(row[t.field]??"")===JSON.stringify(value))continue;
+      if(this.model.hasValue(row[t.field]))overwrites+=1;
+      changes.push({id:row.id,field:t.field,value});
+    }
+    if(!changes.length){this.view.toast(skipped?`Nothing pasted: ${skipped} value${skipped===1?" doesn't":"s don't"} fit ${skipped===1?"its column":"their columns"}`:"Nothing to change");return;}
+    this.pendingPaste={changes,skipped};
+    if(overwrites>1){this.view.showConfirm(`Replace ${overwrites} filled cells?`,`Pasting changes ${changes.length} cell${changes.length===1?"":"s"}, including ${overwrites} that already have values. Undo is available afterwards.`,"confirm-paste","","Replace");return;}
+    this.applyPaste();
+  }
+  applyPaste(){
+    const pending=this.pendingPaste;this.pendingPaste=null;if(!pending)return;
+    const n=this.model.updateCells(pending.changes,"Paste undone");
+    this.update();
+    this.view.toast(`Pasted ${n} cell${n===1?"":"s"}${pending.skipped?` · ${pending.skipped} skipped (not valid for ${pending.skipped===1?"its column":"those columns"})`:""}`,true);
+  }
+  // Delete / Backspace on a focused cell or range: empties the cells that can be emptied (not required ones, not
+  // People/Files/Group). Undo is available.
+  clearCells(cell){
+    const {rows,cols}=this.rangeCells(cell), byId=new Map(this.model.rows.map((r)=>[String(r.id),r])), changes=[];
+    for(const id of rows)for(const field of cols){
+      const row=byId.get(String(id)), column=this.model.board.columns.find((c)=>c.key===field);
+      if(!row||!column||column.required||["owner","files","group"].includes(column.type)||!this.model.hasValue(row[field]))continue;
+      changes.push({id:row.id,field,value:column.type==="checkbox"?false:this.model.isMultiColumn(column)?[]:""});
+    }
+    if(!changes.length)return;
+    const n=this.model.updateCells(changes,"Clear undone");
+    this.update();
+    this.view.toast(`Cleared ${n} cell${n===1?"":"s"}`,true);
+  }
+  // Row order is shared by the whole board, so rows are reordered in Main Table without a sort (never from a view).
+  rowDragBlocked(){ if(this.model.activeView)return "Rows can be reordered in Main Table (row order is shared by every view)."; if(this.model.showArchived)return "Archived records can't be reordered."; if(this.model.sortKey&&!this.model.manualSort)return "Clear the sort to reorder rows by hand."; return ""; }
   openCell(button){
     const id=this.model.idOf(button.dataset.id), field=button.dataset.field, row=this.model.rows.find((r)=>r.id===id), column=this.model.board.columns.find((c)=>c.key===field);
     if(!row||!column)return;
@@ -1112,8 +1223,11 @@ class AppController {
   }
   cellKey(event){
     const cell=event.target, key=event.key; if(event.ctrlKey||event.metaKey||event.altKey)return false;
-    if(key==="Tab"){const next=this.adjacentCell(cell,event.shiftKey?-1:1);if(next){event.preventDefault();next.focus();}return true;}
-    if(key.startsWith("Arrow")){const next=this.adjacentCell(cell,key);if(next){event.preventDefault();next.focus();}return true;}
+    if(event.shiftKey&&key.startsWith("Arrow")){event.preventDefault();this.extendRange(cell,key);return true;}
+    if(key==="Delete"||key==="Backspace"){event.preventDefault();this.clearCells(cell);this.clearRange();return true;}
+    if(key==="Escape"&&this.cellRange){this.clearRange();return true;}
+    if(key==="Tab"){this.clearRange();const next=this.adjacentCell(cell,event.shiftKey?-1:1);if(next){event.preventDefault();next.focus();}return true;}
+    if(key.startsWith("Arrow")){this.clearRange();const next=this.adjacentCell(cell,key);if(next){event.preventDefault();next.focus();}return true;}
     if(key==="F2"){event.preventDefault();cell.click();return true;}
     if(key.length===1&&key!==" "){
       // Typing on a focused text-like cell starts editing with that character; letter shortcuts stay quiet here.

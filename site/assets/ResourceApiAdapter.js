@@ -430,7 +430,7 @@ class ResourceApiAdapter {
     try {
       const { items } = await this.request("GET", `/boards/${boardId}/activity?limit=80`);
       const label = (field) => (field.startsWith("values.") ? board.columns.find((c) => c.key === field.slice(7))?.label || field.slice(7) : field === "groupId" ? "Group" : field.charAt(0).toUpperCase() + field.slice(1));
-      const text = (e) => e.summary || ({ "record.created": "Record created", "record.deleted": "Record deleted", "record.updated": e.changes.length ? `Changed ${e.changes.map((c) => label(c.field)).join(", ")}` : "Record updated" })[e.action] || e.action.replace(/[._]/g, " ");
+      const text = (e) => (e.action === "attachment.added" ? `Added file ${e.summary}` : e.action === "attachment.removed" ? `Removed file ${e.summary}` : "") || e.summary || ({ "record.created": "Record created", "record.deleted": "Record deleted", "record.updated": e.changes.length ? `Changed ${e.changes.map((c) => label(c.field)).join(", ")}` : "Record updated" })[e.action] || e.action.replace(/[._]/g, " ");
       board.load.activity = items.map((e) => ({ id: e.id, text: text(e), at: e.createdAt }));
       board.load.recordActivity = {};
       for (const e of [...items].reverse()) if (e.recordId) (board.load.recordActivity[e.recordId] ||= []).push({ at: e.createdAt, text: text(e), by: e.actorName || "Unknown user" });
@@ -497,6 +497,16 @@ class ResourceApiAdapter {
   blocked() { return new StorageError(StorageError.CODES.INTERNAL_ERROR, "This change would have removed shared data unexpectedly, so it wasn't saved. Reload to see the latest data."); }
 
   async sync(change, data, reconcile) {
+    this.syncCreated = change.op === "moveRecord" ? [] : null;
+    try { return await this.syncChange(change, data, reconcile); } finally { this.syncCreated = null; }
+  }
+  async undoCreated(created, reconcile) {
+    const byBoard = new Map();
+    for (const c of created) (byBoard.get(c.boardId) || byBoard.set(c.boardId, []).get(c.boardId)).push(c);
+    for (const [boardId, list] of byBoard) { try { await this.deleteRecords(boardId, list.map(({ id, expectedVersion }) => ({ id, expectedVersion }))); } catch { /* the original error is reported */ } }
+    for (const c of created) { this.aliases.delete(String(c.from)); reconcile?.ids?.delete(String(c.from)); }
+  }
+  async syncChange(change, data, reconcile) {
     // A per-user change has nothing to send. Comparing its snapshot with the server copy anyway could only misfire:
     // a board's records may still be loading into the model (e.g. right after startup), which looks like deletions
     // and was refused with a false "wasn't saved" error.
@@ -520,7 +530,14 @@ class ResourceApiAdapter {
     await this.syncOrder(target);
     const byBoard = new Map();
     for (const d of deletions) (byBoard.get(d.boardId) || byBoard.set(d.boardId, []).get(d.boardId)).push(d);
-    for (const [boardId, list] of byBoard) await this.deleteRecords(boardId, list);
+    try { for (const [boardId, list] of byBoard) await this.deleteRecords(boardId, list); }
+    catch (error) {
+      // A move copies records to the target board first, then removes the originals. If removing the originals is
+      // refused (e.g. a colleague changed one), the copies are removed again and their IDs forgotten: the move leaves
+      // nothing behind, and the originals stay where they were with their current values.
+      if (change.op === "moveRecord" && this.syncCreated?.length) await this.undoCreated(this.syncCreated, reconcile);
+      throw error;
+    }
     for (const id of goneBoards) await this.deleteBoard(id);
     for (const id of goneWorkspaces) await this.deleteWorkspace(id);
   }
@@ -801,7 +818,7 @@ class ResourceApiAdapter {
       const created = chunk.length === 1
         ? [(await this.request("POST", `/boards/${boardId}/records`, body[0], { kind: "boards" })).record]
         : (await this.request("POST", `/boards/${boardId}/records/batch`, { records: body }, { kind: "boards" })).items;
-      created.forEach((record, n) => { this.records.set(record.id, this.recordFrom(record)); this.alias(chunk[n].row.id, record.id, reconcile); });
+      created.forEach((record, n) => { this.records.set(record.id, this.recordFrom(record)); this.alias(chunk[n].row.id, record.id, reconcile); this.syncCreated?.push({ boardId, id: record.id, expectedVersion: record.version, from: chunk[n].row.id }); });
       board.recordCount += created.filter((r) => !r.archived).length;
     }
   }

@@ -75,7 +75,8 @@ describe("Files column and column guidance (real app, headless browser)", { skip
     assert.ok(await choose(ana, [["site.png", "image/png", "png"], ["invoice.pdf", "application/pdf", "pdf"], ["notes.txt", "text/plain", "hello"]]));
     assert.ok(await ana.waitFor("document.querySelectorAll('.files-popover .file-open').length === 2", 8000), "both files listed after upload");
     assert.match(await ana.evaluate("document.querySelector('.files-popover .file-error')?.textContent || ''"), /Only PDF, JPEG, PNG and WebP/);
-    assert.match(await ana.evaluate("document.querySelector('.files-popover .file-open small').textContent"), /PNG · \d+ B · Ana Reyes ·/);
+    // Uploads finish in any order: find the PNG's row by name.
+    assert.match(await ana.evaluate("[...document.querySelectorAll('.files-popover .file-open')].find((b) => b.querySelector('strong')?.textContent.startsWith('site.png'))?.querySelector('small').textContent || ''"), /PNG · \d+ B · Ana Reyes ·/);
     assert.deepEqual((await serverFiles("F-1")).map((a) => a.name).sort(), ["invoice.pdf", "site.png"], "saved on the server; the text file was never sent");
     assert.equal(await count(ana, `${cell("F-1", "docs")} .file-thumb`), 2, "the cell shows thumbnails");
 
