@@ -52,20 +52,23 @@ Object.assign(AppView.prototype, {
   showGroupMenu(model, name) {
     const editable = !model.board.source?.readOnly, collapsed = model.isGroupCollapsed(name), list = model.board.groups, i = list.indexOf(name);
     const item = (action, ic, label, extra = "") => `<button role="menuitem" data-action="${action}" data-group="${this.attr(name)}" ${extra}>${icon(ic)} ${label}</button>`;
-    const swatches = BoardModel.GROUP_COLORS.map((c) => `<button type="button" role="menuitemradio" aria-checked="${model.groupColor(name) === c.value}" class="color-swatch" data-action="group-color" data-group="${this.attr(name)}" data-color="${c.value}" style="--swatch:${c.value}" aria-label="${c.name}" title="${c.name}"></button>`).join("");
+    const swatch = (c) => `<button type="button" role="menuitemradio" aria-checked="${model.groupColor(name) === c.value}" class="color-swatch" data-action="group-color" data-group="${this.attr(name)}" data-color="${c.value}" style="--swatch:${c.value}" aria-label="${c.name}" title="${c.name}"></button>`;
+    const swatches = BoardModel.GROUP_COLORS.map(swatch).join("") + `</div><div class="swatch-row is-soft" role="group" aria-label="Muted colours">` + BoardModel.GROUP_SOFT.map(swatch).join("") + `</div><div class="swatch-row swatch-actions"><button type="button" class="link-button" data-action="group-rename" data-group="${this.attr(name)}">Custom…</button><button type="button" class="link-button" data-action="group-color-reset" data-group="${this.attr(name)}" ${model.board.groupMeta?.[name]?.color ? "" : "disabled"}>Reset to default</button>`;
     document.querySelector("#overlay-root").innerHTML = `<div class="popover group-menu-popover" role="menu" aria-label="Group ${this.attr(name)}"><div class="popover-title"><strong style="color:${this.cssColor(model.groupColor(name))}">${this.escape(name)}</strong><small>${(n=>`${n} record${n===1?"":"s"}`)(model.groupRows(name).length)}</small></div>
       ${item("group-toggle", "chevron", collapsed ? "Expand this group" : "Collapse this group")}${item("group-collapse-all", "layout", "Collapse all groups")}${item("group-expand-all", "layout", "Expand all groups")}
-      ${editable ? `<div class="menu-divider" role="separator"></div>${item("group-add-record", "plus", "Add record")}${item("group-new-below", "plus", "Add group below")}${item("group-rename", "edit", "Rename group")}<div class="menu-section-label" role="presentation">Group colour</div><div class="swatch-row" role="group" aria-label="Group colour">${swatches}</div>
+      ${editable ? `<div class="menu-divider" role="separator"></div>${item("group-add-record", "plus", "Add record")}${item("group-new-below", "plus", "Add group below")}${item("group-rename", "edit", "Rename group")}<div class="menu-section-label" role="presentation">Group colour · shared</div><div class="swatch-row" role="group" aria-label="Official JARC colours">${swatches}</div>
       <div class="menu-divider" role="separator"></div>${item("group-duplicate", "copy", "Duplicate group")}${item("group-duplicate-records", "copy", "Duplicate with records")}${item("group-move-up", "arrowUp", "Move group up", i <= 0 ? "disabled" : "")}${item("group-move-down", "arrowDown", "Move group down", i >= list.length - 1 ? "disabled" : "")}
       <div class="menu-divider" role="separator"></div>${item("group-archive", "archive", "Archive group", model.activeGroups.length <= 1 ? 'disabled title="A board keeps at least one visible group"' : "")}${item("group-delete", "trash", "Delete group", `class="danger" ${list.length <= 1 ? 'disabled title="A board keeps at least one group"' : ""}`)}` : `<p class="menu-note">This board is synced from monday.com and is read-only.</p>`}
     </div>`;
   },
   showGroupForm(model, { mode = "new", name = "", at = null } = {}) {
     const current = mode === "rename" ? name : model.uniqueGroupName("New group"), color = mode === "rename" ? model.groupColor(name) : model.nextGroupColor();
-    const swatches = BoardModel.GROUP_COLORS.map((c) => `<label class="color-choice" title="${c.name}"><input type="radio" name="color" value="${c.value}" ${c.value === color ? "checked" : ""}><span style="--swatch:${c.value}" aria-hidden="true"></span><span class="sr-only">${c.name}</span></label>`).join("");
+    const own = mode === "rename" ? model.board.groupMeta?.[name]?.color || "" : color, known = [...BoardModel.GROUP_COLORS, ...BoardModel.GROUP_SOFT].some((c) => c.value === own);
+    const swatches = [...BoardModel.GROUP_COLORS, ...BoardModel.GROUP_SOFT].map((c) => `<label class="color-choice" title="${c.name}"><input type="radio" name="color" value="${c.value}" ${c.value === own ? "checked" : ""}><span style="--swatch:${c.value}" aria-hidden="true"></span><span class="sr-only">${c.name}</span></label>`).join("");
     this.overlay(`<form class="modal small-modal group-form" data-action="group-form" data-mode="${mode}" data-group="${this.attr(name)}" data-at="${at ?? ""}"><div class="modal-head"><div><div class="eyebrow">${this.escape(model.board.name)}</div><h2>${mode === "rename" ? "Rename group" : "New group"}</h2></div>${this.closeButton()}</div>
       <label class="field">Group name<input name="name" value="${this.attr(current)}" maxlength="200" required autofocus autocomplete="off"></label>
-      <fieldset class="color-field"><legend>Colour</legend><div class="color-choices">${swatches}</div></fieldset>
+      <fieldset class="color-field"><legend>Colour</legend><div class="color-choices">${swatches}${mode === "rename" ? `<label class="color-choice is-default" title="Default colour"><input type="radio" name="color" value="" ${own ? "" : "checked"}><span aria-hidden="true" style="--swatch:${this.cssColor(color)}">A</span><span class="sr-only">Default colour</span></label>` : ""}</div>
+        <div class="group-color-custom"><label>Custom HEX <input type="text" name="custom" data-action="group-color-hex" value="${own && !known ? this.attr(own) : ""}" placeholder="#00a5a8" maxlength="7" spellcheck="false" autocomplete="off"></label><input type="color" data-action="group-color-picker" value="${this.attr(this.cssColor(color))}" aria-label="Pick a custom group colour"><span class="group-color-preview" style="--group-color:${this.cssColor(color)}" aria-live="polite"><i></i><strong>${this.escape(current)}</strong></span></div></fieldset>
       <div class="modal-actions"><button type="button" class="button secondary" data-action="close-overlay">Cancel</button><button class="button primary" type="submit">${mode === "rename" ? "Save" : "Create group"}</button></div></form>`);
   },
   showGroupDelete(model, name) {
@@ -89,13 +92,33 @@ Object.assign(AppView.prototype, {
   toolbarMenuButton(kind, label, { active = false, iconName = "", title = "" } = {}) {
     return `<button type="button" class="tool-button menu-button ${active ? "active" : ""}" data-action="toolbar-menu" data-menu="${kind}" aria-haspopup="menu" aria-expanded="false" ${title ? `title="${this.attr(title)}"` : ""}>${iconName ? icon(iconName) : ""}<span>${label}</span>${icon("chevron")}</button>`;
   },
+  // The items of one filter section (used by the Filter menu).
+  toolbarMenuSection(model, kind, radio) {
+    radio.kind = kind;
+    let html = "";
+    if (kind === "quick") html = [["all", "All records"], ["mine", "My records"], ["due", "Due soon"], ["recent", "Recently updated"]].map(([v, t]) => radio(v, t, model.quickFilter === v)).join("");
+    if (kind === "status") { const statuses = model.statusColumn?.options?.length ? model.statusColumn.options : [...new Set(model.rows.map((r) => r[model.statusColumn?.key]).filter(Boolean))]; html = radio("All", "All statuses", model.status === "All") + statuses.map((s) => radio(s, this.pill(s, model.optionColor?.(model.statusColumn, s)), model.status === s)).join(""); }
+    if (kind === "person") { const people = [...new Set(model.rows.flatMap((r) => model.valueList(r[model.ownerColumn?.key])))]; html = radio("", "Everyone", !model.personFilter) + people.map((p) => radio(p, `<span class="person-avatar" aria-hidden="true">${this.escape(this.initials(model.personLabel(p)))}</span> ${this.escape(model.personLabel(p))}`, model.personFilter === p)).join(""); }
+    radio.kind = null;
+    return html;
+  },
   showToolbarMenu(model, kind) {
-    const radio = (value, label, on, extra = "") => `<button role="menuitemradio" aria-checked="${on}" class="${on ? "is-selected" : ""}" data-action="toolbar-choose" data-menu="${kind}" data-value="${this.attr(value)}" ${extra}>${label}</button>`;
+    let kindNow = kind;
+    const radio = (value, label, on, extra = "") => `<button role="menuitemradio" aria-checked="${on}" class="${on ? "is-selected" : ""}" data-action="toolbar-choose" data-menu="${this.attr(radio.kind || kindNow)}" data-value="${this.attr(value)}" ${extra}>${label}</button>`;
     let title = "", body = "";
     if (kind === "new") { title = "Create"; body = `<button role="menuitem" data-action="open-form">${icon("plus")} New record</button><button role="menuitem" data-action="group-new">${icon("group")} New group</button>`; }
     if (kind === "quick") { title = "Show"; body = [["all", "All records"], ["mine", "My records"], ["due", "Due soon"], ["recent", "Recently updated"]].map(([v, t]) => radio(v, t, model.quickFilter === v)).join(""); }
     if (kind === "status") { const statuses = model.statusColumn?.options?.length ? model.statusColumn.options : [...new Set(model.rows.map((r) => r[model.statusColumn?.key]).filter(Boolean))]; title = model.statusColumn?.label || "Status"; body = radio("All", "All statuses", model.status === "All") + statuses.map((s) => radio(s, this.pill(s, model.optionColor?.(model.statusColumn, s)), model.status === s)).join(""); }
     if (kind === "person") { title = "Person"; const people = [...new Set(model.rows.flatMap((r) => model.valueList(r[model.ownerColumn?.key])))]; body = radio("", "Everyone", !model.personFilter) + (people.length ? people.map((p) => radio(p, `<span class="person-avatar" aria-hidden="true">${this.escape(this.initials(model.personLabel(p)))}</span> ${this.escape(model.personLabel(p))}`, model.personFilter === p)).join("") : `<p class="menu-note">No one is assigned yet.</p>`); }
+    if (kind === "filter") {
+      // Sections keep their own data-menu (person / status / quick), so each choice applies like its own menu.
+      const sub = (k, t) => { const saved = kind; kind = k; const html = this.toolbarMenuSection(model, k, radio); kind = saved; return html ? `<div class="menu-section-label" role="presentation">${t}</div>${html}` : ""; };
+      title = "Filter";
+      const any = model.personFilter || model.status !== "All" || model.quickFilter !== "all";
+      body = sub("quick", "Show") + (model.statusColumn ? sub("status", this.escape(model.statusColumn.label)) : "") + (model.ownerColumn ? sub("person", "Person") : "") + (any ? `<div class="menu-divider" role="separator"></div><button role="menuitem" data-action="toolbar-clear-filters">${icon("close")} Clear filters</button>` : "");
+      document.querySelector("#overlay-root").innerHTML = `<div class="popover toolbar-menu-popover" role="menu" aria-label="Filter">${body}</div>`;
+      return;
+    }
     if (kind === "groupby") { title = "Group by"; body = radio("", "Board groups", !model.groupBy) + model.groupByColumns.map((c) => radio(c.key, this.escape(c.label), model.groupBy === c.key)).join("") + `<p class="menu-note">Group by changes only how this view is shown.</p>`; }
     document.querySelector("#overlay-root").innerHTML = `<div class="popover toolbar-menu-popover" role="menu" aria-label="${this.attr(title)}"><div class="menu-section-label" role="presentation">${this.escape(title)}</div>${body}</div>`;
   }
@@ -106,6 +129,8 @@ class BoardGroupActions {
   get model() { return this.c.model; }
   get view() { return this.c.view; }
   done(message, undo = true) { this.view.closeOverlay(); this.c.update(); if (message) this.view.toast(message, undo); }
+  // An expanded group's rows fade in (opacity only; skipped for very large groups and with reduced motion).
+  revealGroup(name) { const body = document.querySelector(`.board-group[data-group="${CSS.escape(name)}"]`); if (body && body.rows.length <= 60) this.view.play(body, "group-revealing"); }
 
   onAction(action, target) {
     const model = this.model, name = target.dataset.group ?? "";
@@ -113,7 +138,7 @@ class BoardGroupActions {
     if (readOnly && !["group-menu", "group-toggle", "group-collapse-all", "group-expand-all", "group-archived", "toolbar-menu", "toolbar-choose"].includes(action)) { this.view.toast("This board is synced from monday.com and is read-only"); return; }
     switch (action) {
       case "group-menu": return this.c.togglePanel(`group-menu-${name}`, () => this.view.showGroupMenu(model, name));
-      case "group-toggle": model.toggleGroupCollapsed(name); return this.done();
+      case "group-toggle": { const collapsed = model.toggleGroupCollapsed(name); this.done(); if (!collapsed) this.revealGroup(name); return; }
       case "group-collapse-all": model.collapseAllGroups(true); return this.done();
       case "group-expand-all": model.collapseAllGroups(false); return this.done();
       case "group-archived": return this.c.togglePanel("group-archived", () => this.view.showArchivedGroups(model));
@@ -121,6 +146,7 @@ class BoardGroupActions {
       case "group-new-below": return this.view.showGroupForm(model, { mode: "new", at: model.board.groups.indexOf(name) + 1 });
       case "group-rename": return this.view.showGroupForm(model, { mode: "rename", name });
       case "group-color": if (model.setGroupColor(name, target.dataset.color)) this.done("Group colour changed"); else this.view.closeOverlay(); return;
+      case "group-color-reset": if (model.resetGroupColor(name)) this.done("Group colour reset"); else this.view.closeOverlay(); return;
       case "group-add-record": { this.view.closeOverlay(); if (model.isGroupCollapsed(name)) model.toggleGroupCollapsed(name, false); this.c.update(); const trigger = this.c.root.querySelector(`.board-group[data-group="${CSS.escape(name)}"] [data-action="inline-add"]`); if (trigger) this.c.startInlineAdd(trigger); return; }
       case "group-duplicate": case "group-duplicate-records": { const copy = model.duplicateGroup(name, { withRecords: action === "group-duplicate-records" }); return this.done(copy ? `Created ${copy}${action === "group-duplicate-records" ? " (records copied without files or updates)" : ""}` : ""); }
       case "group-move-up": case "group-move-down": if (model.moveGroup(name, action === "group-move-up" ? -1 : 1)) this.done("Group moved"); return;
@@ -130,6 +156,7 @@ class BoardGroupActions {
       case "group-pick": { const ids = target.dataset.id ? [target.dataset.id] : target.dataset.ids ? target.dataset.ids.split(",").filter(Boolean) : [...model.selected].map(String); if (ids.length) this.c.togglePanel("group-pick", () => this.view.showGroupPicker(model, ids)); return; }
       case "group-move-records": { const ids = String(target.dataset.ids || "").split(",").filter(Boolean); const n = model.moveToGroup(ids, name); if (n) model.selected.clear(); return this.done(n ? `Moved ${n} record${n === 1 ? "" : "s"} to ${name}` : ""); }
       case "toolbar-menu": return this.c.togglePanel(`toolbar-${target.dataset.menu}`, () => this.view.showToolbarMenu(model, target.dataset.menu));
+      case "toolbar-clear-filters": model.quickFilter = "all"; model.status = "All"; model.personFilter = ""; model.selected.clear(); return this.done();
       case "toolbar-choose": {
         const value = target.dataset.value ?? "", kind = target.dataset.menu;
         if (kind === "quick") model.quickFilter = value || "all";
@@ -144,11 +171,12 @@ class BoardGroupActions {
   onSubmit(action, data, form) {
     const model = this.model;
     if (action === "group-form") {
-      const mode = form.dataset.mode, old = form.dataset.group, name = String(data.name || "").trim(), color = String(data.color || "");
+      const mode = form.dataset.mode, old = form.dataset.group, name = String(data.name || "").trim(), custom = String(data.custom || "").trim(), color = BoardModel.isGroupColor(custom) ? custom.toLowerCase() : String(data.color || "");
+      if (custom && !BoardModel.isGroupColor(custom)) { this.view.toast("Use a 6-digit HEX colour like #3b82f6"); return; }
       if (!name) { this.view.toast("Give the group a name"); return; }
       if (mode === "rename") {
         if (name !== old && !model.renameGroup(old, name)) { this.view.showMessage("Group not renamed", "Another group already has that name."); return; }
-        if (color) model.setGroupColor(name, color);
+        if (color) model.setGroupColor(name, color); else model.resetGroupColor(name);
         return this.done("Group updated");
       }
       if (!model.addGroup(name, { color, at: form.dataset.at === "" ? null : Number(form.dataset.at) })) { this.view.showMessage("Group not added", "Use a unique, non-empty group name."); return; }

@@ -29,7 +29,7 @@ async function model({ empty = false, screen = "home" } = {}) {
 function markup(m) {
   const document = { documentElement: { dataset: {}, style: { setProperty() {} } }, querySelector: () => null };
   const context = vm.createContext({ window: {}, document, console, Intl, Date, URL, encodeURIComponent });
-  for (const file of ["AppView.js", "BoardGroups.js", "CommentsPanel.js"]) vm.runInContext(fs.readFileSync(path.join(ASSETS, file), "utf8"), context); // as the page loads them
+  for (const file of ["AppView.js", "IconLibrary.js", "Appearance.js", "BoardGroups.js", "CommentsPanel.js"]) vm.runInContext(fs.readFileSync(path.join(ASSETS, file), "utf8"), context); // as the page loads them
   const root = { innerHTML: "" };
   new context.window.AppView(root).render(m);
   return root.innerHTML;
@@ -49,7 +49,7 @@ describe("Responsive layout (headless browser)", { skip: BROWSER ? false : "no C
   before(async () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "jarc-layout-"));
     const base = "file:///" + ASSETS.split(path.sep).join("/");
-    const css = ["styles.css", "table-clarity.css", "ui-foundation.css"].map((f) => `<link rel="stylesheet" href="${base}/${f}">`).join("");
+    const css = ["styles.css", "table-clarity.css", "ui-foundation.css", "design-system.css"].map((f) => `<link rel="stylesheet" href="${base}/${f}">`).join("");
     const write = (name, html, theme = "dark") => {
       const file = path.join(dir, `${name}.html`);
       fs.writeFileSync(file, `<!doctype html><html data-theme="${theme}" data-density="comfortable"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${css}</head><body><div id="app">${html}</div></body></html>`);

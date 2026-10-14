@@ -556,7 +556,7 @@ class ResourceApiAdapter {
   // ---- Workspaces
   async createWorkspace(w, reconcile) {
     const body = { name: String(w.name || "").trim() || "Untitled workspace", description: w.description || "" };
-    if (typeof w.icon === "string" && w.icon) body.icon = w.icon.slice(0, 4);
+    if (typeof w.icon === "string" && w.icon) body.icon = w.icon.trim().slice(0, 40); // icon:name, emoji or short text (server-validated)
     if (typeof w.color === "string" && /^#[0-9a-f]{3,8}$/i.test(w.color)) body.color = w.color;
     const { workspace } = await this.request("POST", "/workspaces", body, { kind: "workspaces" });
     this.workspaces.set(workspace.id, this.workspaceFrom(workspace));
@@ -570,7 +570,7 @@ class ResourceApiAdapter {
       if (value === undefined) continue;
       if (field === "archived") value = Boolean(value);
       if (field === "name") value = String(value).trim();
-      if (field === "icon") value = String(value).slice(0, 4);
+      if (field === "icon") value = String(value).trim().slice(0, 40);
       if (field === "color" && !(value === "" || /^#[0-9a-f]{3,8}$/i.test(value))) continue;
       if (value !== s[field]) set[field] = value;
     }
@@ -610,7 +610,7 @@ class ResourceApiAdapter {
   static viewState(view) { const { id, name, ...state } = view; return resourceClone(state); }
   async createBoard(workspaceId, b, reconcile) {
     const body = {
-      name: String(b.name || "").trim() || "Untitled board", description: b.description || "", icon: typeof b.icon === "string" && b.icon ? b.icon.slice(0, 4) : "D",
+      name: String(b.name || "").trim() || "Untitled board", description: b.description || "", icon: typeof b.icon === "string" && b.icon ? b.icon.trim().slice(0, 40) : "D",
       archived: Boolean(b.archived), manualOrder: Boolean(b.manualOrder), columns: this.columnsPayload(b.columns),
       groups: ResourceApiAdapter.groupNames(b.groups).map((name) => ({ name })),
       savedViews: (b.savedViews || []).map((v) => ({ name: v.name, state: ResourceApiAdapter.viewState(v) }))
@@ -729,7 +729,7 @@ class ResourceApiAdapter {
 
     // 6. Board fields, column settings, groups and saved views in one versioned PATCH.
     const set = {};
-    const simple = { name: String(b.name ?? "").trim(), description: b.description ?? "", icon: typeof b.icon === "string" ? b.icon.slice(0, 4) : undefined, archived: Boolean(b.archived), manualOrder: Boolean(b.manualOrder) };
+    const simple = { name: String(b.name ?? "").trim(), description: b.description ?? "", icon: typeof b.icon === "string" ? b.icon.trim().slice(0, 40) : undefined, archived: Boolean(b.archived), manualOrder: Boolean(b.manualOrder) };
     for (const [field, value] of Object.entries(simple)) if (value !== undefined && value !== s[field]) set[field] = value;
     if (set.name === "") delete set.name; // the server requires a name; the model never saves an empty one
     const serverColumns = this.columnsPayload(s.columns);

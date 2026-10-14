@@ -95,12 +95,12 @@ describe("Phase 8: groups, toolbar menus and record updates (real app)", { skip:
     await groupMenu(ana, "Later", "group-move-up");
     await saved(ana);
     assert.ok(await click(ana, '.board-group[data-group="Later"] [data-action="group-menu"]'));
-    await ana.waitFor("!!document.querySelector('.group-menu-popover [data-color=\"#0d9488\"]')", 3000);
-    await click(ana, '.group-menu-popover [data-color="#0d9488"]');
+    await ana.waitFor("!!document.querySelector('.group-menu-popover [data-color=\"#00a5a8\"]')", 3000);
+    await click(ana, '.group-menu-popover [data-color="#00a5a8"]');
     await saved(ana);
     let s = await serverBoard();
     assert.deepEqual(s.groups.map((g) => g.name), ["To do", "Doing", "Later", "Done"]);
-    assert.equal(s.groups.find((g) => g.name === "Later").color, "#0d9488");
+    assert.equal(s.groups.find((g) => g.name === "Later").color, "#00a5a8");
     assert.equal((await records()).find((r) => r.values.serial === "Epsilon").groupId, s.groups.find((g) => g.name === "Later").id, "renaming kept the record's group");
     await click(ana, '.board-group[data-group="Done"] [data-action="group-toggle"]');
     assert.ok(await ana.waitFor("document.querySelector('.board-group[data-group=\"Done\"]').classList.contains('is-collapsed')", 3000));
@@ -178,7 +178,7 @@ describe("Phase 8: groups, toolbar menus and record updates (real app)", { skip:
 
   test("toolbar menus are themed (dark and light), work from the keyboard, and Group by changes only the view", async () => {
     await ana.evaluate(`document.documentElement.dataset.theme = "dark"`);
-    await click(ana, '[data-action="toolbar-menu"][data-menu="quick"]');
+    await click(ana, '[data-action="toolbar-menu"][data-menu="filter"]');
     assert.ok(await ana.waitFor("!!document.querySelector('.toolbar-menu-popover')", 3000));
     const dark = await ana.evaluate("getComputedStyle(document.querySelector('.toolbar-menu-popover')).backgroundColor");
     const lum = (c) => { const [r, g, b] = c.match(/\d+/g).map(Number); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
@@ -188,11 +188,11 @@ describe("Phase 8: groups, toolbar menus and record updates (real app)", { skip:
     await ana.key("ArrowDown");
     assert.equal(await ana.evaluate("document.activeElement.textContent"), "My records");
     await ana.key("Enter");
-    assert.ok(await ana.waitFor("/My records/.test(document.querySelector('[data-menu=\"quick\"]')?.textContent || '')", 3000), "keyboard choice applied");
-    await click(ana, '[data-action="toolbar-menu"][data-menu="quick"]'); await ana.waitFor("!!document.querySelector('.toolbar-menu-popover')", 3000);
+    assert.ok(await ana.waitFor("document.querySelector('[data-action=toolbar-menu][data-menu=filter]')?.dataset.quick === 'mine'", 3000), "keyboard choice applied (Filter: My records)");
+    await click(ana, '[data-action="toolbar-menu"][data-menu="filter"]'); await ana.waitFor("!!document.querySelector('.toolbar-menu-popover')", 3000);
     await click(ana, '.toolbar-menu-popover [data-value="all"]');
     await ana.evaluate(`document.documentElement.dataset.theme = "light"`);
-    await click(ana, '[data-action="toolbar-menu"][data-menu="status"]');
+    await click(ana, '[data-action="toolbar-menu"][data-menu="filter"]');
     assert.ok(await ana.waitFor("!!document.querySelector('.toolbar-menu-popover')", 3000));
     assert.ok(lum(await ana.evaluate("getComputedStyle(document.querySelector('.toolbar-menu-popover')).backgroundColor")) > 200, "light menu in light mode");
     await ana.key("Escape");

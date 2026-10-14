@@ -16,7 +16,7 @@ function loadView() {
   const document = { documentElement: { dataset: {}, style: { setProperty() {} } }, querySelector: (sel) => (sel === "#overlay-root" ? overlay : null), body: { classList: { add() {}, remove() {}, contains: () => false } } };
   const window = {};
   const context = vm.createContext({ window, document, console, Intl, Date, URL, encodeURIComponent });
-  vm.runInContext(fs.readFileSync(path.join(ASSETS, "AppView.js"), "utf8"), context, { filename: "AppView.js" });
+  for (const file of ["AppView.js", "IconLibrary.js", "Appearance.js", "BoardGroups.js", "CommentsPanel.js"]) vm.runInContext(fs.readFileSync(path.join(ASSETS, file), "utf8"), context, { filename: file }); // as the page loads them
   const root = { innerHTML: "" };
   return { view: new window.AppView(root), root, overlay };
 }

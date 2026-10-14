@@ -150,7 +150,10 @@ describe("Mobile interactions (real app, headless browser)", { skip: BROWSER ? f
 
   test("phones: every form field is at least 16 px (no iOS zoom on focus) and dialogs stay on screen", async () => {
     const smallest = "[...document.querySelectorAll('input:not([type=checkbox]):not([type=hidden]):not([type=file]):not([type=color]), select, textarea')].filter(e => e.getBoundingClientRect().width).reduce((m, e) => Math.min(m, parseFloat(getComputedStyle(e).fontSize)), 99)";
-    const onScreen = (sel) => `(() => { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) return 'missing'; const r = el.getBoundingClientRect(); return r.left >= -0.5 && r.right <= innerWidth + 0.5 && r.top >= -0.5 && r.bottom <= innerHeight + 0.5; })()`;
+    // Measured once the panel's own entrance animation has finished: drawers slide in from translateX(24px), and under
+    // heavy load (many browsers in parallel) a 350 ms settle could catch the first frame — 24 px past a 320 px screen —
+    // which made this check intermittent. Waiting is bounded (2 s), so a panel that never settles still fails.
+    const onScreen = (sel) => `(async () => { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) return 'missing'; await Promise.race([Promise.all(el.getAnimations().map((a) => a.finished.catch(() => null))), new Promise((r) => setTimeout(r, 2000))]); const r = el.getBoundingClientRect(); return r.left >= -0.5 && r.right <= innerWidth + 0.5 && r.top >= -0.5 && r.bottom <= innerHeight + 0.5; })()`;
     for (const width of [320, 390]) {
       await open(width);
       for (const [trigger, panel] of [[".global-search-button", ".command-modal"], ['[data-action="notifications"]', ".notification-drawer"], ['[data-action="profile-menu"]', ".profile-popover"], ['.page-head [data-action="new-board"]', "#overlay-root .modal"]]) {

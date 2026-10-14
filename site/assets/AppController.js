@@ -3,6 +3,7 @@ class AppController {
     this.root = root; this.auth = new AuthModel(); this.model = new BoardModel(); this.view = new AppView(root);this.view.onUndo=()=>{if(this.busy)return;const label=this.model.undo();this.update();this.view.toast(label);};
     this.integrations = typeof IntegrationsPanel === "function" ? new IntegrationsPanel(this) : null; this.view.integrations = this.integrations;
     this.groupActions = typeof BoardGroupActions === "function" ? new BoardGroupActions(this) : null;
+    this.appearance = typeof AppearanceActions === "function" ? new AppearanceActions(this) : null;
     this.comments = typeof CommentsPanel === "function" ? new CommentsPanel(this) : null;
     this.view.onRecordDrawer = (row) => this.comments?.open(row.id);
     root.addEventListener("click", (event) => this.guard(()=>this.onClick(event)));
@@ -49,7 +50,8 @@ class AppController {
   // Loads stored data before anything data-dependent renders. Loading screen first; failures show the recovery screen
   // with an in-place Retry (no page reload needed).
   async start() {
-    this.ready = false; this.view.renderLoading();
+    // Until the server confirms a session again, nothing personal is shown (neutral JARC Light while loading).
+    this.ready = false; this.view.preAuth = true; this.view.appearanceOwner = null; this.view.applyNeutralAppearance?.(); this.view.renderLoading();
     // Resource mode with Microsoft Entra ID (server AUTH_MODE=entra): a JARC server session (Microsoft sign-in) FIRST; no
     // protected data is requested before that. Other modes keep the temporary sign-in (AuthModel).
     if (this.model.storage.adapter.mode === "resource" && typeof EntraAuth !== "undefined") {
@@ -60,6 +62,8 @@ class AppController {
         this.entra = signIn.entra;
         if (signIn.state !== "signed-in") { this.showEntraGate(signIn.state); return; }
         this.auth = new EntraSession(signIn.entra, signIn.me);
+        // The server confirmed who this is: their own last appearance can show while their data loads (never before).
+        this.view.appearanceOwner = this.auth.userId || null; this.view.applyOwnerAppearance?.(this.view.appearanceOwner);
         // From the server (shown in Settings); the server alone decides what is allowed.
         this.model.permissions = { accessPolicy: signIn.me?.accessPolicy, betaOpenEditing: Boolean(signIn.me?.betaOpenEditing), canCreateWorkspaces: Boolean(signIn.me?.canCreateWorkspaces) };
       }
@@ -77,7 +81,7 @@ class AppController {
       if (this.model.profile.name !== this.auth.username || this.model.profile.email !== this.auth.email || this.model.profile.role !== role) this.model.updateProfile({ name: this.auth.username, email: this.auth.email, role });
     }
     if (this.entra && this.auth.userId) this.model.me = `user:${this.auth.userId}`;
-    this.root.onclick = null; this.ready = true; this.update(); this.integrations?.afterStart();
+    this.root.onclick = null; this.ready = true; this.update(); this.integrations?.afterStart(); this.appearance?.afterStart();
     this.loadPeople(); this.loadFeed(); this.startLive();
     if (!this.feedTimer && this.model.storage.adapter.loadActivityFeed) this.feedTimer = setInterval(() => { if (this.ready && document.visibilityState === "visible") this.loadFeed(); }, 60000);
   }
@@ -323,6 +327,7 @@ class AppController {
     if (action === "entra-sign-out" && this.entra) { this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true, signingOut: true }); this.entra.signOut(); return; }
     if (window.jarcStorage?.connection === "offline" && ["cell-open","set-cell-option","inline-add","open-form","new-item","new-board","add-column","create-workspace","import"].includes(action)) { this.view.toast(StorageError.describe(StorageError.CODES.OFFLINE).message); return; }
     if (action.startsWith("integration-") && this.integrations) { if (target.tagName !== "SELECT") this.integrations.onAction(action, target); return; }
+    if ((action.startsWith("appearance-") || (["icon-picker", "icon-tab", "icon-choose"].includes(action))) && this.appearance) { if (target.tagName !== "INPUT") this.appearance.onAction(action, target); return; }
     if ((action.startsWith("group-") || action.startsWith("toolbar-")) && this.groupActions) { this.lastTrigger = target; this.groupActions.onAction(action, target); return; }
     if (action.startsWith("comment-") && this.comments && action !== "comment-input") { this.comments.onAction(action, target); return; }
     if (action === "drawer-tab") { this.view.selectDrawerTab(target.dataset.tab); if (target.dataset.tab === "updates") document.querySelector('#overlay-root textarea[data-role="new"]')?.focus(); return; }
@@ -355,7 +360,7 @@ class AppController {
     if (action === "open-board") { this.view.closeOverlay();this.model.openBoard(target.dataset.id); this.update(); }
     if (action === "open-record-board") { this.model.openBoard(target.dataset.board,target.dataset.workspace); this.update(); }
     if (action === "collapse-nav") { document.body.classList.toggle("nav-collapsed"); window.jarcStorage.setPreference("navCollapsed",document.body.classList.contains("nav-collapsed")?"1":"0"); }
-    if (action === "toggle-workspace-section") { document.body.classList.toggle("workspace-section-collapsed"); window.jarcStorage.setPreference("workspaceSectionCollapsed",document.body.classList.contains("workspace-section-collapsed")?"1":"0"); }
+    if (action === "toggle-workspace-section") { document.body.classList.toggle("workspace-section-collapsed"); const collapsed=document.body.classList.contains("workspace-section-collapsed"); window.jarcStorage.setPreference("workspaceSectionCollapsed",collapsed?"1":"0"); if(!collapsed)this.view.play(this.root.querySelector(".sidebar .nav-tree"),"section-reveal"); }
     if (action === "workspace-menu") this.togglePanel("workspace",()=>this.view.showWorkspaceMenu(this.model));
     if (action === "create-workspace") this.view.showWorkspaceForm();
     if (action === "record-menu") this.togglePanel(`record-${target.dataset.id}`,()=>this.view.showRecordMenu(this.model.rows.find((row)=>row.id===this.model.idOf(target.dataset.id))));
@@ -385,7 +390,7 @@ class AppController {
     if (action === "pin-item") { this.model.togglePin(target.dataset.id); this.update(); this.view.toast("Pin updated"); }
     if (action === "archive-item") { const row=this.model.rows.find((item)=>item.id===this.model.idOf(target.dataset.id)); const archive=!row.archived; this.model.archiveItem(target.dataset.id,archive); this.update(); this.view.toast(archive?"Record archived":"Record restored",true); }
     if (action === "delete") this.requestDeleteRecords([this.model.idOf(target.dataset.id)]);
-    if (action === "delete-selected") { const ids=[...this.model.selected]; if(ids.length>=10){this.pendingBulkDelete=ids;this.view.showBulkDeleteConfirm(ids.length,this.model.boardFileCount(this.model.board,{recordIds:ids}));} else this.requestDeleteRecords(ids); return; }
+    if (action === "delete-selected") { const ids=[...this.model.selected]; if(ids.length>=10){this.pendingBulkDelete=ids;this.deleteFileInfo(ids).then(({files,unknown})=>this.view.showBulkDeleteConfirm(ids.length,files||(unknown?-1:0)));} else this.requestDeleteRecords(ids); return; }
     // ---- Phase 6 bulk actions (Shift-click selects a range).
     if (action === "select") { const id=this.model.idOf(target.dataset.id); if(event.shiftKey&&this.lastSelected!==undefined&&this.lastSelected!==null&&this.model.visibleRows.some((r)=>r.id===this.lastSelected))this.model.selectRange(this.lastSelected,id,target.checked); else if(target.checked)this.model.selected.add(id); else this.model.selected.delete(id); this.lastSelected=id; this.update(); return; }
     if (action === "bulk-archive" || action === "bulk-restore") { const n=this.model.bulkArchive([...this.model.selected],action==="bulk-archive"); this.update(); if(n)this.view.toast(`${n} record${n===1?"":"s"} ${action==="bulk-archive"?"archived · restore them from Archived records":"restored"}`,true); return; }
@@ -494,7 +499,7 @@ class AppController {
     if (action === "request-delete-workspace") { const workspace=this.model.workspaces.find((w)=>String(w.id)===String(target.dataset.id)), files=workspace?.boards?.some((x)=>x.columns?.some((c)=>c.type==="files")); this.view.showConfirm("Delete workspace?",`All boards and records in this workspace will be deleted${this.model.filesAvailable()?"":" from this browser"}.${files?" Files in Files columns are deleted permanently.":""}`,"confirm-delete-workspace",target.dataset.id); }
     if (action === "confirm-delete-workspace") { const id=target.dataset.payload; this.runBusy(target,()=>this.model.deleteWorkspace(id),()=>{this.view.closeOverlay();this.update();this.view.toast("Workspace deleted",true);}); }
     if (action === "remove-member") { const id=target.dataset.id; this.runBusy(target,()=>this.model.removeMember(id),()=>{this.update();this.view.showSettings(this.model,"members");}); }
-    if (action === "theme") { this.model.updateSetting("theme",target.dataset.theme); this.view.applyDisplay(this.model); this.view.showSettings(this.model); this.markPanel("settings"); }
+    if (action === "theme") { this.model.updateSetting("theme",target.dataset.theme); this.model.updateSetting("palette","default"); this.appearance?.save(); this.view.applyDisplay(this.model); this.view.showSettings(this.model); this.markPanel("settings"); }
     if (action === "invite") this.view.showInvite();
     if (action === "profile-menu") this.togglePanel("profile",()=>this.view.showProfileMenu(this.model,this.auth));
     if (action === "lock-session") { this.auth.lock(); this.update(); }
@@ -530,6 +535,7 @@ class AppController {
   }
 
   onInput(event) {
+    if (this.appearance?.onInput(event.target)) return;
     if (event.target.dataset?.action === "comment-input") { this.comments?.onInput(event.target); return; }
     if (event.target.dataset.action === "cell-option-search") { this.view.filterOptions(event.target.closest(".cell-options-popover"),event.target.value); return; }
     if (event.target.dataset.action === "workspace-search") { const term=event.target.value.toLowerCase(); document.querySelectorAll(".workspace-list > button").forEach((button)=>{button.hidden=!button.textContent.toLowerCase().includes(term);}); return; }
@@ -617,6 +623,7 @@ class AppController {
     if (action === "workspace-settings-form") { this.model.updateWorkspace(this.model.currentWorkspaceId,data); this.update();this.view.showSettings(this.model,"workspace"); this.view.toast("Workspace updated"); }
   }
   onKeydown(event) {
+    if (this.appearance?.onKeydown(event)) return;
     if (event.target.dataset?.action === "comment-input" && this.comments?.onKeydown(event)) return;
     if(this.busy)return;
     if(event.target.dataset?.action==="row-drag"&&event.altKey&&["ArrowUp","ArrowDown"].includes(event.key)&&this.rowDragBlocked()){event.preventDefault();this.view.toast(this.rowDragBlocked());return;}
@@ -667,7 +674,23 @@ class AppController {
     }
   }
 
-  requestDeleteRecords(ids) { if (!ids.length) return; const files=this.model.board?this.model.boardFileCount(this.model.board,{recordIds:ids}):0; this.view.showConfirm(`Delete ${ids.length} record${ids.length===1?"":"s"}?`,files?`The selected data will be removed from this board, and their ${files} attached file${files===1?"":"s"} will be permanently deleted. Undo can restore the records but not the files.`:"The selected data will be removed from this board. Undo remains available afterward.","confirm-delete-records",ids.join(",")); }
+  // The file warning must be right: if this board's file list is still arriving, wait for it (briefly) first; if it
+  // couldn't load, say plainly that attached files would be deleted too.
+  async deleteFileInfo(ids) {
+    const board=this.model.board, id=board?String(this.model.serverId(board.id)):"", hasFiles=Boolean(board?.columns.some((col)=>col.type==="files"));
+    const pending=hasFiles&&this.attachmentLoads?.get(id);
+    if(pending)await Promise.race([pending,new Promise((r)=>setTimeout(r,5000))]);
+    return { files: board?this.model.boardFileCount(board,{recordIds:ids}):0, unknown: hasFiles&&(this.model.attachmentErrors.has(id)||this.model.attachmentLoading.has(id)) };
+  }
+  async requestDeleteRecords(ids) {
+    if (!ids.length) return;
+    const { files, unknown } = await this.deleteFileInfo(ids);
+    const n=ids.length, what=`Delete ${n} record${n===1?"":"s"}?`;
+    const text=files?`The selected data will be removed from this board, and their ${files} attached file${files===1?"":"s"} will be permanently deleted. Undo can restore the records but not the files.`
+      :unknown?"The selected data will be removed from this board. Any files attached to these records will be permanently deleted — Undo can restore the records but not the files."
+      :"The selected data will be removed from this board. Undo remains available afterward.";
+    this.view.showConfirm(what,text,"confirm-delete-records",ids.join(","));
+  }
   // Rows leave with a short slide once the server has confirmed the deletion, then the table re-renders.
   deleteRecords(ids,button=null) { if (!ids.length) return; const rows=ids.map((id)=>this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"]`)); this.runBusy(button,()=>this.model.remove(ids),async()=>{this.view.closeOverlay();await this.animateOut(rows.filter((tr)=>tr?.isConnected));this.update();this.view.toast(`${ids.length===1?"Record":`${ids.length} records`} deleted`,true);}); }
   deleteBoard(id,button=null) { this.runBusy(button,()=>this.model.deleteBoard(id),()=>{this.view.closeOverlay();this.update();this.view.toast("Board deleted",true);}); }
@@ -679,7 +702,8 @@ class AppController {
     if(command==="new-record")this.chooseBoardAction("record");
     if(command==="new-board")this.view.showBoardForm(null);
     if(command==="import")this.chooseBoardAction("import");
-    if(command==="theme"){this.model.updateSetting("theme",document.documentElement.dataset.theme==="dark"?"light":"dark");this.update();}
+    // Toggle light / dark: JARC Default for the other mode, saved for this person (Phase 9C).
+    if(command==="theme"){const next=document.documentElement.dataset.theme==="dark"?"light":"dark";if(this.appearance)this.appearance.setMode(next);else this.model.updateSetting("theme",next);this.update();this.appearance?.save();}
     if(command==="shortcuts")this.view.showShortcuts();
     if(command==="notifications")this.view.showNotifications(this.model);
     if(command==="profile")this.view.showProfileSettings(this.model);
@@ -972,7 +996,8 @@ class AppController {
     // Loading → shown in the Files cells and panel; a failure is shown (with Try again) instead of retrying on every render.
     this.model.attachmentBoards.add(id); this.model.attachmentLoading.add(id); this.model.attachmentErrors.delete(id);
     const startedAt=Date.now();
-    adapter.loadAttachments(id).then((items)=>{this.model.replaceBoardAttachments(id,items,startedAt);},()=>{this.model.attachmentErrors.add(id);}).finally(()=>{this.model.attachmentLoading.delete(id);this.refreshFilesCells();});
+    const load=adapter.loadAttachments(id).then((items)=>{this.model.replaceBoardAttachments(id,items,startedAt);},()=>{this.model.attachmentErrors.add(id);}).finally(()=>{this.model.attachmentLoading.delete(id);this.attachmentLoads?.delete(id);this.refreshFilesCells();});
+    (this.attachmentLoads||=new Map()).set(id,load);
   }
   // Redraws every Files cell on the open board, and the Files panel if one is open.
   refreshFilesCells(){
@@ -1230,6 +1255,8 @@ class AppController {
     this.patchCell(id,field,move!=="none");
     if(!note&&column?.type==="link"&&value.trim()&&value!==input.dataset.original&&!this.view.safeHref(value,"link"))note="Saved as text — only http, https, mailto and tel links can be opened.";
     if(note)this.view.toast(note);
+    // A refused value: the cell briefly shows the problem where it happened (the toast carries the message).
+    if(note&&!(column?.type==="link"&&!column.required&&input.checkValidity()))this.view.play(this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"] td[data-column-key="${CSS.escape(field)}"]`),"cell-rejected");
     if(move==="next"||move==="prev"){const cell=this.cellButton(id,field);(this.adjacentCell(cell,move==="next"?1:-1)||cell)?.focus();}
   }
   cancelCell(input){input.dataset.done="1";this.patchCell(this.model.idOf(input.dataset.id),input.dataset.field,true);}

@@ -210,15 +210,15 @@ describe("Requests, errors and sessions", () => {
     const b = browser();
     const ana = (await signedIn("ana", b)).back;
     const modelA = ana.model(); await modelA.init();
-    modelA.updateSetting("theme", "light"); await modelA.whenSaved();
+    modelA.updateSetting("theme", "dark"); await modelA.whenSaved(); // Ana leaves the default (JARC Default — Light)
     const anaKey = ana.adapter.userKey;
     await (await ana.prepare()).entra.signOut();
     const ben = (await signedIn("ben", b)).back;
     const modelB = ben.model(); await modelB.init();
-    assert.equal(modelB.settings.theme, "dark", "Ben doesn't get Ana's settings");
+    assert.equal(modelB.settings.theme, "light", "Ben doesn't get Ana's settings");
     modelB.updateSetting("density", "compact"); await modelB.whenSaved();
     assert.notEqual(ben.adapter.userKey, anaKey);
-    same(JSON.parse(b.local.getItem(anaKey)).settings.theme, "light");
+    same(JSON.parse(b.local.getItem(anaKey)).settings.theme, "dark");
   });
 
   test("tokens never appear in console output", () => {

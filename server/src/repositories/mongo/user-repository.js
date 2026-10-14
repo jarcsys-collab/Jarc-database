@@ -12,6 +12,8 @@ class UserRepository {
   constructor(db) { this.collection = db.collection(COLLECTIONS.users); }
 
   findById(id) { return this.collection.findOne({ _id: id }); }
+  // Personal preferences (Phase 9C): only the preferences field of the person's own document changes.
+  async setPreferences(id, preferences) { await this.collection.updateOne({ _id: id }, { $set: { preferences } }); }
 
   findByIds(ids) { return ids.length ? this.collection.find({ _id: { $in: ids } }, { limit: 5000 }).toArray() : Promise.resolve([]); }
 

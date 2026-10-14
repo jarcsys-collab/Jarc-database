@@ -1,12 +1,13 @@
 // Request validation for the resource API. Each function returns a new object containing only allowed, checked
 // fields, so request bodies are never passed to MongoDB as they arrive.
 const { fail, requireBody, allowOnly, text, color, bool, finiteNumber, version, queryString, parseId, isObject, isSafeKey } = require("./common");
+const { iconValue } = require("./appearance");
 const { normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, groupColumnOf, checkValue, hasValue, isMultiColumn, valueList, PRIMARY_KEY, LIMITS, COLUMN_TYPES } = require("../domain/board-schema");
 
 const POSITION = { min: -1e15, max: 1e15 };
 
 // ---- Workspaces
-const WORKSPACE_FIELDS = { name: (v) => text(v, "name", { required: true }), description: (v) => text(v, "description", { max: 5000 }), icon: (v) => text(v, "icon", { max: 4 }), color: (v) => color(v), archived: (v) => bool(v, "archived"), position: (v) => finiteNumber(v, "position", POSITION) };
+const WORKSPACE_FIELDS = { name: (v) => text(v, "name", { required: true }), description: (v) => text(v, "description", { max: 5000 }), icon: (v) => iconValue(v), color: (v) => color(v), archived: (v) => bool(v, "archived"), position: (v) => finiteNumber(v, "position", POSITION) };
 
 function pickFields(body, rules) {
   const result = {};
@@ -32,7 +33,7 @@ function workspacePatch(raw) {
 }
 
 // ---- Boards
-const BOARD_SIMPLE_FIELDS = { name: (v) => text(v, "name", { required: true }), description: (v) => text(v, "description", { max: 5000 }), icon: (v) => text(v, "icon", { max: 4 }), archived: (v) => bool(v, "archived"), position: (v) => finiteNumber(v, "position", POSITION), manualOrder: (v) => bool(v, "manualOrder"), nextItemNumber: (v) => wholeNumber(v, "nextItemNumber") };
+const BOARD_SIMPLE_FIELDS = { name: (v) => text(v, "name", { required: true }), description: (v) => text(v, "description", { max: 5000 }), icon: (v) => iconValue(v), archived: (v) => bool(v, "archived"), position: (v) => finiteNumber(v, "position", POSITION), manualOrder: (v) => bool(v, "manualOrder"), nextItemNumber: (v) => wholeNumber(v, "nextItemNumber") };
 const wholeNumber = (v, label) => { if (!Number.isSafeInteger(v) || v < 1 || v > 1e9) fail(`${label} must be a whole number of at least 1.`); return v; };
 
 function boardCreate(raw, { actorId, now }) {

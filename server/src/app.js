@@ -21,6 +21,7 @@ const { fileRoutes } = require("./routes/files");
 const { searchRoutes } = require("./routes/search");
 const { integrationRoutes, integrationPublicRoutes } = require("./routes/integrations");
 const { commentRoutes } = require("./routes/comments");
+const { preferenceRoutes } = require("./routes/preferences");
 const { version } = require("../package.json");
 
 // Larger than any state the frontend can produce today: browser storage caps at roughly 5 MB, and backup and CSV
@@ -80,6 +81,7 @@ function createApp({ repository, environment = "development", enableDevStateApi 
     // Global search across the boards the caller may see.
     if (dataLayer.services?.search) api.use(identify, searchRoutes({ services: dataLayer.services, access }));
     if (dataLayer.services?.comments) api.use(identify, commentRoutes({ services: dataLayer.services, access }));
+    api.use(identify, preferenceRoutes({ repos: dataLayer.repos }));
     if (dataLayer.services?.integration) api.use(identify, integrationRoutes({ integration: dataLayer.services.integration, access }));
     // Live updates (Server-Sent Events) from the activity log; live: { pollMs, overlapMs, timings } for tests.
     const stream = new ActivityStream({ activities: dataLayer.repos.activities, logger, ...(live.pollMs ? { pollMs: live.pollMs } : {}), ...(live.overlapMs ? { overlapMs: live.overlapMs } : {}) });

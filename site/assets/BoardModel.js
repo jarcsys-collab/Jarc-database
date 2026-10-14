@@ -92,7 +92,9 @@ class BoardModel {
     this.screen = saved.screen || "home";
     this.currentView = saved.currentView || "table";
     this.manualSort = Boolean(this.board?.manualOrder);
-    this.settings = { theme: "dark", density: "comfortable", accentColor: "#0f9489", fontSize: "normal", highContrast: false, reduceMotion: false, stickyFirstColumn: true, showInvoiceDate: true, showOwner: true, showPriority: true, showBoardCounts: true, showIcons: true, dateFormat: "DD/MM/YYYY", language: "English", autosave: true, settingsSection: "appearance", ...(saved.settings || {}) };
+    // Appearance defaults: JARC Default — Light, JARC Teal, comfortable (Phase 9C; appearanceVersion 2). A theme
+    // saved by an earlier version is kept as the person left it; only the old built-in accent value moves to JARC Teal.
+    this.settings = BoardModel.migrateAppearance({ theme: "light", palette: "default", density: "comfortable", accentColor: BoardModel.JARC_TEAL, fontSize: "normal", highContrast: false, reduceMotion: false, stickyFirstColumn: true, showInvoiceDate: true, showOwner: true, showPriority: true, showBoardCounts: true, showIcons: true, dateFormat: "DD/MM/YYYY", language: "English", autosave: true, settingsSection: "appearance", ...(saved.settings || {}) });
     this.profile = { name: "medtek", email: "", role: "Workspace admin", initials: "M", avatar: "", color: "#0f9489", presence: "Available", startScreen: "Home", ...(saved.profile || {}) };
     this.notifications = saved.notifications || [];
     this.collapsedGroups = saved.collapsedGroups && typeof saved.collapsedGroups === "object" ? saved.collapsedGroups : {}; // boardId → [group names]
@@ -230,7 +232,8 @@ class BoardModel {
       this.mergeLoadedRecords(boardId, loaded);
     } catch (error) {
       this.boardLoading[boardId] = "error";
-      this.boardLoadError = StorageError.describe(error).message;
+      const failure = StorageError.describe(error);
+      this.boardLoadError = failure.message; this.boardLoadErrorCode = failure.code;
     }
     window.dispatchEvent(new CustomEvent("jarc-board-status", { detail: { boardId } }));
   }
@@ -367,7 +370,7 @@ class BoardModel {
   }
 
   setView(view) { if(["table","list","kanban","calendar"].includes(view)){ this.currentView=view; if(this.board)this.board.lastView=view; this.save({op:"updateUserState",boardId:this.board?.id}); } }
-  updateWorkspace(id, values) { const space=this.workspaces.find((item)=>item.id===id); if(!space)return false; this.snapshot("Workspace update undone"); if(values.name?.trim())space.name=values.name.trim(); if(values.icon!=null)space.icon=String(values.icon||space.name[0]).slice(0,2); if(values.color)space.color=values.color; if(values.description!=null)space.description=String(values.description); this.save({op:"updateWorkspace",workspaceId:id}); return true; }
+  updateWorkspace(id, values) { const space=this.workspaces.find((item)=>item.id===id); if(!space)return false; this.snapshot("Workspace update undone"); if(values.name?.trim())space.name=values.name.trim(); if(values.icon!=null)space.icon=String(values.icon||"").trim().slice(0,40); if(values.color)space.color=values.color; if(values.description!=null)space.description=String(values.description); this.save({op:"updateWorkspace",workspaceId:id}); return true; }
   moveWorkspace(id, direction) { const index=this.workspaces.findIndex((item)=>item.id===id), target=index+(direction==="up"?-1:1); if(index<0||target<0||target>=this.workspaces.length)return false; this.snapshot("Workspace reorder undone"); [this.workspaces[index],this.workspaces[target]]=[this.workspaces[target],this.workspaces[index]]; this.save({op:"updateWorkspace",workspaceId:id,fields:["order"]}); return true; }
   deleteWorkspace(id) { if(!this.workspaces.find(w=>w.id===id)?.archived && this.workspaces.filter(w=>!w.archived).length<=1)throw new Error("Keep at least one active workspace."); if(this.workspaces.length<=1)throw new Error("Keep at least one workspace."); const index=this.workspaces.findIndex((item)=>item.id===id); if(index<0)return; this.snapshot("Workspace deletion undone"); this.workspaces.splice(index,1); if(this.currentWorkspaceId===id){ const next=this.workspaces.find(w=>!w.archived)||this.workspaces[0];this.currentWorkspaceId=next.id; this.currentBoardId=next.boards[0]?.id||""; this.screen="home"; } this.save({op:"deleteWorkspace",workspaceId:id}); }
   moveBoardToWorkspace(boardId,targetWorkspaceId) { const source=this.workspace; const idx=source.boards.findIndex((b)=>b.id===boardId); const target=this.workspaces.find((w)=>w.id===targetWorkspaceId); if(idx<0||!target||target.id===source.id)return false; this.snapshot("Board move undone"); const [board]=source.boards.splice(idx,1); target.boards.push(board); if(this.currentBoardId===boardId){this.currentWorkspaceId=target.id;} this.save({op:"updateBoard",boardId,workspaceId:target.id,fromWorkspaceId:source.id}); return true; }
@@ -392,6 +395,8 @@ class BoardModel {
     this.workspace.boards.push(board); this.openBoard(board.id); this.log("Board created"); this.save({op:"createBoard",boardId:board.id,workspaceId:this.workspace.id}); return board;
   }
 
+  // Board icon (shared): "icon:<name>", one emoji, or "" for the default. The server validates the value.
+  setBoardIcon(id, value) { const board = this.workspaces.flatMap((w) => w.boards).find((b) => String(b.id) === String(this.idOf(id))); if (!board || board.source?.readOnly) return false; const v = String(value || "").trim().slice(0, 40); if ((board.icon || "") === v) return true; this.snapshot("Icon change undone"); board.icon = v; this.save({ op: "updateBoard", boardId: board.id }); return true; }
   renameBoard(id, name) { const board = this.workspace.boards.find((item) => item.id === id); if (board && name.trim()) { this.snapshot("Board rename undone"); board.name = name.trim(); this.log("Board renamed"); this.save({op:"updateBoard",boardId:id}); } }
   duplicateBoard(id) { const source = this.workspace.boards.find((item) => item.id === id); if (!source) return; this.snapshot("Board duplication undone"); const copy = JSON.parse(JSON.stringify(source)); delete copy.source; copy.id = `board-${Date.now()}`; copy.name = `${source.name} copy`; copy.activity = [{ id: Date.now(), text: `Duplicated from ${source.name}`, at: new Date().toISOString() }]; this.workspace.boards.push(copy); this.openBoard(copy.id); this.save({op:"createBoard",boardId:copy.id,workspaceId:this.workspace.id}); }
   deleteBoard(id) {
@@ -441,7 +446,15 @@ class BoardModel {
   // ---- Permanent board groups. A record's group is its group column's value when the board has one, otherwise
   // row["@group"] (filled from the record's groupId; "@" can't appear in a column key or a stored field name check). groupMeta keeps each group's
   // colour and archived flag by name. Collapsing is a per-person view preference (user state), never board data.
-  static GROUP_COLORS = Object.freeze([{name:"Blue",value:"#3b82f6"},{name:"Green",value:"#16a34a"},{name:"Purple",value:"#8b5cf6"},{name:"Orange",value:"#f97316"},{name:"Pink",value:"#ec4899"},{name:"Red",value:"#ef4444"},{name:"Teal",value:"#0d9488"},{name:"Yellow",value:"#ca8a04"},{name:"Indigo",value:"#6366f1"},{name:"Gray",value:"#64748b"}]);
+  // Official JARC group colours, in default order (a group without its own colour takes the one for its position).
+  static GROUP_COLORS = Object.freeze([{name:"JARC Teal",value:"#00a5a8"},{name:"Green",value:"#08ab4b"},{name:"Purple",value:"#7c5cbf"},{name:"Gold",value:"#d39e1a"},{name:"Blue",value:"#3b82f6"},{name:"Red",value:"#e5484d"},{name:"Orange",value:"#f97316"},{name:"Pink",value:"#ec4899"},{name:"Indigo",value:"#6366f1"},{name:"Blue-grey",value:"#64748b"}]);
+  // Softer, eye-friendly tones (shown beside the vivid set in the group colour pickers).
+  static GROUP_SOFT = Object.freeze([{name:"Soft blue",value:"#7aa2e3"},{name:"Soft green",value:"#6dbb8a"},{name:"Lavender",value:"#a594e0"},{name:"Apricot",value:"#e6a06b"},{name:"Rose",value:"#e08aa8"},{name:"Coral",value:"#e38b80"},{name:"Sage",value:"#7fb3a8"},{name:"Sand",value:"#c9ad6e"}]);
+  static JARC_TEAL = "#00a5a8";
+  static LEGACY_ACCENT = "#0f9489"; // the built-in accent before Phase 9C (never a personal choice)
+  // Settings from older versions (no appearanceVersion): the stored theme stays as it was; the old built-in accent
+  // becomes JARC Teal; anything else is kept. Later versions are returned unchanged.
+  static migrateAppearance(settings){if(Number(settings.appearanceVersion)>=2)return settings;const out={...settings,appearanceVersion:2};if(String(out.accentColor||"").toLowerCase()===BoardModel.LEGACY_ACCENT)out.accentColor=BoardModel.JARC_TEAL;if(!out.palette)out.palette="default";return out;}
   static isGroupColor(c){return /^#[0-9a-f]{6}$/i.test(String(c||""));}
   get groupField(){return this.groupColumn?.key||"@group";}
   groupOf(row){return String(row?.[this.groupField]??"").trim();}
@@ -456,6 +469,8 @@ class BoardModel {
   toggleGroupCollapsed(name,force){const id=this.board.id,set=new Set(this.collapsedGroups[id]||[]);const on=force??!set.has(name);if(on)set.add(name);else set.delete(name);this.collapsedGroups[id]=[...set].filter((g)=>this.board.groups.includes(g));this.save({op:"updateUserState"});return on;}
   collapseAllGroups(collapsed){this.collapsedGroups[this.board.id]=collapsed?[...this.board.groups]:[];this.save({op:"updateUserState"});}
   setGroupColor(name,color){if(!this.board.groups.includes(name)||!BoardModel.isGroupColor(color)||this.groupColor(name)===color)return false;this.snapshot("Group colour change undone");this.setGroupMeta(name,{color});this.log(`Changed the colour of group ${name}`);this.save({op:"updateGroups",boardId:this.board.id});return true;}
+  // Back to the default colour (the palette colour for its position); stored as "" on the board.
+  resetGroupColor(name){if(!this.board.groups.includes(name)||!this.board.groupMeta?.[name]?.color)return false;this.snapshot("Group colour change undone");this.setGroupMeta(name,{color:""});this.log(`Reset the colour of group ${name}`);this.save({op:"updateGroups",boardId:this.board.id});return true;}
   moveGroup(name,delta){const list=this.board.groups,i=list.indexOf(name),j=i+Number(delta);if(i<0||j<0||j>=list.length||i===j)return false;this.snapshot("Group move undone");list.splice(i,1);list.splice(j,0,name);this.log(`Moved group ${name}`);this.save({op:"updateGroups",boardId:this.board.id});return true;}
   // Archived groups disappear from the table (their records keep their group) and can be restored. The last visible
   // group can't be archived.
