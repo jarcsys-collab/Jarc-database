@@ -212,8 +212,11 @@ describe("Columns and notifications (real app, headless browser)", { skip: BROWS
     const empty = (await api(ana, "POST", `/workspaces/${ws.id}/boards`, { name: "Empty" })).body.board;
     await ana.open(`${base}/`, { width: 1280, height: 860 }); await ana.waitFor("!!document.querySelector('.app-shell')", 8000);
     await ana.evaluate(`[...document.querySelectorAll('#sidebar .tree-item')].find(b => b.textContent.includes('Empty')).click()`); await sleep(600);
-    await click(ana, ".add-column-button"); await sleep(200);
-    await click(ana, '.chooser-option[data-type="status"]'); await sleep(200);
+    assert.ok(await ana.waitFor("!!document.querySelector('.add-column-button')", 8000), "empty board shown");
+    await click(ana, ".add-column-button");
+    assert.ok(await ana.waitFor("!!document.querySelector('.chooser-option[data-type=\"status\"]')", 8000), "column chooser open");
+    await click(ana, '.chooser-option[data-type="status"]');
+    assert.ok(await ana.waitFor("!!document.querySelector('[data-action=create-column-form]')", 8000), "column form open"); // under load a fixed pause wasn't always enough
     await ana.evaluate("document.querySelector('[data-action=create-column-form]').requestSubmit()"); await saved(ana); await sleep(400);
     const status = (await api(ana, "GET", `/boards/${empty.id}`)).body.board.columns.find((c) => c.type === "status");
     assert.ok(status, "the column exists on the server");

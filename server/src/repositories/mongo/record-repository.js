@@ -32,6 +32,18 @@ class RecordRepository extends VersionedRepository {
     return this.collection.find({ archived: false, $or: clauses }, { projection, limit, maxTimeMS }).toArray();
   }
 
+  // Command Center search: the same per-board clauses, newest-updated first with a stable _id tie-break. Each board
+  // branch walks its board_updated index ({ boardId, updatedAt: -1, _id: -1 }), so the server merges already-sorted
+  // branches and stops after `limit` documents.
+  searchPage(clauses, { projection, limit, maxTimeMS }) {
+    return this.collection.find({ archived: false, $or: clauses }, { projection, sort: { updatedAt: -1, _id: -1 }, limit, maxTimeMS }).toArray();
+  }
+
+  // Item names (and the fields needed to check access) of the given records, at most 200.
+  titles(ids) {
+    return this.collection.find({ _id: { $in: ids.slice(0, 200) } }, { projection: { _id: 1, boardId: 1, workspaceId: 1, archived: 1, "values.serial": 1 }, limit: 200 }).toArray();
+  }
+
   async firstPosition(boardId) {
     const first = await this.collection.findOne({ boardId }, { sort: { position: 1 }, projection: { position: 1 } });
     return first ? first.position - 1000 : 0;

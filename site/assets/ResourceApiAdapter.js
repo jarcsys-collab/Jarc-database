@@ -142,7 +142,7 @@ class ResourceApiAdapter {
   alias(from, to, reconcile) { if (String(from) === String(to)) return; this.aliases.set(String(from), to); reconcile.mapId(from, to); }
 
   // ---- Server documents → adapter copy ------------------------------------------------------------------------
-  workspaceFrom(w) { return { id: w.id, name: w.name, description: w.description, icon: w.icon, color: w.color, archived: w.archived, position: w.position, version: w.version, createdAt: w.createdAt }; }
+  workspaceFrom(w) { return { id: w.id, name: w.name, description: w.description, icon: w.icon, color: w.color, archived: w.archived, position: w.position, version: w.version, createdAt: w.createdAt, ...(w.role ? { role: w.role } : {}) }; }
   boardFrom(b, previous = this.boards.get(b.id)) {
     return {
       id: b.id, workspaceId: b.workspaceId, name: b.name, description: b.description, icon: b.icon, archived: b.archived, position: b.position,
@@ -175,7 +175,7 @@ class ResourceApiAdapter {
   }
   modelWorkspaces(prefs = {}) {
     return [...this.workspaces.values()].sort(byPosition).map((w) => ({
-      id: w.id, name: w.name, description: w.description, icon: w.icon, color: w.color, archived: w.archived, createdAt: w.createdAt,
+      id: w.id, name: w.name, description: w.description, icon: w.icon, color: w.color, archived: w.archived, createdAt: w.createdAt, ...(w.role ? { role: w.role } : {}),
       boards: [...this.boards.values()].filter((b) => b.workspaceId === w.id).sort(byPosition).map((b) => this.modelBoard(b, prefs[b.id]))
     }));
   }
@@ -288,6 +288,8 @@ class ResourceApiAdapter {
   }
   // Global search across every board this person may see (the server applies the access rules).
   async searchRecords(q, { limit = 20 } = {}) { return this.request("GET", `/search?q=${encodeURIComponent(q)}&limit=${limit}`); }
+  // Command Center (Phase 14): params is a URLSearchParams of validated filter values (see CommandCenter.params).
+  async searchGlobal(params) { return this.request("GET", `/search/global?${params.toString()}`); }
   async loadPeople(workspaceId) {
     const id = this.resolve(workspaceId);
     if (!this.workspaces.has(String(id))) return [];

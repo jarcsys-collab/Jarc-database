@@ -436,3 +436,41 @@ td.cell-rejected .cell-display { animation: jarc-cell-reject 700ms var(--ease-ou
 .ap-primary { border-radius: var(--radius-pill); background: var(--accent-fill, var(--accent)); }
 .ap-group-name { color: var(--jarc-teal); }
 .ap-ring { border-radius: var(--radius-pill); }
+
+/* ---- Global Search & Command Center (Phase 14) -------------------------------------------------------------------
+   One rounded dialog: search row, a compact chip row (result type + Filters), an optional filter panel, active-filter
+   chips, then grouped results. Tokens only, so light, dark, custom accents and high contrast all follow. */
+.command-modal { width: min(680px, 100%); }
+.cc-filters { padding: 0 12px 8px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
+.cc-filter-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.cc-chip { display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 11px; border-radius: var(--radius-pill); border: 1px solid var(--line); background: var(--surface); color: var(--muted); font: inherit; font-size: var(--fs-sm); cursor: pointer; }
+.cc-chip:hover { background: var(--hover); color: var(--text); }
+.cc-chip.is-on { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 45%, transparent); color: var(--accent-text); font-weight: 600; }
+.cc-chip .icon { width: 14px; height: 14px; }
+.cc-filter-toggle { margin-left: auto; }
+.cc-filter-toggle b { min-width: 18px; height: 18px; border-radius: var(--radius-pill); background: var(--accent-fill, var(--accent)); color: #fff; font-size: var(--fs-xs); display: inline-grid; place-items: center; padding: 0 5px; }
+.cc-chip:focus-visible, .cc-active-chip:focus-visible, .cc-more:focus-visible, .cc-field select:focus-visible, .cc-field input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.cc-filter-panel { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px 10px; padding: 10px; border-radius: var(--radius-lg); background: var(--surface-2); }
+.cc-field { display: grid; gap: 3px; font-size: var(--fs-xs); color: var(--muted); font-weight: 500; }
+.cc-field select, .cc-field input { height: 32px; min-width: 0; border-radius: var(--radius-md); border: 1px solid var(--line); background: var(--surface); color: var(--text); font: inherit; font-size: var(--fs-sm); padding: 0 8px; color-scheme: light dark; }
+.cc-field select:disabled { opacity: .55; }
+.cc-active { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.cc-active-chip { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 6px 0 10px; border-radius: var(--radius-pill); border: 0; background: var(--accent-soft); color: var(--accent-text); font: inherit; font-size: var(--fs-xs); font-weight: 600; cursor: pointer; }
+.cc-active-chip .icon { width: 12px; height: 12px; }
+.cc-clear { font-size: var(--fs-xs); }
+.command-results button[role=option] { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; }
+.command-results button[role=option] > span:first-of-type { min-width: 0; flex: 1; display: grid; }
+.command-results button strong { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.command-results button small { color: var(--muted); }
+.command-results h3 { display: flex; align-items: center; justify-content: space-between; }
+.cc-clear-history { font-size: var(--fs-xs); text-transform: none; letter-spacing: 0; font-weight: 500; }
+.cc-badges { display: inline-flex; gap: 4px; flex-shrink: 0; }
+.cc-badge { flex-shrink: 0; height: 20px; padding: 0 8px; border-radius: var(--radius-pill); background: var(--surface-2); border: 1px solid var(--line); color: var(--muted); font-size: var(--fs-xs); display: inline-flex; align-items: center; white-space: nowrap; }
+.cc-more { display: flex; align-items: center; gap: 8px; margin: 2px 0 6px; color: var(--accent-text) !important; font-weight: 500; }
+.cc-more .icon { transform: rotate(-90deg); width: 14px; height: 14px; }
+.update-card.is-search-target { box-shadow: 0 0 0 2px var(--focus); border-radius: var(--radius-lg); }
+@media (max-width: 620px) {
+  .cc-filter-toggle { margin-left: 0; }
+  .cc-filter-panel { grid-template-columns: 1fr 1fr; }
+  .cc-badges { display: none; }
+}

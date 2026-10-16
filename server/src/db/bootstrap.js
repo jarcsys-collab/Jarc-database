@@ -92,6 +92,9 @@ const INDEXES = Object.freeze({
   comments: [
     { name: "record_time", key: { recordId: 1, createdAt: 1 } },
     { name: "board_live", key: { boardId: 1, deletedAt: 1 } },
+    // Command Center search (Phase 14): a board's comments newest first, so a search across boards merges sorted
+    // index walks and stops at the page size instead of sorting every matching comment in memory.
+    { name: "board_created", key: { boardId: 1, createdAt: -1, _id: -1 } },
     { name: "workspace", key: { workspaceId: 1 } }
   ],
   integrationOAuthStates: [

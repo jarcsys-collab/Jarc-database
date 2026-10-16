@@ -266,7 +266,7 @@ describe("Phase 8: database setup", () => {
     assert.deepEqual(result.createdCollections, ["comments"]);
     assert.deepEqual(writes().slice(writesBefore), [], "no document writes at all");
     assert.equal(snapshot(), before);
-    assert.deepEqual(db.collection("comments").indexes.map((i) => i.name).sort(), ["_id_", "board_live", "record_time", "workspace"]);
+    assert.deepEqual(db.collection("comments").indexes.map((i) => i.name).sort(), ["_id_", "board_created", "board_live", "record_time", "workspace"], "board_created: Command Center search (Phase 14)");
     assert.deepEqual((await ensureDatabase(db)).createdCollections, [], "running it again changes nothing");
   });
 });

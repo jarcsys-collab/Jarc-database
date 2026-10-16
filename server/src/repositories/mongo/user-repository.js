@@ -13,7 +13,11 @@ class UserRepository {
 
   findById(id) { return this.collection.findOne({ _id: id }); }
   // Personal preferences (Phase 9C): only the preferences field of the person's own document changes.
-  async setPreferences(id, preferences) { await this.collection.updateOne({ _id: id }, { $set: { preferences } }); }
+  // Each part (appearance, navigation) is replaced on its own, so saving one never erases the other.
+  async setPreferences(id, preferences) {
+    const set = Object.fromEntries(Object.entries(preferences).map(([k, v]) => [`preferences.${k}`, v]));
+    await this.collection.updateOne({ _id: id }, { $set: set });
+  }
 
   findByIds(ids) { return ids.length ? this.collection.find({ _id: { $in: ids } }, { limit: 5000 }).toArray() : Promise.resolve([]); }
 

@@ -23,6 +23,12 @@ function sendError(res, status, code, message, details) {
 // JSON 404 for any unknown /api/v1 path, so API calls never receive index.html.
 function apiNotFound(req, res) { sendError(res, 404, "NOT_FOUND"); }
 
+// Logged request path: search text (q and filter values) is personal and never written to the server log.
+const loggedUrl = (req) => {
+  const url = String(req.originalUrl || "");
+  return url.startsWith("/api/v1/search") && url.includes("?") ? `${url.split("?")[0]}?[redacted]` : url;
+};
+
 // Final error middleware. Known errors keep their code; everything else becomes a generic INTERNAL_ERROR.
 function errorHandler(logger) {
   // eslint-disable-next-line no-unused-vars -- Express identifies error middleware by its four arguments.
@@ -34,11 +40,11 @@ function errorHandler(logger) {
     if (isMongoError(error)) {
       const mapped = translateMongoError(error);
       // Server-side only, and redacted: driver messages can name hosts or contain connection strings.
-      if (mapped.status >= 500) logger.error(`[api] ${req.method} ${req.originalUrl} database error: ${error.name}${error.code ? ` ${error.code}` : ""} ${redact(error.message)}`);
+      if (mapped.status >= 500) logger.error(`[api] ${req.method} ${loggedUrl(req)} database error: ${error.name}${error.code ? ` ${error.code}` : ""} ${redact(error.message)}`);
       return sendError(res, mapped.status, mapped.code, mapped.message);
     }
     if (error?.status >= 400 && error?.status < 500) return sendError(res, error.status, "VALIDATION_ERROR");
-    logger.error(`[api] ${req.method} ${req.originalUrl} failed:`, error); // server-side only
+    logger.error(`[api] ${req.method} ${loggedUrl(req)} failed:`, error); // server-side only
     return sendError(res, 500, "INTERNAL_ERROR");
   };
 }

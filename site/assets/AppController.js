@@ -6,6 +6,7 @@ class AppController {
     this.appearance = typeof AppearanceActions === "function" ? new AppearanceActions(this) : null;
     this.comments = typeof CommentsPanel === "function" ? new CommentsPanel(this) : null;
     this.view.onRecordDrawer = (row) => this.comments?.open(row.id);
+    this.command = typeof CommandCenter === "function" ? new CommandCenter(this) : null;
     root.addEventListener("click", (event) => this.guard(()=>this.onClick(event)));
     root.addEventListener("input", (event) => this.onInput(event));
     root.addEventListener("change", (event) => this.guard(()=>this.onChange(event)));
@@ -241,7 +242,11 @@ class AppController {
     this.ensureAttachments(); this.trackRows(); this.reapplyFlashes();
   }
   // Microsoft sign-in screens: "signed-out" | "expired" | "denied" | "error". Shown instead of the app.
-  showEntraGate(state, options = {}) { this.entraGate = state; this.navOpen = false; this.applyNav(); this.view.renderEntraGate(state, this.model, options); }
+  // Someone may use the app now: signed in, and no sign-in gate (an expired, denied or signed-out session) is shown.
+  get signedIn() { return Boolean(this.auth.authenticated) && !this.entraGate; }
+  // A gate means the person's session ended: search results, recents and filters of the Command Center are dropped
+  // before the gate shows, so the next person at this computer can't open them.
+  showEntraGate(state, options = {}) { this.entraGate = state; this.command?.reset(); this.navOpen = false; this.applyNav(); this.view.renderEntraGate(state, this.model, options); }
   entraSignIn() {
     this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true });
     this.entra.signIn().catch(() => this.showEntraGate("error", { message: "Microsoft sign-in couldn't start. Check your connection, then try again." }));
@@ -302,7 +307,8 @@ class AppController {
   focusedControl() {
     const active = document.activeElement;
     if (!active || !this.root.contains(active) || !active.dataset?.action || active.matches("input,textarea,select")) return null;
-    return ["action", "id", "screen", "board", "workspace"].map((k) => active.dataset[k] === undefined ? "" : `[data-${k}="${CSS.escape(active.dataset[k])}"]`).join("");
+    // data-place tells apart controls with the same action (the three search controls: sidebar, top bar, Home).
+    return ["action", "id", "place", "screen", "board", "workspace"].map((k) => active.dataset[k] === undefined ? "" : `[data-${k}="${CSS.escape(active.dataset[k])}"]`).join("");
   }
   refocus(selector) {
     if (!selector || (document.activeElement && document.activeElement !== document.body)) return;
@@ -314,7 +320,7 @@ class AppController {
   // without one; anything else opens "Create workspace" instead of acting on a workspace that doesn't exist.
   static READ_ONLY_BLOCKED = new Set(["add-column","add-group-column","add-group-form","cell-open","set-cell-option","inline-add","open-form","new-item","import","choose-import-file","duplicate-record","duplicate-column","delete","archive-item","pin-item","rename-column","edit-column-options","column-editor","edit-description","manage-groups","request-delete-column","request-delete-group","move-record-board","move-column","edit","files-input","request-remove-file","board-title-inline"]);
   static NO_WORKSPACE_ACTIONS = new Set(["create-workspace","close-overlay","nav","toggle-nav","collapse-nav","toggle-workspace-section","command-palette","run-command","retry-save","dismiss-hint","notifications","notification-filter","mark-notifications","profile-menu","profile-settings","choose-avatar","remove-avatar","set-presence","settings","settings-section","setting","theme","shortcuts","request-logout","confirm-logout","lock-session"]);
-  static NO_WORKSPACE_COMMANDS = new Set(["home","mywork","theme","settings","notifications","shortcuts"]);
+  static NO_WORKSPACE_COMMANDS = new Set(["home","mywork","theme","settings","appearance","notifications","shortcuts"]);
   needsWorkspace(allowed) {
     if (this.model.workspaces.length || allowed) return false;
     this.view.closeOverlay(); this.view.showWorkspaceForm(); return true;
@@ -330,6 +336,7 @@ class AppController {
     if ((action.startsWith("appearance-") || (["icon-picker", "icon-tab", "icon-choose"].includes(action))) && this.appearance) { if (target.tagName !== "INPUT") this.appearance.onAction(action, target); return; }
     if ((action.startsWith("group-") || action.startsWith("toolbar-")) && this.groupActions) { this.lastTrigger = target; this.groupActions.onAction(action, target); return; }
     if (action.startsWith("comment-") && this.comments && action !== "comment-input") { this.comments.onAction(action, target); return; }
+    if (action.startsWith("cc-") && this.command) { if (target.tagName !== "SELECT" && target.tagName !== "INPUT") this.command.onAction(action, target); return; }
     if (action === "drawer-tab") { this.view.selectDrawerTab(target.dataset.tab); if (target.dataset.tab === "updates") document.querySelector('#overlay-root textarea[data-role="new"]')?.focus(); return; }
     if (action === "open-updates") { const row = this.model.rows.find((r) => String(r.id) === String(this.model.idOf(target.dataset.id))); if (row) this.view.showRecordForm(this.model, row, { tab: "updates" }); return; }
     // Boards synchronized from monday.com are read-only (the server refuses changes too; this avoids starting them).
@@ -502,9 +509,9 @@ class AppController {
     if (action === "theme") { this.model.updateSetting("theme",target.dataset.theme); this.model.updateSetting("palette","default"); this.appearance?.save(); this.view.applyDisplay(this.model); this.view.showSettings(this.model); this.markPanel("settings"); }
     if (action === "invite") this.view.showInvite();
     if (action === "profile-menu") this.togglePanel("profile",()=>this.view.showProfileMenu(this.model,this.auth));
-    if (action === "lock-session") { this.auth.lock(); this.update(); }
+    if (action === "lock-session") { this.command?.reset(); this.auth.lock(); this.update(); }
     if (action === "request-logout") this.view.showConfirm("Sign out of Jarc?","Your local board data will remain on this browser.","confirm-logout");
-    if (action === "confirm-logout") { this.auth.logout(); this.update(); }
+    if (action === "confirm-logout") { this.command?.reset(); this.auth.logout(); this.update(); }
     if (action === "profile-settings") this.view.showProfileSettings(this.model);
     if (action === "choose-avatar") document.querySelector("#avatar-file").click();
     if (action === "remove-avatar") { this.model.setAvatar(""); this.view.showProfileSettings(this.model); }
@@ -517,10 +524,10 @@ class AppController {
     if (action === "open-notification" && this.model.feed) { const board=target.dataset.board, workspace=target.dataset.workspace; this.view.closeOverlay(); if(board&&this.model.workspaces.some((w)=>w.id===workspace&&w.boards.some((b)=>b.id===board)))this.model.openBoard(board,workspace); else if(workspace&&this.model.workspaces.some((w)=>w.id===workspace))this.model.switchWorkspace(workspace); else this.view.toast("That item no longer exists."); this.update(); return; }
     if (action === "open-notification") { const item=this.model.notifications.find((note)=>note.boardId===target.dataset.board && note.workspaceId===target.dataset.workspace && !note.read); if(item)item.read=true; this.model.save({op:"updateUserState"}); this.model.openBoard(target.dataset.board,target.dataset.workspace); this.view.closeOverlay(); this.update(); }
     if (action === "command-palette") this.view.showCommandPalette(this.model);
-    if (action === "palette-workspace") { this.model.switchWorkspace(target.dataset.id); this.view.closeOverlay(); this.update(); }
-    if (action === "palette-board") { this.model.openBoard(target.dataset.id,target.dataset.workspace); this.view.closeOverlay(); this.update(); }
-    if (action === "palette-record") { this.openSearchResult(target.dataset.board,target.dataset.workspace,target.dataset.id,target.dataset.title); return; }
-    if (action === "search-retry") { const q=document.querySelector("[data-action=command-search]")?.value||""; this.serverSearch=null; this.scheduleServerSearch(q,0); return; }
+    if (action === "palette-workspace") { this.view.closeOverlay(); if(!this.model.workspaces.some((w)=>w.id===target.dataset.id&&!w.archived)){this.view.toast("That workspace is no longer available.");return;} this.model.switchWorkspace(target.dataset.id); this.update(); }
+    if (action === "palette-board") { this.view.closeOverlay(); try{this.model.openBoard(target.dataset.id,target.dataset.workspace);}catch{this.view.toast("That board is no longer available.");return;} this.update(); }
+    if (action === "palette-record") { this.openSearchResult(target.dataset.board,target.dataset.workspace,target.dataset.id,target.dataset.title,{tab:target.dataset.tab||"fields",commentId:target.dataset.comment||""}); return; }
+    if (action === "search-retry") { this.command?.retry(); return; }
     if (action === "run-command") this.runCommand(target.dataset.command);
     if (action === "global-search") this.view.showGlobalSearch();
     if(action==="move-board"){const choices=this.model.workspaces.filter(w=>w.id!==this.model.currentWorkspaceId&&!w.archived);this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>Move board to workspace</h2>${this.view.closeButton()}</div><div class="choice-list">${choices.map(w=>`<button data-action="apply-move-board" data-id="${this.view.attr(target.dataset.id)}" data-workspace="${this.view.attr(w.id)}">${this.view.escape(w.name)}</button>`).join("")||"<p>Create another workspace to move this board.</p>"}</div></div>`);}
@@ -540,7 +547,7 @@ class AppController {
     if (event.target.dataset.action === "cell-option-search") { this.view.filterOptions(event.target.closest(".cell-options-popover"),event.target.value); return; }
     if (event.target.dataset.action === "workspace-search") { const term=event.target.value.toLowerCase(); document.querySelectorAll(".workspace-list > button").forEach((button)=>{button.hidden=!button.textContent.toLowerCase().includes(term);}); return; }
     if (event.target.dataset.action === "column-picker-search") { this.view.showColumnPicker(this.model,event.target.value); return; }
-    if (event.target.dataset.action === "command-search") { clearTimeout(this.searchTimer); const value=event.target.value; this.searchTimer=setTimeout(()=>{ if(document.querySelector(".command-modal")) this.view.showCommandPalette(this.model,value,this.serverSearchFor(value)); },90); this.scheduleServerSearch(value); return; }
+    if (event.target.dataset.action === "command-search") { this.command?.onInput(event.target.value); return; }
     if (event.target.dataset.action === "column-type-search") {
       const term=event.target.value.trim().toLowerCase(), modal=event.target.closest(".column-chooser"), options=[...modal.querySelectorAll(".chooser-option")];
       options.forEach((b)=>{b.hidden=Boolean(term)&&!b.dataset.search.includes(term);});
@@ -553,6 +560,7 @@ class AppController {
   }
   onChange(event) {
     if (event.target.dataset?.action === "comment-input") return;
+    if (event.target.dataset?.action === "cc-filter") { this.command?.onFilterChange(event.target); return; }
     if (event.target.dataset?.action === "integration-wizard-workspace") { this.integrations?.onAction("integration-wizard-workspace", event.target); return; }
     // Display columns: show/hide one column, or all of them (Item always stays).
     if (event.target.dataset?.action === "column-toggle" || event.target.dataset?.action === "column-toggle-all") {
@@ -632,31 +640,32 @@ class AppController {
       if(target&&this.model.reorderRecord(id,target.id,up?"before":"after")){this.update();this.root.querySelector('[data-action="row-drag"][data-id="'+id+'"]')?.focus();this.view.toast("Row moved",true);}return;
     }
     const editing=event.target.matches?.('input,textarea,select,[contenteditable="true"]');
-    if(!this.auth.authenticated)return;
+    if(!this.signedIn)return; // no shortcuts (Ctrl K included) behind a sign-in screen or gate
     if(event.target.dataset?.action==="cell-input"){this.cellInputKey(event);return;}
     if(event.target.dataset?.action==="draft-input"){this.draftKey(event);return;}
     if(event.target.classList?.contains("cell-display")&&!document.querySelector("#overlay-root")?.children.length&&this.cellKey(event))return;
     // Undo / redo for board changes — never inside text fields (their own undo stays native) or open dialogs.
     if((event.ctrlKey||event.metaKey)&&!event.altKey&&["z","y"].includes(event.key.toLowerCase())&&!editing&&!document.querySelector("#overlay-root")?.children.length&&this.model.screen==="board"){event.preventDefault();this.undoRedo(event.key.toLowerCase()==="y"||event.shiftKey);return;}
-    if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="k"){event.preventDefault();this.view.showCommandPalette(this.model);return;}
+    if(this.isPaletteShortcut(event)){event.preventDefault();if(this.command)this.command.toggle();else this.view.showCommandPalette(this.model);return;}
     if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="b"&&!editing){event.preventDefault();this.toggleSidebar();return;}
     if(event.target.dataset?.action==="column-type-search"&&event.key==="Enter"){event.preventDefault();event.target.closest(".column-chooser")?.querySelector(".chooser-option:not([hidden]):not(:disabled)")?.click();return;}
     if(event.key==="Escape"){
       event.preventDefault();
       if(event.target.dataset.action==="board-title-inline"){event.target.value=event.target.dataset.beforeEdit??event.target.defaultValue;event.target.blur();return;}
-      this.view.closeOverlay();this.setNav(false);return;
+      const palette=Boolean(document.querySelector("#overlay-root .command-modal"));
+      this.view.closeOverlay();this.setNav(false);if(palette)this.command?.restoreFocus();return;
     }
     const root=document.querySelector("#overlay-root");
     if(root?.children.length){
       const palette=root.querySelector(".command-results"), menu=root.querySelector(".popover,.profile-popover");
       const list=palette||menu;
-      if(list&&["ArrowDown","ArrowUp","Enter"].includes(event.key)&&!event.target.matches('select,textarea')){
+      if(list&&["ArrowDown","ArrowUp","Enter"].includes(event.key)&&!event.target.matches('select,textarea,input[type="date"]')&&!(palette&&event.target.closest?.(".cc-filters"))){
         const buttons=[...list.querySelectorAll('button:not(:disabled)')].filter(b=>!b.hidden&&b.offsetParent!==null);if(!buttons.length)return;
         const index=buttons.findIndex(b=>b===document.activeElement||b.classList.contains("keyboard-selected"));
         event.preventDefault();if(event.key==="Enter"){buttons[Math.max(0,index)].click();return;}
         const next=(index+(event.key==="ArrowDown"?1:-1)+buttons.length)%buttons.length;
         buttons.forEach(b=>b.classList.remove("keyboard-selected"));buttons[next].classList.add("keyboard-selected");
-        if(!palette)buttons[next].focus();buttons[next].scrollIntoView({block:"nearest"});return;
+        if(!palette)buttons[next].focus();else this.command?.highlight(buttons[next]);buttons[next].scrollIntoView({block:"nearest"});return;
       }
       if(event.key==="Tab"){
         const focusable=[...root.querySelectorAll('button:not(:disabled),input:not([type="hidden"]):not(:disabled),textarea,select,[tabindex="0"]')].filter(e=>!e.hidden&&e.offsetParent!==null);
@@ -708,6 +717,11 @@ class AppController {
     if(command==="notifications")this.view.showNotifications(this.model);
     if(command==="profile")this.view.showProfileSettings(this.model);
     if(command==="settings")this.view.showSettings(this.model);
+    // Command Center (Phase 14): Appearance settings and board views, through the same model calls as the toolbar.
+    if(command==="appearance"){this.model.updateSetting("settingsSection","appearance");this.view.showSettings(this.model,"appearance");}
+    const onBoard=this.model.screen==="board"&&this.model.board;
+    if(command.startsWith("view:")&&onBoard){const type=command.slice(5);if(type==="table"&&!this.model.activeView&&!this.model.showArchived)this.model.openMainTable();else{this.model.setView(type);this.model.showArchived=false;}this.update();}
+    if(command.startsWith("saved-view:")&&onBoard){const id=command.slice(11);if((this.model.board.savedViews||[]).some((v)=>String(v.id)===id)){this.model.applyView(id);this.update();}else this.view.toast("That view no longer exists.");}
   }
 
   focusItem(id) { requestAnimationFrame(()=>{ const cell=this.cellButton(id,"serial"); cell?.scrollIntoView({block:"nearest",inline:"nearest"}); cell?.focus(); }); }
@@ -1075,37 +1089,39 @@ class AppController {
     if(picker){this.view.showColumnPicker(this.model,query);const back=focusAll?document.querySelector('#overlay-root [data-action="column-toggle-all"]'):focusKey?document.querySelector(`#overlay-root [data-action="column-toggle"][data-key="${CSS.escape(focusKey)}"]`):null;back?.focus();}
     this.view.fitBoard();
   }
-  // ---- Global search (server part): debounced, only the latest query's answer is shown, failures are reported.
-  serverSearchFor(value){const q=String(value||"").trim();return this.serverSearch&&this.serverSearch.q===q?this.serverSearch:null;}
-  scheduleServerSearch(value,delay=250){
-    clearTimeout(this.serverSearchTimer);
-    const q=String(value||"").trim(), adapter=this.model.storage.adapter;
-    if(!adapter.searchRecords||q.length<2||q.length>100){this.serverSearch=null;return;}
-    if(this.serverSearch?.q===q&&this.serverSearch.status!=="error")return;
-    this.serverSearch={q,status:"loading",items:[]};
-    this.serverSearchTimer=setTimeout(async()=>{
-      const seq=(this.serverSearchSeq=(this.serverSearchSeq||0)+1);
-      let next;
-      try{const res=await adapter.searchRecords(q,{limit:20});next={q,status:"done",items:res.items||[],more:Boolean(res.more),partial:Boolean(res.partial)};}
-      catch(error){next={q,status:"error",items:[],message:error?.code==="RATE_LIMITED"?"Too many searches just now.":error?.code==="OFFLINE"?"You're offline, so other boards can't be searched.":"Couldn't search all boards."};}
-      if(seq!==this.serverSearchSeq)return; // a newer search started meanwhile
-      this.serverSearch=next;
-      const input=document.querySelector(".command-modal [data-action=command-search]");
-      if(input&&input.value.trim()===q)this.view.showCommandPalette(this.model,q,next);
-    },delay);
-    if(document.querySelector(".command-modal"))this.view.showCommandPalette(this.model,q,this.serverSearch);
-  }
-  // Opens a record found by search, also on a board not opened yet (waits for its records, then opens the record).
-  async openSearchResult(boardId,workspaceId,recordId,title=""){
+  // Opens a record found by search (Command Center, recents), also on a board not opened yet: waits for its records,
+  // then opens the record's drawer (tab "updates" for an Update, with that update highlighted). A result that went
+  // stale is reported plainly and never replaced by another record: a missing workspace or board stops before
+  // navigating; a deleted, archived or no-longer-accessible record is checked with the server and said so.
+  async openSearchResult(boardId,workspaceId,recordId,title="",{tab="fields",commentId=""}={}){
     this.view.closeOverlay();
+    const space=this.model.workspaces.find((w)=>w.id===workspaceId);
+    if(!space||space.archived){this.view.toast("That workspace is no longer available.");return;}
     try{this.model.openBoard(boardId,workspaceId);}catch{this.view.toast("That board is no longer available.");return;}
     this.update();
     const find=()=>this.model.rows.find((r)=>String(r.id)===String(recordId)||String(this.model.serverId(r.id))===String(recordId));
     for(let i=0;i<100&&!find()&&["loading","none"].includes(this.model.boardLoadState().state);i+=1)await new Promise((r)=>setTimeout(r,100));
     const row=find();
-    if(row){this.update();this.view.showRecordForm(this.model,row);return;}
+    if(row){
+      this.update();this.view.showRecordForm(this.model,row,{tab});
+      if(commentId)for(let i=0;i<30;i+=1){const card=document.querySelector(`#overlay-root .update-card[data-comment="${CSS.escape(commentId)}"]`);if(card){card.classList.add("is-search-target");card.scrollIntoView({block:"center"});break;}await new Promise((r)=>setTimeout(r,100));}
+      return;
+    }
     // Not among the records loaded here (e.g. a very large board): show the board searched for it instead.
-    if(title){this.model.query=title;this.update();this.view.toast(`Showing records matching “${title}”`);}
+    if(this.model.boardLoadState().state==="partial"&&title){this.model.query=title;this.update();this.view.toast(`Showing records matching “${title}”`);return;}
+    const adapter=this.model.storage?.adapter;
+    if(typeof adapter?.searchGlobal==="function"&&/^[0-9a-f]{24}$/.test(String(recordId))){
+      try{const {record}=await adapter.request("GET",`/records/${recordId}`);if(record?.archived){this.view.toast("That record is archived. Open Archived records on this board to restore it.");return;}}
+      catch{this.view.toast("That record was deleted, or you no longer have access to it.");return;}
+    }
+    this.view.toast("That record is no longer on this board.");
+  }
+  // The palette shortcut: ⌘ K on macOS, Ctrl K elsewhere. Typing in a multi-line or rich-text field keeps the key.
+  isPaletteShortcut(event){
+    if(event.altKey||event.shiftKey||String(event.key).toLowerCase()!=="k")return false;
+    const mac=typeof CommandCenter==="function"&&CommandCenter.isMac();
+    if(mac?!event.metaKey:!event.ctrlKey)return false;
+    return !event.target?.matches?.('textarea,[contenteditable="true"]');
   }
   // A colleague's change highlights its cell for 1.6 s. The highlight is remembered, so a redraw of the table in that
   // time (e.g. other live changes arriving) keeps showing it instead of wiping it.

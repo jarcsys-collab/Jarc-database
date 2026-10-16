@@ -8,8 +8,10 @@ class BoardRepository extends VersionedRepository {
   constructor(db) { super(db.collection(COLLECTIONS.boards)); }
 
   // Global search: the non-archived boards of the given workspaces (null = all), only the fields search needs.
-  listForSearch(workspaceIds, { limit }) {
-    return this.collection.find({ archived: false, ...(workspaceIds ? { workspaceId: { $in: workspaceIds } } : {}) }, { sort: { workspaceId: 1, position: 1, _id: 1 }, limit, projection: { _id: 1, workspaceId: 1, columns: 1 } }).toArray();
+  // withNames (Command Center): also the name, icon and read-only source, to show and open board results.
+  listForSearch(workspaceIds, { limit, withNames = false }) {
+    const projection = { _id: 1, workspaceId: 1, columns: 1, ...(withNames ? { name: 1, icon: 1, "source.readOnly": 1 } : {}) };
+    return this.collection.find({ archived: false, ...(workspaceIds ? { workspaceId: { $in: workspaceIds } } : {}) }, { sort: { workspaceId: 1, position: 1, _id: 1 }, limit, projection }).toArray();
   }
 
   listByWorkspace(workspaceId) {

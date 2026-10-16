@@ -123,7 +123,7 @@ describe("Desktop workspace (real app, headless browser, role_based)", { skip: B
     await type("directors");
     assert.equal(await mia.evaluate("document.querySelector('.command-results .search-empty')?.textContent || ''").then((t) => /No matches/.test(t)), true, "empty state");
     assert.equal(await mia.evaluate("window.__requests.filter((u) => /\\/api\\/v1\\/(boards|records|workspaces)/.test(u)).length"), 0, "typing never downloads boards or records");
-    assert.ok(await mia.evaluate("window.__requests.some((u) => u.includes('/api/v1/search?q='))"), "it asks the search endpoint instead");
+    assert.ok(await mia.evaluate("window.__requests.some((u) => u.includes('/api/v1/search/global?q='))"), "it asks the Command Center search endpoint instead");
     // Keyboard: ↓ moves to the first result, Enter opens it.
     await type("JOB-2");
     await mia.key("ArrowDown"); await mia.key("Enter");

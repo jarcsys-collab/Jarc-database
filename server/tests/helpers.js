@@ -76,7 +76,7 @@ const entraEnv = (overrides = {}) => ({ ...TEST_ENTRA, ...overrides });
 
 // The full stack with Microsoft Entra ID sign-in (AUTH_MODE=entra): ID tokens verified against a local test key set,
 // server sessions in the fake MongoDB. No development user exists in this mode.
-async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient(), accessPolicy, live, fileStore = new MemoryFileStore(), monday = null, fetch = undefined, betaOpenEditing = false } = {}) {
+async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient(), accessPolicy, live, fileStore = new MemoryFileStore(), monday = null, fetch = undefined, betaOpenEditing = false, searchLimiter = null } = {}) {
   const { createEntraVerifier } = require("../src/auth/entra-token");
   const connection = new MongoConnection({ uri: "mongodb://fake.invalid", dbName: "jarc_database", createClient: () => fake });
   await connection.connect();
@@ -85,7 +85,7 @@ async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient(),
   const dataLayer = createDataLayer({ connection, logger, fileStore, monday, ...(fetch ? { fetch } : {}) });
   const config = { ...issuer.config, ...entra };
   const verify = createEntraVerifier({ ...config, keySet: issuer.keySet });
-  const started = await startApp({ dataLayer, auth: { mode: "entra", entra: config, verify }, logger, ...(accessPolicy ? { accessPolicy } : {}), ...(betaOpenEditing ? { betaOpenEditing } : {}), ...(live ? { live } : {}) });
+  const started = await startApp({ dataLayer, auth: { mode: "entra", entra: config, verify }, logger, ...(accessPolicy ? { accessPolicy } : {}), ...(betaOpenEditing ? { betaOpenEditing } : {}), ...(searchLimiter ? { searchLimiter } : {}), ...(live ? { live } : {}) });
   return { ...started, fake, connection, dataLayer, db: connection.db, logger, entra: config, fileStore };
 }
 

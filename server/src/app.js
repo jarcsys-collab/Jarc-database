@@ -47,7 +47,7 @@ function resourceModeIndex(siteDir) {
 //   enableDevResourceApi + devActor            the fixed development user (development and test only)
 // accessPolicy: "role_based" (default) or "development_shared" (see auth/access.js). betaOpenEditing: temporary
 // beta collaboration (JARC_BETA_OPEN_EDITING), see auth/access.js.
-function createApp({ repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, live = {}, siteDir = DEFAULT_SITE_DIR, logger = console } = {}) {
+function createApp({ repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console } = {}) {
   if (environment === "production" && (enableDevStateApi || enableDevResourceApi)) {
     throw new Error("Development (pre-auth) APIs can't be enabled in production.");
   }
@@ -79,7 +79,7 @@ function createApp({ repository, environment = "development", enableDevStateApi 
     // Files columns (attachments in GridFS).
     if (dataLayer.services?.files) api.use(identify, fileRoutes({ services: dataLayer.services, access }));
     // Global search across the boards the caller may see.
-    if (dataLayer.services?.search) api.use(identify, searchRoutes({ services: dataLayer.services, access }));
+    if (dataLayer.services?.search) api.use(identify, searchRoutes({ services: dataLayer.services, access, repos: dataLayer.repos, ...(searchLimiter ? { limiter: searchLimiter } : {}) }));
     if (dataLayer.services?.comments) api.use(identify, commentRoutes({ services: dataLayer.services, access }));
     api.use(identify, preferenceRoutes({ repos: dataLayer.repos }));
     if (dataLayer.services?.integration) api.use(identify, integrationRoutes({ integration: dataLayer.services.integration, access }));
