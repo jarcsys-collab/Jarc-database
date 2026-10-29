@@ -20,22 +20,43 @@
 // actions (imports, integrations), membership changes and comment moderation (both need a real membership or the
 // JARC.Admin role), read-only synchronized boards, version checks, CSRF, validation and rate limits. Turning it off
 // restores the configured policy immediately.
+//
+// ACCOUNT_MANAGEMENT=enforced (Phase M4.3, auth/accounts.js) replaces both open-access settings: development_shared and
+// beta open editing are IGNORED (reported as overridden), SYSTEM_ADMIN is only an active Super Admin account, and every
+// membership role is capped by the person's global account role (VIEWER accounts are read-only everywhere). Pending
+// and blocked accounts see nothing. Legacy users (no account yet) keep exactly their membership roles (role_based).
+// staged and off: unchanged from the rules above.
 const { ApiError } = require("../middleware/errors");
 const { notFound } = require("../services/shared");
+const { capWorkspaceRole } = require("./accounts");
 
 const RANK = Object.freeze({ VIEWER: 1, MEMBER: 2, WORKSPACE_ADMIN: 3, SYSTEM_ADMIN: 4 });
 const ACCESS_POLICIES = Object.freeze(["role_based", "development_shared"]);
 const forbidden = (message = "You don't have permission to do this in this workspace.") => new ApiError(403, "FORBIDDEN", message);
 
 class Access {
-  constructor(repos, { policy = "role_based", betaOpenEditing = false } = {}) {
+  constructor(repos, { policy = "role_based", betaOpenEditing = false, accountMode = "off" } = {}) {
     if (!ACCESS_POLICIES.includes(policy)) throw new Error(`Unknown access policy: ${policy}`);
+    if (!["off", "staged", "enforced"].includes(accountMode)) throw new Error(`Unknown account management mode: ${accountMode}`);
     this.repos = repos;
-    this.policy = policy;
-    this.betaOpenEditing = betaOpenEditing === true;
+    this.accountMode = accountMode;
+    this.enforced = accountMode === "enforced";
+    // What the environment asked for, and what is in effect (enforced accounts switch open access off).
+    this.configured = Object.freeze({ policy, betaOpenEditing: betaOpenEditing === true });
+    this.policy = this.enforced ? "role_based" : policy;
+    this.betaOpenEditing = !this.enforced && betaOpenEditing === true;
     // Open access: development_shared, or beta open editing.
-    this.shared = policy === "development_shared" || this.betaOpenEditing;
+    this.shared = this.policy === "development_shared" || this.betaOpenEditing;
   }
+
+  // Open-access settings that are configured but not in effect because accounts are enforced.
+  get overridden() {
+    if (!this.enforced) return [];
+    return [...(this.configured.policy === "development_shared" ? ["ACCESS_POLICY=development_shared"] : []), ...(this.configured.betaOpenEditing ? ["JARC_BETA_OPEN_EDITING=true"] : [])];
+  }
+
+  // The membership role the caller may actually use (enforced accounts: capped by their global role).
+  effective(actor, role) { return this.enforced && actor.account ? capWorkspaceRole(actor.account, role) : role; }
 
   // A role the caller holds in every workspace without a membership (null: memberships decide).
   globalRole(actor) {
@@ -49,7 +70,7 @@ class Access {
     if (actor.isSystemAdmin) return "SYSTEM_ADMIN";
     if (this.shared && !membershipOnly) return "WORKSPACE_ADMIN";
     const membership = await this.repos.memberships.findActive(workspaceId, actor.userId);
-    return membership ? membership.role : null;
+    return membership ? this.effective(actor, membership.role) : null;
   }
 
   async check(actor, workspaceId, minimum, what, options = {}) {
@@ -94,7 +115,7 @@ class Access {
   async visibleRoles(actor) {
     if (this.globalRole(actor)) return null;
     const memberships = await this.repos.memberships.listForUser(actor.userId);
-    return new Map(memberships.map((m) => [m.workspaceId.toHexString(), m.role]));
+    return new Map(memberships.map((m) => [m.workspaceId.toHexString(), this.effective(actor, m.role)]).filter(([, role]) => role));
   }
 
   static atLeast(role, minimum) { return Boolean(role) && RANK[role] >= RANK[minimum]; }

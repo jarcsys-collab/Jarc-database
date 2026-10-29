@@ -30,14 +30,19 @@ class UserRepository {
 
   // Returns the user for this Entra identity, creating it on first sign-in. Simultaneous first sign-ins can't create
   // two users: the unique index rejects the second insert, which then reads the user the first one created.
-  async upsertFromEntra({ tenantId, objectId, displayName, email }, now = new Date()) {
+  async upsertFromEntra(identity, now = new Date()) { return (await this.signInFromEntra(identity, now)).user; }
+
+  // { user, created }. trackAccounts (ACCOUNT_MANAGEMENT staged/enforced): a NEW user starts as a pending account with
+  // no role (auth/accounts.js); existing users are never given an account here (no silent promotion or lock-out).
+  async signInFromEntra({ tenantId, objectId, displayName, email }, now = new Date(), { trackAccounts = false } = {}) {
     const identity = { tenantId, entraObjectId: objectId };
     let user = await this.collection.findOne(identity);
     if (!user) {
-      const doc = { ...identity, source: "entra", displayName, email, emailNormalized: email ? email.toLowerCase() : null, status: "active", createdAt: now, updatedAt: now, lastLoginAt: now };
+      const doc = { ...identity, source: "entra", displayName, email, emailNormalized: email ? email.toLowerCase() : null, status: "active", createdAt: now, updatedAt: now, lastLoginAt: now,
+        ...(trackAccounts ? { firstLoginAt: now, account: { status: "pending", role: null, version: 1, createdAt: now, updatedAt: now } } : {}) };
       try {
         await this.collection.insertOne(doc);
-        return doc;
+        return { user: doc, created: true };
       } catch (error) {
         if (error?.code !== 11000) throw error;
         user = await this.collection.findOne(identity);
@@ -50,8 +55,38 @@ class UserRepository {
       await this.collection.updateOne({ _id: user._id }, { $set: { displayName, email, emailNormalized: email ? email.toLowerCase() : null, lastLoginAt: now, updatedAt: now } });
       user = { ...user, displayName, email, lastLoginAt: now, updatedAt: now };
     }
-    return user;
+    return { user, created: false };
   }
+
+  // ---- Account Management (Phase M4.3)
+  // Every successful sign-in (not only every 15 minutes) when accounts are tracked; firstLoginAt only once.
+  async recordLogin(id, now) {
+    await this.collection.updateOne({ _id: id }, { $set: { lastLoginAt: now } });
+    await this.collection.updateOne({ _id: id, firstLoginAt: { $exists: false } }, { $set: { firstLoginAt: now } });
+  }
+
+  // Signed-in Entra people (the accounts Account Management lists), at most 5000.
+  listEntra() { return this.collection.find({ source: "entra" }, { sort: { createdAt: 1 }, limit: 5000 }).toArray(); }
+
+  countIdentity(tenantId, entraObjectId) { return this.collection.countDocuments({ tenantId, entraObjectId }); }
+  // Users with this email whose identity is NOT the given one (an ambiguous email → identity mapping).
+  async countOthersWithEmail(email, userId) { return (await this.collection.find({ emailNormalized: String(email).toLowerCase() }, { limit: 50 }).toArray()).filter((u) => !u._id.equals(userId)).length; }
+  countSuperAdmins({ session } = {}) { return this.collection.countDocuments({ "account.status": "active", "account.role": "SUPER_ADMIN" }, { session }); }
+  findByIdIn(id, { session } = {}) { return this.collection.findOne({ _id: id }, { session }); }
+
+  // Changes account fields only if the account is still at expectedVersion (0 = a legacy user without an account), and
+  // bumps the version, so two administrators can't overwrite each other's change. Returns the updated user or null.
+  async updateAccount(id, expectedVersion, fields, now, { session } = {}) {
+    const filter = expectedVersion === 0 ? { _id: id, account: { $exists: false } } : { _id: id, "account.version": expectedVersion };
+    const set = { "account.version": expectedVersion + 1, "account.updatedAt": now, updatedAt: now };
+    for (const [k, v] of Object.entries(fields)) set[`account.${k}`] = v;
+    if (expectedVersion === 0) set["account.createdAt"] = now;
+    return this.collection.findOneAndUpdate(filter, { $set: set }, { session, returnDocument: "after" });
+  }
+
+  // Marks the administrator's own document inside an account-change transaction, so two administrators changing each
+  // other at the same moment conflict (one is retried) instead of both succeeding (e.g. removing the last Super Admin).
+  async touchAccountActor(id, now, { session } = {}) { await this.collection.updateOne({ _id: id }, { $set: { "account.lastActionAt": now } }, { session }); }
 
   // Creates the development actor once (upsert on its fixed devKey) and returns it.
   async ensureDevelopmentUser({ devKey, displayName, now }) {

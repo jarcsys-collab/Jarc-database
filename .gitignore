@@ -37,3 +37,8 @@ ehthumbs.db
 
 # Local design references and review screenshots (never committed)
 design-references/
+
+# monday.com migration: local token and private extraction output (never committed)
+.env.monday
+monday-extraction/
+monday-migration/

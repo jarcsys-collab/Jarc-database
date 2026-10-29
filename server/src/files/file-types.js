@@ -14,16 +14,26 @@ const TYPES = Object.freeze({
 // A safe display/download name: no folders, no control or reserved characters, no invisible direction overrides
 // (which can make "report<U+202E>fdp.exe" look like a PDF), at most 200 characters, and an
 // extension that matches the file's type. Returns null when nothing usable is left.
-function cleanFileName(raw, type) {
+// Migration only (never accepted by the upload API): files carried over from monday.com that JARC stores and offers
+// as downloads but never shows in the page. CSV is checked to be text (no NUL bytes in its first bytes); HEIC by its
+// ISO-BMFF "ftyp" brand. HEIC originals are preserved; a JPEG rendition can be added next to them later.
+const HEIC_BRANDS = new Set(["heic", "heix", "hevc", "hevx", "heim", "heis", "mif1", "msf1"]);
+const MIGRATION_TYPES = Object.freeze({
+  ...TYPES,
+  "text/csv": { label: "CSV", extensions: ["csv"], downloadOnly: true, matches: (b) => b.length > 0 && !b.includes(0x00) },
+  "image/heic": { label: "HEIC", extensions: ["heic", "heif"], downloadOnly: true, matches: (b) => b.length >= 12 && b.subarray(4, 8).toString("latin1") === "ftyp" && HEIC_BRANDS.has(b.subarray(8, 12).toString("latin1")) }
+});
+
+function cleanFileName(raw, type, types = TYPES) {
   let name = String(raw ?? "");
   try { name = decodeURIComponent(name); } catch { /* keep as sent */ }
   name = name.split(/[\\/]/).pop().replace(/[\u0000-\u001f\u007f<>:"|?*]/g, "").replace(/[​-‏‪-‮⁦-⁩﻿]/g, "").replace(/\s+/g, " ").trim().replace(/^\.+/, "");
   if (!name) return null;
   const ext = (name.includes(".") ? name.split(".").pop() : "").toLowerCase();
-  const allowed = TYPES[type]?.extensions || [];
+  const allowed = types[type]?.extensions || [];
   if (!allowed.includes(ext)) name = `${name}.${allowed[0]}`;
   if (name.length > 200) { const suffix = name.slice(name.lastIndexOf(".")); name = name.slice(0, 200 - suffix.length) + suffix; }
   return name;
 }
 
-module.exports = { TYPES, MAX_FILE_BYTES, MAX_FILES_PER_CELL, SNIFF_BYTES, cleanFileName };
+module.exports = { TYPES, MIGRATION_TYPES, MAX_FILE_BYTES, MAX_FILES_PER_CELL, SNIFF_BYTES, cleanFileName };

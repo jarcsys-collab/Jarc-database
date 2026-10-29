@@ -22,6 +22,7 @@ const { searchRoutes } = require("./routes/search");
 const { integrationRoutes, integrationPublicRoutes } = require("./routes/integrations");
 const { commentRoutes } = require("./routes/comments");
 const { preferenceRoutes } = require("./routes/preferences");
+const { accountRoutes } = require("./routes/accounts");
 const { version } = require("../package.json");
 
 // Larger than any state the frontend can produce today: browser storage caps at roughly 5 MB, and backup and CSV
@@ -46,19 +47,27 @@ function resourceModeIndex(siteDir) {
 //   auth = { mode: "entra", entra, verify }   Microsoft Entra ID sign-in → server session cookie (required in production)
 //   enableDevResourceApi + devActor            the fixed development user (development and test only)
 // accessPolicy: "role_based" (default) or "development_shared" (see auth/access.js). betaOpenEditing: temporary
-// beta collaboration (JARC_BETA_OPEN_EDITING), see auth/access.js.
-function createApp({ repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console } = {}) {
+// beta collaboration (JARC_BETA_OPEN_EDITING), see auth/access.js. accounts: Account Management (Phase M4.3,
+// auth/accounts.js) { mode: off | staged | enforced, superAdmin }; Entra sign-in only.
+function createApp({ repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console } = {}) {
   if (environment === "production" && (enableDevStateApi || enableDevResourceApi)) {
     throw new Error("Development (pre-auth) APIs can't be enabled in production.");
   }
   if (auth && (auth.mode !== "entra" || typeof auth.verify !== "function" || !auth.entra)) throw new Error("createApp auth must be Entra ID token validation.");
   if (auth && enableDevResourceApi) throw new Error("Choose either Entra ID authentication or the development actor, not both.");
+  const accountMode = accounts?.mode || "off";
+  if (accountMode !== "off" && !auth) throw new Error("Account Management needs Microsoft Entra ID sign-in.");
+  // Production: observation mode (staged) only until enforcement is separately approved (config refuses it too).
+  if (accountMode === "enforced" && environment === "production") throw new Error("ACCOUNT_MANAGEMENT=enforced is not approved for production yet.");
   const app = express();
   app.disable("x-powered-by");
   app.use((req, res, next) => { res.set("X-Content-Type-Options", "nosniff"); next(); });
 
   const api = express.Router();
-  api.use(express.json({ limit: JSON_BODY_LIMIT, strict: true }));
+  // inflate: false — compressed (gzip/deflate/br) request bodies are refused with 415 before anything is read or
+  // decompressed. JARC's browser app never sends them, and this parser runs before authentication, so decompression
+  // would be reachable without signing in (body-parser advisory GHSA-27r3-jxmh-p828).
+  api.use(express.json({ limit: JSON_BODY_LIMIT, strict: true, inflate: false }));
   api.use(healthRoutes({ environment, version, database: dataLayer?.connection ?? null }));
   api.use(authConfigRoutes({ mode: auth ? "entra" : "dev", entra: auth?.entra }));
   if (enableDevStateApi) {
@@ -68,14 +77,16 @@ function createApp({ repository, environment = "development", enableDevStateApi 
   if (enableDevResourceApi || auth) {
     if (!dataLayer) throw new Error("createApp needs a data layer for the resource API.");
     if (enableDevResourceApi && !devActor) throw new Error("createApp needs the development actor for the development resource API.");
-    const access = new Access(dataLayer.repos, { policy: accessPolicy, betaOpenEditing });
+    const access = new Access(dataLayer.repos, { policy: accessPolicy, betaOpenEditing, accountMode });
+    const accountService = accountMode !== "off" ? dataLayer.services.accounts.configure({ mode: accountMode, superAdmin: accounts.superAdmin || null, entra: auth.entra, environment }) : null;
     // monday.com OAuth return and webhooks: no JARC session (each has its own protection).
     if (dataLayer.services?.integration) api.use(integrationPublicRoutes({ integration: dataLayer.services.integration }));
-    if (auth) api.use(signInRoutes({ entra: auth.entra, verify: auth.verify, repos: dataLayer.repos, access }));
-    const identify = auth ? sessionAuthentication({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users, entra: auth.entra }) : devActorMiddleware(devActor, { environment });
+    if (auth) api.use(signInRoutes({ entra: auth.entra, verify: auth.verify, repos: dataLayer.repos, access, accounts: accountService }));
+    const identify = auth ? sessionAuthentication({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users, entra: auth.entra, accountMode }) : devActorMiddleware(devActor, { environment });
     // Everything after `identify` requires a caller (in Entra mode, a valid session — including unknown paths).
-    if (auth) api.use(identify, sessionRoutes({ repos: dataLayer.repos, access }));
-    api.use(identify, meRoutes({ repos: dataLayer.repos, mode: auth ? "entra" : "dev", access }), memberRoutes({ services: dataLayer.services, access }), resourceRoutes({ services: dataLayer.services, access }));
+    if (auth) api.use(identify, sessionRoutes({ repos: dataLayer.repos, access, accounts: accountService }));
+    if (accountService) api.use(identify, accountRoutes({ services: dataLayer.services, repos: dataLayer.repos }));
+    api.use(identify, meRoutes({ repos: dataLayer.repos, mode: auth ? "entra" : "dev", access }), memberRoutes({ services: dataLayer.services, access, repos: dataLayer.repos }), resourceRoutes({ services: dataLayer.services, access }));
     // Files columns (attachments in GridFS).
     if (dataLayer.services?.files) api.use(identify, fileRoutes({ services: dataLayer.services, access }));
     // Global search across the boards the caller may see.

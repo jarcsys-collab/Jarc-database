@@ -8,7 +8,7 @@ const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("path");
 const { spawn } = require("child_process");
-const { findBrowser, launch, sleep, freePort } = require("./support/headless-browser");
+const { findBrowser, launch, sleep, freePort, waitForServer } = require("./support/headless-browser");
 
 const BROWSER = findBrowser();
 const COLUMNS = [{ key: "serial", label: "Item", type: "text", required: true }, { key: "status", label: "Status", type: "status", options: ["Medium", "Critical", "Done"] }, { key: "qty", label: "Qty", type: "number" }, { key: "notes", label: "Notes", type: "text" }];
@@ -45,7 +45,7 @@ describe("Phase 9D: motion, menus, states and shared-computer sign-in (real app)
     const port = await freePort();
     base = `http://localhost:${port}`;
     server = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port), "shared"], { stdio: "ignore" });
-    for (let i = 0; i < 100; i += 1) { try { await fetch(`${base}/api/v1/health`); break; } catch { await sleep(100); } }
+    await waitForServer(base, { child: server });
     b = await launch(BROWSER); browsers.push(b);
     await b.send("Page.addScriptToEvaluateOnNewDocument", { source: ERROR_TRAP });
     await b.motionPreference("no-preference");

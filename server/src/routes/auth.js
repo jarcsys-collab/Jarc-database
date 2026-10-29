@@ -12,17 +12,31 @@
 //   POST /api/v1/auth/sign-out        ends the session (CSRF-protected like every other change)
 //   GET  /api/v1/me                   the user's display details, admin flag and workspace roles
 // Signed-in responses also carry the access policy and whether the caller may create workspaces (display only; every
-// request is still authorized by the server).
+// request is still authorized by the server). The policy and beta flag are the ones IN EFFECT (ACCOUNT_MANAGEMENT=
+// enforced switches both open-access settings off). With Account Management on (staged/enforced) they add
+// `account` { status, role, legacy } and `accountManagement` { mode, enforced, overridden, canManage, canClaimSuperAdmin }.
 const express = require("express");
 const { allowOnly, requireBody } = require("../validation/common");
 const { userToApi } = require("../api/serialize");
 const { InvalidTokenError, AuthUnavailableError } = require("../auth/entra-token");
 const { readCookie, cookieHeader, clearCookie, csrfTokenFor, originAllowed, randomSecret, SESSION_COOKIE, SIGN_IN_COOKIE } = require("../auth/session");
 const { sendError } = require("../middleware/errors");
+const { accountOf, isActiveSuperAdmin } = require("../auth/accounts");
 
 const SIGN_IN_ATTEMPT_MS = 10 * 60 * 1000;
 const SCOPES = Object.freeze(["openid", "profile", "email"]);
-const permissionsOf = (access, actor) => ({ accessPolicy: access.policy, betaOpenEditing: Boolean(access.betaOpenEditing), canCreateWorkspaces: access.canManageWorkspaces(actor) });
+const permissionsOf = (access, actor, { canClaimSuperAdmin = false } = {}) => ({
+  accessPolicy: access.policy, betaOpenEditing: Boolean(access.betaOpenEditing), canCreateWorkspaces: access.canManageWorkspaces(actor),
+  ...(access.accountMode === "off" ? {} : {
+    account: actor.account ? { status: actor.account.legacy ? "legacy" : actor.account.status, role: actor.account.role, legacy: actor.account.legacy } : null,
+    accountManagement: { mode: access.accountMode, enforced: access.enforced, overridden: access.overridden, canManage: isActiveSuperAdmin(actor.account), canClaimSuperAdmin }
+  })
+});
+// Only the configured administrator's own session runs the (few) eligibility queries.
+async function claimable(accounts, actor, session) {
+  if (!accounts?.tracking || !accounts.superAdmin || !session || String(session.objectId).toLowerCase() !== accounts.superAdmin.objectId || isActiveSuperAdmin(actor.account)) return false;
+  return (await accounts.eligibility(actor, session)).eligible;
+}
 
 function authConfigRoutes({ mode, entra }) {
   const router = express.Router();
@@ -37,7 +51,7 @@ function authConfigRoutes({ mode, entra }) {
 }
 
 // Sign-in: nonce, then ID token → session. Mounted before session authentication (no session exists yet).
-function signInRoutes({ entra, verify, repos, access }) {
+function signInRoutes({ entra, verify, repos, access, accounts = null }) {
   const router = express.Router();
   const sessionLifetimeMs = entra.sessionMaxHours * 60 * 60 * 1000;
   const idleMs = entra.sessionIdleMinutes * 60 * 1000;
@@ -67,26 +81,33 @@ function signInRoutes({ entra, verify, repos, access }) {
       if (error instanceof AuthUnavailableError) return sendError(res, 503, "SERVICE_UNAVAILABLE", "Sign-in can't be checked right now. Try again in a moment.");
       throw error;
     }
-    const user = await repos.users.upsertFromEntra(identity);
+    const tracking = access.accountMode !== "off";
+    const now = new Date();
+    const { user, created } = await repos.users.signInFromEntra(identity, now, { trackAccounts: tracking });
     if (user.status !== "active") return sendError(res, 403, "ACCOUNT_DISABLED", "Your JARC account is disabled. Contact a JARC administrator.");
+    const account = tracking ? accountOf(user) : null;
+    if (account && !account.legacy && account.status === "blocked") return sendError(res, 403, "ACCOUNT_DISABLED", "Your JARC account is blocked. Contact a JARC administrator.");
     // A new session every time (never reuse an earlier cookie's session).
     const previous = readCookie(req, SESSION_COOKIE);
     if (previous) await repos.sessions.removeBySecret(previous);
-    const sessionSecret = randomSecret(), now = new Date();
+    const sessionSecret = randomSecret();
     const session = await repos.sessions.create({ sessionSecret, userId: user._id, tenantId: identity.tenantId, objectId: identity.objectId, isSystemAdmin: identity.isSystemAdmin, now, idleMs, maxMs: sessionLifetimeMs });
+    await accounts?.onSignIn(user, created, now);
     res.append("Set-Cookie", cookieHeader(SESSION_COOKIE, sessionSecret, sessionLifetimeMs / 1000));
-    res.status(201).set("Cache-Control", "no-store").json({ user: userToApi(user), isSystemAdmin: identity.isSystemAdmin, ...permissionsOf(access, identity), csrfToken: csrfTokenFor(sessionSecret), expiresAt: session.expiresAt.toISOString() });
+    // The same rules the session check applies to every later request (auth/session.js).
+    const actor = { userId: user._id, kind: "entra", account, hasAdminAppRole: identity.isSystemAdmin, isSystemAdmin: access.enforced ? isActiveSuperAdmin(account) : identity.isSystemAdmin };
+    res.status(201).set("Cache-Control", "no-store").json({ user: userToApi(user), isSystemAdmin: actor.isSystemAdmin, ...permissionsOf(access, actor, { canClaimSuperAdmin: await claimable(accounts, actor, session) }), csrfToken: csrfTokenFor(sessionSecret), expiresAt: session.expiresAt.toISOString() });
   });
   return router;
 }
 
 // Mounted after session authentication.
-function sessionRoutes({ repos, access }) {
+function sessionRoutes({ repos, access, accounts = null }) {
   const router = express.Router();
   router.get("/auth/session", async (req, res) => {
     allowOnly(req.query, [], "the query");
     const [user, session] = await Promise.all([repos.users.findById(req.actor.userId), repos.sessions.findBySecret(req.sessionSecret)]);
-    res.set("Cache-Control", "no-store").json({ user: userToApi(user), isSystemAdmin: req.actor.isSystemAdmin, ...permissionsOf(access, req.actor), csrfToken: csrfTokenFor(req.sessionSecret), expiresAt: session.expiresAt.toISOString(), idleExpiresAt: session.idleExpiresAt.toISOString() });
+    res.set("Cache-Control", "no-store").json({ user: userToApi(user), isSystemAdmin: req.actor.isSystemAdmin, ...permissionsOf(access, req.actor, { canClaimSuperAdmin: await claimable(accounts, req.actor, session) }), csrfToken: csrfTokenFor(req.sessionSecret), expiresAt: session.expiresAt.toISOString(), idleExpiresAt: session.idleExpiresAt.toISOString() });
   });
   router.post("/auth/sign-out", async (req, res) => {
     allowOnly(req.query, [], "the query");
@@ -102,10 +123,11 @@ function meRoutes({ repos, mode, access }) {
   router.get("/me", async (req, res) => {
     allowOnly(req.query, [], "the query");
     const user = await repos.users.findById(req.actor.userId);
-    const memberships = await repos.memberships.listForUser(req.actor.userId);
+    // A pending (enforced) account sees no workspace IDs; otherwise each role as it is in effect.
+    const memberships = access.enforced && req.actor.account && !req.actor.account.legacy && req.actor.account.status !== "active" ? [] : await repos.memberships.listForUser(req.actor.userId);
     res.set("Cache-Control", "no-store").json({
       user: userToApi(user), authMode: mode, isSystemAdmin: Boolean(req.actor.isSystemAdmin), ...permissionsOf(access, req.actor),
-      memberships: memberships.map((m) => ({ workspaceId: m.workspaceId.toHexString(), role: m.role }))
+      memberships: memberships.map((m) => ({ workspaceId: m.workspaceId.toHexString(), role: access.effective(req.actor, m.role) })).filter((m) => m.role)
     });
   });
   return router;

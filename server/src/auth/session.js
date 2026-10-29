@@ -13,14 +13,23 @@
 //            (GET /events) and requests marked X-JARC-Background: 1 (notification feed, people list, live refreshes,
 //            polling) — is authenticated the same way but doesn't count as activity, so an open but unused tab still
 //            times out. (The header can only make a session end sooner.)
+//   account  (ACCOUNT_MANAGEMENT staged/enforced, auth/accounts.js) read from the stored user on every request, so a
+//            role or status change applies to the very next request: a blocked account's session ends (403
+//            ACCOUNT_DISABLED); under enforced, a pending account can only read its own session and preferences (403
+//            ACCOUNT_PENDING elsewhere) and SYSTEM_ADMIN means an active Super Admin account, not the JARC.Admin app role.
 // Nothing here logs the cookie, the CSRF token or any token.
 const crypto = require("crypto");
 const { sendError } = require("../middleware/errors");
+const { accountOf, isActiveSuperAdmin } = require("./accounts");
 
 const SESSION_COOKIE = "__Host-jarc_session";
 const SIGN_IN_COOKIE = "__Host-jarc_signin";
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const TOUCH_INTERVAL_MS = 60 * 1000;
+// What a pending account may do while it waits for approval (ACCOUNT_MANAGEMENT=enforced). Nothing here returns
+// workspace data. The bootstrap route checks its own strict rules (only the configured administrator).
+const PENDING_ALLOWED = new Set(["GET /auth/session", "POST /auth/sign-out", "GET /me", "GET /me/preferences", "PUT /me/preferences", "POST /accounts/bootstrap"]);
+const blocked = (account) => Boolean(account && !account.legacy && account.status === "blocked");
 
 const randomSecret = () => crypto.randomBytes(32).toString("base64url");
 const csrfTokenFor = (sessionSecret) => crypto.createHash("sha256").update(`jarc-csrf:${sessionSecret}`).digest("base64url");
@@ -53,7 +62,7 @@ function originAllowed(req, appOrigin) {
   return true; // non-browser clients still need the CSRF token
 }
 
-function sessionAuthentication({ sessions, users, entra }) {
+function sessionAuthentication({ sessions, users, entra, accountMode = "off" }) {
   const idleMs = entra.sessionIdleMinutes * 60 * 1000;
   return async (req, res, next) => {
     const secret = readCookie(req, SESSION_COOKIE);
@@ -77,6 +86,12 @@ function sessionAuthentication({ sessions, users, entra }) {
       res.append("Set-Cookie", clearCookie(SESSION_COOKIE));
       return sendError(res, 403, "ACCOUNT_DISABLED", "Your JARC account is disabled. Contact a JARC administrator.");
     }
+    const account = accountMode === "off" ? null : accountOf(user);
+    if (blocked(account)) {
+      await sessions.remove(session._id);
+      res.append("Set-Cookie", clearCookie(SESSION_COOKIE));
+      return sendError(res, 403, "ACCOUNT_DISABLED", "Your JARC account is blocked. Contact a JARC administrator.");
+    }
     if (UNSAFE_METHODS.has(req.method)) {
       if (!originAllowed(req, entra.appOrigin)) return sendError(res, 403, "CSRF_INVALID", "This request didn't come from JARC.");
       if (!sameText(req.get("x-csrf-token"), csrfTokenFor(secret))) return sendError(res, 403, "CSRF_INVALID", "This request couldn't be verified. Reload JARC and try again.");
@@ -85,10 +100,15 @@ function sessionAuthentication({ sessions, users, entra }) {
     if (!background && now - session.lastSeenAt > TOUCH_INTERVAL_MS) await sessions.touch(session._id, now, idleMs);
     // displayName comes from the stored user (refreshed from the verified Microsoft token at sign-in), never from the
     // request; it is snapshotted on activity entries.
-    req.actor = Object.freeze({ userId: user._id, kind: "entra", isSystemAdmin: Boolean(session.isSystemAdmin), sessionId: session._id, displayName: user.displayName || user.email || null });
+    if (accountMode === "enforced" && account && !account.legacy && account.status === "pending" && !PENDING_ALLOWED.has(`${req.method} ${req.path}`)) {
+      return sendError(res, 403, "ACCOUNT_PENDING", "Your JARC account is waiting for approval by a JARC administrator.");
+    }
+    const isSystemAdmin = accountMode === "enforced" ? isActiveSuperAdmin(account) : Boolean(session.isSystemAdmin);
+    // account: null while ACCOUNT_MANAGEMENT=off. hasAdminAppRole: the JARC.Admin app role was in the sign-in token.
+    req.actor = Object.freeze({ userId: user._id, kind: "entra", isSystemAdmin, hasAdminAppRole: Boolean(session.isSystemAdmin), account, sessionId: session._id, displayName: user.displayName || user.email || null });
     req.sessionSecret = secret;
     return next();
   };
 }
 
-module.exports = { sessionAuthentication, readCookie, cookieHeader, clearCookie, csrfTokenFor, originAllowed, randomSecret, SESSION_COOKIE, SIGN_IN_COOKIE, UNSAFE_METHODS };
+module.exports = { PENDING_ALLOWED, sessionAuthentication, readCookie, cookieHeader, clearCookie, csrfTokenFor, originAllowed, randomSecret, SESSION_COOKIE, SIGN_IN_COOKIE, UNSAFE_METHODS };

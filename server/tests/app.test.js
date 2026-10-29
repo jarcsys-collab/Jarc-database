@@ -177,7 +177,7 @@ describe("Configuration", () => {
     // Stage 10 added dataStore/mongo/enableDevResourceApi; the defaults keep Stage 9 behaviour (memory, no MongoDB).
     const { monday, ...base } = loadConfig({});
     assert.deepEqual({ enabled: monday.enabled, configured: monday.configured, missing: monday.missing }, { enabled: false, configured: false, missing: ["MONDAY_CLIENT_ID", "MONDAY_CLIENT_SECRET", "MONDAY_REDIRECT_URI", "MONDAY_TOKEN_KEY"] });
-    assert.deepEqual(base, { nodeEnv: "development", port: 3000, host: "127.0.0.1", dataStore: "memory", mongo: null, authMode: "dev", entra: null, accessPolicy: "role_based", accessPolicyIgnored: false, maxFileStorageBytes: 300 * 1024 * 1024, betaOpenEditing: false, enableDevStateApi: true, enableDevResourceApi: false });
+    assert.deepEqual(base, { nodeEnv: "development", port: 3000, host: "127.0.0.1", dataStore: "memory", mongo: null, authMode: "dev", entra: null, accessPolicy: "role_based", accessPolicyIgnored: false, accounts: { mode: "off", superAdmin: null }, maxFileStorageBytes: 300 * 1024 * 1024, attachments: { defaultProvider: "gridfs", s3: null, migrationMaxFileBytes: 20 * 1024 * 1024 }, betaOpenEditing: false, enableDevStateApi: true, enableDevResourceApi: false });
     // Files storage cap: optional, whole megabytes.
     assert.equal(loadConfig({ ATTACHMENTS_MAX_TOTAL_MB: "2000" }).maxFileStorageBytes, 2000 * 1024 * 1024);
     for (const bad of ["0", "-5", "1.5", "lots"]) assert.throws(() => loadConfig({ ATTACHMENTS_MAX_TOTAL_MB: bad }), /ATTACHMENTS_MAX_TOTAL_MB/);

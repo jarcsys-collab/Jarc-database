@@ -24,6 +24,7 @@ StorageError.CODES = Object.freeze({
   PAYLOAD_TOO_LARGE: "PAYLOAD_TOO_LARGE", RATE_LIMITED: "RATE_LIMITED", SERVICE_UNAVAILABLE: "SERVICE_UNAVAILABLE",
   OFFLINE: "OFFLINE", INTERNAL_ERROR: "INTERNAL_ERROR",
   ACCOUNT_DISABLED: "ACCOUNT_DISABLED", // Entra sign-in: the JARC account is disabled
+  ACCOUNT_PENDING: "ACCOUNT_PENDING",   // Account Management: the JARC account is waiting for approval
   CANCELLED: "CANCELLED"              // internal: a queued save skipped because an earlier save failed
 });
 // The one place that turns an error code into user-facing text. Never includes raw exceptions, stacks or tokens.
@@ -39,6 +40,7 @@ StorageError.describe = (codeOrError) => {
     [C.NOT_FOUND]: ["This item no longer exists. Reload to see the latest data.", false],
     [C.UNAUTHENTICATED]: ["Your session has expired. Sign in again to keep working.", false],
     [C.ACCOUNT_DISABLED]: ["Your JARC account doesn't have access. Contact a JARC administrator.", false],
+    [C.ACCOUNT_PENDING]: ["Your JARC account is waiting for approval by a JARC administrator.", false],
     [C.FORBIDDEN]: ["You don't have permission to make this change.", false],
     [C.CONFLICT]: ["Someone else changed this item. Reload to see the latest version.", false],
     [C.PAYLOAD_TOO_LARGE]: ["This is too large to save.", false],
@@ -197,6 +199,9 @@ class ApiAdapter {
         if (serverCode === StorageError.CODES.ACCOUNT_DISABLED) {
           error = fail(StorageError.CODES.ACCOUNT_DISABLED, null, { status: response.status });
           window.dispatchEvent?.(new CustomEvent("jarc-access-denied"));
+        } else if (serverCode === StorageError.CODES.ACCOUNT_PENDING) {
+          error = fail(StorageError.CODES.ACCOUNT_PENDING, null, { status: response.status });
+          window.dispatchEvent?.(new CustomEvent("jarc-account-pending"));
         } else if (this.csrfToken && (response.status === 401 || serverCode === "CSRF_INVALID")) {
           // The signed-in session ended (expired, signed out elsewhere, or no longer valid): nothing is retried.
           error = fail(StorageError.CODES.UNAUTHENTICATED, null, { status: response.status });

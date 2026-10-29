@@ -13,6 +13,8 @@ class AttachmentRepository {
   insertPending(doc) { return this.collection.insertOne({ ...doc, status: "pending" }); }
   async markReady(id, fields) { await this.collection.updateOne({ _id: id, status: "pending" }, { $set: { ...fields, status: "ready" } }); }
   findById(id) { return this.collection.findOne({ _id: id }); }
+  // Object-storage files are found by where their bytes are (GridFS bytes share the document's _id).
+  findByStorageKey(provider, key) { return this.collection.findOne({ "storage.provider": provider, "storage.key": String(key) }); }
   findReady(id) { return this.collection.findOne({ _id: id, status: "ready" }); }
   findByUploadKey(recordId, uploadKey) { return this.collection.findOne({ recordId, uploadKey, status: "ready" }); }
   listByBoard(boardId) { return this.collection.find({ boardId, status: "ready" }, { sort: { createdAt: 1, _id: 1 }, limit: 20000 }).toArray(); }

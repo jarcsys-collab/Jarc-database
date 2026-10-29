@@ -140,6 +140,8 @@ class EntraAuth {
     if (!session) return { mode: "entra", entra, state: "signed-out" };
     adapter.useCsrfToken(session.csrfToken);
     adapter.setAccount(session.user.id);
+    // Account Management enforced: a pending account waits for approval (no workspace data is requested).
+    if (session.accountManagement?.enforced && session.account?.status === "pending") return { mode: "entra", entra, state: "pending", me: session };
     return { mode: "entra", entra, state: "signed-in", me: session };
   }
 }

@@ -6,7 +6,7 @@ const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("path");
 const { spawn } = require("child_process");
-const { findBrowser, launch, sleep, freePort } = require("./support/headless-browser");
+const { findBrowser, launch, sleep, freePort, waitForServer } = require("./support/headless-browser");
 
 const BROWSER = findBrowser();
 const OIDS = { ada: "0e0e0e0e-0000-4000-8000-0000000000b1", vic: "0e0e0e0e-0000-4000-8000-0000000000b2", nora: "0e0e0e0e-0000-4000-8000-0000000000b3" };
@@ -31,7 +31,7 @@ describe("Beta open editing (real app, role_based + beta)", { skip: BROWSER ? fa
     const port = await freePort();
     base = `http://localhost:${port}`;
     server = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port)], { stdio: "ignore", env: { ...process.env, JARC_TEST_BETA: "1" } });
-    for (let i = 0; i < 100; i += 1) { try { await fetch(`${base}/api/v1/health`); break; } catch { await sleep(100); } }
+    await waitForServer(base, { child: server });
     vic = await launch(BROWSER); nora = await launch(BROWSER);
     for (const b of [vic, nora]) { await b.motionPreference("no-preference"); await b.open(`${base}/api/v1/health`, { width: 1440 }); }
     // Ada (JARC administrator, in Nora's browser first) sets up a workspace with Vic as a VIEWER and legacy records.

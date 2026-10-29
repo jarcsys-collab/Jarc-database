@@ -10,7 +10,7 @@ const { spawn } = require("child_process");
 const { loadBrowser } = require("./support/browser-model");
 const { startEntraApp, SessionClient } = require("./helpers");
 const { createTokenIssuer } = require("./support/entra-tokens");
-const { findBrowser, launch, sleep, freePort } = require("./support/headless-browser");
+const { findBrowser, launch, sleep, freePort, waitForServer } = require("./support/headless-browser");
 
 const COLUMNS = [
   { key: "serial", label: "Item", type: "text", required: true },
@@ -96,7 +96,7 @@ describe("Undo, bulk changes and moves when a colleague's change hasn't arrived 
     const port = await freePort();
     base = `http://localhost:${port}`;
     server = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port), "shared"], { stdio: "ignore" });
-    for (let i = 0; i < 100; i += 1) { try { await fetch(`${base}/api/v1/health`); break; } catch { await sleep(100); } }
+    await waitForServer(base, { child: server });
     ana = await launch(BROWSER); ben = await launch(BROWSER);
     // Ana's browser never receives live updates (and doesn't poll): a colleague's change stays unknown to it.
     await ana.send("Page.addScriptToEvaluateOnNewDocument", { source: "window.EventSource = class { constructor() { this.readyState = 0; } addEventListener() {} removeEventListener() {} close() {} };" });

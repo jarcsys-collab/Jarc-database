@@ -18,6 +18,7 @@ const express = require("express");
 const { ObjectId } = require("mongodb");
 const { allowOnly, queryString, fail } = require("../validation/common");
 const { sendError } = require("../middleware/errors");
+const { accountOf } = require("../auth/accounts");
 
 const HEARTBEAT_MS = 20000;
 const ACCESS_REFRESH_MS = 15000;
@@ -109,20 +110,27 @@ function eventRoutes({ stream, access, repos, sessionCheck = null, timings = {} 
 
     timers.push(setInterval(() => write(": ping\n\n"), t.heartbeat));
     timers.push(setInterval(refreshAccess, t.access));
-    if (sessionCheck) timers.push(setInterval(async () => { if (!(await sessionCheck(req).catch(() => true))) close("session"); }, t.session));
+    // "refresh": the person's account role or status changed — the stream ends without "session-ended" and the browser
+    // reconnects, with the new permissions.
+    if (sessionCheck) timers.push(setInterval(async () => { const ok = await sessionCheck(req).catch(() => true); if (!ok) close("session"); else if (ok === "refresh") close("refresh"); }, t.session));
     timers.forEach((timer) => timer.unref?.());
   });
   return router;
 }
 
-// The stored session behind this request is still valid (not expired, idle or signed out; the user is active).
+// The stored session behind this request is still valid (not expired, idle or signed out; the user is active; the
+// account isn't blocked). "refresh" when the account changed since the stream opened (Account Management).
 function entraSessionCheck({ sessions, users }) {
   return async (req) => {
     const session = await sessions.findBySecret(req.sessionSecret);
     const now = new Date();
     if (!session || session.expiresAt <= now || session.idleExpiresAt <= now) return false;
     const user = await users.findById(session.userId);
-    return Boolean(user && user.status === "active");
+    if (!user || user.status !== "active") return false;
+    if (!req.actor?.account) return true;
+    const account = accountOf(user);
+    if (!account.legacy && account.status === "blocked") return false;
+    return account.version !== req.actor.account.version || account.legacy !== req.actor.account.legacy ? "refresh" : true;
   };
 }
 

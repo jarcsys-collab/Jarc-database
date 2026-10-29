@@ -7,7 +7,7 @@ const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("path");
 const { spawn } = require("child_process");
-const { findBrowser, launch, sleep, freePort } = require("./support/headless-browser");
+const { findBrowser, launch, sleep, freePort, waitForServer } = require("./support/headless-browser");
 
 const BROWSER = findBrowser();
 const OIDS = { ana: "0a0a0a0a-0000-4000-8000-0000000000a1", ben: "0b0b0b0b-0000-4000-8000-0000000000b2" };
@@ -47,7 +47,7 @@ describe("Real-time collaboration (real app, headless browsers)", { skip: BROWSE
     const port = await freePort();
     base = `http://localhost:${port}`;
     server = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port), "shared"], { stdio: "ignore" });
-    for (let i = 0; i < 100; i += 1) { try { await fetch(`${base}/api/v1/health`); break; } catch { await sleep(100); } }
+    await waitForServer(base, { child: server });
     ana = await launch(BROWSER); ben = await launch(BROWSER);
     await ana.open(`${base}/api/v1/health`, { width: 1280 }); await signIn(ana, "ana", "Ana Reyes");
     await ben.open(`${base}/api/v1/health`, { width: 1280 }); await signIn(ben, "ben", "Ben Cruz");

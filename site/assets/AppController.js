@@ -2,6 +2,7 @@ class AppController {
   constructor(root) {
     this.root = root; this.auth = new AuthModel(); this.model = new BoardModel(); this.view = new AppView(root);this.view.onUndo=()=>{if(this.busy)return;const label=this.model.undo();this.update();this.view.toast(label);};
     this.integrations = typeof IntegrationsPanel === "function" ? new IntegrationsPanel(this) : null; this.view.integrations = this.integrations;
+    this.accounts = typeof AccountsPanel === "function" ? new AccountsPanel(this) : null; this.view.accountsPanel = this.accounts;
     this.groupActions = typeof BoardGroupActions === "function" ? new BoardGroupActions(this) : null;
     this.appearance = typeof AppearanceActions === "function" ? new AppearanceActions(this) : null;
     this.comments = typeof CommentsPanel === "function" ? new CommentsPanel(this) : null;
@@ -34,7 +35,7 @@ class AppController {
     // Leaving a cell editor saves it (Esc cancels first); leaving an empty draft row discards it.
     root.addEventListener("focusout",e=>{const a=e.target.dataset?.action;if(a==="cell-input")this.commitCell(e.target,"none");else if(a==="draft-input")this.commitDraft(e.target);});
     document.addEventListener("pointerdown",e=>{const overlay=this.root.querySelector('#overlay-root');if(overlay?.querySelector('.popover,.profile-popover')&&!overlay.contains(e.target)&&!e.target.closest('[data-action]'))this.view.closeOverlay();});
-    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("jarc-session-expired",()=>{if(this.entra)this.showEntraGate("expired");});window.addEventListener("jarc-access-denied",()=>{if(this.entra)this.showEntraGate("denied");});window.addEventListener("jarc-board-status",()=>this.refreshWhenIdle());window.addEventListener("jarc-ids-changed",()=>this.refreshWhenIdle());window.addEventListener("jarc-rollback",(event)=>this.onRollback(event.detail));window.addEventListener("jarc-connection",()=>this.saveFeedback());window.addEventListener("online",()=>this.saveFeedback());window.addEventListener("offline",()=>this.saveFeedback());
+    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("jarc-session-expired",()=>{if(this.entra)this.showEntraGate("expired");});window.addEventListener("jarc-access-denied",()=>{if(this.entra)this.showEntraGate("denied");});window.addEventListener("jarc-account-pending",()=>{if(this.entra)this.showEntraGate("pending");});window.addEventListener("jarc-board-status",()=>this.refreshWhenIdle());window.addEventListener("jarc-ids-changed",()=>this.refreshWhenIdle());window.addEventListener("jarc-rollback",(event)=>this.onRollback(event.detail));window.addEventListener("jarc-connection",()=>this.saveFeedback());window.addEventListener("online",()=>this.saveFeedback());window.addEventListener("offline",()=>this.saveFeedback());
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>this.view.applyDisplay(this.model));
     root.addEventListener("pointerover",e=>{
       const target=e.target.closest('button');if(!target)return;
@@ -61,12 +62,15 @@ class AppController {
       catch (error) { renderStartupRecovery(this.root, error, () => this.start()); return; }
       if (signIn.mode === "entra") {
         this.entra = signIn.entra;
-        if (signIn.state !== "signed-in") { this.showEntraGate(signIn.state); return; }
+        // Pending (Account Management enforced): the configured administrator may claim the first Super Admin role here.
+        if (signIn.state === "pending") this.model.permissions = { accountManagement: signIn.me?.accountManagement || null, account: signIn.me?.account || null };
+        if (signIn.state !== "signed-in") { this.showEntraGate(signIn.state, { claim: Boolean(signIn.me?.accountManagement?.canClaimSuperAdmin) }); return; }
         this.auth = new EntraSession(signIn.entra, signIn.me);
         // The server confirmed who this is: their own last appearance can show while their data loads (never before).
         this.view.appearanceOwner = this.auth.userId || null; this.view.applyOwnerAppearance?.(this.view.appearanceOwner);
         // From the server (shown in Settings); the server alone decides what is allowed.
-        this.model.permissions = { accessPolicy: signIn.me?.accessPolicy, betaOpenEditing: Boolean(signIn.me?.betaOpenEditing), canCreateWorkspaces: Boolean(signIn.me?.canCreateWorkspaces) };
+        this.model.permissions = { accessPolicy: signIn.me?.accessPolicy, betaOpenEditing: Boolean(signIn.me?.betaOpenEditing), canCreateWorkspaces: Boolean(signIn.me?.canCreateWorkspaces), account: signIn.me?.account || null, accountManagement: signIn.me?.accountManagement || null };
+        this.accounts && (this.accounts.items = null);
       }
     }
     this.loadStartedAt = new Date().toISOString(); // live updates replay anything saved while loading
@@ -74,11 +78,13 @@ class AppController {
     catch (error) {
       if (this.entra && error?.code === StorageError.CODES.UNAUTHENTICATED) { this.showEntraGate("expired"); return; }
       if (this.entra && error?.code === StorageError.CODES.ACCOUNT_DISABLED) { this.showEntraGate("denied"); return; }
+      if (this.entra && error?.code === StorageError.CODES.ACCOUNT_PENDING) { this.showEntraGate("pending"); return; }
       renderStartupRecovery(this.root, error, () => this.start()); return;
     }
     // The profile shows the Microsoft account's name and email (kept in this browser, per account).
     if (this.entra) {
-      const role = this.auth.isSystemAdmin ? "JARC administrator" : this.auth.sharedAccess ? "JARC employee · shared access" : "Microsoft work account";
+      const accountRole = { SUPER_ADMIN: "Super Admin", ADMIN: "Admin", EDITOR: "Editor", VIEWER: "Viewer" }[this.model.permissions?.account?.role];
+      const role = accountRole && this.model.permissions?.accountManagement?.enforced ? `JARC ${accountRole}` : this.auth.isSystemAdmin ? "JARC administrator" : this.auth.sharedAccess ? "JARC employee · shared access" : "Microsoft work account";
       if (this.model.profile.name !== this.auth.username || this.model.profile.email !== this.auth.email || this.model.profile.role !== role) this.model.updateProfile({ name: this.auth.username, email: this.auth.email, role });
     }
     if (this.entra && this.auth.userId) this.model.me = `user:${this.auth.userId}`;
@@ -333,6 +339,7 @@ class AppController {
     if (action === "entra-sign-out" && this.entra) { this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true, signingOut: true }); this.entra.signOut(); return; }
     if (window.jarcStorage?.connection === "offline" && ["cell-open","set-cell-option","inline-add","open-form","new-item","new-board","add-column","create-workspace","import"].includes(action)) { this.view.toast(StorageError.describe(StorageError.CODES.OFFLINE).message); return; }
     if (action.startsWith("integration-") && this.integrations) { if (target.tagName !== "SELECT") this.integrations.onAction(action, target); return; }
+    if (action.startsWith("acct-") && this.accounts) { if (!["SELECT", "INPUT", "FORM"].includes(target.tagName)) this.accounts.onAction(action, target); return; }
     if ((action.startsWith("appearance-") || (["icon-picker", "icon-tab", "icon-choose"].includes(action))) && this.appearance) { if (target.tagName !== "INPUT") this.appearance.onAction(action, target); return; }
     if ((action.startsWith("group-") || action.startsWith("toolbar-")) && this.groupActions) { this.lastTrigger = target; this.groupActions.onAction(action, target); return; }
     if (action.startsWith("comment-") && this.comments && action !== "comment-input") { this.comments.onAction(action, target); return; }
@@ -544,6 +551,7 @@ class AppController {
   onInput(event) {
     if (this.appearance?.onInput(event.target)) return;
     if (event.target.dataset?.action === "comment-input") { this.comments?.onInput(event.target); return; }
+    if (event.target.dataset?.action === "acct-search") { this.accounts?.onSearch(event.target); return; }
     if (event.target.dataset.action === "cell-option-search") { this.view.filterOptions(event.target.closest(".cell-options-popover"),event.target.value); return; }
     if (event.target.dataset.action === "workspace-search") { const term=event.target.value.toLowerCase(); document.querySelectorAll(".workspace-list > button").forEach((button)=>{button.hidden=!button.textContent.toLowerCase().includes(term);}); return; }
     if (event.target.dataset.action === "column-picker-search") { this.view.showColumnPicker(this.model,event.target.value); return; }
@@ -562,6 +570,8 @@ class AppController {
     if (event.target.dataset?.action === "comment-input") return;
     if (event.target.dataset?.action === "cc-filter") { this.command?.onFilterChange(event.target); return; }
     if (event.target.dataset?.action === "integration-wizard-workspace") { this.integrations?.onAction("integration-wizard-workspace", event.target); return; }
+    if (event.target.dataset?.action === "acct-filter") { this.accounts?.onFilter(event.target); return; }
+    if (event.target.dataset?.action === "acct-ws-role") { this.accounts?.onChange(event.target); return; }
     // Display columns: show/hide one column, or all of them (Item always stays).
     if (event.target.dataset?.action === "column-toggle" || event.target.dataset?.action === "column-toggle-all") {
       const all=event.target.dataset.action==="column-toggle-all";
@@ -588,6 +598,7 @@ class AppController {
   onSubmit(event) {
     event.preventDefault(); const action=event.target.dataset.action; const data=Object.fromEntries(new FormData(event.target));
     if (action?.startsWith("integration-")) { this.integrations?.onSubmit(action, data, event.target); return; }
+    if (action?.startsWith("acct-")) { this.accounts?.onSubmit(action, data, event.target); return; }
     if ((action === "group-form" || action === "group-delete-form") && this.groupActions) { this.groupActions.onSubmit(action, data, event.target); return; }
     if (action === "workspace-form") { this.runBusy(event.submitter,()=>this.model.createWorkspace(data)?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast("Workspace created");}); return; }
     if(action==="login-form"){

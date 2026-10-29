@@ -66,7 +66,7 @@ function commentRoutes({ services, access, limiter = commentLimiter() }) {
     const found = await forComment(req, "VIEWER");
     if (!found) return sendError(res, 404, "NOT_FOUND", "That update doesn't exist.");
     // Authors need to be able to write here to remove their own words; moderators are checked by the service.
-    if (found.comment.authorId.equals(req.actor.userId)) await access.record(req.actor, found.record._id, "MEMBER");
+    if (found.comment.authorId?.equals(req.actor.userId)) await access.record(req.actor, found.record._id, "MEMBER");
     send(res, 200, await comments.remove(req.actor, found));
   });
   router.get("/boards/:boardId/comment-counts", async (req, res) => {

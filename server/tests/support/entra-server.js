@@ -7,6 +7,7 @@
 //        enable a user / add an old-style activity entry without an actor (legacyActivity: workspace ID)
 //   GET  /__test/stats  → protected API requests, and any that arrived without a session cookie
 //   JARC_TEST_BETA=1: JARC_BETA_OPEN_EDITING (beta open editing) on top of the access policy
+//   JARC_TEST_ACCOUNTS=staged|enforced: Account Management; JARC_TEST_SUPER_ADMIN_OID: the configured Super Admin
 //   JARC_TEST_MONDAY=1: the monday.com integration is configured against the MOCK monday.com (tests/support/mock-monday)
 //   POST /__test/monday { connect, run }  → store a (mock) connection directly / run due integration jobs once
 const express = require("express");
@@ -38,7 +39,7 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
   const verify = createEntraVerifier({ ...entra, keySet: issuer.keySet });
   // Optional 2nd argument "shared": ACCESS_POLICY=development_shared (as on Railway); default role_based.
   const accessPolicy = process.argv[3] === "shared" ? "development_shared" : "role_based";
-  const app = createApp({ repository: new MemoryStateRepository(), environment: "test", dataLayer, auth: { mode: "entra", entra, verify }, accessPolicy, betaOpenEditing: process.env.JARC_TEST_BETA === "1", logger: { error() {} } });
+  const app = createApp({ repository: new MemoryStateRepository(), environment: "test", dataLayer, auth: { mode: "entra", entra, verify }, accessPolicy, betaOpenEditing: process.env.JARC_TEST_BETA === "1", ...(process.env.JARC_TEST_ACCOUNTS ? { accounts: { mode: process.env.JARC_TEST_ACCOUNTS, superAdmin: process.env.JARC_TEST_SUPER_ADMIN_OID ? { tenantId: entra.tenantId, objectId: process.env.JARC_TEST_SUPER_ADMIN_OID.toLowerCase(), email: null } : null } } : {}), logger: { error() {} } });
   const sim = { protected: 0, withSession: 0, withoutSession: [] };
 
   const outer = express();

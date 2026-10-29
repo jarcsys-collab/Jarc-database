@@ -6,3 +6,5 @@
 .github
 server/tests
 **/*.log
+monday-extraction
+monday-migration

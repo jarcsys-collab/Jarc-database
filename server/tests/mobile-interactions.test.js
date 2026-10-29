@@ -7,7 +7,7 @@ const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("path");
 const { spawn } = require("child_process");
-const { findBrowser, launch, sleep, freePort } = require("./support/headless-browser");
+const { findBrowser, launch, sleep, freePort, waitForServer } = require("./support/headless-browser");
 
 const BROWSER = findBrowser();
 const PHONES = [320, 375, 390, 430];
@@ -25,7 +25,7 @@ describe("Mobile interactions (real app, headless browser)", { skip: BROWSER ? f
     const port = await freePort();
     base = `http://localhost:${port}`;
     server = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port)], { stdio: "ignore" });
-    for (let i = 0; i < 100; i += 1) { try { await fetch(`${base}/api/v1/health`); break; } catch { await sleep(100); } }
+    await waitForServer(base, { child: server });
     browser = await launch(BROWSER);
     await browser.open(`${base}/`, { width: 390 });
     // Sign in as the test server's Microsoft would (nonce → ID token → session cookie), then create test data.

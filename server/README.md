@@ -98,6 +98,19 @@ granted by the shared policy outlives it. The server logs a warning at startup w
    workspace has the right admins.
 4. Data, boards and records are unchanged; activity history keeps the real employee who made each change.
 
+### Account Management (`ACCOUNT_MANAGEMENT`, Phases M4.3–M4.4A)
+
+| Value | Effect |
+|---|---|
+| `off` (default) | Unchanged behaviour. |
+| `staged` (observation mode; allowed in production) | New sign-ins are recorded as **pending** accounts; the Super Admin reviews people in **Settings → Account Management** and records roles and workspaces. Roles and pending status are **not enforced** (`ACCESS_POLICY` / `JARC_BETA_OPEN_EDITING` still decide access, and the page says so). Blocking applies immediately. |
+| `enforced` (refused at startup in production until separately approved) | Account roles decide access: Super Admin (every workspace, account management), Admin (manages assigned workspaces), Editor (edits assigned workspaces), Viewer (reads assigned workspaces). Membership roles are capped by the account role. Pending accounts reach nothing but their own session. `development_shared` and beta open editing are **ignored**; the `JARC.Admin` app role alone grants nothing. Users who signed in before Account Management ("not reviewed") keep exactly their membership roles until reviewed. |
+
+`JARC_SUPER_ADMIN_TENANT_ID` + `JARC_SUPER_ADMIN_OBJECT_ID` (optional `JARC_SUPER_ADMIN_EMAIL`) name the intended first
+Super Admin. Being configured grants nothing: that person signs in with exactly these verified Entra claims **and** the
+`JARC.Admin` app role, then claims the role once with a typed confirmation. Every account change is recorded in
+`accountAudit`. See `monday-migration/m43-account-management.md` for the transition plan.
+
 Permissions per workspace: **VIEWER** reads; **MEMBER** edits boards, records, columns (add/rename), groups and views;
 **WORKSPACE_ADMIN** also deletes or retypes columns, removes options, archives/deletes/moves boards, edits the
 workspace and manages members; **SYSTEM_ADMIN** (the `JARC.Admin` app role) creates and deletes workspaces and

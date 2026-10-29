@@ -13,7 +13,9 @@ const express = require("express");
 const { parseId, allowOnly, queryString, fail, isSafeKey } = require("../validation/common");
 const { sendError } = require("../middleware/errors");
 const { attachmentToApi } = require("../api/serialize");
-const { MAX_FILE_BYTES } = require("../files/file-types");
+const { MAX_FILE_BYTES, TYPES } = require("../files/file-types");
+
+const INLINE_TYPES = new Set(Object.keys(TYPES)); // PDF, JPEG, PNG, WebP: the types normal uploads accept
 
 const UPLOADS_PER_WINDOW = 60;
 const WINDOW_MS = 10 * 60 * 1000;
@@ -88,16 +90,18 @@ function fileRoutes({ services, access, limiter = uploadLimiter() }) {
     const attachment = await files.get(parseId(req.params.attachmentId, "attachmentId"));
     await access.record(req.actor, attachment.recordId, "VIEWER");
     const etag = `"${attachment.sha256}"`;
+    // Types that may be shown in the page; anything else (e.g. migrated CSV/HEIC) is always a download.
+    const inline = !download && INLINE_TYPES.has(attachment.type);
     res.set({
-      "Content-Type": attachment.type,
-      "Content-Disposition": disposition(download ? "attachment" : "inline", attachment.name),
+      "Content-Type": INLINE_TYPES.has(attachment.type) ? attachment.type : "application/octet-stream",
+      "Content-Disposition": disposition(inline ? "inline" : "attachment", attachment.name),
       "Cache-Control": "private, no-cache", ETag: etag,
       "X-Content-Type-Options": "nosniff", "Cross-Origin-Resource-Policy": "same-origin", "X-Frame-Options": "SAMEORIGIN",
       // Nothing in a served file may load or run anything. PDFs need object-src for the browser's built-in viewer.
       "Content-Security-Policy": attachment.type === "application/pdf" ? "default-src 'none'; object-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; frame-ancestors 'self'" : "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'self'; sandbox"
     });
     if (req.get("if-none-match") === etag) return res.status(304).end();
-    const stream = services.files.store.openDownload(attachment._id);
+    const stream = services.files.openDownload(attachment);
     stream.on("error", () => { if (!res.headersSent) sendError(res, 404, "NOT_FOUND", "This file's contents are missing."); else res.destroy(); });
     res.status(200).set("Content-Length", String(attachment.size));
     stream.pipe(res);

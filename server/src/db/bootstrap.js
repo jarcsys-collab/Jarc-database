@@ -28,7 +28,11 @@ const COLLECTIONS = Object.freeze({
   integrationJobs: "integrationJobs",
   integrationEvents: "integrationEvents",
   // Record discussions (see repositories/mongo/comment-repository.js).
-  comments: "comments"
+  comments: "comments",
+  // Attachment storage counters per provider (see repositories/mongo/storage-usage-repository.js).
+  storageUsage: "storageUsage",
+  // Account Management audit trail (Phase M4.3; see repositories/mongo/account-audit-repository.js). Append-only.
+  accountAudit: "accountAudit"
 });
 
 const present = { $exists: true };
@@ -83,7 +87,11 @@ const INDEXES = Object.freeze({
     { name: "workspace", key: { workspaceId: 1 } },
     { name: "status_created", key: { status: 1, createdAt: 1 } },
     // A retried upload (same browser-generated key) never creates a second attachment.
-    { name: "uniq_upload_key", key: { recordId: 1, uploadKey: 1 }, unique: true, partialFilterExpression: { uploadKey: { $type: "string" } } }
+    { name: "uniq_upload_key", key: { recordId: 1, uploadKey: 1 }, unique: true, partialFilterExpression: { uploadKey: { $type: "string" } } },
+    // Object-storage files (documents without `storage` are GridFS, keyed by their _id): one document per stored object.
+    { name: "uniq_storage_key", key: { "storage.provider": 1, "storage.key": 1 }, unique: true, partialFilterExpression: { "storage.key": { $type: "string" } } },
+    // Migrated files: one attachment per source asset (a retried migration can't store a file twice).
+    { name: "uniq_source_asset", key: { "imported.provider": 1, "imported.sourceAssetId": 1 }, unique: true, partialFilterExpression: { "imported.sourceAssetId": { $type: "string" } } }
   ],
   // The indexes the MongoDB driver itself expects on a GridFS bucket (same names, so it never creates duplicates).
   "attachmentFiles.files": [
@@ -113,6 +121,10 @@ const INDEXES = Object.freeze({
   integrationEvents: [
     { name: "uniq_event", key: { provider: 1, eventId: 1 }, unique: true },
     { name: "expires", key: { receivedAt: 1 }, expireAfterSeconds: 30 * 24 * 3600 }
+  ],
+  accountAudit: [
+    { name: "target_time", key: { targetUserId: 1, at: -1 } },
+    { name: "time", key: { at: -1 } }
   ],
   "attachmentFiles.chunks": [
     { name: "files_id_1_n_1", key: { files_id: 1, n: 1 }, unique: true }

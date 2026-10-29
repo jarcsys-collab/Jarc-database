@@ -7,7 +7,7 @@ const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("path");
 const { spawn } = require("child_process");
-const { findBrowser, launch, sleep, freePort } = require("./support/headless-browser");
+const { findBrowser, launch, sleep, freePort, waitForServer } = require("./support/headless-browser");
 
 const BROWSER = findBrowser();
 const COLUMNS = [
@@ -54,7 +54,7 @@ describe("Columns and notifications (real app, headless browser)", { skip: BROWS
     const port = await freePort();
     base = `http://localhost:${port}`;
     server = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port), "shared"], { stdio: "ignore" });
-    for (let i = 0; i < 100; i += 1) { try { await fetch(`${base}/api/v1/health`); break; } catch { await sleep(100); } }
+    await waitForServer(base, { child: server });
     ana = await launch(BROWSER); ben = await launch(BROWSER);
     for (const [b, name, email] of [[ana, "Ana Reyes", "ana@example.invalid"], [ben, "Ben Cruz", "ben@example.invalid"]]) { await b.open(`${base}/api/v1/health`, { width: 1280 }); await signIn(b, name, email); }
     ws = (await api(ana, "POST", "/workspaces", { name: "Operations" })).body.workspace;

@@ -39,6 +39,9 @@ class SessionRepository {
   async remove(id) { await this.sessions.deleteOne({ _id: id }); }
 
   async removeBySecret(sessionSecret) { await this.sessions.deleteOne({ _id: hash(sessionSecret) }); }
+
+  // Ends every session of one person (an account was blocked). Returns how many ended.
+  async removeForUser(userId) { const { deletedCount } = await this.sessions.deleteMany({ userId }); return deletedCount; }
 }
 
 module.exports = { SessionRepository, hashSecret: hash };

@@ -90,4 +90,17 @@ async function launch(executable = findBrowser(), { attempts = 2, startupMs = 60
   };
 }
 
-module.exports = { findBrowser, launch, sleep, freePort };
+// Waits until a test server started as a child process answers /api/v1/health, and FAILS if it never does. (An earlier
+// loop gave up silently after 10 s; under a full parallel run the server could still be starting, and the first request
+// from the browser then failed with "Failed to fetch" in an unrelated-looking place.)
+async function waitForServer(base, { timeoutMs = 60000, child = null } = {}) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    if (child && child.exitCode !== null) throw new Error(`The test server exited early (code ${child.exitCode}).`);
+    try { const res = await fetch(`${base}/api/v1/health`); if (res.ok) return; } catch { /* not listening yet */ }
+    await sleep(100);
+  }
+  throw new Error(`The test server at ${base} did not become ready within ${timeoutMs / 1000} s.`);
+}
+
+module.exports = { findBrowser, launch, sleep, freePort, waitForServer };

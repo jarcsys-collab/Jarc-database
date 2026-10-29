@@ -37,6 +37,7 @@ function errorHandler(logger) {
     if (error instanceof ApiError) return sendError(res, error.status, error.code, error.message, error.details);
     if (error?.type === "entity.too.large") return sendError(res, 413, "PAYLOAD_TOO_LARGE", "The data is larger than the server accepts.");
     if (error?.type === "entity.parse.failed") return sendError(res, 400, "VALIDATION_ERROR", "The request body is not valid JSON.");
+    if (error?.type === "encoding.unsupported") return sendError(res, 415, "UNSUPPORTED_ENCODING", "Compressed request bodies aren't accepted. Send the data uncompressed.");
     if (isMongoError(error)) {
       const mapped = translateMongoError(error);
       // Server-side only, and redacted: driver messages can name hosts or contain connection strings.

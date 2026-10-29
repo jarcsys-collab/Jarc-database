@@ -14,6 +14,10 @@
 //   activity      each post/edit/delete adds an activity entry (IDs only, no text): live updates, the notification
 //                 feed (mentions, replies) and the audit trail. It is written in the same transaction as the comment
 //   read-only     boards synchronized from monday.com refuse new comments, edits and deletions
+//   imported      comments migrated from monday.com (Phase M2) carry `imported` attribution metadata. Their authorId is
+//                 a verified JARC user or null (historical author without a JARC account; the name stays in
+//                 authorName/imported.author). Attribution never grants anything: imported comments can't be edited
+//                 by anyone, and only a moderator can delete them
 const { ObjectId } = require("mongodb");
 const { ApiError } = require("../middleware/errors");
 const { activityEntry, conflict } = require("./shared");
@@ -22,6 +26,8 @@ const MAX_BODY = 5000, MAX_MENTIONS = 20;
 const invalid = (message) => new ApiError(400, "VALIDATION_ERROR", message);
 const userRef = (id) => `user:${id.toHexString()}`;
 const USER_REF = /^user:([0-9a-f]{24})$/;
+// The signed-in person wrote this comment in JARC (imported history is never "yours", even when attributed to you).
+const isOwn = (doc, actor) => !doc.imported && Boolean(doc.authorId?.equals(actor.userId));
 
 function cleanBody(value) {
   if (typeof value !== "string") throw invalid("Write something first.");
@@ -79,7 +85,7 @@ class CommentService {
     }
     const now = new Date();
     const doc = { _id: new ObjectId(), workspaceId: record.workspaceId, boardId: record.boardId, recordId: record._id, parentId: parent?._id || null, authorId: actor.userId, authorName: actor.displayName || null, body: text, mentions, createdAt: now, updatedAt: now, editedAt: null, deletedAt: null, deletedBy: null, version: 1 };
-    const replyTo = parent && !parent.authorId.equals(actor.userId) ? parent.authorId : null;
+    const replyTo = parent?.authorId && !parent.authorId.equals(actor.userId) ? parent.authorId : null;
     await this.connection.withTransaction(async (session) => {
       await this.repos.comments.insert(doc, { session });
       await this.repos.activities.append(this.entry(actor, doc, "comment.created", { mentions: mentions.filter((m) => !m.equals(actor.userId)), replyTo, now }), { session });
@@ -90,7 +96,8 @@ class CommentService {
   async update(actor, { comment, record, board }, body) {
     this.writable(board, record);
     if (comment.deletedAt) throw new ApiError(404, "NOT_FOUND", "That update no longer exists.");
-    if (!comment.authorId.equals(actor.userId)) throw new ApiError(403, "FORBIDDEN", "Only the author can edit this update.");
+    if (comment.imported) throw new ApiError(403, "FORBIDDEN", "Updates imported from monday.com are historical and can't be edited.");
+    if (!isOwn(comment, actor)) throw new ApiError(403, "FORBIDDEN", "Only the author can edit this update.");
     if (!Number.isInteger(body.expectedVersion)) throw invalid("expectedVersion is required.");
     const text = cleanBody(body.body), mentions = await this.checkMentions(actor, record.workspaceId, body.mentions);
     const now = new Date(), before = new Set(comment.mentions.map((m) => m.toHexString()));
@@ -107,7 +114,7 @@ class CommentService {
   async remove(actor, { comment, record, board }) {
     this.writable(board, null);
     if (comment.deletedAt) return { deleted: true };
-    const own = comment.authorId.equals(actor.userId);
+    const own = isOwn(comment, actor);
     if (!own && !await this.isModerator(actor, record.workspaceId)) throw new ApiError(403, "FORBIDDEN", "Only the author or a workspace admin can delete this update.");
     const now = new Date();
     await this.connection.withTransaction(async (session) => {
@@ -127,10 +134,11 @@ class CommentService {
   }
 
   toApi(d, actor, moderator) {
-    const own = d.authorId.equals(actor.userId), deleted = Boolean(d.deletedAt);
+    const own = isOwn(d, actor), deleted = Boolean(d.deletedAt);
     return {
       id: d._id.toHexString(), recordId: d.recordId.toHexString(), parentId: d.parentId ? d.parentId.toHexString() : null,
-      author: { id: userRef(d.authorId), name: d.authorName || "Unknown user", isYou: own },
+      author: { id: d.authorId ? userRef(d.authorId) : null, name: d.authorName || "Unknown user", isYou: own },
+      ...(d.imported ? { imported: { provider: "monday.com", systemGenerated: Boolean(d.imported.systemGenerated) } } : {}),
       body: deleted ? "" : d.body, mentions: deleted ? [] : d.mentions.map(userRef), deleted,
       createdAt: d.createdAt.toISOString(), editedAt: d.editedAt ? d.editedAt.toISOString() : null, version: d.version,
       canEdit: own && !deleted, canDelete: !deleted && (own || moderator)

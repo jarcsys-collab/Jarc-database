@@ -7,7 +7,7 @@ const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("path");
 const { spawn } = require("child_process");
-const { findBrowser, launch, sleep, freePort } = require("./support/headless-browser");
+const { findBrowser, launch, sleep, freePort, waitForServer } = require("./support/headless-browser");
 const { loadBrowser } = require("./support/browser-model");
 
 const BROWSER = findBrowser();
@@ -64,7 +64,7 @@ describe("Phase 9C: JARC Default theme and personalization (real app)", { skip: 
     const port = await freePort();
     base = `http://localhost:${port}`;
     server = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port), "shared"], { stdio: "ignore" });
-    for (let i = 0; i < 100; i += 1) { try { await fetch(`${base}/api/v1/health`); break; } catch { await sleep(100); } }
+    await waitForServer(base, { child: server });
     a = await newBrowser(ANA, "Ana Reyes");
     ws = (await api(a, "POST", "/workspaces", { name: "Studio" })).body.workspace;
     board = (await api(a, "POST", `/workspaces/${ws.id}/boards`, { name: "Theme board", columns: COLUMNS, groups: [{ name: "Planning" }, { name: "Doing" }] })).body.board;
@@ -185,13 +185,15 @@ describe("Phase 9C: JARC Default theme and personalization (real app)", { skip: 
     const rowH = () => a.evaluate("Math.round(document.querySelector('tr[data-record-context]').getBoundingClientRect().height)");
     const heights = {};
     for (const d of ["compact", "spacious", "comfortable"]) {
-      await openAppearance(a); await click(a, `[data-action=appearance-density][data-value=${d}]`);
+      await openAppearance(a); assert.ok(await click(a, `[data-action=appearance-density][data-value=${d}]`), `density choice ${d} shown`);
       assert.ok(await a.waitFor(`document.documentElement.dataset.density === "${d}"`, 3000)); await closeOverlay(a); heights[d] = await rowH();
     }
     assert.ok(heights.compact < heights.comfortable && heights.comfortable < heights.spacious, JSON.stringify(heights));
     const recs = (await api(a, "GET", `/boards/${board.id}/records`)).body.items.map((r) => r.values.serial).sort();
     assert.deepEqual(recs, ["Task 1", "Task 2", "Task 3"]);
-    assert.equal((await savedPrefs(a)).density, "comfortable");
+    // The appearance is saved 350 ms after the last change (debounced) and then sent: wait for the server to have it,
+    // as the Light/Dark test does, instead of reading it at once (that raced under a full parallel run).
+    assert.ok(await a.waitFor(`fetch("/api/v1/me/preferences").then((r) => r.json()).then((p) => p.appearance.density === "comfortable")`, 10000), "density saved on the server");
   });
 
   test("board icon from the picker (Lucide icon, then emoji): saved on the board and shown live to a colleague", async () => {
