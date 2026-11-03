@@ -48,7 +48,16 @@ function snippetAround(text, needle) {
 }
 
 class SearchService {
-  constructor({ repos }) { this.repos = repos; }
+  // index: services/record-search-index.js. Used only when switched on and caught up; otherwise records are searched directly.
+  constructor({ repos, index = null }) { this.repos = repos; this.index = index; }
+
+  // The index finds the matching IDs; the records are then read in that order, with the same projection as a direct search.
+  async fromIndex(boards, { projection, limit, maxTimeMS, ...options }) {
+    const ids = await this.index.ids(boards, { ...options, limit, maxTimeMS });
+    if (!ids.length) return [];
+    const byId = new Map((await this.repos.records.byIds(ids, { projection, maxTimeMS })).map((d) => [hex(d._id), d]));
+    return ids.map((id) => byId.get(hex(id))).filter(Boolean);
+  }
 
   // workspaceIds: ObjectIds the caller may see (null = all). Returns { items, more, partial }.
   async records(query, { workspaceIds, limit }) {
@@ -69,7 +78,10 @@ class SearchService {
     if (!clauses.length) return { items: [], more: false, partial };
     let docs;
     try {
-      docs = await this.repos.records.searchText(clauses, { projection: { _id: 1, boardId: 1, workspaceId: 1, ...Object.fromEntries([...projected].map((p) => [p, 1])) }, limit: limit + 1, maxTimeMS: MAX_TIME_MS });
+      const projection = { _id: 1, boardId: 1, workspaceId: 1, ...Object.fromEntries([...projected].map((p) => [p, 1])) };
+      const indexed = { pattern: escapeRegex(query.toLowerCase()), limit: limit + 1, maxTimeMS: MAX_TIME_MS }, boardsWithFields = searched.filter((b) => fieldsOf.has(hex(b._id)));
+      docs = this.index?.active ? await this.fromIndex(boardsWithFields, { ...indexed, projection }) : await this.repos.records.searchText(clauses, { projection, limit: limit + 1, maxTimeMS: MAX_TIME_MS });
+      if (this.index?.shadowing) this.index.compare(docs.map((d) => d._id), boardsWithFields, indexed);
     } catch (error) {
       if (timedOut(error)) throw new ApiError(503, "SEARCH_TIMEOUT", "The search took too long. Try a longer or more specific search.");
       throw error;
@@ -142,6 +154,7 @@ class SearchService {
   async recordGroup(scope, boards, { q, status, priority, assignee, from, to, cursor }, limit) {
     const empty = { type: "record", items: [], more: false, next: null };
     const pattern = q ? escapeRegex(q) : null, needle = q.toLowerCase();
+    const cursorClause = !cursor ? null : cursor.time ? { $or: [{ updatedAt: { $lt: cursor.time } }, { updatedAt: cursor.time, _id: { $lt: cursor.id } }, { updatedAt: null }] } : { updatedAt: null, _id: { $lt: cursor.id } };
     const plans = new Map(), clauses = [], nameClauses = [], projected = new Set(["values.serial"]);
     const keysOf = (b, type) => (b.columns || []).filter((c) => c.type === type).map((c) => c.key);
     const anyOf = (keys, value) => ({ $or: keys.map((k) => ({ [`values.${k}`]: value })) });
@@ -157,7 +170,7 @@ class SearchService {
       if (assignee) and.push(anyOf(ownerKeys, `user:${hex(assignee)}`));
       const clause = { boardId: b._id };
       if (from || to) clause.updatedAt = { ...(from ? { $gte: from } : {}), ...(to ? { $lt: to } : {}) };
-      if (cursor) and.push(cursor.time ? { $or: [{ updatedAt: { $lt: cursor.time } }, { updatedAt: cursor.time, _id: { $lt: cursor.id } }, { updatedAt: null }] } : { updatedAt: null, _id: { $lt: cursor.id } });
+      if (cursorClause) and.push(cursorClause);
       if (and.length) clause.$and = and;
       clauses.push(clause);
       if (pattern && !cursor) nameClauses.push({ ...clause, $and: [{ "values.serial": { $regex: pattern, $options: "i" } }, ...and.slice(1)] });
@@ -172,8 +185,18 @@ class SearchService {
     const nameBudget = Math.floor(limit / 2);
     let docs, named = [];
     try {
-      docs = await this.repos.records.searchPage(clauses, { projection, limit: limit + 1, maxTimeMS: MAX_TIME_MS });
-      if (nameClauses.length && nameBudget) named = await this.repos.records.searchPage(nameClauses, { projection, limit: nameBudget, maxTimeMS: MAX_TIME_MS });
+      // Status, priority and assignee filters need the cells themselves, so those searches stay on the records.
+      const plain = Boolean(pattern) && !status && !priority && !assignee;
+      const searched = [...plans.values()].map((p) => p.board);
+      const indexed = { pattern: pattern && escapeRegex(needle), extra: from || to ? { updatedAt: { ...(from ? { $gte: from } : {}), ...(to ? { $lt: to } : {}) } } : {}, and: cursorClause ? [cursorClause] : [], maxTimeMS: MAX_TIME_MS };
+      if (plain && this.index?.active) {
+        docs = await this.fromIndex(searched, { ...indexed, projection, limit: limit + 1 });
+        if (nameClauses.length && nameBudget) named = await this.fromIndex(searched, { ...indexed, field: "name", projection, limit: nameBudget });
+      } else {
+        docs = await this.repos.records.searchPage(clauses, { projection, limit: limit + 1, maxTimeMS: MAX_TIME_MS });
+        if (nameClauses.length && nameBudget) named = await this.repos.records.searchPage(nameClauses, { projection, limit: nameBudget, maxTimeMS: MAX_TIME_MS });
+        if (plain && this.index?.shadowing) this.index.compare(docs.map((d) => d._id), searched, { ...indexed, limit: limit + 1 });
+      }
     } catch (error) {
       if (timedOut(error)) throw new ApiError(503, "SEARCH_TIMEOUT", "The search took too long. Try a longer search or add a filter.");
       throw error;

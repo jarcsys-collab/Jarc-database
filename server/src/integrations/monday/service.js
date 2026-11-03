@@ -28,8 +28,8 @@ const SYNC_TYPES = ["sync-item", "reconcile"];
 const fail = (status, code, message) => new ApiError(status, code, message);
 
 class MondayIntegration {
-  constructor({ repos, connection, config, fetch = globalThis.fetch, logger = console, now = () => new Date() }) {
-    Object.assign(this, { repos, connection, config: config || { enabled: false, configured: false, missing: [] }, fetchImpl: fetch, logger, now });
+  constructor({ repos, connection, config, fetch = globalThis.fetch, logger = console, now = () => new Date(), searchIndex = null }) {
+    Object.assign(this, { repos, connection, config: config || { enabled: false, configured: false, missing: [] }, fetchImpl: fetch, logger, now, searchIndex });
   }
 
   record() { return this.repos.integrations.get(PROVIDER); }
@@ -210,6 +210,7 @@ class MondayIntegration {
       await this.repos.records.collection.updateOne({ _id: u.map.targetId, boardId: board._id }, { $set: set, $inc: { version: 1 } });
       await this.repos.integrations.updateMapping(u.map._id, { sourceUpdatedAt: u.updatedAt, lastSyncedAt: now });
     }
+    this.searchIndex?.refreshBoard(board._id);
     return creates.length;
   }
 
@@ -265,6 +266,7 @@ class MondayIntegration {
   // Records the sync and tells connected browsers (live updates) that the board changed.
   async finishSync(board, summary) {
     const now = this.now();
+    this.searchIndex?.refreshBoard(board._id); // records archived during this sync
     await this.repos.integrations.set(PROVIDER, { lastSyncAt: now, lastError: null });
     await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: board.workspaceId, boardId: board._id, actorUserId: null, actorName: "monday.com sync", action: "integration.synced", entityType: "board", entityId: board._id, summary, now }));
   }

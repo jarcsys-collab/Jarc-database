@@ -56,12 +56,46 @@ describe("Authentication runs once per request", () => {
   });
 });
 
+describe("Slow request log", () => {
+  const { slowRequestLog } = require("../src/middleware/slow-requests");
+  const run = (thresholdMs, delay = 20, url = "/things/abc123?q=secret-text") => new Promise((resolve) => {
+    const lines = [], app = express();
+    app.use(slowRequestLog({ logger: { warn: (m) => lines.push(m) }, thresholdMs }));
+    app.get("/things/:id", async (req, res) => { await sleep(delay); res.json({ ok: true }); });
+    app.get("/events", async (req, res) => { await sleep(delay); res.json({ ok: true }); });
+    const server = app.listen(0, "127.0.0.1", async () => { await fetch(`http://127.0.0.1:${server.address().port}${url}`); await sleep(10); server.close(); resolve(lines); });
+  });
+  test("logs the method, route pattern, status and time, and nothing from the request itself", async () => {
+    const [line] = await run(5);
+    assert.match(line, /^\[slow\] GET \/things\/:id 200 \d+ms$/);
+    assert.doesNotMatch(line, /abc123|secret-text/);
+  });
+  test("fast requests, the live-update stream and a threshold of 0 log nothing", async () => {
+    assert.deepEqual(await run(5000), []);
+    assert.deepEqual(await run(5, 20, "/events"), []);
+    assert.deepEqual(await run(0), []);
+  });
+});
+
 describe("Record pages", () => {
   test("a page is requested in one batch, so it needs no second round trip", async () => {
     let options = null;
     const repo = new RecordRepository({ collection: () => ({ find: (query, o) => { options = o; return { toArray: async () => [] }; } }) });
     await repo.listPage(new ObjectId(), { sort: { field: "position", dir: "asc" }, limit: 200 });
     assert.deepEqual([options.limit, options.batchSize], [201, 201]);
+  });
+  test("specific records of one board: the IDs are checked, and only that board is read", async () => {
+    const validate = require("../src/validation/resources");
+    const board = { columns: [], groups: [] }, a = "a".repeat(24), b = "b".repeat(24);
+    const { filter } = validate.recordListQuery({ ids: `${a},${b}` }, board);
+    assert.deepEqual(filter.ids.map(String), [a, b]);
+    for (const bad of ["nope", `${a},nope`, "$gt", Array(101).fill(a).join(",")]) assert.throws(() => validate.recordListQuery({ ids: bad }, board), /ids must be/);
+    let query = null;
+    const repo = new RecordRepository({ collection: () => ({ find: (q) => { query = q; return { toArray: async () => [] }; } }) });
+    const boardId = new ObjectId();
+    await repo.listPage(boardId, { sort: { field: "position", dir: "asc" }, limit: 100, filter });
+    assert.equal(query.boardId, boardId);
+    assert.equal(query._id.$in.length, 2);
   });
 });
 
@@ -84,6 +118,39 @@ describe("Startup does not wait for records", () => {
 });
 
 const BROWSER = findBrowser();
+describe("With the search index off, a partly loaded board behaves as it always has (real app, headless browser)", { skip: BROWSER ? false : "no Chrome or Edge installed" }, () => {
+  let server, b, port;
+  before(async () => {
+    port = await freePort();
+    server = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port), "shared"], { stdio: "ignore", env: { ...process.env, JARC_TEST_RECORD_SEARCH: "off" } });
+    await waitForServer(`http://localhost:${port}`, { child: server });
+    b = await launch();
+  });
+  after(async () => { await b?.close(); server?.kill(); });
+  test("typing in board search sends no search to the server, and the notice says so", async () => {
+    const base = `http://localhost:${port}`;
+    await b.open(`${base}/`, { width: 1440, height: 900 });
+    await b.evaluate(`(async () => { const start = await (await fetch("/api/v1/auth/sign-in/start", { method: "POST" })).json(); const { token } = await (await fetch("/__test/id-token?oid=0d0d0d0d-0000-4000-8000-000000000092&name=Off&email=off@example.invalid&nonce=" + start.nonce)).json(); await fetch("/api/v1/auth/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ idToken: token }) }); })()`);
+    const api = (method, p, body) => b.evaluate(`(async () => { const { csrfToken } = await (await fetch("/api/v1/auth/session")).json(); const r = await fetch("/api/v1${p}", { method: "${method}", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken } ${body ? `, body: ${JSON.stringify(JSON.stringify(body))}` : ""} }); return { status: r.status, body: await r.json() }; })()`);
+    const ws = (await api("POST", "/workspaces", { name: "Off" })).body.workspace;
+    await api("POST", `/workspaces/${ws.id}/boards`, { name: "Opens first", columns: [{ key: "serial", label: "Item", type: "text", required: true }] }); // so the limit below is set before the big board loads
+    const board = (await api("POST", `/workspaces/${ws.id}/boards`, { name: "Off board", columns: [{ key: "serial", label: "Item", type: "text", required: true }] })).body.board;
+    for (let n = 0; n < 3; n += 1) assert.equal((await api("POST", `/boards/${board.id}/records/batch`, { records: Array.from({ length: 100 }, (_, i) => ({ values: { serial: `Off ${n}-${i}` } })) })).status, 201);
+    assert.deepEqual((await api("GET", "/search/status")).body, { boardSearch: false });
+    await b.send("Page.navigate", { url: `${base}/` });
+    assert.ok(await b.waitFor("!!document.querySelector('#sidebar .tree-item')", 15000));
+    await b.evaluate("ResourceApiAdapter.FULL_LOAD_LIMIT = 100");
+    await b.evaluate(`[...document.querySelectorAll('#sidebar .tree-item')].find((el) => el.textContent.includes("Off board"))?.click()`);
+    assert.ok(await b.waitFor("!!document.querySelector('.partial-notice')", 15000));
+    await sleep(300);
+    assert.match(await b.evaluate("document.querySelector('.partial-notice').textContent"), /Search, filters and sorting apply to the loaded records/);
+    await b.evaluate("performance.clearResourceTimings()");
+    await b.evaluate(`(() => { const i = document.querySelector('#board-search'); i.value = 'Off 0-5'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    await sleep(800);
+    assert.deepEqual(await b.evaluate("performance.getEntriesByType('resource').map((e) => e.name).filter((n) => n.includes('/search'))"), []);
+  });
+});
+
 describe("Row window on a large board (real app, headless browser)", { skip: BROWSER ? false : "no Chrome or Edge installed" }, () => {
   let server, base, b, big, small;
   const api = (method, p, body) => b.evaluate(`(async () => { const { csrfToken } = await (await fetch("/api/v1/auth/session")).json(); const r = await fetch("/api/v1${p}", { method: "${method}", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken } ${body ? `, body: ${JSON.stringify(JSON.stringify(body))}` : ""} }); return { status: r.status, body: await r.json() }; })()`);
@@ -94,7 +161,7 @@ describe("Row window on a large board (real app, headless browser)", { skip: BRO
   before(async () => {
     const port = await freePort();
     base = `http://localhost:${port}`;
-    server = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port), "shared"], { stdio: "ignore" });
+    server = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port), "shared"], { stdio: "ignore", env: { ...process.env, JARC_TEST_RECORD_SEARCH: "on" } });
     await waitForServer(base, { child: server });
     b = await launch();
     await b.open(`${base}/`, { width: 1440, height: 900 });
@@ -105,7 +172,7 @@ describe("Row window on a large board (real app, headless browser)", { skip: BRO
     big = await created("Big board", [{ id: "grp_first1", name: "First" }, { id: "grp_second1", name: "Second" }]);
     small = await created("Small board", [{ id: "grp_only01", name: "Only" }]);
     const make = (n, board, prefix, last = "") => Array.from({ length: n }, (_, i) => ({ values: { serial: `${prefix} ${String(i).padStart(4, "0")}`, notes: i === n - 1 ? last : "" }, groupId: board.groups[i % board.groups.length].id }));
-    for (const batch of [make(100, big, "Big"), make(100, big, "Big-b"), make(100, big, "Big-c", "the-last-one")]) { const res = await api("POST", `/boards/${big.id}/records/batch`, { records: batch }); assert.equal(res.status, 201, JSON.stringify(res.body).slice(0, 300)); }
+    for (const batch of [make(100, big, "Big", "unloaded-marker"), make(100, big, "Big-b"), make(100, big, "Big-c", "the-last-one")]) { const res = await api("POST", `/boards/${big.id}/records/batch`, { records: batch }); assert.equal(res.status, 201, JSON.stringify(res.body).slice(0, 300)); }
     assert.equal((await api("POST", `/boards/${small.id}/records/batch`, { records: make(40, small, "Small") })).status, 201);
     await b.send("Page.navigate", { url: `${base}/` });
     assert.ok(await b.waitFor("!!document.querySelector('#sidebar .tree-item')", 15000), "app shown");
@@ -127,6 +194,23 @@ describe("Row window on a large board (real app, headless browser)", { skip: BRO
     await sleep(200);
     assert.equal(await rows(), 105);
     assert.match(await b.evaluate("document.querySelector('.rows-more-row').textContent"), /100 of 150 shown/);
+  });
+  test("a partly loaded board: board search finds a record that isn't loaded and shows it like any other row", async () => {
+    await open("Small board"); // so the next load starts on another board, after the limit below is set
+    await b.send("Page.navigate", { url: `${base}/` });
+    assert.ok(await b.waitFor("!!document.querySelector('#sidebar .tree-item')", 15000));
+    await b.evaluate("ResourceApiAdapter.FULL_LOAD_LIMIT = 100");
+    await open("Big board");
+    assert.match(await b.evaluate("document.querySelector('.partial-notice').textContent"), /first 200 of 300/);
+    assert.equal(await b.evaluate("[...document.querySelectorAll('tr[data-record-context]')].some((r) => r.textContent.includes('unloaded-marker'))"), false);
+    await search("unloaded-marker");
+    assert.ok(await b.waitFor("[...document.querySelectorAll('tr[data-record-context]')].some((r) => r.textContent.includes('unloaded-marker'))", 5000), "found on the server and shown");
+    assert.match(await b.evaluate("document.querySelector('.partial-notice').textContent"), /Found 1 more match/);
+    assert.equal(await b.evaluate("document.activeElement?.id"), "board-search", "typing focus is kept");
+    await search("");
+    await b.send("Page.navigate", { url: `${base}/` });
+    assert.ok(await b.waitFor("!!document.querySelector('#sidebar .tree-item')", 15000));
+    await sleep(300);
   });
   test("search and select-all still reach the records outside the window", async () => {
     await open("Big board");

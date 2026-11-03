@@ -566,6 +566,20 @@ class AppController {
     if (event.target.dataset.action !== "search") return;
     const cursor=event.target.selectionStart; this.model.query=event.target.value; this.update();
     const input=document.querySelector('[data-action="search"]'); input?.focus(); input?.setSelectionRange(cursor,cursor);
+    this.searchUnloaded();
+  }
+  // A partly loaded board: after a short pause, the server also searches the records not loaded here.
+  searchUnloaded() {
+    clearTimeout(this.boardSearchTimer);
+    const model=this.model, boardId=model.board?.id, query=model.query.trim();
+    if(query.length<2||!boardId||!model.boardSearchAvailable||model.boardLoadState(boardId).state!=="partial"){model.remoteSearch=null;return;}
+    this.boardSearchTimer=setTimeout(async()=>{
+      await model.searchUnloadedRecords(boardId,query);
+      if(model.query.trim()!==query||String(model.board?.id)!==String(boardId)||model.screen!=="board")return;
+      const input=document.querySelector('[data-action="search"]'), focused=document.activeElement===input, at=input?.selectionStart;
+      this.update();
+      if(focused){const next=document.querySelector('[data-action="search"]');next?.focus();next?.setSelectionRange(at,at);}
+    },350);
   }
   onChange(event) {
     if (event.target.dataset?.action === "comment-input") return;

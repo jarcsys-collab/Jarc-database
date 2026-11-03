@@ -7,6 +7,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const { healthRoutes } = require("./routes/health");
+const { slowRequestLog } = require("./middleware/slow-requests");
 const { stateRoutes } = require("./routes/state");
 const { resourceRoutes } = require("./routes/resources");
 const { memberRoutes } = require("./routes/members");
@@ -49,7 +50,7 @@ function resourceModeIndex(siteDir) {
 // accessPolicy: "role_based" (default) or "development_shared" (see auth/access.js). betaOpenEditing: temporary
 // beta collaboration (JARC_BETA_OPEN_EDITING), see auth/access.js. accounts: Account Management (Phase M4.3,
 // auth/accounts.js) { mode: off | staged | enforced, superAdmin }; Entra sign-in only.
-function createApp({ repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console } = {}) {
+function createApp({ repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console, slowRequestMs = 0 } = {}) {
   if (environment === "production" && (enableDevStateApi || enableDevResourceApi)) {
     throw new Error("Development (pre-auth) APIs can't be enabled in production.");
   }
@@ -64,6 +65,7 @@ function createApp({ repository, environment = "development", enableDevStateApi 
   app.use((req, res, next) => { res.set("X-Content-Type-Options", "nosniff"); next(); });
 
   const api = express.Router();
+  api.use(slowRequestLog({ logger, thresholdMs: slowRequestMs }));
   // inflate: false — compressed (gzip/deflate/br) request bodies are refused with 415 before anything is read or
   // decompressed. JARC's browser app never sends them, and this parser runs before authentication, so decompression
   // would be reachable without signing in (body-parser advisory GHSA-27r3-jxmh-p828).

@@ -9,7 +9,7 @@ const { sameValue, valueList, USER_REF } = require("../domain/board-schema");
 const { ApiError } = require("../middleware/errors");
 
 class RecordService {
-  constructor({ repos, connection, logger }) { Object.assign(this, { repos, connection, logger }); }
+  constructor({ repos, connection, logger, searchIndex = null }) { Object.assign(this, { repos, connection, logger, searchIndex }); }
 
   // People cells may only name real, active JARC users ("user:<id>") who may be assigned in this workspace:
   // { everyone: true } (development_shared) → any active user; otherwise → the workspace's active members.
@@ -69,6 +69,7 @@ class RecordService {
       throw notFound("board");
     }
     await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: board.workspaceId, boardId, recordId: doc._id, actorUserId: actor.userId, actorName: actor.displayName, action: "record.created", entityType: "record", entityId: doc._id, now }));
+    this.searchIndex?.refresh(boardId, [doc._id]);
     return doc;
   }
 
@@ -91,6 +92,7 @@ class RecordService {
       ...["groupId", "position", "archived", "pinned"].filter((f) => change[f] !== undefined && before[f] !== change[f]).map((f) => ({ field: f, from: before[f] ?? null, to: change[f] }))
     ];
     await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: record.workspaceId, boardId: record.boardId, recordId: id, actorUserId: actor.userId, actorName: actor.displayName, action: "record.updated", entityType: "record", entityId: id, changes, now }));
+    this.searchIndex?.refresh(record.boardId, [id]);
     return after;
   }
 
@@ -98,6 +100,7 @@ class RecordService {
     const record = await this.get(id);
     if (!await this.repos.records.deleteVersioned(id, expectedVersion)) throw await missingOrStale(this.repos.records, id, "record");
     await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: record.workspaceId, boardId: record.boardId, recordId: id, actorUserId: actor.userId, actorName: actor.displayName, action: "record.deleted", entityType: "record", entityId: id, summary: String(record.values?.serial ?? "").slice(0, 200), now: new Date() }));
+    this.searchIndex?.refresh(record.boardId, [id]);
   }
 }
 
@@ -120,6 +123,7 @@ RecordService.prototype.createMany = async function createMany(boardId, raw, act
     await this.repos.activities.append(activityEntry({ workspaceId: board.workspaceId, boardId, actorUserId: actor.userId, actorName: actor.displayName, action: "records.created", entityType: "board", entityId: boardId, summary: `Added ${docs.length} records`, now }), { session });
   });
   if (!await this.repos.boards.findById(boardId)) { await this.repos.records.deleteByBoard(boardId); throw notFound("board"); }
+  this.searchIndex?.refresh(boardId, docs.map((d) => d._id));
   return docs;
 };
 
@@ -139,7 +143,7 @@ RecordService.prototype.updateMany = async function updateMany(boardId, raw, act
   const items = validate.recordBatchUpdate(raw, board);
   await this.checkPeople(board, items.map((i) => i.change.values), people);
   const now = new Date();
-  return this.connection.withTransaction(async (session) => {
+  const updated = await this.connection.withTransaction(async (session) => {
     const found = await checkVersions(this.repos, boardId, items, { session });
     const entries = [];
     const updates = items.map(({ id, expectedVersion, change }) => {
@@ -160,6 +164,8 @@ RecordService.prototype.updateMany = async function updateMany(boardId, raw, act
     const after = new Map((await this.repos.records.findManyInBoard(boardId, items.map((i) => i.id), { session })).map((r) => [r._id.toHexString(), r]));
     return items.map((i) => after.get(i.id.toHexString()));
   });
+  this.searchIndex?.refresh(boardId, items.map((i) => i.id));
+  return updated;
 };
 
 // Records that are already gone are skipped, so repeating a delete is safe.
@@ -167,7 +173,7 @@ RecordService.prototype.deleteMany = async function deleteMany(boardId, raw, act
   const board = await this.board(boardId);
   const items = validate.recordBatchDelete(raw);
   const now = new Date();
-  return this.connection.withTransaction(async (session) => {
+  const result = await this.connection.withTransaction(async (session) => {
     const found = await checkVersions(this.repos, boardId, items, { session, skipMissing: true });
     const present = items.filter((i) => found.has(i.id.toHexString()));
     const deleted = await this.repos.records.bulkDelete(present.map((i) => ({ _id: i.id, boardId, version: i.expectedVersion })), { session });
@@ -175,6 +181,8 @@ RecordService.prototype.deleteMany = async function deleteMany(boardId, raw, act
     await this.repos.activities.appendMany(present.map((i) => activityEntry({ workspaceId: board.workspaceId, boardId, recordId: i.id, actorUserId: actor.userId, actorName: actor.displayName, action: "record.deleted", entityType: "record", entityId: i.id, summary: String(found.get(i.id.toHexString()).values?.serial ?? "").slice(0, 200), now })), { session });
     return { deleted, alreadyDeleted: items.length - present.length };
   });
+  this.searchIndex?.refresh(boardId, items.map((i) => i.id));
+  return result;
 };
 
 module.exports = { RecordService };

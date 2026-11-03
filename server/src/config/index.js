@@ -63,6 +63,10 @@ function loadConfig(env = process.env) {
     maxFileStorageBytes: maxFileStorageMb * 1024 * 1024,
     attachments: loadAttachmentConfig(env, nodeEnv),
     monday: loadMondayConfig(env),
+    // Search index (services/record-search-index.js): off, shadow or on. Unset: off, which writes nothing.
+    recordSearch: loadRecordSearchMode(env),
+    // Requests slower than this are logged by route pattern (middleware/slow-requests.js). 0 turns it off.
+    slowRequestMs: loadSlowRequestMs(env),
     // TEMPORARY beta collaboration (see auth/access.js). Only the exact value "true" turns it on.
     betaOpenEditing: env.JARC_BETA_OPEN_EDITING === "true",
     // GET/PUT /api/v1/state is a transitional development endpoint with no authentication. Never in production.
@@ -71,6 +75,18 @@ function loadConfig(env = process.env) {
     // Only outside production, and only with MongoDB.
     enableDevResourceApi: preAuth && dataStore === "mongodb" && authMode === "dev"
   });
+}
+
+function loadSlowRequestMs(env) {
+  if (env.SLOW_REQUEST_MS === undefined || env.SLOW_REQUEST_MS === "") return 2000;
+  if (!/^\d{1,6}$/.test(env.SLOW_REQUEST_MS)) throw new ConfigError("SLOW_REQUEST_MS must be a whole number of milliseconds (0 turns it off).");
+  return Number(env.SLOW_REQUEST_MS);
+}
+
+function loadRecordSearchMode(env) {
+  const mode = env.RECORD_SEARCH_INDEX === undefined || env.RECORD_SEARCH_INDEX === "" ? "off" : env.RECORD_SEARCH_INDEX;
+  if (!["off", "shadow", "on"].includes(mode)) throw new ConfigError("RECORD_SEARCH_INDEX must be off, shadow or on.");
+  return mode;
 }
 
 // AUTH_MODE selects how the resource API knows who is calling:

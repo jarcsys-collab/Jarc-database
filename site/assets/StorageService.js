@@ -310,6 +310,8 @@ class StorageService {
   lastChangeFor(change) { return JSON.parse(JSON.stringify(change)); }
 
   // Resource mode only: fetch a board's records (in order with saves). Other modes already hold every record.
+  searchStatus() { return this.adapter.searchStatus?.() ?? Promise.resolve({ boardSearch: false }); }
+  searchBoard(boardId, q) { return this.adapter.searchBoard?.(boardId, q) ?? Promise.resolve({ records: [], more: false }); }
   loadBoard(boardId, options) {
     const result = this.queue.then(() => this.adapter.loadBoardRecords(boardId, options));
     this.queue = result.catch(() => {});

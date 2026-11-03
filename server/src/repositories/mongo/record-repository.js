@@ -14,6 +14,7 @@ class RecordRepository extends VersionedRepository {
     if (!SORTABLE.has(sort.field)) throw new TypeError("Unsupported sort field.");
     const direction = sort.dir === "desc" ? -1 : 1;
     const query = { boardId };
+    if (filter.ids) query._id = { $in: filter.ids };
     if (filter.groupId !== undefined) query.groupId = filter.groupId;
     if (filter.archived !== undefined) query.archived = filter.archived;
     if (filter.status) query[`values.${filter.status.key}`] = filter.status.value; // key is a validated column key
@@ -38,6 +39,11 @@ class RecordRepository extends VersionedRepository {
   // branches and stops after `limit` documents.
   searchPage(clauses, { projection, limit, maxTimeMS }) {
     return this.collection.find({ archived: false, $or: clauses }, { projection, sort: { updatedAt: -1, _id: -1 }, limit, maxTimeMS }).toArray();
+  }
+
+  // The given records with only the projected fields (search results from the index), bounded by maxTimeMS.
+  byIds(ids, { projection, maxTimeMS }) {
+    return this.collection.find({ _id: { $in: ids } }, { projection, limit: ids.length, maxTimeMS }).toArray();
   }
 
   // Item names (and the fields needed to check access) of the given records, at most 200.

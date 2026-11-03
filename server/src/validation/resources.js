@@ -1,6 +1,7 @@
 // Request validation for the resource API. Each function returns a new object containing only allowed, checked
 // fields, so request bodies are never passed to MongoDB as they arrive.
 const { fail, requireBody, allowOnly, text, color, bool, finiteNumber, version, queryString, parseId, isObject, isSafeKey } = require("./common");
+const { ObjectId } = require("mongodb");
 const { iconValue } = require("./appearance");
 const { normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, groupColumnOf, checkValue, hasValue, isMultiColumn, valueList, PRIMARY_KEY, LIMITS, COLUMN_TYPES } = require("../domain/board-schema");
 
@@ -149,10 +150,10 @@ function recordPatch(raw, board) {
 
 // ---- Record listing: limit, cursor, an allowlisted sort, and a few exact filters.
 const RECORD_SORTS = Object.freeze({ position: "position", createdAt: "createdAt", updatedAt: "updatedAt" });
-const PAGE = Object.freeze({ defaultLimit: 50, maxLimit: 200 });
+const PAGE = Object.freeze({ defaultLimit: 50, maxLimit: 200, maxIds: 100 });
 
 function recordListQuery(query, board) {
-  allowOnly(query, ["limit", "cursor", "sort", "dir", "groupId", "status", "archived"], "the query");
+  allowOnly(query, ["limit", "cursor", "sort", "dir", "groupId", "status", "archived", "ids"], "the query");
   const rawLimit = queryString(query.limit, "limit");
   let limit = PAGE.defaultLimit;
   if (rawLimit !== undefined) {
@@ -172,6 +173,12 @@ function recordListQuery(query, board) {
     const statusColumn = board.columns.find((c) => c.type === "status");
     if (!statusColumn) fail("This board has no status column to filter by.");
     filter.status = { key: statusColumn.key, value: text(status, "status", { max: 200, trim: false }) };
+  }
+  const idList = queryString(query.ids, "ids");
+  if (idList !== undefined) {
+    const ids = idList.split(",");
+    if (!ids.length || ids.length > PAGE.maxIds || ids.some((id) => !/^[0-9a-f]{24}$/.test(id))) fail(`ids must be up to ${PAGE.maxIds} record IDs.`);
+    filter.ids = ids.map((id) => new ObjectId(id));
   }
   const archived = queryString(query.archived, "archived");
   if (archived !== undefined) {

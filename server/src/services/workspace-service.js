@@ -4,7 +4,7 @@ const validate = require("../validation/resources");
 const { notFound, conflict, missingOrStale, activityEntry, appendActivity, fieldChanges, sweepAfterCommit } = require("./shared");
 
 class WorkspaceService {
-  constructor({ repos, connection, logger }) { Object.assign(this, { repos, connection, logger }); }
+  constructor({ repos, connection, logger, searchIndex = null }) { Object.assign(this, { repos, connection, logger, searchIndex }); }
 
   list() { return this.repos.workspaces.list(); }
 
@@ -45,6 +45,7 @@ class WorkspaceService {
   // commit removes any board or record created concurrently while the transaction ran, so no orphans remain.
   async delete(id, expectedVersion, actor) {
     const now = new Date();
+    const boardIds = this.searchIndex?.enabled ? (await this.repos.boards.listByWorkspace(id)).map((b) => b._id) : [];
     const removed = await this.connection.withTransaction(async (session) => {
       const workspace = await this.repos.workspaces.findById(id, { session });
       if (!workspace) throw notFound("workspace");
@@ -58,6 +59,7 @@ class WorkspaceService {
     });
     removed.records += await sweepAfterCommit(this.logger, "workspace records", () => this.repos.records.deleteByWorkspace(id));
     removed.boards += await sweepAfterCommit(this.logger, "workspace boards", () => this.repos.boards.deleteByWorkspace(id));
+    this.searchIndex?.removeBoards(boardIds);
     return removed;
   }
 }

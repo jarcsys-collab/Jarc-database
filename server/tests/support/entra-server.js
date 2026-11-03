@@ -35,7 +35,8 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
   const monday = process.env.JARC_TEST_MONDAY === "1" ? require("./mock-monday") : null;
   const mock = monday?.mockMonday();
   const mondayConfig = monday ? require("../../src/config").loadMondayConfig(monday.ENV) : null;
-  const dataLayer = createDataLayer({ connection, logger: { error() {} }, fileStore: new MemoryFileStore(), monday: mondayConfig, ...(mock ? { fetch: mock.fetch } : {}) });
+  const dataLayer = createDataLayer({ connection, logger: { error() {} }, fileStore: new MemoryFileStore(), monday: mondayConfig, recordSearch: process.env.JARC_TEST_RECORD_SEARCH || "off", ...(mock ? { fetch: mock.fetch } : {}) });
+  await dataLayer.searchIndex.catchUp();
   const verify = createEntraVerifier({ ...entra, keySet: issuer.keySet });
   // Optional 2nd argument "shared": ACCESS_POLICY=development_shared (as on Railway); default role_based.
   const accessPolicy = process.argv[3] === "shared" ? "development_shared" : "role_based";

@@ -230,12 +230,24 @@ class BoardModel {
       const loaded = await this.storage.loadBoard(boardId, { more });
       delete this.boardLoading[boardId];
       this.mergeLoadedRecords(boardId, loaded);
+      // Searching beyond what's loaded depends on the server's search index, so ask once a board is only partly loaded.
+      if (this.boardLoadState(boardId).state === "partial" && this.boardSearchAvailable === undefined) { this.boardSearchAvailable = false; try { this.boardSearchAvailable = Boolean((await this.storage.searchStatus()).boardSearch); } catch { this.boardSearchAvailable = false; } }
     } catch (error) {
       this.boardLoading[boardId] = "error";
       const failure = StorageError.describe(error);
       this.boardLoadError = failure.message; this.boardLoadErrorCode = failure.code;
     }
     window.dispatchEvent(new CustomEvent("jarc-board-status", { detail: { boardId } }));
+  }
+  // Search on a partly loaded board: rows the server finds outside what's loaded join the board like loaded rows.
+  async searchUnloadedRecords(boardId, query) {
+    this.remoteSearch = { query, state: "searching" };
+    try {
+      const { records, more } = await this.storage.searchBoard(boardId, query);
+      if (records.length) this.mergeLoadedRecords(boardId, { records, activity: null });
+      this.remoteSearch = { query, state: "done", added: records.length, more };
+    } catch { this.remoteSearch = { query, state: "error" }; }
+    return this.remoteSearch;
   }
   // Adds loaded server records to the board in every copy of the state (visible, saved, failed, undo history), so
   // an undo or rollback never "forgets" records and asks the server to delete them.

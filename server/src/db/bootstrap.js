@@ -31,12 +31,17 @@ const COLLECTIONS = Object.freeze({
   comments: "comments",
   // Attachment storage counters per provider (see repositories/mongo/storage-usage-repository.js).
   storageUsage: "storageUsage",
+  // Derived search text, one document per record; rebuilt from records at any time (see services/record-search-index.js).
+  recordSearch: "recordSearch",
   // Account Management audit trail (Phase M4.3; see repositories/mongo/account-audit-repository.js). Append-only.
   accountAudit: "accountAudit"
 });
 
 const present = { $exists: true };
 const INDEXES = Object.freeze({
+  recordSearch: [
+    { name: "board_updated", key: { boardId: 1, updatedAt: -1, _id: -1 } }
+  ],
   users: [
     // Future Microsoft Entra identity: tenant + object ID (immutable). Email is never the identity key.
     { name: "uniq_entra_identity", key: { tenantId: 1, entraObjectId: 1 }, unique: true, partialFilterExpression: { entraObjectId: { $type: "string" } } },
@@ -63,6 +68,7 @@ const INDEXES = Object.freeze({
     { name: "board_updated", key: { boardId: 1, updatedAt: -1, _id: -1 } },
     { name: "board_created", key: { boardId: 1, createdAt: -1, _id: -1 } },
     { name: "board_group", key: { boardId: 1, groupId: 1 } },
+    { name: "board_active", key: { boardId: 1, archived: 1 } }, // active-record counts on every board list
     { name: "workspace_board", key: { workspaceId: 1, boardId: 1 } },
     { name: "uniq_board_legacy_id", key: { boardId: 1, legacyId: 1 }, unique: true, partialFilterExpression: { legacyId: present } }
   ],

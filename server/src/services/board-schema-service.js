@@ -14,7 +14,7 @@ const { notFound, conflict, activityEntry } = require("./shared");
 const invalid = (message) => new ApiError(400, "VALIDATION_ERROR", message);
 
 class BoardSchemaService {
-  constructor({ repos, connection }) { Object.assign(this, { repos, connection }); }
+  constructor({ repos, connection, searchIndex = null }) { Object.assign(this, { repos, connection, searchIndex }); }
 
   // Shared executor. build(board, records) → { boardSet, changes: [{ record, set?, unset? }], affected, summary } (or a
   // promise of it).
@@ -36,7 +36,10 @@ class BoardSchemaService {
       await this.repos.activities.append(activityEntry({ workspaceId: board.workspaceId, boardId, actorUserId: actor.userId, actorName: actor.displayName, action, entityType: "board", entityId: boardId, summary: plan.summary, now }), { session });
       return { board: { ...board, ...plan.boardSet, updatedAt: now, version: board.version + 1 }, affected: plan.affected, recordsChanged: updates.length };
     };
-    return dryRun ? run(undefined) : this.connection.withTransaction(run);
+    if (dryRun) return run(undefined);
+    const result = await this.connection.withTransaction(run);
+    this.searchIndex?.refreshBoard(boardId); // a change of columns can change what is searchable on every record
+    return result;
   }
 
   column(board, key) {

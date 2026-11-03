@@ -289,6 +289,22 @@ class ResourceApiAdapter {
   // Global search across every board this person may see (the server applies the access rules).
   async searchRecords(q, { limit = 20 } = {}) { return this.request("GET", `/search?q=${encodeURIComponent(q)}&limit=${limit}`); }
   // Command Center (Phase 14): params is a URLSearchParams of validated filter values (see CommandCenter.params).
+  async searchStatus() { return this.background("/search/status"); }
+  // Board search beyond what's loaded (a large board): the server finds matches among all the board's records, and those
+  // not loaded here are fetched so they appear like any other row. { records: model rows newly loaded, more }.
+  async searchBoard(boardId, q) {
+    const board = this.boards.get(this.resolve(boardId));
+    if (!board) return { records: [], more: false };
+    const { groups } = await this.background(`/search/global?type=record&boardId=${board.id}&q=${encodeURIComponent(q)}&limit=25`);
+    const group = groups.find((g) => g.type === "record") || { items: [], more: false };
+    const missing = group.items.map((i) => i.id).filter((id) => !this.records.has(id));
+    const records = [];
+    if (missing.length) {
+      const page = await this.background(`/boards/${board.id}/records?ids=${missing.join(",")}&limit=100`);
+      for (const r of page.items) { this.records.set(r.id, this.recordFrom(r)); records.push(this.modelRow(this.records.get(r.id), board)); }
+    }
+    return { records, more: Boolean(group.more) };
+  }
   async searchGlobal(params) { return this.request("GET", `/search/global?${params.toString()}`); }
   async loadPeople(workspaceId) {
     const id = this.resolve(workspaceId);

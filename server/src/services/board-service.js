@@ -6,7 +6,7 @@ const { ApiError } = require("../middleware/errors");
 const { notFound, conflict, missingOrStale, activityEntry, appendActivity, fieldChanges, sweepAfterCommit } = require("./shared");
 
 class BoardService {
-  constructor({ repos, connection, logger }) { Object.assign(this, { repos, connection, logger }); }
+  constructor({ repos, connection, logger, searchIndex = null }) { Object.assign(this, { repos, connection, logger, searchIndex }); }
 
   // Board summaries carry recordCount (active records), so lists can show counts without loading records.
   async listByWorkspace(workspaceId) {
@@ -83,6 +83,7 @@ class BoardService {
       return { records };
     });
     removed.records += await sweepAfterCommit(this.logger, "board records", () => this.repos.records.deleteByBoard(id));
+    this.searchIndex?.refreshBoard(id);
     return removed;
   }
 }

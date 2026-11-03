@@ -11,6 +11,8 @@ const { GridFsFileStore, AttachmentStorage, createS3FileStore } = require("./fil
 const { StorageUsageRepository } = require("./repositories/mongo/storage-usage-repository");
 const { FileService } = require("./services/file-service");
 const { SearchService } = require("./services/search-service");
+const { RecordSearchIndex } = require("./services/record-search-index");
+const { RecordSearchRepository } = require("./repositories/mongo/record-search-repository");
 const { IntegrationRepository } = require("./repositories/mongo/integration-repository");
 const { CommentRepository } = require("./repositories/mongo/comment-repository");
 const { CommentService } = require("./services/comment-service");
@@ -30,7 +32,7 @@ const { AccountService } = require("./services/account-service");
 // pass a mock — tests never reach monday.com).
 // attachments: config.attachments (where new uploads go; the S3 bucket when configured). s3Store: tests pass a store
 // pointed at a local mock instead of real settings. GridFS is always available, so existing files stay readable.
-function createDataLayer({ connection, logger = console, fileStore = new GridFsFileStore(connection.db), maxFileStorageBytes, attachments = null, s3Store = null, monday = null, fetch = globalThis.fetch } = {}) {
+function createDataLayer({ connection, logger = console, fileStore = new GridFsFileStore(connection.db), maxFileStorageBytes, attachments = null, s3Store = null, monday = null, recordSearch = "off", fetch = globalThis.fetch } = {}) {
   const db = connection.db;
   const s3 = s3Store || (attachments?.s3 ? createS3FileStore(attachments.s3) : null);
   const storage = new AttachmentStorage({ stores: { gridfs: fileStore, s3 }, defaultProvider: attachments?.defaultProvider || "gridfs" });
@@ -41,6 +43,7 @@ function createDataLayer({ connection, logger = console, fileStore = new GridFsF
     memberships: new MembershipRepository(db),
     boards: new BoardRepository(db),
     records: new RecordRepository(db),
+    recordSearch: new RecordSearchRepository(db),
     activities: new ActivityRepository(db),
     sessions: new SessionRepository(db),
     attachments: new AttachmentRepository(db),
@@ -49,17 +52,19 @@ function createDataLayer({ connection, logger = console, fileStore = new GridFsF
     storageUsage: new StorageUsageRepository(db),
     accountAudit: new AccountAuditRepository(db)
   };
-  const deps = { repos, connection, logger };
+  const searchIndex = new RecordSearchIndex({ repos, logger, mode: recordSearch });
+  const deps = { repos, connection, logger, searchIndex };
   return {
     connection,
     repos,
+    searchIndex,
     services: { workspaces: new WorkspaceService(deps), boards: new BoardService(deps), records: new RecordService(deps), imports: new ImportService(deps), schema: new BoardSchemaService(deps), members: new MembershipService(deps),
       // Account Management (Phase M4.3); unused while ACCOUNT_MANAGEMENT=off.
       accounts: new AccountService(deps),
-      search: new SearchService({ repos }),
+      search: new SearchService({ repos, index: searchIndex }),
       // access is attached when the routes are mounted (it depends on the access policy).
       comments: new CommentService({ repos, connection, logger }),
-      integration: new MondayIntegration({ repos, connection, config: monday, fetch, logger }),
+      integration: new MondayIntegration({ repos, connection, config: monday, fetch, logger, searchIndex }),
       files: new FileService({ repos, storage, logger, ...(maxFileStorageBytes ? { maxTotalBytes: maxFileStorageBytes } : {}), limits: Object.fromEntries(Object.entries(limits).filter(([, v]) => v)) }),
       // Read-only views used by the notification feed and People columns.
       activity: { recent: (options) => repos.activities.listRecent(options) },

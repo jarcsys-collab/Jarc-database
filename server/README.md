@@ -98,6 +98,13 @@ granted by the shared policy outlives it. The server logs a warning at startup w
    workspace has the right admins.
 4. Data, boards and records are unchanged; activity history keeps the real employee who made each change.
 
+## Search index and slow-request log
+
+| Setting | Values | Effect |
+|---|---|---|
+| `RECORD_SEARCH_INDEX` | `off` (default), `shadow`, `on` | `off` writes nothing. `shadow` keeps the `recordSearch` collection current and compares it with the regular search, logging only counts. `on` answers plain searches from it once it has caught up (searches with status, priority or assignee filters stay on the records). The collection is derived from `records` and rebuilt by the catch up at start; `records` is never written. |
+| `SLOW_REQUEST_MS` | milliseconds, default `2000`, `0` turns it off | Logs slower API requests: method, route pattern, status and time only. |
+
 ### Account Management (`ACCOUNT_MANAGEMENT`, Phases M4.3–M4.4A)
 
 | Value | Effect |

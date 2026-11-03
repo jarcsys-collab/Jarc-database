@@ -184,10 +184,10 @@ class FakeCollection {
     let matchedCount = 0, modifiedCount = 0, deletedCount = 0;
     for (const operation of operations) {
       if (operation.updateOne) {
-        const { filter, update } = operation.updateOne;
+        const { filter, update, upsert } = operation.updateOne;
         if (!filter || !Object.keys(filter).length) throw new Error("fake-mongo: refusing an unscoped bulk update");
         const index = this.docs.findIndex((d) => matches(d, filter));
-        if (index < 0) continue;
+        if (index < 0) { if (upsert) await this.updateOne(filter, update, { upsert: true }); continue; }
         this.replaceAt(index, applyUpdate(clone(this.docs[index]), update)); matchedCount += 1; modifiedCount += 1;
       } else if (operation.deleteOne) {
         const { filter } = operation.deleteOne;

@@ -13,7 +13,7 @@ const { ApiError } = require("../middleware/errors");
 const BATCH = 1000;
 
 class ImportService {
-  constructor({ repos, connection }) { Object.assign(this, { repos, connection }); }
+  constructor({ repos, connection, searchIndex = null }) { Object.assign(this, { repos, connection, searchIndex }); }
 
   async run(input, { dryRun, actor }) {
     const plan = buildImportPlan(input, { actorId: actor.userId });
@@ -32,6 +32,7 @@ class ImportService {
       if (error?.code === 11000) throw alreadyImported([]);
       throw error;
     }
+    this.searchIndex?.removeBoards(plan.boards.map((b) => b._id));
     return { dryRun: false, importId: plan.importId, report: plan.report };
   }
 

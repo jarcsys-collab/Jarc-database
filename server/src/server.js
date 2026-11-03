@@ -23,7 +23,7 @@ async function main() {
     connection = new MongoConnection({ uri: config.mongo.uri, dbName: config.mongo.dbName });
     await connection.connect();
     const { createdCollections } = await ensureDatabase(connection.db);
-    dataLayer = createDataLayer({ connection, maxFileStorageBytes: config.maxFileStorageBytes, attachments: config.attachments, monday: config.monday });
+    dataLayer = createDataLayer({ connection, maxFileStorageBytes: config.maxFileStorageBytes, attachments: config.attachments, monday: config.monday, recordSearch: config.recordSearch });
     if (config.enableDevResourceApi) devActor = await ensureDevelopmentActor(dataLayer.repos.users, { environment: config.nodeEnv });
     console.log(`MongoDB connected (database ${config.mongo.dbName}).${createdCollections.length ? ` Created collections: ${createdCollections.join(", ")}.` : ""}`);
   }
@@ -31,7 +31,7 @@ async function main() {
   // Entra mode: the sign-in ID token is checked once against this tenant's published signing keys, then a server
   // session cookie is used. No client secret is involved.
   const auth = config.authMode === "entra" ? { mode: "entra", entra: config.entra, verify: createEntraVerifier(config.entra) } : null;
-  const app = createApp({ repository, environment: config.nodeEnv, enableDevStateApi: config.enableDevStateApi, dataLayer, devActor, auth, enableDevResourceApi: config.enableDevResourceApi, accessPolicy: config.accessPolicy, betaOpenEditing: config.betaOpenEditing, accounts: config.accounts });
+  const app = createApp({ slowRequestMs: config.slowRequestMs, repository, environment: config.nodeEnv, enableDevStateApi: config.enableDevStateApi, dataLayer, devActor, auth, enableDevResourceApi: config.enableDevResourceApi, accessPolicy: config.accessPolicy, betaOpenEditing: config.betaOpenEditing, accounts: config.accounts });
   const server = app.listen(config.port, config.host, () => {
     const { port } = server.address();
     console.log(`JARC Database server (${config.nodeEnv}) on http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${port}/`);
@@ -45,6 +45,9 @@ async function main() {
     if (config.accounts.mode === "enforced") console.warn(`ACCOUNT_MANAGEMENT=enforced: account roles and workspace memberships decide access.${config.accessPolicy === "development_shared" || config.betaOpenEditing ? " ACCESS_POLICY=development_shared / JARC_BETA_OPEN_EDITING are IGNORED." : ""}`);
     if (config.accessPolicy === "development_shared") console.warn("ACCESS_POLICY=development_shared: every signed-in employee can create, edit and delete every workspace, board and record. Development collaboration only — set ACCESS_POLICY=role_based before production rollout.");
   });
+
+  // Search index: catches up in the background when switched on; search uses the records until it finishes.
+  dataLayer?.searchIndex.catchUp();
 
   // Files: remove interrupted uploads and files left behind by deletions, shortly after start and every 15 minutes.
   const files = dataLayer?.services.files;

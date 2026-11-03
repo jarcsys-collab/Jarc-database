@@ -37,6 +37,13 @@ function searchRoutes({ services, access, repos, limiter = searchLimiter(), rece
   const tooMany = (res) => sendError(res, 429, "RATE_LIMITED", "Too many searches. Wait a few seconds and try again.");
   const scopeOf = async (actor) => ({ roles: await access.visibleRoles(actor), globalRole: access.globalRole(actor) });
 
+  // Whether search across a whole board is available right now: only when the search index is on and has caught up
+  // (see services/record-search-index.js). Otherwise a partly loaded board searches its loaded records, as it always has.
+  router.get("/search/status", (req, res) => {
+    allowOnly(req.query, [], "the query");
+    send(res, { boardSearch: Boolean(services.search.index?.active) });
+  });
+
   router.get("/search", async (req, res) => {
     allowOnly(req.query, ["q", "limit"], "the query");
     const q = (queryString(req.query.q, "q") ?? "").trim();
