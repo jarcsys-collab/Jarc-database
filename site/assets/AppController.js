@@ -357,6 +357,7 @@ class AppController {
     if(action==="retry-save"){this.retrySave();return;}
     if(action==="retry-board-load"){this.model.ensureBoardRecords(this.model.board?.id);this.update();return;}
     if(action==="load-more-records"){this.model.ensureBoardRecords(this.model.board?.id,{more:true});return;}
+    if(action==="rows-show-more"){this.view.showMoreRows(this.model,target.dataset.key,target.dataset.shown);this.update();return;}
     if(action==="dismiss-hint"){this.model.updateSetting("dismissedHint",true);this.update();return;}
     if(action==="toggle-home-archived"){this.model.updateSetting("homeArchived",!this.model.settings.homeArchived);this.update();return;}
     if(action==="home-create-record"||action==="home-import"){this.chooseBoardAction(action==="home-import"?"import":"record");return;}

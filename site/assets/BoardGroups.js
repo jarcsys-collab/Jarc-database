@@ -14,7 +14,11 @@ Object.assign(AppView.prototype, {
       .filter((s) => !filtering || s.rows.length);
     const loose = rows.filter((r) => !known.has(model.groupOf(r)));
     const shown = [...sections.flatMap((s) => (model.isGroupCollapsed(s.name) ? [] : s.rows)), ...loose];
-    const bodies = sections.map((s) => this.groupSection(model, s.name, s.rows, { editable })).join("") + (loose.length ? this.groupSection(model, "", loose, { editable, loose: true }) : "");
+    // Large board: open groups share a window of rows, in order, each showing at least a few (each has "Show more").
+    const large = rows.length > AppView.LARGE_BOARD_ROWS;
+    let left = AppView.ROW_WINDOW;
+    const sizeFor = (s, open = true) => { if (!large) return Infinity; const size = Math.max(AppView.ROW_WINDOW_NEXT_GROUP, left); if (open) left -= Math.min(size, s.length); return size; };
+    const bodies = sections.map((s) => this.groupSection(model, s.name, s.rows, { editable, size: sizeFor(s.rows, !model.isGroupCollapsed(s.name)) })).join("") + (loose.length ? this.groupSection(model, "", loose, { editable, loose: true, size: sizeFor(loose) }) : "");
     const hiddenCount = rows.filter((r) => archived.has(model.groupOf(r))).length;
     const footer = `<div class="group-footer">${editable ? `<button type="button" class="add-group-button" data-action="group-new">${icon("plus")}<span>Add new group</span></button>` : ""}${archived.size ? `<button type="button" class="link-button archived-groups-button" data-action="group-archived" aria-haspopup="menu">${archived.size} archived group${archived.size === 1 ? "" : "s"}${hiddenCount ? ` · ${hiddenCount} record${hiddenCount === 1 ? "" : "s"}` : ""}</button>` : ""}</div>`;
     const table = bodies ? this.table(shown, model, "", bodies) : `<div class="quiet-empty">${icon("records")}<span><strong>No records match</strong></span></div>`;
@@ -30,10 +34,11 @@ Object.assign(AppView.prototype, {
       ${!loose && toggle ? `<button type="button" class="icon-button group-menu-button" data-action="group-menu" data-group="${this.attr(name)}" aria-haspopup="menu" aria-label="Actions for group ${this.attr(label)}" title="Group actions">${icon("more")}</button>` : ""}
     </div></th></tr>`;
   },
-  groupSection(model, name, rows, { editable, loose = false }) {
+  groupSection(model, name, rows, { editable, loose = false, size = Infinity }) {
     const collapsed = !loose && model.isGroupCollapsed(name), color = loose ? "#94a3b8" : model.groupColor(name), label = loose ? "No group" : name;
     const head = this.groupHeaderRow(model, { name, label, color, count: rows.length, collapsed, loose, editable, ids: loose ? rows.map((r) => r.id) : [], note: loose ? "Saved without a group" : "" });
-    const body = collapsed ? "" : rows.map((row) => this.row(row, model)).join("") + (editable && !loose ? this.quickAddRow(model, name, !rows.length) : "");
+    const windowKey = `group:${name}`, list = size === Infinity ? rows : rows.slice(0, this.rowLimit(model, windowKey, size));
+    const body = collapsed ? "" : list.map((row) => this.row(row, model)).join("") + (list.length < rows.length ? this.moreRowsRow(model, windowKey, list.length, rows.length) : "") + (editable && !loose ? this.quickAddRow(model, name, !rows.length) : "");
     return `<tbody class="board-group ${collapsed ? "is-collapsed" : ""} ${loose ? "is-loose" : ""}" style="--group-color:${this.cssColor(color)}" data-group="${this.attr(name)}" aria-label="${this.attr(label)}, ${rows.length} record${rows.length === 1 ? "" : "s"}">${head}${body}</tbody>`;
   },
   // View Group by: sections by a column's values (presentation only; no group actions).
@@ -44,7 +49,9 @@ Object.assign(AppView.prototype, {
     for (const r of rows) { const v = model.groupValue(r, column); (buckets.get(v) || buckets.set(v, []).get(v)).push(r); }
     const list = [...buckets].filter(([, l]) => l.length);
     if (!list.length) return `<section class="data-region board-groups"><div class="quiet-empty">${icon("records")}<span><strong>No records match</strong></span></div></section>`;
-    const bodies = list.map(([value, l]) => `<tbody class="board-group view-group" style="--group-color:${this.cssColor(model.optionColor?.(column, value), "#64748b")}" data-view-group="${this.attr(value)}">${this.groupHeaderRow(model, { name: value, label: value, count: l.length, toggle: false, note: `Grouped by ${this.escape(column.label)}` })}${l.map((row) => this.row(row, model)).join("")}</tbody>`).join("");
+    const large = rows.length > AppView.LARGE_BOARD_ROWS;
+    const rowsOf = (value, l, i) => { const key = `view:${column.key}:${value}`, shown = large ? l.slice(0, this.rowLimit(model, key, i ? AppView.ROW_WINDOW_NEXT_GROUP : AppView.ROW_WINDOW)) : l; return shown.map((row) => this.row(row, model)).join("") + (shown.length < l.length ? this.moreRowsRow(model, key, shown.length, l.length) : ""); };
+    const bodies = list.map(([value, l], i) => `<tbody class="board-group view-group" style="--group-color:${this.cssColor(model.optionColor?.(column, value), "#64748b")}" data-view-group="${this.attr(value)}">${this.groupHeaderRow(model, { name: value, label: value, count: l.length, toggle: false, note: `Grouped by ${this.escape(column.label)}` })}${rowsOf(value, l, i)}</tbody>`).join("");
     return `<section class="data-region board-groups">${this.table(rows, model, "", bodies)}</section>`;
   },
 

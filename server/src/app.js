@@ -82,7 +82,10 @@ function createApp({ repository, environment = "development", enableDevStateApi 
     // monday.com OAuth return and webhooks: no JARC session (each has its own protection).
     if (dataLayer.services?.integration) api.use(integrationPublicRoutes({ integration: dataLayer.services.integration }));
     if (auth) api.use(signInRoutes({ entra: auth.entra, verify: auth.verify, repos: dataLayer.repos, access, accounts: accountService }));
-    const identify = auth ? sessionAuthentication({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users, entra: auth.entra, accountMode }) : devActorMiddleware(devActor, { environment });
+    const authenticate = auth ? sessionAuthentication({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users, entra: auth.entra, accountMode }) : devActorMiddleware(devActor, { environment });
+    // Each router below is mounted with `identify`, and a request passes through every mount until one answers: the
+    // full check runs once per request and later mounts reuse its verified result (req.actor).
+    const identify = (req, res, next) => (req.actor ? next() : authenticate(req, res, next));
     // Everything after `identify` requires a caller (in Entra mode, a valid session — including unknown paths).
     if (auth) api.use(identify, sessionRoutes({ repos: dataLayer.repos, access, accounts: accountService }));
     if (accountService) api.use(identify, accountRoutes({ services: dataLayer.services, repos: dataLayer.repos }));

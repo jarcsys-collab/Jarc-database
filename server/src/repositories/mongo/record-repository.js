@@ -21,7 +21,8 @@ class RecordRepository extends VersionedRepository {
       const beyond = direction === 1 ? "$gt" : "$lt";
       query.$or = [{ [sort.field]: { [beyond]: after.value } }, { [sort.field]: after.value, _id: { [beyond]: after.id } }];
     }
-    const items = await this.collection.find(query, { sort: { [sort.field]: direction, _id: direction }, limit: limit + 1 }).toArray();
+    // batchSize: the whole page in one round trip (the driver's default first batch of 101 needs a getMore).
+    const items = await this.collection.find(query, { sort: { [sort.field]: direction, _id: direction }, limit: limit + 1, batchSize: limit + 1 }).toArray();
     return { items: items.slice(0, limit), hasMore: items.length > limit };
   }
 

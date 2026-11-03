@@ -198,7 +198,8 @@ class ResourceApiAdapter {
   }
 
   // ---- Load ----------------------------------------------------------------------------------------------------
-  // Workspaces, then each workspace's board summaries (with record counts), then the open board's records.
+  // Workspaces, then each workspace's board summaries (with record counts). Records are not awaited here: the model
+  // loads the open board's records after the app is shown (BoardModel.init), so a large board never delays startup.
   async loadResourceState() {
     this.reset();
     const stored = this.readUserState();
@@ -206,7 +207,6 @@ class ResourceApiAdapter {
       const { items: workspaces } = await this.request("GET", "/workspaces");
       const lists = await Promise.all(workspaces.map((w) => this.request("GET", `/workspaces/${w.id}/boards`)));
       workspaces.forEach((w, i) => { this.workspaces.set(w.id, this.workspaceFrom(w)); for (const b of lists[i].items) this.boards.set(b.id, this.boardFrom(b)); });
-      if (this.boards.has(stored.currentBoardId)) await this.loadBoardRecords(stored.currentBoardId);
     } catch (error) {
       if (!(error instanceof StorageError)) throw error;
       if (error.code === StorageError.CODES.OFFLINE || /took too long/.test(error.message)) throw error;
