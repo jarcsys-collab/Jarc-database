@@ -48,3 +48,34 @@
 html[data-density=compact] .editable-table td{height:42px}
 html[data-density=compact] .editable-table .inline-editor{min-height:30px;padding-top:3px;padding-bottom:3px}
 @media(max-width:1000px){.tool-left,.tool-right{flex-wrap:wrap}.table-guidance{align-items:flex-start}.table-guidance>div{gap:6px}.table-guidance span{font-size:11px}.table-guidance .button{flex-shrink:0}}
+
+/* Large boards: the true record count, and the spacers that stand in for rows away from the viewport. */
+.records-indicator{display:flex;align-items:center;gap:8px;padding:4px 2px;font-size:13px;color:var(--muted,inherit)}
+.row-spacer td{padding:0!important;border:0!important;background:transparent!important}
+.rows-loading td{padding:8px 4px}
+/* Rows of a group still on their way: faint lines, so a fast scroll never looks like an empty board. */
+.row-reserved td{background:linear-gradient(to bottom,transparent calc(100% - 1px),var(--line-subtle,rgba(127,127,127,.25)) 0) repeat-y!important}
+
+/* Native forms */
+.form-designer,.form-fill{max-height:88vh;overflow-y:auto;width:min(640px,calc(100vw - 32px));}
+.form-design-field{border:1px solid var(--line,#d9dee7);border-radius:8px;padding:12px;margin:0 0 12px;display:grid;gap:8px;}
+.form-design-condition{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;}
+.form-design-actions{display:flex;flex-wrap:wrap;gap:12px;}
+.form-menu-row{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.form-fill-field small{display:block;opacity:.75;font-weight:400;margin-top:2px;}
+.form-fill-field[hidden]{display:none;}
+.form-fill-error{color:var(--danger,#b42318);margin:8px 0;}
+@media (max-width:600px){.form-design-condition{grid-template-columns:1fr;}.form-designer input,.form-designer select,.form-fill input,.form-fill select{font-size:16px;}}
+
+/* Excel and CSV imports */
+.xl-progress{height:8px;border-radius:4px;background:var(--line,#d9dee7);overflow:hidden;margin:12px 0;}
+.xl-progress span{display:block;height:100%;background:var(--accent,#2563eb);transition:width .2s;}
+.xl-mapping{max-height:88vh;overflow-y:auto;width:min(760px,calc(100vw - 32px));}
+.xl-map-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px;}
+.xl-sample{overflow-x:auto;margin:8px 0 16px;}
+.xl-sample table{border-collapse:collapse;font-size:12px;}
+.xl-sample th,.xl-sample td{border:1px solid var(--line,#d9dee7);padding:4px 8px;white-space:nowrap;max-width:200px;overflow:hidden;text-overflow:ellipsis;}
+.xl-warning{color:var(--danger,#b42318);}
+.xl-errors ul,.xl-check ul{max-height:180px;overflow-y:auto;margin:8px 0;padding-left:18px;}
+.xl-import-open{display:grid;gap:4px;margin:0 0 12px;justify-items:start;}
+@media (max-width:600px){.xl-map-grid{grid-template-columns:1fr;}}

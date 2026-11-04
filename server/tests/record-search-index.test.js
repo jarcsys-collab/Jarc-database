@@ -9,13 +9,13 @@ const { ensureDatabase, INDEXES, COLLECTIONS } = require("../src/db/bootstrap");
 const { createDataLayer } = require("../src/data-layer");
 const { MemoryFileStore } = require("../src/files/file-store");
 const { searchParams } = require("../src/validation/search");
-const { searchDocument, searchableKeys } = require("../src/services/record-search-index");
+const { searchDocument, planOf } = require("../src/services/record-search-index");
 const { loadConfig } = require("../src/config");
 const { FakeMongoClient } = require("./support/fake-mongo");
 
 const COLUMNS = [
   { key: "serial", label: "Item", type: "text", required: true }, { key: "notes", label: "Notes", type: "text" },
-  { key: "status", label: "Status", type: "status", options: ["To do", "Done"] }, { key: "qty", label: "Qty", type: "number" },
+  { key: "status", label: "Status", type: "status", options: ["To do", "Done"] }, { key: "qty", label: "Qty", type: "number" }, { key: "prio", label: "Priority", type: "priority", options: ["Low", "High"] },
   { key: "tags", label: "Tags", type: "dropdown", options: ["Red", "Blue"], multiple: true }, { key: "who", label: "Who", type: "owner" }, { key: "ok", label: "OK", type: "checkbox" }, { key: "due", label: "Due", type: "date" }
 ];
 const quiet = { log() {}, warn() {}, error() {} };
@@ -28,7 +28,7 @@ async function world(mode, logger = quiet) {
   await connection.connect();
   await ensureDatabase(connection.db);
   const dl = createDataLayer({ connection, logger, fileStore: new MemoryFileStore(), recordSearch: mode });
-  dl.searchIndex.pauseMs = 0;
+  dl.searchIndex.pauseMs = 0; dl.searchIndex.repairMs = 0;
   return { dl, fake, s: dl.services, repos: dl.repos, index: dl.searchIndex, db: connection.db };
 }
 async function seed({ s, repos }) {
@@ -73,12 +73,13 @@ describe("Off (the default)", () => {
 });
 
 describe("What is indexed", () => {
-  const board = { columns: COLUMNS }, keys = searchableKeys(board);
+  const board = { columns: COLUMNS }, plan = planOf(board), { keys } = plan;
   test("the same columns as the regular search: name and text-like cells, never people, numbers or checkboxes", () => {
-    assert.deepEqual(keys, ["serial", "notes", "status", "tags", "due"]);
-    const doc = searchDocument({ _id: 1, boardId: 2, archived: false, updatedAt: null, values: { serial: "AB-1", notes: "Hello World", qty: 77, who: ["user:abc"], ok: true, tags: ["Red", "Blue"], due: "2026-01-02" } }, keys);
+    assert.deepEqual(keys, ["serial", "notes", "status", "prio", "tags", "due"]);
+    const doc = searchDocument({ _id: 1, boardId: 2, archived: false, updatedAt: null, values: { serial: "AB-1", notes: "Hello World", qty: 77, who: ["user:abc"], ok: true, tags: ["Red", "Blue"], due: "2026-01-02", status: "Done" } }, plan);
     assert.equal(doc.name, "ab-1");
-    assert.equal(doc.text, "ab-1\nhello world\nred\nblue\n2026-01-02");
+    assert.equal(doc.text, "ab-1\nhello world\ndone\nred\nblue\n2026-01-02");
+    assert.deepEqual([doc.status, doc.owner], [["Done"], ["user:abc"]], "the filter columns' values, as they are");
     assert.doesNotMatch(doc.text, /77|user:|true/);
   });
 });
@@ -116,11 +117,29 @@ describe("Results identical to searching the records", () => {
     const walk = async (svc) => { const seen = []; let cursor; for (let i = 0; i < 20; i += 1) { const g = recordsOf(await search(svc, { q: "plain", limit: "5", ...(cursor ? { cursor } : {}) })); seen.push(...g.items.map((x) => x.title)); if (!g.next) break; cursor = g.next; } return [...new Set(seen)].sort(); };
     assert.deepEqual(await walk(on.s.search), await walk(off.s.search));
   });
-  test("searches with a status filter stay on the records and give the same results", async () => {
+  test("status filters use the index, with or without text, and give the same results", async () => {
     let used = 0; const o = on.repos.records.searchPage; on.repos.records.searchPage = (...a) => { used += 1; return o.apply(on.repos.records, a); };
-    const a = names(await search(on.s.search, { q: "plain", status: "Done" })); on.repos.records.searchPage = o;
-    assert.ok(used > 0);
-    assert.deepEqual(a, names(await search(off.s.search, { q: "plain", status: "Done" })));
+    for (const q of [{ q: "plain", status: "Done" }, { status: "To do" }, { q: "alpha", status: "Done", from: "2026-01-02", to: "2026-01-20" }, { q: "zzqx", status: "Done" }, { status: "Nobody" }]) assert.deepEqual(names(await search(on.s.search, q)), names(await search(off.s.search, q)), JSON.stringify(q));
+    on.repos.records.searchPage = o;
+    assert.equal(used, 0, "the slow path isn't used");
+  });
+  test("a priority filter uses the index and matches", async () => {
+    for (const w of [on, off]) { const r = await w.repos.records.collection.findOne({ "values.serial": "Beta 4" }); await w.repos.records.collection.updateOne({ _id: r._id }, { $set: { "values.prio": "High", updatedAt: new Date("2026-02-02") } }); }
+    await on.index.catchUp();
+    let used = 0; const o = on.repos.records.searchPage; on.repos.records.searchPage = (...a) => { used += 1; return o.apply(on.repos.records, a); };
+    assert.deepEqual(names(await search(on.s.search, { priority: "High" })), ["Beta 4"]);
+    assert.deepEqual(names(await search(on.s.search, { q: "beta", priority: "High" })), names(await search(off.s.search, { q: "beta", priority: "High" })));
+    on.repos.records.searchPage = o;
+    assert.equal(used, 0);
+  });
+  test("an assignee filter uses the index and matches", async () => {
+    const who = new ObjectId();
+    for (const w of [on, off]) { const r = await w.repos.records.collection.findOne({ "values.serial": "Beta 3" }); await w.repos.records.collection.updateOne({ _id: r._id }, { $set: { "values.who": [`user:${who.toHexString()}`], updatedAt: new Date("2026-02-01") } }); }
+    await on.index.catchUp();
+    assert.equal(on.index.active, true);
+    const q = { assignee: `user:${who.toHexString()}` };
+    assert.deepEqual(names(await search(on.s.search, q)), ["Beta 3"]);
+    assert.deepEqual(names(await search(on.s.search, q)), names(await search(off.s.search, q)));
   });
   test("the older /search endpoint gives the same records", async () => {
     const list = async (w) => (await w.s.search.records("plain", { workspaceIds: null, limit: 50 })).items.map((i) => i.title).sort();
@@ -207,7 +226,18 @@ describe("Failures and recovery", () => {
     await w.index.catchUp();
     assert.equal(w.index.active, true);
   });
-  test("a failing index never fails or delays a save; it is logged, and the next catch up repairs it", async () => {
+  test("an index found incomplete isn't used until a catch up has repaired and verified it", async () => {
+    const warnings = [], w = await world("on", { ...quiet, warn: (m) => warnings.push(m) }); await seed(w);
+    const verify = w.index.verify.bind(w.index); w.index.verify = async () => ({ ...(await verify()), missing: 1 });
+    await w.index.catchUp();
+    assert.equal(w.index.active, false, "still not trusted");
+    assert.match(warnings[0], /not used yet: 1 missing/);
+    assert.ok(recordsOf(await search(w.s.search, { q: "plain" })).items.length > 0, "search still answers, from the records");
+    w.index.verify = verify;
+    await w.index.catchUp();
+    assert.equal(w.index.active, true);
+  });
+  test("a failing index never fails a save; it is logged, the index leaves use at once, and a catch up repairs it", async () => {
     const errors = [], w = await world("on", { ...quiet, error: (m) => errors.push(m) }); const seeded = await seed(w); await w.index.catchUp();
     const original = w.repos.recordSearch.upsertMany; w.repos.recordSearch.upsertMany = async () => { throw new Error("index down mongodb://user:secret@host"); };
     const doc = await w.s.records.create(seeded.a._id, { values: { serial: "Survivor heron" } }, actor, people);
@@ -215,6 +245,7 @@ describe("Failures and recovery", () => {
     await w.index.flush();
     assert.equal(errors.length, 1);
     assert.doesNotMatch(errors[0], /secret/, "error text is redacted");
+    assert.equal(w.index.active, false, "search stops trusting it immediately");
     w.repos.recordSearch.upsertMany = original;
     assert.equal((await w.index.verify()).missing, 1);
     await w.index.catchUp();
@@ -223,6 +254,7 @@ describe("Failures and recovery", () => {
   test("catch up repairs records changed behind its back, and only rewrites what differs", async () => {
     const w = await world("on"); const seeded = await seed(w); await w.index.catchUp();
     assert.equal((await w.index.catchUp()).rewritten, 0, "nothing to do the second time");
+    assert.deepEqual((await w.index.catchUp()).health, { boards: 3, records: 43, indexed: 43, missing: 0, stale: 0, extra: 0 });
     const r = await w.repos.records.collection.findOne({ boardId: seeded.a._id, archived: false });
     await w.repos.records.collection.updateOne({ _id: r._id }, { $set: { "values.serial": "Direct edit lynx", updatedAt: new Date() } });
     assert.equal((await w.index.catchUp()).rewritten, 1);

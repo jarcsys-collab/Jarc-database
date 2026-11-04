@@ -2,6 +2,7 @@
 // stable IDs, saved views and record values. They mirror the current frontend (site/assets/BoardModel.js).
 const crypto = require("crypto");
 const { fail, isObject, isPrimitive, isSafeKey, text, color, bool } = require("../validation/common");
+const { cleanFilter, cleanOrderBy } = require("./record-filter");
 
 const COLUMN_TYPES = Object.freeze(["text", "number", "status", "dropdown", "checkbox", "priority", "owner", "date", "email", "phone", "link", "group", "files"]);
 const PRIMARY_KEY = "serial"; // the required Item column; its key never changes (label may)
@@ -137,6 +138,8 @@ function viewState(state, index) {
   const clean = {};
   for (const [key, value] of entries) {
     if (!isSafeKey(key)) fail(`Saved view ${index + 1} has an invalid setting name.`);
+    if (key === "filter" && value !== null) { clean.filter = cleanFilter(value); continue; }
+    if (key === "orderBy" && value !== null) { clean.orderBy = cleanOrderBy(value); continue; }
     if (isPrimitive(value)) { if (typeof value === "string" && value.length > 1000) fail(`Saved view ${index + 1} has a setting that is too long.`); clean[key] = value; }
     else if (Array.isArray(value) && value.length <= LIMITS.columns && value.every(isSafeKey)) clean[key] = [...value];
     else if (isObject(value) && Object.keys(value).length <= LIMITS.columns && Object.entries(value).every(([k, v]) => isSafeKey(k) && (v === null || (typeof v === "number" && Number.isFinite(v))))) clean[key] = { ...value };

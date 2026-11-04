@@ -22,6 +22,8 @@ const { fileRoutes } = require("./routes/files");
 const { searchRoutes } = require("./routes/search");
 const { integrationRoutes, integrationPublicRoutes } = require("./routes/integrations");
 const { commentRoutes } = require("./routes/comments");
+const { formRoutes } = require("./routes/forms");
+const { importRoutes } = require("./routes/imports");
 const { preferenceRoutes } = require("./routes/preferences");
 const { accountRoutes } = require("./routes/accounts");
 const { version } = require("../package.json");
@@ -43,14 +45,18 @@ function resourceModeIndex(siteDir) {
   return html.replace(STORAGE_DEFAULT_LOCAL, STORAGE_DEFAULT_RESOURCE);
 }
 
+// An optional feature not stated is off in production and on elsewhere.
+const resolveFeatures = (features = {}, environment = "development") => { const on = (name) => (typeof features[name] === "boolean" ? features[name] : environment !== "production"); return Object.freeze({ nativeForms: on("nativeForms"), spreadsheetImports: on("spreadsheetImports") }); };
+
 // dataLayer (optional): { connection, repos, services } from createDataLayer. Without it the server behaves exactly
 // as in Stage 9. Who may use the resource API:
 //   auth = { mode: "entra", entra, verify }   Microsoft Entra ID sign-in → server session cookie (required in production)
 //   enableDevResourceApi + devActor            the fixed development user (development and test only)
 // accessPolicy: "role_based" (default) or "development_shared" (see auth/access.js). betaOpenEditing: temporary
 // beta collaboration (JARC_BETA_OPEN_EDITING), see auth/access.js. accounts: Account Management (Phase M4.3,
-// auth/accounts.js) { mode: off | staged | enforced, superAdmin }; Entra sign-in only.
-function createApp({ repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console, slowRequestMs = 0 } = {}) {
+// auth/accounts.js) { mode: off | staged | enforced, superAdmin }; Entra sign-in only. features: the optional features switched
+// on, { nativeForms, spreadsheetImports } (config/index.js); anything not stated is off in production and on elsewhere.
+function createApp({ features = {}, repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console, slowRequestMs = 0 } = {}) {
   if (environment === "production" && (enableDevStateApi || enableDevResourceApi)) {
     throw new Error("Development (pre-auth) APIs can't be enabled in production.");
   }
@@ -60,6 +66,7 @@ function createApp({ repository, environment = "development", enableDevStateApi 
   if (accountMode !== "off" && !auth) throw new Error("Account Management needs Microsoft Entra ID sign-in.");
   // Production: observation mode (staged) only until enforcement is separately approved (config refuses it too).
   if (accountMode === "enforced" && environment === "production") throw new Error("ACCOUNT_MANAGEMENT=enforced is not approved for production yet.");
+  const enabled = resolveFeatures(features, environment);
   const app = express();
   app.disable("x-powered-by");
   app.use((req, res, next) => { res.set("X-Content-Type-Options", "nosniff"); next(); });
@@ -97,6 +104,11 @@ function createApp({ repository, environment = "development", enableDevStateApi 
     // Global search across the boards the caller may see.
     if (dataLayer.services?.search) api.use(identify, searchRoutes({ services: dataLayer.services, access, repos: dataLayer.repos, ...(searchLimiter ? { limiter: searchLimiter } : {}) }));
     if (dataLayer.services?.comments) api.use(identify, commentRoutes({ services: dataLayer.services, access }));
+    // A feature that's off has no routes at all: its paths answer like any unknown path, whoever asks and however they ask.
+    if (enabled.nativeForms && dataLayer.services?.forms) api.use(identify, formRoutes({ services: dataLayer.services, access }));
+    if (enabled.spreadsheetImports && dataLayer.services?.importJobs) api.use(identify, importRoutes({ services: dataLayer.services, access }));
+    // What this server has switched on, so the browser shows only what will work. The routes above are what enforce it.
+    api.get("/features", identify, (req, res) => res.status(200).set("Cache-Control", "no-store").json({ features: enabled }));
     api.use(identify, preferenceRoutes({ repos: dataLayer.repos }));
     if (dataLayer.services?.integration) api.use(identify, integrationRoutes({ integration: dataLayer.services.integration, access }));
     // Live updates (Server-Sent Events) from the activity log; live: { pollMs, overlapMs, timings } for tests.
@@ -119,4 +131,4 @@ function createApp({ repository, environment = "development", enableDevStateApi 
   return app;
 }
 
-module.exports = { createApp, JSON_BODY_LIMIT };
+module.exports = { createApp, resolveFeatures, JSON_BODY_LIMIT };

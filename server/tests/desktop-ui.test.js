@@ -106,7 +106,8 @@ describe("Desktop workspace (real app, headless browser, role_based)", { skip: B
   });
 
   test("global search (Ctrl K): grouped, highlighted, with context; keyboard navigation opens the result; nothing extra is downloaded", async () => {
-    await mia.evaluate("(() => { window.__requests = []; const f = window.fetch; window.fetch = (u, i) => { window.__requests.push(String(u)); return f(u, i); }; })()");
+    // Only what typing asks for counts. A live update from an earlier change may load boards at any moment, and that's its job.
+    await mia.evaluate("(() => { window.__requests = []; window.__liveLoads = 0; const f = window.fetch; window.fetch = (u, i) => { if (!window.__liveLoads) window.__requests.push(String(u)); return f(u, i); }; const live = ResourceApiAdapter.prototype.fetchRemote; ResourceApiAdapter.prototype.fetchRemote = async function (...a) { window.__liveLoads += 1; try { return await live.apply(this, a); } finally { window.__liveLoads -= 1; } }; })()");
     await mia.evaluate("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }))");
     assert.ok(await mia.waitFor("document.activeElement?.dataset.action === 'command-search'", 2000), "Ctrl K opens search with focus in the box");
     const type = async (q) => { await mia.evaluate(`(() => { const i = document.querySelector('[data-action=command-search]'); i.value = ${JSON.stringify(q)}; i.dispatchEvent(new Event('input', { bubbles: true })); })()`); await sleep(150); await mia.waitFor("!document.querySelector('.search-status .loading-spinner')", 5000); await sleep(100); };

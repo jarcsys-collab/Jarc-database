@@ -11,14 +11,13 @@ Object.assign(AppView.prototype, {
     const filtering = Boolean(model.query || model.status !== "All" || model.quickFilter !== "all" || model.columnFilter || model.personFilter);
     const known = new Set(model.board.groups), archived = new Set(model.archivedGroupNames), editable = !model.board.source?.readOnly;
     const sections = model.activeGroups.map((name) => ({ name, rows: rows.filter((r) => model.groupOf(r) === name) }))
-      .filter((s) => !filtering || s.rows.length);
+      .filter((s) => !filtering || s.rows.length || model.groupDisplayCount?.(s.name, 0) > 0);
     const loose = rows.filter((r) => !known.has(model.groupOf(r)));
     const shown = [...sections.flatMap((s) => (model.isGroupCollapsed(s.name) ? [] : s.rows)), ...loose];
-    // Large board: open groups share a window of rows, in order, each showing at least a few (each has "Show more").
-    const large = rows.length > AppView.LARGE_BOARD_ROWS;
-    let left = AppView.ROW_WINDOW;
-    const sizeFor = (s, open = true) => { if (!large) return Infinity; const size = Math.max(AppView.ROW_WINDOW_NEXT_GROUP, left); if (open) left -= Math.min(size, s.length); return size; };
-    const bodies = sections.map((s) => this.groupSection(model, s.name, s.rows, { editable, size: sizeFor(s.rows, !model.isGroupCollapsed(s.name)) })).join("") + (loose.length ? this.groupSection(model, "", loose, { editable, loose: true, size: sizeFor(loose) }) : "");
+    // Large board: only the rows near the viewport are in the page; the rest are spacers (see groupRowsHtml).
+    const large = rows.length > AppView.LARGE_BOARD_ROWS || Boolean(model.serverView);
+    this.virtual = large ? new Map() : null;
+    const bodies = sections.map((s) => this.groupSection(model, s.name, s.rows, { editable, large })).join("") + (loose.length ? this.groupSection(model, "", loose, { editable, loose: true, large }) : "");
     const hiddenCount = rows.filter((r) => archived.has(model.groupOf(r))).length;
     const footer = `<div class="group-footer">${editable ? `<button type="button" class="add-group-button" data-action="group-new">${icon("plus")}<span>Add new group</span></button>` : ""}${archived.size ? `<button type="button" class="link-button archived-groups-button" data-action="group-archived" aria-haspopup="menu">${archived.size} archived group${archived.size === 1 ? "" : "s"}${hiddenCount ? ` · ${hiddenCount} record${hiddenCount === 1 ? "" : "s"}` : ""}</button>` : ""}</div>`;
     const table = bodies ? this.table(shown, model, "", bodies) : `<div class="quiet-empty">${icon("records")}<span><strong>No records match</strong></span></div>`;
@@ -34,12 +33,42 @@ Object.assign(AppView.prototype, {
       ${!loose && toggle ? `<button type="button" class="icon-button group-menu-button" data-action="group-menu" data-group="${this.attr(name)}" aria-haspopup="menu" aria-label="Actions for group ${this.attr(label)}" title="Group actions">${icon("more")}</button>` : ""}
     </div></th></tr>`;
   },
-  groupSection(model, name, rows, { editable, loose = false, size = Infinity }) {
+  // The rows of a group that are near the viewport, between spacers that keep the scroll height right. The controller moves
+  // the range as the table scrolls and rebuilds only that group's body (AppController.syncVirtual).
+  groupRowsHtml(model, name, rows) {
+    const key = `group:${name}`, span = model.visibleColumns.length + 3, h = this.rowHeight || AppView.ROW_HEIGHT;
+    const first = !this.virtual.size, range = this.rowRanges?.get(key) || (first ? [0, AppView.ROW_WINDOW] : [0, 0]);
+    const start = Math.min(range[0], rows.length), end = Math.min(range[1], rows.length);
+    this.virtual.set(key, { name, count: rows.length, start, end });
+    const spacer = (n) => (n > 0 ? `<tr class="row-spacer" aria-hidden="true"><td colspan="${span}" style="height:${n * h}px"></td></tr>` : "");
+    const more = model.groupHasMore?.(name), reserved = more ? Math.max(0, model.groupDisplayCount(name, rows.length) - rows.length - 1) : 0;
+    return spacer(start) + rows.slice(start, end).map((row) => this.row(row, model)).join("") + spacer(rows.length - end) + (more ? `<tr class="rows-loading" data-more-group="${this.attr(name)}"><td></td><td colspan="${span - 1}"><span class="empty-table-note">Loading more records…</span></td></tr>` : "") + (reserved > 0 ? `<tr class="row-spacer row-reserved" aria-hidden="true"><td colspan="${span}" style="height:${reserved * h}px;background-size:100% ${h}px"></td></tr>` : "");
+  },
+  // Moves a group's window by adding and removing only the rows that enter and leave, so a wide board doesn't redraw rows that
+  // stay in view. → false when the rows on screen aren't what was last drawn: the caller then rebuilds the group.
+  moveGroupWindow(body, model, name, rows, [from, to]) {
+    const key = `group:${name}`, info = this.virtual?.get(key), h = this.rowHeight || AppView.ROW_HEIGHT;
+    if (!info || info.count !== rows.length || to <= from || to <= info.start || from >= info.end) return false;
+    const shown = [...body.querySelectorAll(":scope > tr[data-record-context]")];
+    if (shown.length !== info.end - info.start || shown.some((tr, i) => tr.dataset.recordContext !== String(rows[info.start + i]?.id))) return false;
+    const staying = shown.filter((tr, i) => { const at = info.start + i; if (at >= from && at < to) return true; tr.remove(); return false; });
+    if (!staying.length) return false;
+    const html = (a, b) => rows.slice(a, b).map((row) => this.row(row, model)).join("");
+    if (from < info.start) staying[0].insertAdjacentHTML("beforebegin", html(from, info.start));
+    if (to > info.end) staying.at(-1).insertAdjacentHTML("afterend", html(info.end, to));
+    for (const spacer of body.querySelectorAll(":scope > tr.row-spacer:not(.row-reserved)")) spacer.remove();
+    const spacer = (n) => (n > 0 ? `<tr class="row-spacer" aria-hidden="true"><td colspan="${model.visibleColumns.length + 3}" style="height:${n * h}px"></td></tr>` : "");
+    const now = [...body.querySelectorAll(":scope > tr[data-record-context]")];
+    now[0].insertAdjacentHTML("beforebegin", spacer(from));
+    now.at(-1).insertAdjacentHTML("afterend", spacer(rows.length - to));
+    this.virtual.set(key, { name, count: rows.length, start: from, end: to });
+    return true;
+  },
+  groupSection(model, name, rows, { editable, loose = false, large = false }) {
     const collapsed = !loose && model.isGroupCollapsed(name), color = loose ? "#94a3b8" : model.groupColor(name), label = loose ? "No group" : name;
-    const head = this.groupHeaderRow(model, { name, label, color, count: rows.length, collapsed, loose, editable, ids: loose ? rows.map((r) => r.id) : [], note: loose ? "Saved without a group" : "" });
-    const windowKey = `group:${name}`, list = size === Infinity ? rows : rows.slice(0, this.rowLimit(model, windowKey, size));
-    const body = collapsed ? "" : list.map((row) => this.row(row, model)).join("") + (list.length < rows.length ? this.moreRowsRow(model, windowKey, list.length, rows.length) : "") + (editable && !loose ? this.quickAddRow(model, name, !rows.length) : "");
-    return `<tbody class="board-group ${collapsed ? "is-collapsed" : ""} ${loose ? "is-loose" : ""}" style="--group-color:${this.cssColor(color)}" data-group="${this.attr(name)}" aria-label="${this.attr(label)}, ${rows.length} record${rows.length === 1 ? "" : "s"}">${head}${body}</tbody>`;
+    const head = this.groupHeaderRow(model, { name, label, color, count: model.groupDisplayCount ? model.groupDisplayCount(name, rows.length) : rows.length, collapsed, loose, editable, ids: loose ? rows.map((r) => r.id) : [], note: loose ? "Saved without a group" : "" });
+    const body = collapsed ? "" : (large ? this.groupRowsHtml(model, name, rows) : rows.map((row) => this.row(row, model)).join("")) + (editable && !loose ? this.quickAddRow(model, name, !rows.length && !model.groupDisplayCount?.(name, 0)) : "");
+    return `<tbody class="board-group ${collapsed ? "is-collapsed" : ""} ${loose ? "is-loose" : ""}" style="--group-color:${this.cssColor(color)}" data-group="${this.attr(name)}" ${large && !collapsed ? `data-window-key="${this.attr(`group:${name}`)}"` : ""} aria-label="${this.attr(label)}">${head}${body}</tbody>`;
   },
   // View Group by: sections by a column's values (presentation only; no group actions).
   columnGroupsView(rows, model) {
@@ -79,7 +108,7 @@ Object.assign(AppView.prototype, {
       <div class="modal-actions"><button type="button" class="button secondary" data-action="close-overlay">Cancel</button><button class="button primary" type="submit">${mode === "rename" ? "Save" : "Create group"}</button></div></form>`);
   },
   showGroupDelete(model, name) {
-    const count = model.groupRows(name).length, others = model.board.groups.filter((g) => g !== name);
+    const count = model.groupDisplayCount ? model.groupDisplayCount(name, model.groupRows(name).length) : model.groupRows(name).length, others = model.board.groups.filter((g) => g !== name);
     const choices = count ? `<fieldset class="delete-choice"><legend>${count} record${count === 1 ? "" : "s"} in this group</legend>
       <label class="radio-row"><input type="radio" name="mode" value="move" checked> Move them to <select name="moveTo" aria-label="Move records to">${others.map((g) => `<option value="${this.attr(g)}">${this.escape(g)}</option>`).join("")}</select></label>
       <label class="radio-row danger-text"><input type="radio" name="mode" value="delete"> Delete them permanently</label></fieldset>` : `<input type="hidden" name="mode" value="move"><input type="hidden" name="moveTo" value="${this.attr(others[0] || "")}">`;
@@ -155,7 +184,8 @@ class BoardGroupActions {
       case "group-color": if (model.setGroupColor(name, target.dataset.color)) this.done("Group colour changed"); else this.view.closeOverlay(); return;
       case "group-color-reset": if (model.resetGroupColor(name)) this.done("Group colour reset"); else this.view.closeOverlay(); return;
       case "group-add-record": { this.view.closeOverlay(); if (model.isGroupCollapsed(name)) model.toggleGroupCollapsed(name, false); this.c.update(); const trigger = this.c.root.querySelector(`.board-group[data-group="${CSS.escape(name)}"] [data-action="inline-add"]`); if (trigger) this.c.startInlineAdd(trigger); return; }
-      case "group-duplicate": case "group-duplicate-records": { const copy = model.duplicateGroup(name, { withRecords: action === "group-duplicate-records" }); return this.done(copy ? `Created ${copy}${action === "group-duplicate-records" ? " (records copied without files or updates)" : ""}` : ""); }
+      case "group-duplicate": case "group-duplicate-records": {
+        if (action === "group-duplicate-records" && model.serverView) { this.view.closeOverlay(); this.view.toast("A board this large can't duplicate a group with its records yet. Nothing was changed."); return; } const copy = model.duplicateGroup(name, { withRecords: action === "group-duplicate-records" }); return this.done(copy ? `Created ${copy}${action === "group-duplicate-records" ? " (records copied without files or updates)" : ""}` : ""); }
       case "group-move-up": case "group-move-down": if (model.moveGroup(name, action === "group-move-up" ? -1 : 1)) this.done("Group moved"); return;
       case "group-archive": if (model.archiveGroup(name, true)) this.done(`Archived ${name}`); else this.view.toast("A board keeps at least one visible group"); return;
       case "group-restore": if (model.archiveGroup(name, false)) this.done(`Restored ${name}`); return;
@@ -192,7 +222,8 @@ class BoardGroupActions {
     }
     if (action === "group-delete-form") {
       const name = form.dataset.group, remove = data.mode === "delete";
-      if (!model.deleteGroup(name, data.moveTo, { deleteRecords: remove })) { this.view.showMessage("Group not deleted", "A board keeps at least one group."); return; }
+      if (remove && model.serverView) { this.view.closeOverlay(); this.view.toast("A board this large can't delete a group with its records yet. Move them to another group instead. Nothing was changed."); return; }
+        if (!model.deleteGroup(name, data.moveTo, { deleteRecords: remove })) { this.view.showMessage("Group not deleted", "A board keeps at least one group."); return; }
       return this.done(remove ? "Group and its records deleted" : `Group deleted · records moved to ${data.moveTo}`);
     }
   }

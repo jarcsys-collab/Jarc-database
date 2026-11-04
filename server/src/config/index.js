@@ -65,6 +65,8 @@ function loadConfig(env = process.env) {
     monday: loadMondayConfig(env),
     // Search index (services/record-search-index.js): off, shadow or on. Unset: off, which writes nothing.
     recordSearch: loadRecordSearchMode(env),
+    // Optional features, each with its own switch: { nativeForms, spreadsheetImports }. Off in production unless turned on.
+    features: loadFeatureSwitches(env, nodeEnv),
     // Requests slower than this are logged by route pattern (middleware/slow-requests.js). 0 turns it off.
     slowRequestMs: loadSlowRequestMs(env),
     // TEMPORARY beta collaboration (see auth/access.js). Only the exact value "true" turns it on.
@@ -81,6 +83,20 @@ function loadSlowRequestMs(env) {
   if (env.SLOW_REQUEST_MS === undefined || env.SLOW_REQUEST_MS === "") return 2000;
   if (!/^\d{1,6}$/.test(env.SLOW_REQUEST_MS)) throw new ConfigError("SLOW_REQUEST_MS must be a whole number of milliseconds (0 turns it off).");
   return Number(env.SLOW_REQUEST_MS);
+}
+
+// JARC_FEATURE_FORMS, JARC_FEATURE_IMPORTS: true or false; anything else stops startup rather than being guessed. Unset means off
+// in production and on elsewhere. While off, the feature's API paths don't exist (app.js), its screens are hidden, the import
+// worker doesn't run and its database collections aren't created. Stored forms and imports are kept and return when it's on again.
+const FEATURE_SWITCHES = Object.freeze({ nativeForms: "JARC_FEATURE_FORMS", spreadsheetImports: "JARC_FEATURE_IMPORTS" });
+function loadFeatureSwitches(env, nodeEnv) {
+  const out = {};
+  for (const [feature, name] of Object.entries(FEATURE_SWITCHES)) {
+    const value = env[name];
+    if (value !== undefined && value !== "" && value !== "true" && value !== "false") throw new ConfigError(`${name} must be true or false.`);
+    out[feature] = value === undefined || value === "" ? nodeEnv !== "production" : value === "true";
+  }
+  return Object.freeze(out);
 }
 
 function loadRecordSearchMode(env) {
@@ -257,4 +273,4 @@ function assertMongoUri(uri) {
   if (pathDb && pathDb !== JARC_DB_NAME) throw new ConfigError(`MONGODB_URI names a different database in its path. Remove it (or use "${JARC_DB_NAME}"); the database always comes from MONGODB_DB_NAME.`);
 }
 
-module.exports = { loadConfig, loadAccountConfig, loadMondayConfig, loadAttachmentConfig, assertJarcDatabaseName, ConfigError, JARC_DB_NAME, ACCESS_POLICIES };
+module.exports = { FEATURE_SWITCHES, loadConfig, loadAccountConfig, loadMondayConfig, loadAttachmentConfig, assertJarcDatabaseName, ConfigError, JARC_DB_NAME, ACCESS_POLICIES };

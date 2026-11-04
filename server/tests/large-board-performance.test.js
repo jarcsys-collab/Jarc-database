@@ -141,13 +141,15 @@ describe("With the search index off, a partly loaded board behaves as it always 
     assert.ok(await b.waitFor("!!document.querySelector('#sidebar .tree-item')", 15000));
     await b.evaluate("ResourceApiAdapter.FULL_LOAD_LIMIT = 100");
     await b.evaluate(`[...document.querySelectorAll('#sidebar .tree-item')].find((el) => el.textContent.includes("Off board"))?.click()`);
-    assert.ok(await b.waitFor("!!document.querySelector('.partial-notice')", 15000));
+    assert.ok(await b.waitFor("!!document.querySelector('.records-indicator')", 15000));
     await sleep(300);
-    assert.match(await b.evaluate("document.querySelector('.partial-notice').textContent"), /Search, filters and sorting apply to the loaded records/);
+    assert.ok(await b.waitFor("/300 records/.test(document.querySelector('.records-indicator')?.textContent || '')", 8000));
     await b.evaluate("performance.clearResourceTimings()");
     await b.evaluate(`(() => { const i = document.querySelector('#board-search'); i.value = 'Off 0-5'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
     await sleep(800);
-    assert.deepEqual(await b.evaluate("performance.getEntriesByType('resource').map((e) => e.name).filter((n) => n.includes('/search'))"), []);
+    const asked = await b.evaluate("performance.getEntriesByType('resource').map((e) => e.name)");
+    assert.deepEqual(asked.filter((n) => n.includes('/search') || /[?&]q=/.test(n)), [], "no text search reaches the server while the index is off");
+    assert.match(await b.evaluate("document.querySelector('.records-indicator').textContent"), /search covers the records loaded so far/);
   });
 });
 
@@ -180,44 +182,49 @@ describe("Row window on a large board (real app, headless browser)", { skip: BRO
   });
   after(async () => { await b?.close(); server?.kill(); });
 
-  test("a small board shows every row and no Show more", async () => {
+  test("a small board shows every row", async () => {
     await open("Small board");
     assert.equal(await rows(), 40);
-    assert.equal(await b.evaluate("document.querySelectorAll('[data-action=rows-show-more]').length"), 0);
+    assert.equal(await b.evaluate("document.querySelectorAll('tr.row-spacer').length"), 0);
   });
-  test("a large board shows a window, true group counts, and Show more reveals more without a request for data", async () => {
+  const toBottom = async (times = 12) => { for (let i = 0; i < times; i += 1) { await b.evaluate("(() => { const w = document.querySelector('.board-view-region .table-wrap'); w.scrollTop = w.scrollHeight; })()"); await sleep(120); } };
+  test("a large board keeps only the rows near the viewport in the page, with true counts, and scrolling reaches every row", async () => {
     await open("Big board");
-    assert.equal(await rows(), 55, "50 in the first open group, 5 in the next");
+    assert.ok(await rows() <= 60, `few rows in the page: ${await rows()}`);
+    assert.ok(await b.evaluate("document.querySelectorAll('tr.row-spacer').length") >= 1);
     assert.deepEqual(await b.evaluate("[...document.querySelectorAll('.group-count')].map((x) => x.textContent.trim())"), ["150 records", "150 records"]);
-    assert.equal(await b.evaluate("document.querySelectorAll('[data-action=rows-show-more]').length"), 2);
-    await b.evaluate("document.querySelector('[data-action=rows-show-more]').click()");
-    await sleep(200);
-    assert.equal(await rows(), 105);
-    assert.match(await b.evaluate("document.querySelector('.rows-more-row').textContent"), /100 of 150 shown/);
+    await toBottom();
+    assert.ok(await rows() <= 80, `still few after scrolling: ${await rows()}`);
+    const last = await b.evaluate("[...document.querySelectorAll('tr[data-record-context]')].at(-1).textContent");
+    assert.ok(last.length > 0);
+    assert.equal(await b.evaluate("document.querySelector('.board-group[data-group=Second] tr[data-record-context]') !== null"), true, "the second group's rows appear when scrolled to");
+    await b.evaluate("document.querySelector('.board-view-region .table-wrap').scrollTop = 0"); await sleep(200);
+    assert.equal(await b.evaluate("document.querySelector('.board-group[data-group=First] tr[data-record-context]') !== null"), true, "and back again");
   });
-  test("a partly loaded board: board search finds a record that isn't loaded and shows it like any other row", async () => {
+  test("a partly loaded board: search reaches a record that isn't loaded, and the true count shows instead of a warning", async () => {
     await open("Small board"); // so the next load starts on another board, after the limit below is set
     await b.send("Page.navigate", { url: `${base}/` });
     assert.ok(await b.waitFor("!!document.querySelector('#sidebar .tree-item')", 15000));
     await b.evaluate("ResourceApiAdapter.FULL_LOAD_LIMIT = 100");
     await open("Big board");
-    assert.match(await b.evaluate("document.querySelector('.partial-notice').textContent"), /first 200 of 300/);
+    assert.ok(await b.waitFor("/300 records/.test(document.querySelector('.records-indicator')?.textContent || '')", 8000), "the true total");
+    assert.equal(await b.evaluate("!!document.querySelector('.partial-notice')"), false, "no warning");
     assert.equal(await b.evaluate("[...document.querySelectorAll('tr[data-record-context]')].some((r) => r.textContent.includes('unloaded-marker'))"), false);
     await search("unloaded-marker");
-    assert.ok(await b.waitFor("[...document.querySelectorAll('tr[data-record-context]')].some((r) => r.textContent.includes('unloaded-marker'))", 5000), "found on the server and shown");
-    assert.match(await b.evaluate("document.querySelector('.partial-notice').textContent"), /Found 1 more match/);
+    assert.ok(await b.waitFor("[...document.querySelectorAll('tr[data-record-context]')].some((r) => r.textContent.includes('unloaded-marker'))", 8000), "found on the server and shown");
+    assert.match(await b.evaluate("document.querySelector('.records-indicator').textContent"), /1 record/);
     assert.equal(await b.evaluate("document.activeElement?.id"), "board-search", "typing focus is kept");
     await search("");
     await b.send("Page.navigate", { url: `${base}/` });
     assert.ok(await b.waitFor("!!document.querySelector('#sidebar .tree-item')", 15000));
     await sleep(300);
   });
-  test("search and select-all still reach the records outside the window", async () => {
+  test("search and select-all still reach the records outside the page", async () => {
     await open("Big board");
     await search("the-last-one");
-    assert.ok(await b.waitFor("[...document.querySelectorAll('tr[data-record-context]')].some((r) => r.textContent.includes('the-last-one'))", 5000), "a record outside the window is found");
+    assert.ok(await b.waitFor("[...document.querySelectorAll('tr[data-record-context]')].some((r) => r.textContent.includes('the-last-one'))", 5000), "a record outside the page is found");
     await search("");
-    assert.ok(await b.waitFor("document.querySelectorAll('tr[data-record-context]').length > 50", 5000));
+    assert.ok(await b.waitFor("document.querySelectorAll('tr[data-record-context]').length > 20", 5000));
     await b.evaluate("document.querySelector('input[data-action=select-all]').click()");
     await sleep(300);
     assert.match(await b.evaluate("document.body.textContent.replace(/\\s+/g, ' ')"), /300 ?records? selected/i, "select-all covers every matching record, as before");

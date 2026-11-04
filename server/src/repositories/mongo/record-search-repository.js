@@ -10,7 +10,7 @@ class RecordSearchRepository {
   // Newest-updated first with a stable _id tie-break, like the records query it replaces; each board branch walks the
   // board_updated index, and the server stops after `limit` documents or maxTimeMS.
   searchPage(clauses, { limit, maxTimeMS }) {
-    return this.collection.find({ archived: false, $or: clauses }, { projection: { _id: 1 }, sort: { updatedAt: -1, _id: -1 }, limit, maxTimeMS }).toArray();
+    return this.collection.find({ archived: false, $or: clauses }, { projection: { _id: 1, boardId: 1, updatedAt: 1 }, sort: { updatedAt: -1, _id: -1 }, limit, maxTimeMS }).toArray();
   }
 
   // What is stored for one board, without the text: enough to find what differs from the records.

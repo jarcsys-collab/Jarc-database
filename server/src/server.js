@@ -22,7 +22,7 @@ async function main() {
   if (config.dataStore === "mongodb") {
     connection = new MongoConnection({ uri: config.mongo.uri, dbName: config.mongo.dbName });
     await connection.connect();
-    const { createdCollections } = await ensureDatabase(connection.db);
+    const { createdCollections } = await ensureDatabase(connection.db, { features: config.features });
     dataLayer = createDataLayer({ connection, maxFileStorageBytes: config.maxFileStorageBytes, attachments: config.attachments, monday: config.monday, recordSearch: config.recordSearch });
     if (config.enableDevResourceApi) devActor = await ensureDevelopmentActor(dataLayer.repos.users, { environment: config.nodeEnv });
     console.log(`MongoDB connected (database ${config.mongo.dbName}).${createdCollections.length ? ` Created collections: ${createdCollections.join(", ")}.` : ""}`);
@@ -31,10 +31,11 @@ async function main() {
   // Entra mode: the sign-in ID token is checked once against this tenant's published signing keys, then a server
   // session cookie is used. No client secret is involved.
   const auth = config.authMode === "entra" ? { mode: "entra", entra: config.entra, verify: createEntraVerifier(config.entra) } : null;
-  const app = createApp({ slowRequestMs: config.slowRequestMs, repository, environment: config.nodeEnv, enableDevStateApi: config.enableDevStateApi, dataLayer, devActor, auth, enableDevResourceApi: config.enableDevResourceApi, accessPolicy: config.accessPolicy, betaOpenEditing: config.betaOpenEditing, accounts: config.accounts });
+  const app = createApp({ features: config.features, slowRequestMs: config.slowRequestMs, repository, environment: config.nodeEnv, enableDevStateApi: config.enableDevStateApi, dataLayer, devActor, auth, enableDevResourceApi: config.enableDevResourceApi, accessPolicy: config.accessPolicy, betaOpenEditing: config.betaOpenEditing, accounts: config.accounts });
   const server = app.listen(config.port, config.host, () => {
     const { port } = server.address();
     console.log(`JARC Database server (${config.nodeEnv}) on http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${port}/`);
+    console.log(`Optional features: native forms ${config.features.nativeForms ? "on" : "off"}, Excel and CSV imports ${config.features.spreadsheetImports ? "on" : "off"}.`);
     if (config.enableDevStateApi) console.log("Development state API enabled: data is kept in memory only and is cleared when the server restarts.");
     else console.log("Development state API disabled (production). Only health endpoints and the frontend are served.");
     if (config.enableDevResourceApi) console.log("Resource API enabled for DEVELOPMENT / PRE-AUTH use: no authentication; every change is attributed to the local development actor.");
@@ -60,9 +61,13 @@ async function main() {
   const integrationWorker = dataLayer && config.monday.enabled ? new IntegrationWorker({ integration: dataLayer.services.integration, repos: dataLayer.repos }) : null;
   integrationWorker?.start();
 
+  // Excel and CSV imports: continues any import a previous run of the server left unfinished. Switched off, nothing runs and an
+  // unfinished import waits, for as long as its uploaded rows are kept (7 days).
+  if (config.features.spreadsheetImports) dataLayer?.services.importJobs.startWorker();
+
   let stopping = false;
   const shutdown = () => {
-    clearInterval(sweep); clearTimeout(firstSweep); integrationWorker?.stop();
+    clearInterval(sweep); clearTimeout(firstSweep); integrationWorker?.stop(); dataLayer?.services.importJobs.stopWorker();
     app.locals.realtime?.closeAll(); // open live-update streams would otherwise keep the server from closing
     if (stopping) return;
     stopping = true;

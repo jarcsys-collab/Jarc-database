@@ -236,7 +236,7 @@ class ResourceApiAdapter {
       const page = await this.request("GET", `/boards/${boardId}/records${query}`);
       for (const r of page.items) { this.records.set(r.id, this.recordFrom(r)); ids.push(r.id); }
       cursor = page.nextCursor;
-    } while (cursor && ids.length < ResourceApiAdapter.FULL_LOAD_LIMIT);
+    } while (cursor && ids.length < (board.recordCount > ResourceApiAdapter.FULL_LOAD_LIMIT ? 1 : ResourceApiAdapter.FULL_LOAD_LIMIT)); // a large board: one page now, the rest as it's asked for
     board.load.state = cursor ? "partial" : "full";
     board.load.cursor = cursor || null;
     return ids;
@@ -289,7 +289,38 @@ class ResourceApiAdapter {
   // Global search across every board this person may see (the server applies the access rules).
   async searchRecords(q, { limit = 20 } = {}) { return this.request("GET", `/search?q=${encodeURIComponent(q)}&limit=${limit}`); }
   // Command Center (Phase 14): params is a URLSearchParams of validated filter values (see CommandCenter.params).
+  // Saved view conditions, run by the server against every record of the board. New rows are kept like loaded ones.
+  // → { records: all rows of this page as model rows, ids: their IDs in order, nextCursor }.
+  async loadFiltered(boardId, { filter = null, also = null, q = null, orderBy = null, archived = false, group, cursor = null, limit = ResourceApiAdapter.PAGE_SIZE } = {}) {
+    const board = this.boards.get(this.resolve(boardId));
+    if (!board) throw new StorageError(StorageError.CODES.NOT_FOUND, "This board no longer exists. Reload to see the latest data.");
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (filter) query.set("filter", JSON.stringify(filter));
+    if (also) query.set("also", JSON.stringify(also));
+    if (q) query.set("q", q);
+    if (archived) query.set("archived", "true");
+    if (group !== undefined) query.set("group", group === "" ? "none" : board.groups.find((g) => g.name === group)?.id ?? "none");
+    query.set("orderBy", JSON.stringify(orderBy?.length ? orderBy : [{ key: "position", dir: "asc" }]));
+    if (cursor) query.set("cursor", cursor);
+    const page = await this.background(`/boards/${board.id}/records?${query}`);
+    for (const r of page.items) if (!this.records.has(r.id)) this.records.set(r.id, this.recordFrom(r));
+    return { records: page.items.map((r) => this.modelRow(this.records.get(r.id), board)), ids: page.items.map((r) => r.id), nextCursor: page.nextCursor };
+  }
+  // → { total, groups: { group name: count } }.
+  async countFiltered(boardId, { filter = null, also = null, q = null, archived = false } = {}) {
+    const board = this.boards.get(this.resolve(boardId));
+    if (!board) throw new StorageError(StorageError.CODES.NOT_FOUND, "This board no longer exists. Reload to see the latest data.");
+    const query = new URLSearchParams();
+    if (filter) query.set("filter", JSON.stringify(filter));
+    if (also) query.set("also", JSON.stringify(also));
+    if (q) query.set("q", q);
+    if (archived) query.set("archived", "true");
+    const { total, groups } = await this.background(`/boards/${board.id}/records/count?${query}`);
+    const nameOf = new Map(board.groups.map((g) => [g.id, g.name]));
+    return { total, groups: Object.fromEntries(Object.entries(groups).map(([id, n]) => [nameOf.get(id) ?? id, n])) };
+  }
   async searchStatus() { return this.background("/search/status"); }
+  async features() { return this.background("/features"); }
   // Board search beyond what's loaded (a large board): the server finds matches among all the board's records, and those
   // not loaded here are fetched so they appear like any other row. { records: model rows newly loaded, more }.
   async searchBoard(boardId, q) {
@@ -375,7 +406,7 @@ class ResourceApiAdapter {
     do {
       const page = await this.background(`/boards/${boardId}/records?limit=${ResourceApiAdapter.PAGE_SIZE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
       out.push(...page.items); cursor = page.nextCursor;
-    } while (cursor && out.length < Math.max(wanted, ResourceApiAdapter.FULL_LOAD_LIMIT));
+    } while (cursor && out.length < (this.boards.get(boardId)?.recordCount > ResourceApiAdapter.FULL_LOAD_LIMIT ? 1 : Math.max(wanted, ResourceApiAdapter.FULL_LOAD_LIMIT)));
     return { items: out, partial: Boolean(cursor) };
   }
   commitRemote(plan) {
@@ -429,7 +460,7 @@ class ResourceApiAdapter {
         if (!same && !older) {
           for (const r of this.boardRecords(boardId)) this.records.delete(r.id);
           for (const r of records.items) this.records.set(r.id, this.recordFrom(r));
-          const b = this.boards.get(boardId); b.load.state = records.partial ? "partial" : "full"; b.recordCount = records.items.filter((r) => !r.archived).length;
+          const b = this.boards.get(boardId); b.load.state = records.partial ? "partial" : "full"; if (!records.partial) b.recordCount = records.items.filter((r) => !r.archived).length; // a partial reload saw only part of the board
           reconcile.replaceBoardRecords(boardId, this.boardRecords(boardId).map((r) => this.modelRow(r, b)));
           changed = true;
         }
@@ -488,7 +519,7 @@ class ResourceApiAdapter {
       const page = await this.request("GET", `/boards/${boardId}/records?limit=${ResourceApiAdapter.PAGE_SIZE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
       for (const r of page.items) { this.records.set(r.id, this.recordFrom(r)); count += 1; }
       cursor = page.nextCursor;
-    } while (cursor && count < Math.max(wanted, ResourceApiAdapter.FULL_LOAD_LIMIT));
+    } while (cursor && count < (board.recordCount > ResourceApiAdapter.FULL_LOAD_LIMIT ? 1 : Math.max(wanted, ResourceApiAdapter.FULL_LOAD_LIMIT)));
     board.load.state = cursor ? "partial" : "full";
     board.load.cursor = cursor || null;
     return this.boardRecords(boardId).map((r) => this.modelRow(r, board));

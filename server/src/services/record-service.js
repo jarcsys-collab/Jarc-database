@@ -7,6 +7,10 @@ const { notFound, missingOrStale, activityEntry, appendActivity } = require("./s
 const { sameValue, valueList, USER_REF } = require("../domain/board-schema");
 
 const { ApiError } = require("../middleware/errors");
+const recordFilter = require("../domain/record-filter");
+
+const FILTER_TIME_MS = 10000;
+const filterTimedOut = (error) => (error?.code === 50 || error?.codeName === "MaxTimeMSExpired" ? new ApiError(503, "FILTER_TIMEOUT", "This filter took too long. Try narrowing it.") : error);
 
 class RecordService {
   constructor({ repos, connection, logger, searchIndex = null }) { Object.assign(this, { repos, connection, logger, searchIndex }); }
@@ -37,10 +41,51 @@ class RecordService {
 
   async list(boardId, query) {
     const board = await this.board(boardId);
-    const { limit, sort, filter, after } = validate.recordListQuery(query, board);
+    const parsed = validate.recordListQuery(query, board);
+    if (parsed.filtered) return this.listFiltered(board, parsed);
+    const { limit, sort, filter, after } = parsed;
     const page = await this.repos.records.listPage(boardId, { sort, limit, after, filter });
     const last = page.items.at(-1);
     return { items: page.items, limit, nextCursor: page.hasMore ? validate.encodeCursor(sort, last[sort.field], last._id) : null };
+  }
+
+  // The conditions as query parts. Text search uses the search index when it is active; otherwise it reads the cells.
+  async filterParts(board, { filter, also, q, archived }) {
+    const parts = [{ archived }];
+    if (filter) parts.push(recordFilter.filterQuery(filter, board));
+    if (also) parts.push(recordFilter.filterQuery(also, board));
+    if (q) {
+      if (this.searchIndex?.active) parts.push({ _id: { $in: await this.searchIndex.boardIds(board._id, recordFilter.escapeRegex(q.toLowerCase()), { maxTimeMS: FILTER_TIME_MS, archived }) } });
+      else { const { searchableKeys } = require("./record-search-index"); parts.push({ $or: searchableKeys(board).map((k) => ({ [`values.${k}`]: { $regex: recordFilter.escapeRegex(q), $options: "i" } })) }); }
+    }
+    return parts;
+  }
+
+  // Every record of the board is considered, not only those a browser has loaded.
+  async listFiltered(board, { limit, filtered: { filter, also, q, orderBy, archived, after, groupId } }) {
+    const parts = await this.filterParts(board, { filter, also, q, archived });
+    if (groupId !== undefined) parts.push({ groupId });
+    const byColumn = orderBy.some((s) => s.path.startsWith("values."));
+    if (byColumn) {
+      const stages = recordFilter.columnSortStages(orderBy, after ? { values: after.values, oid: new ObjectId(after.id) } : null);
+      try {
+        const page = await this.repos.records.listByColumn(board._id, { query: { $and: parts }, stages, sortField: recordFilter.SORT_FIELD, collation: recordFilter.COLLATION, limit, maxTimeMS: FILTER_TIME_MS });
+        return { items: page.items, limit, nextCursor: page.hasMore ? recordFilter.encodeCursor(orderBy, page.items.at(-1), page.lastSort) : null };
+      } catch (error) { throw filterTimedOut(error); }
+    }
+    if (after) parts.push(recordFilter.afterQuery(orderBy, after.values, new ObjectId(after.id)));
+    const sort = Object.fromEntries([...orderBy.map((s) => [s.path, s.dir === "desc" ? -1 : 1]), ["_id", orderBy.at(-1).dir === "desc" ? -1 : 1]]);
+    try {
+      const page = await this.repos.records.listFiltered(board._id, { query: { $and: parts }, sort, limit, maxTimeMS: FILTER_TIME_MS });
+      return { items: page.items, limit, nextCursor: page.hasMore ? recordFilter.encodeCursor(orderBy, page.items.at(-1)) : null };
+    } catch (error) { throw filterTimedOut(error); }
+  }
+
+  async count(boardId, query) {
+    const board = await this.board(boardId);
+    const parts = await this.filterParts(board, validate.recordCountQuery(query, board));
+    try { return await this.repos.records.countFiltered(boardId, { query: { $and: parts }, maxTimeMS: FILTER_TIME_MS }); }
+    catch (error) { throw filterTimedOut(error); }
   }
 
   async exists(id) { return Boolean(await this.repos.records.findById(id)); }

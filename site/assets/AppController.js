@@ -6,6 +6,11 @@ class AppController {
     this.groupActions = typeof BoardGroupActions === "function" ? new BoardGroupActions(this) : null;
     this.appearance = typeof AppearanceActions === "function" ? new AppearanceActions(this) : null;
     this.comments = typeof CommentsPanel === "function" ? new CommentsPanel(this) : null;
+    this.forms = typeof FormsPanel === "function" ? new FormsPanel(this) : null;
+    this.imports = typeof ImportPanel === "function" ? new ImportPanel(this) : null;
+    window.addEventListener("jarc-import-open", () => { if (this.model.features?.spreadsheetImports) this.imports?.fillList(); });
+    // An import finished: the same reload as a colleague's change arriving.
+    window.addEventListener("jarc-board-changed", (event) => { const boardId = event.detail?.boardId; if (!boardId || !this.model.storage?.canFilterOnServer) return; (this.remoteQueue ??= []).push({ action: "board.updated", boardId: this.model.serverId(boardId), workspaceId: this.model.serverId(this.model.workspace?.id) }); this.processRemote(); });
     this.view.onRecordDrawer = (row) => this.comments?.open(row.id);
     this.command = typeof CommandCenter === "function" ? new CommandCenter(this) : null;
     root.addEventListener("click", (event) => this.guard(()=>this.onClick(event)));
@@ -35,7 +40,7 @@ class AppController {
     // Leaving a cell editor saves it (Esc cancels first); leaving an empty draft row discards it.
     root.addEventListener("focusout",e=>{const a=e.target.dataset?.action;if(a==="cell-input")this.commitCell(e.target,"none");else if(a==="draft-input")this.commitDraft(e.target);});
     document.addEventListener("pointerdown",e=>{const overlay=this.root.querySelector('#overlay-root');if(overlay?.querySelector('.popover,.profile-popover')&&!overlay.contains(e.target)&&!e.target.closest('[data-action]'))this.view.closeOverlay();});
-    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("jarc-session-expired",()=>{if(this.entra)this.showEntraGate("expired");});window.addEventListener("jarc-access-denied",()=>{if(this.entra)this.showEntraGate("denied");});window.addEventListener("jarc-account-pending",()=>{if(this.entra)this.showEntraGate("pending");});window.addEventListener("jarc-board-status",()=>this.refreshWhenIdle());window.addEventListener("jarc-ids-changed",()=>this.refreshWhenIdle());window.addEventListener("jarc-rollback",(event)=>this.onRollback(event.detail));window.addEventListener("jarc-connection",()=>this.saveFeedback());window.addEventListener("online",()=>this.saveFeedback());window.addEventListener("offline",()=>this.saveFeedback());
+    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("jarc-session-expired",()=>{if(this.entra)this.showEntraGate("expired");});window.addEventListener("jarc-access-denied",()=>{if(this.entra)this.showEntraGate("denied");});window.addEventListener("jarc-account-pending",()=>{if(this.entra)this.showEntraGate("pending");});window.addEventListener("jarc-board-status",()=>this.refreshWhenIdle());window.addEventListener("jarc-server-view",(e)=>this.renderServerView(e.detail?.groups||null));this.root.addEventListener("scroll",()=>this.scheduleVirtual(),true);window.addEventListener("jarc-ids-changed",()=>this.refreshWhenIdle());window.addEventListener("jarc-rollback",(event)=>this.onRollback(event.detail));window.addEventListener("jarc-connection",()=>this.saveFeedback());window.addEventListener("online",()=>this.saveFeedback());window.addEventListener("offline",()=>this.saveFeedback());
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>this.view.applyDisplay(this.model));
     root.addEventListener("pointerover",e=>{
       const target=e.target.closest('button');if(!target)return;
@@ -45,7 +50,8 @@ class AppController {
     });
     root.addEventListener("pointerout",()=>{clearTimeout(this.tooltipTimer);document.querySelector('.ui-tooltip')?.remove();});
     this.overlayObserver=new MutationObserver(()=>this.enhanceOverlay());this.overlayObserver.observe(root,{childList:true,subtree:true});
-    const originalClose=this.view.closeOverlay.bind(this.view);this.view.closeOverlay=()=>{originalClose();if(this.pendingRefresh){this.pendingRefresh=false;Promise.resolve().then(()=>this.update());}this.boardMenuWorkspace=null;this.root.querySelector(".app-shell")?.removeAttribute("inert");this.overlayReturnFocus?.focus?.();this.overlayReturnFocus=null;};
+    // A refresh that waited for a dialog runs once it's closed, unless closing it opened another (a search result opens its record): drawing now would remove that one, so it waits for that one too.
+    const originalClose=this.view.closeOverlay.bind(this.view);this.view.closeOverlay=()=>{originalClose();if(this.pendingRefresh){this.pendingRefresh=false;Promise.resolve().then(()=>{if(document.querySelector("#overlay-root")?.children.length){this.pendingRefresh=true;return;}this.update();});}this.boardMenuWorkspace=null;this.root.querySelector(".app-shell")?.removeAttribute("inert");this.overlayReturnFocus?.focus?.();this.overlayReturnFocus=null;};
     if (window.jarcStorage.getPreference("navCollapsed")==="1") document.body.classList.add("nav-collapsed");
     if (window.jarcStorage.getPreference("workspaceSectionCollapsed")==="1") document.body.classList.add("workspace-section-collapsed");
   }
@@ -74,7 +80,7 @@ class AppController {
       }
     }
     this.loadStartedAt = new Date().toISOString(); // live updates replay anything saved while loading
-    try { await this.model.init(); }
+    try { await this.model.init(); await this.model.loadFeatures(); }
     catch (error) {
       if (this.entra && error?.code === StorageError.CODES.UNAUTHENTICATED) { this.showEntraGate("expired"); return; }
       if (this.entra && error?.code === StorageError.CODES.ACCOUNT_DISABLED) { this.showEntraGate("denied"); return; }
@@ -139,6 +145,8 @@ class AppController {
       const { reconcile, summary } = adapter.commitRemote(plan);
       const before = this.remoteSnapshot(summary);
       if (this.model.applyRemote(reconcile)) this.renderRemote(summary, before, events);
+      const boardId = this.model.board?.id, reloaded = boardId && [...summary.boards].some((id) => String(id) === String(this.model.serverId?.(boardId) ?? boardId));
+      if (reloaded) this.model.afterBoardReload(boardId); else this.model.scheduleViewCount();
     } catch { this.remoteQueue.unshift(...events); this.needsResync = true; } // e.g. offline: retried when live again
     finally {
       this.remoteBusy = false;
@@ -232,6 +240,7 @@ class AppController {
   }
   update() {
     this.pendingRefresh = false;
+    this.model.syncServerQuery?.();
     this.view.commentsEnabled = Boolean(this.comments?.available);
     if (this.view.commentsEnabled && this.model.screen === "board" && this.model.board && this.countsBoardId !== this.model.board.id) { this.countsBoardId = this.model.board.id; this.model.commentCounts = {}; this.comments.loadCounts(this.model.board.id); }
     // The open view was deleted (here or by a colleague): back to Main Table.
@@ -242,7 +251,7 @@ class AppController {
     this.auth.authenticated ? this.view.render(this.model) : this.view.renderLogin(this.auth,this.model); this.applyNav(); this.saveFeedback();
     // A different screen or board starts at the top; re-renders of the same one keep their scroll position.
     const place = `${this.model.screen}:${this.model.screen === "board" ? this.model.board?.id : ""}`;
-    this.refocus(focus); if (place === this.lastPlace) this.restoreScroll(scroll); else if (this.lastPlace !== undefined) window.scrollTo(0, 0);
+    this.scheduleVirtual(); this.refocus(focus); if (place === this.lastPlace) this.restoreScroll(scroll); else if (this.lastPlace !== undefined) window.scrollTo(0, 0);
     this.lastPlace = place;
     if (this.ready && this.model.workspace && this.model.workspace.id !== this.peopleKey) this.loadPeople();
     this.ensureAttachments(); this.trackRows(); this.reapplyFlashes();
@@ -342,6 +351,8 @@ class AppController {
     if (action.startsWith("acct-") && this.accounts) { if (!["SELECT", "INPUT", "FORM"].includes(target.tagName)) this.accounts.onAction(action, target); return; }
     if ((action.startsWith("appearance-") || (["icon-picker", "icon-tab", "icon-choose"].includes(action))) && this.appearance) { if (target.tagName !== "INPUT") this.appearance.onAction(action, target); return; }
     if ((action.startsWith("group-") || action.startsWith("toolbar-")) && this.groupActions) { this.lastTrigger = target; this.groupActions.onAction(action, target); return; }
+    if (action.startsWith("xl-import-")) { if (this.model.features?.spreadsheetImports) this.imports?.onAction(action, target); return; }
+    if (action.startsWith("form-") && !["form-design-form", "form-fill-form"].includes(action)) { if (this.model.features?.nativeForms) this.forms?.onAction(action, target); return; }
     if (action.startsWith("comment-") && this.comments && action !== "comment-input") { this.comments.onAction(action, target); return; }
     if (action.startsWith("cc-") && this.command) { if (target.tagName !== "SELECT" && target.tagName !== "INPUT") this.command.onAction(action, target); return; }
     if (action === "drawer-tab") { this.view.selectDrawerTab(target.dataset.tab); if (target.dataset.tab === "updates") document.querySelector('#overlay-root textarea[data-role="new"]')?.focus(); return; }
@@ -357,6 +368,10 @@ class AppController {
     if(action==="retry-save"){this.retrySave();return;}
     if(action==="retry-board-load"){this.model.ensureBoardRecords(this.model.board?.id);this.update();return;}
     if(action==="load-more-records"){this.model.ensureBoardRecords(this.model.board?.id,{more:true});return;}
+    if(action==="view-load-more"){this.model.loadServerPage(null);return;}
+    if(action==="view-retry"){this.model.serverView=null;this.update();return;}
+    if(action==="view-filter"){this.view.closeOverlay();this.filterDraft=JSON.parse(JSON.stringify(this.model.viewFilter||{op:"and",rules:[]}));this.view.showViewFilter(this.model,this.filterDraft);return;}
+    if(action==="view-filter-add"||action==="view-filter-remove"){this.readFilterDraft();if(action==="view-filter-add")this.filterDraft.rules.push({key:this.model.board.columns.find((c)=>c.type!=="group")?.key,cmp:"in",values:[""]});else this.filterDraft.rules.splice(Number(target.dataset.index),1);this.view.showViewFilter(this.model,this.filterDraft);return;}
     if(action==="rows-show-more"){this.view.showMoreRows(this.model,target.dataset.key,target.dataset.shown);this.update();return;}
     if(action==="dismiss-hint"){this.model.updateSetting("dismissedHint",true);this.update();return;}
     if(action==="toggle-home-archived"){this.model.updateSetting("homeArchived",!this.model.settings.homeArchived);this.update();return;}
@@ -407,10 +422,11 @@ class AppController {
     if (action === "delete") this.requestDeleteRecords([this.model.idOf(target.dataset.id)]);
     if (action === "delete-selected") { const ids=[...this.model.selected]; if(ids.length>=10){this.pendingBulkDelete=ids;this.deleteFileInfo(ids).then(({files,unknown})=>this.view.showBulkDeleteConfirm(ids.length,files||(unknown?-1:0)));} else this.requestDeleteRecords(ids); return; }
     // ---- Phase 6 bulk actions (Shift-click selects a range).
-    if (action === "select") { const id=this.model.idOf(target.dataset.id); if(event.shiftKey&&this.lastSelected!==undefined&&this.lastSelected!==null&&this.model.visibleRows.some((r)=>r.id===this.lastSelected))this.model.selectRange(this.lastSelected,id,target.checked); else if(target.checked)this.model.selected.add(id); else this.model.selected.delete(id); this.lastSelected=id; this.update(); return; }
+    if (action === "select") { const id=this.model.idOf(target.dataset.id); if(event.shiftKey&&this.lastSelected!==undefined&&this.lastSelected!==null&&this.model.visibleRows.some((r)=>r.id===this.lastSelected)){const n=this.model.selectRange(this.lastSelected,id,target.checked);if(n&&target.checked&&this.model.serverView&&!this.model.serverViewComplete)this.view.toast(`${n.toLocaleString()} loaded record${n===1?"":"s"} selected. Records still loading aren't included. Use Select all for the whole view.`);} else if(target.checked)this.model.selected.add(id); else this.model.selected.delete(id); this.lastSelected=id; this.update(); return; }
     if (action === "bulk-archive" || action === "bulk-restore") { const n=this.model.bulkArchive([...this.model.selected],action==="bulk-archive"); this.update(); if(n)this.view.toast(`${n} record${n===1?"":"s"} ${action==="bulk-archive"?"archived · restore them from Archived records":"restored"}`,true); return; }
     if (action === "bulk-duplicate") { const ids=this.model.bulkDuplicate([...this.model.selected]); this.update(); if(ids.length)this.view.toast(`${ids.length} record${ids.length===1?"":"s"} duplicated (files are not copied)`,true); return; }
-    if (action === "bulk-export") { this.exportCsv(this.model.visibleRows.filter((r)=>this.model.selected.has(r.id))); return; }
+    // Every selected record, including any a later search or filter has hidden: the count on the bar is what's exported.
+    if (action === "bulk-export") { this.exportCsv(this.model.rows.filter((r)=>this.model.selected.has(r.id)),"Selection exported"); return; }
     if (action === "bulk-move") { this.togglePanel("bulk-move",()=>this.view.showMoveTargets(this.model)); return; }
     if (action === "apply-bulk-move") { const board=this.model.workspaces.flatMap((w)=>w.boards).find((b)=>String(b.id)===target.dataset.board); const n=this.model.bulkMove([...this.model.selected],target.dataset.board); this.view.closeOverlay(); this.update(); if(n)this.view.toast(`${n} record${n===1?"":"s"} moved to ${board?.name||"the board"}`,true); return; }
     if (action === "confirm-paste") { this.view.closeOverlay(); this.applyPaste(); return; }
@@ -544,7 +560,7 @@ class AppController {
     if(action==="shortcuts")this.view.showShortcuts();
     if (action === "import") this.view.showImport(this.model);
     if (action === "choose-import-file") document.querySelector("#import-file").click();
-    if (action === "export") this.exportCsv();
+    if (action === "export") { if(this.model.serverView&&!this.model.serverViewComplete)this.exportWholeView(); else if(!this.model.serverView&&this.model.boardLoadState().state!=="full")this.view.toast("This board is still loading, so nothing was exported. Try again in a moment."); else this.exportCsv(); }
     if (action === "export-backup") this.exportBackup();
     if (action === "close-overlay" && (event.target === target || target.closest("button"))) this.view.closeOverlay();
   }
@@ -566,23 +582,86 @@ class AppController {
     if (event.target.dataset.action !== "search") return;
     const cursor=event.target.selectionStart; this.model.query=event.target.value; this.update();
     const input=document.querySelector('[data-action="search"]'); input?.focus(); input?.setSelectionRange(cursor,cursor);
-    this.searchUnloaded();
   }
-  // A partly loaded board: after a short pause, the server also searches the records not loaded here.
-  searchUnloaded() {
-    clearTimeout(this.boardSearchTimer);
-    const model=this.model, boardId=model.board?.id, query=model.query.trim();
-    if(query.length<2||!boardId||!model.boardSearchAvailable||model.boardLoadState(boardId).state!=="partial"){model.remoteSearch=null;return;}
-    this.boardSearchTimer=setTimeout(async()=>{
-      await model.searchUnloadedRecords(boardId,query);
-      if(model.query.trim()!==query||String(model.board?.id)!==String(boardId)||model.screen!=="board")return;
-      const input=document.querySelector('[data-action="search"]'), focused=document.activeElement===input, at=input?.selectionStart;
-      this.update();
-      if(focused){const next=document.querySelector('[data-action="search"]');next?.focus();next?.setSelectionRange(at,at);}
-    },350);
+  // Select all and export act on the whole view, so a view with records still on the server loads them first. Past the limit
+  // nothing is selected, and the person is told in a message that stays until it's closed.
+  async withWholeView(fn){
+    const view=this.model.serverView, loading=view&&!this.model.serverViewComplete, limit=BoardModel.SELECT_ALL_LIMIT;
+    const tooMany=()=>{this.update();this.view.showMessage("Nothing was selected",`This view has ${(view.total||0).toLocaleString()} records, and Select all works on up to ${limit.toLocaleString()} at a time. Narrow the search or filters first. To download every record in this view, use Export, which has no such limit.`);};
+    if(view&&view.total>limit){tooMany();return;}
+    if(loading){
+      this.view.toast(`Loading all ${(view.total||0).toLocaleString()} records…`);
+      try{
+        let done="changed"; for(let i=0;i<3&&done==="changed";i+=1)done=await this.model.completeServerView();
+        if(done===false){tooMany();return;}
+        if(done!==true){this.view.toast("The board changed while loading, so nothing was done. Try again.");this.update();return;}
+      }
+      catch{this.view.toast("Not all the records arrived, so nothing was done.");this.update();return;}
+    }
+    fn();
+    if(loading)this.update();
+  }
+  // Virtual rows: as the table scrolls, each group shows only the rows near the viewport and asks for its next page when
+  // its end comes near. Only a group whose range changed is rebuilt; nothing runs while someone is typing in a row. Every group is
+  // measured before any is rebuilt: measuring after a rebuild makes the browser lay out the whole table again, once per group.
+  scheduleVirtual(){ if(this.virtualFrame)return; this.virtualFrame=requestAnimationFrame(()=>{this.virtualFrame=null;this.syncVirtual();}); }
+  syncVirtual(){
+    const view=this.view, wrap=this.root.querySelector(".board-view-region .table-wrap");
+    if(!wrap||!view.virtual)return;
+    const sample=wrap.querySelector("tr[data-record-context]"); if(sample?.offsetHeight)view.rowHeight=sample.offsetHeight;
+    const h=view.rowHeight||AppView.ROW_HEIGHT, box=wrap.getBoundingClientRect(), BUFFER=15;
+    view.rowRanges||=new Map();
+    const rebuild=[];
+    for(const body of wrap.querySelectorAll("tbody[data-window-key]")){
+      const key=body.dataset.windowKey, info=view.virtual.get(key); if(!info)continue;
+      const top=body.getBoundingClientRect().top+(body.rows[0]?.offsetHeight||0), near=top+info.count*h<box.bottom+800&&top<box.bottom+800;
+      if(near&&this.model.groupHasMore(info.name))this.model.loadServerPage(info.name,{limit:(box.top-top)/h-info.count>100?200:100}); // far behind: bigger pages
+      const from=Math.max(0,Math.floor((box.top-top)/h)), to=Math.min(info.count,Math.ceil((box.bottom-top)/h));
+      const visible=to>0&&from<info.count;
+      if(!visible&&info.end===info.start)continue;
+      if(visible&&from>=info.start&&to<=info.end)continue;
+      if(!visible&&!(info.start<info.count))continue;
+      if(body.contains(document.activeElement)&&document.activeElement.matches("input,textarea,select"))continue;
+      view.rowRanges.set(key,visible?[Math.max(0,from-BUFFER),Math.min(info.count,to+BUFFER)]:[0,0]);
+      rebuild.push({body,name:info.name,range:view.rowRanges.get(key)});
+    }
+    if(!rebuild.length)return;
+    const all=this.model.visibleRows;
+    for(const {body,name,range} of rebuild){const rows=all.filter((r)=>this.model.groupOf(r)===name);if(!view.moveGroupWindow(body,this.model,name,rows,range))this.rebuildGroup(body,name,rows);}
+  }
+  rebuildGroup(body,name,rows){body.outerHTML=this.view.groupSection(this.model,name,rows,{editable:!this.model.board.source?.readOnly,loose:!this.model.board.groups.includes(name),large:true});}
+  // A page of a group arrived while scrolling: only that group changes. → false when the whole screen has to be drawn instead.
+  showGroupPages(names){
+    const view=this.view, wrap=this.root.querySelector(".board-view-region .table-wrap");
+    // A table that showed no rows has its header's Select all switched off, so it's drawn in full.
+    if(!wrap||wrap.classList.contains("is-empty")||!view.virtual||this.model.currentView!=="table")return false;
+    if(document.querySelector(".view-filter-form")||document.querySelector("#overlay-root")?.children.length)return false;
+    const bodies=names.map((name)=>[...wrap.querySelectorAll("tbody[data-window-key]")].find((b)=>b.dataset.group===name));
+    if(bodies.some((b)=>!b||(b.contains(document.activeElement)&&document.activeElement.matches("input,textarea,select"))))return false;
+    const all=this.model.visibleRows;
+    names.forEach((name,i)=>{const key=`group:${name}`,info=view.virtual.get(key);if(!info)return;(view.rowRanges||=new Map());if(!view.rowRanges.has(key))view.rowRanges.set(key,[info.start,info.end]);this.rebuildGroup(bodies[i],name,all.filter((r)=>this.model.groupOf(r)===name));});
+    const selectAll=wrap.querySelector("input[data-action=select-all]");
+    if(selectAll)selectAll.checked=all.length>0&&all.every((r)=>this.model.selected.has(r.id));
+    this.scheduleVirtual();
+    return true;
+  }
+  // Server results and pages: shown even while the search box has focus, keeping the caret where it was.
+  renderServerView(groups=null){
+    if(!this.ready||!this.auth.authenticated||this.model.screen!=="board")return;
+    if(groups&&this.showGroupPages(groups))return;
+    const input=document.querySelector('[data-action="search"]');
+    if(input&&document.activeElement===input&&!document.querySelector("#overlay-root")?.children.length){const at=input.selectionStart;this.update();const next=document.querySelector('[data-action="search"]');next?.focus();next?.setSelectionRange(at,at);return;}
+    this.refreshWhenIdle();
+  }
+  readFilterDraft(){
+    const form=document.querySelector(".view-filter-form"); if(!form)return;
+    this.filterDraft.op=form.querySelector('[name="op"]').value==="or"?"or":"and";
+    this.filterDraft.rules=[...form.querySelectorAll(".view-filter-rule")].map((row)=>{const key=row.querySelector('[name="key"]').value,cmp=row.querySelector('[name="cmp"]').value,box=row.querySelector('[name="values"]');const prior=box?box.value.split("\n").map((v)=>v.trim()).filter(Boolean):[];return ["empty","notEmpty"].includes(cmp)?{key,cmp}:{key,cmp,values:prior.length?prior:[""]};});
   }
   onChange(event) {
     if (event.target.dataset?.action === "comment-input") return;
+    if (event.target.closest?.(".form-fill")) { this.forms?.onChange(event.target); return; }
+    if (event.target.closest?.(".form-designer")) return;
     if (event.target.dataset?.action === "cc-filter") { this.command?.onFilterChange(event.target); return; }
     if (event.target.dataset?.action === "integration-wizard-workspace") { this.integrations?.onAction("integration-wizard-workspace", event.target); return; }
     if (event.target.dataset?.action === "acct-filter") { this.accounts?.onFilter(event.target); return; }
@@ -602,16 +681,19 @@ class AppController {
     if(action==="import-mapping"){const data=Object.fromEntries(new FormData(event.target.form));this.view.showImportPreview(this.model,this.pendingImport,data);return;}
     if (action === "filter") { this.model.status=event.target.value; this.update(); }
     if (action === "select") return; // handled on click (Shift-click selects a range)
-    if (action === "select-all") { this.model.visibleRows.forEach((row)=>event.target.checked?this.model.selected.add(row.id):this.model.selected.delete(row.id)); this.update(); }
+    if (action === "select-all") { const on=event.target.checked; const apply=()=>{this.model.visibleRows.forEach((row)=>on?this.model.selected.add(row.id):this.model.selected.delete(row.id)); this.update();}; if(on)this.withWholeView(apply); else apply(); }
     if (action === "density") { this.model.updateSetting("density",event.target.checked?"compact":"comfortable"); document.documentElement.dataset.density=this.model.settings.density; }
     if (action === "setting") { this.model.updateSetting(event.target.dataset.key,event.target.checked); this.update(); this.view.showSettings(this.model); }
     if (action === "setting-select") { const key=event.target.dataset.key; const value=["density","fontSize"].includes(key)?event.target.value.toLowerCase():event.target.value; this.model.updateSetting(key,value); this.update(); this.view.showSettings(this.model,this.model.settings.settingsSection); }
     if (action === "board-title-inline") { this.model.renameBoard(this.model.currentBoardId,event.target.value); this.update(); this.view.toast("Board name saved"); }
     if (action === "import-file") this.importData(event.target.files[0]);
+    if (action === "xl-import-file") { const file = event.target.files[0]; event.target.value = ""; if (file && this.model.features?.spreadsheetImports) this.imports?.upload(file); return; }
     if (action === "avatar-file") this.loadAvatar(event.target.files[0]);
   }
   onSubmit(event) {
     event.preventDefault(); const action=event.target.dataset.action; const data=Object.fromEntries(new FormData(event.target));
+    if (action === "form-design-form") { if (this.model.features?.nativeForms) this.forms?.saveDesigner(); return; }
+    if (action === "form-fill-form") { if (this.model.features?.nativeForms) this.forms?.submitFill(); return; }
     if (action?.startsWith("integration-")) { this.integrations?.onSubmit(action, data, event.target); return; }
     if (action?.startsWith("acct-")) { this.accounts?.onSubmit(action, data, event.target); return; }
     if ((action === "group-form" || action === "group-delete-form") && this.groupActions) { this.groupActions.onSubmit(action, data, event.target); return; }
@@ -634,6 +716,12 @@ class AppController {
     if (action === "invite-form") { if(this.model.addMember(data)){this.view.closeOverlay();this.update();this.view.toast("Member added");}else this.view.showMessage("Member not added","Use a unique email address."); }
     if (action === "global-search-form") this.globalSearch(data.term);
     if (action === "add-group-form") { if (this.model.addGroup(data.name)) { this.view.showGroupManager(this.model); this.view.toast("Group added"); } else this.view.showMessage("Group not added","Use a unique, non-empty group name."); }
+    if (action === "view-filter-form") {
+      this.readFilterDraft();
+      const noValue=new Set(["empty","notEmpty"]), rules=this.filterDraft.rules.filter((r)=>noValue.has(r.cmp)||r.values?.length);
+      const filter=rules.length||this.filterDraft.groups?.length?{op:this.filterDraft.op,rules,...(this.filterDraft.groups?.length?{groups:this.filterDraft.groups}:{})}:null;
+      this.model.setViewFilter(filter); this.view.closeOverlay(); this.update(); return;
+    }
     if (action === "column-filter-form") {
       const form=event.target, key=data.key, op=data.op, noValue=["empty","not-empty","checked","unchecked"].includes(op);
       const value=op==="in"?new FormData(form).getAll("value"):String(data.value??"").trim();
@@ -756,7 +844,20 @@ class AppController {
   // exported with a leading apostrophe. Plain numbers in Number columns (e.g. -5) are left as numbers.
   csvCell(value,column=null){ let text=String(value??""); const plainNumber=column?.type==="number"&&/^-?\d+(\.\d+)?$/.test(text.trim()); if(!plainNumber&&/^[=+\-@\t\r]/.test(text))text="'"+text; return `"${text.replaceAll('"','""')}"`; }
   // Exports are async-shaped so a future server-generated export can replace them without changing callers.
-  async exportCsv(rows=this.model.visibleRows) { const fields=this.model.board.columns; const csv=[fields.map((field)=>this.csvCell(field.label)).join(","),...rows.map((row)=>fields.map((field)=>this.csvCell(this.model.isMultiColumn(field)?this.model.valueText(field,row[field.key]):row[field.key],field)).join(","))].join("\n"); if(this.download(new Blob([csv],{type:"text/csv"}),`${this.model.board.name.toLowerCase().replace(/[^a-z0-9]+/g,"-")||"board"}.csv`))this.view.toast("Board exported"); }
+  csvHeader(){return this.model.board.columns.map((field)=>this.csvCell(field.label)).join(",");}
+  csvLine(row){return this.model.board.columns.map((field)=>this.csvCell(this.model.isMultiColumn(field)?this.model.valueText(field,row[field.key]):row[field.key],field)).join(",");}
+  csvFileName(){return `${this.model.board.name.toLowerCase().replace(/[^a-z0-9]+/g,"-")||"board"}.csv`;}
+  async exportCsv(rows=this.model.visibleRows,label="Board exported") { const csv=[this.csvHeader(),...rows.map((row)=>this.csvLine(row))].join("\n"); if(this.download(new Blob([csv],{type:"text/csv"}),this.csvFileName()))this.view.toast(`${label} · ${rows.length.toLocaleString()} record${rows.length===1?"":"s"}`); }
+  // Every record of the view, however many, built page by page. A failure downloads nothing, and the message says how many arrived.
+  async exportWholeView(){
+    const view=this.model.serverView, total=view.total, name=this.csvFileName(); let parts=[this.csvHeader()];
+    this.view.toast(`Preparing ${(total||0).toLocaleString()} records…`);
+    try{
+      const count=await this.model.eachMatchingPage((rows,sofar)=>{for(const row of rows)parts.push(this.csvLine(row));if(total>5000&&sofar%5000===0)this.view.toast(`Preparing… ${sofar.toLocaleString()} of ${total.toLocaleString()} records`);});
+      if(this.download(new Blob([parts.join("\n")],{type:"text/csv"}),name))this.view.toast(this.model.query.trim()&&!view.query.q?`${count.toLocaleString()} matching record${count===1?"":"s"} exported`:count===total?`All ${count.toLocaleString()} records exported`:`${count.toLocaleString()} records exported. The view had ${(total||0).toLocaleString()} when the export began, and records changed while it ran.`);
+    }catch{this.view.toast("The export didn't finish. Nothing was downloaded.");}
+    finally{parts=null;}
+  }
   async exportBackup() { const backup=JSON.stringify(this.model.createBackup(),null,2); if(this.download(new Blob([backup],{type:"application/json"}),"jarc-database-backup.json"))this.view.toast("Full backup exported"); }
   async importData(file) {
     if(!file)return;

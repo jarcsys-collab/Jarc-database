@@ -186,3 +186,56 @@ Local mode (`/`) and `?storage=api` keep the temporary sign-in.
 - `GET/PUT /api/v1/state` (TRANSITIONAL) saves the whole document at once with no authentication. Resource mode no
   longer needs it; it stays until resource mode replaces API mode everywhere. It is disabled when `NODE_ENV=production`.
 - `AUTH_MODE=dev` is for local development only (no Microsoft sign-in; the temporary browser sign-in is used).
+
+## Search index, forms and imports
+
+**Search index** (`RECORD_SEARCH_INDEX`, `services/record-search-index.js`). With `on`, global and board search, including status, priority and assignee filters, answer from the `recordSearch` collection, once a catch up has verified it complete. A failed update takes it out of use until it has been repaired and verified again; until then search answers from the records. `node scripts/search-index.js verify|rebuild --target local --db <db>` checks or repairs it (production verify is read-only; a production rebuild needs `--confirm-production`).
+
+**Forms** (`routes/forms.js`, `services/form-service.js`). Internal only: every route needs a signed-in session and the usual workspace role. Admins design forms, members submit them, and a submission is an ordinary record change. No public form exists, and a definition can't create one.
+
+**Excel and CSV imports** (`routes/imports.js`, `services/import-job-service.js`, `domain/spreadsheet.js`). Up to 25 MB and 100,000 rows. A background job, paced to about 250 database operations per second; it resumes after a restart, and every row has a fixed `legacyId`, so an interrupted batch can run again without repeating a row. A file's rows are kept in `importBatches` only until its job ends (7 days at most if abandoned). `.xls` and password-protected workbooks are refused.
+
+## Optional features
+
+Each has its own switch. Only `true` or `false` are accepted; anything else stops startup. Unset means **off in production** and on elsewhere.
+
+| Variable | Feature | Production default |
+| --- | --- | --- |
+| `JARC_FEATURE_FORMS` | Native forms | off |
+| `JARC_FEATURE_IMPORTS` | Excel and CSV import jobs (up to 100,000 rows) | off |
+
+While a feature is off:
+
+- **API:** its routes aren't mounted, so every path answers `404` like an unknown path, including for administrators and direct API calls. Without a session the answer stays `401`.
+- **Screens:** the Forms button and the Excel and CSV import option are hidden. The browser asks `GET /api/v1/features`, and shows nothing if it can't tell.
+- **Background work:** the import worker doesn't run. An unfinished import waits, for as long as its uploaded rows are kept (7 days).
+- **Database:** its collections and indexes aren't created at startup. Forms and imports already stored are kept and return when the feature is on again.
+
+The existing browser import of CSV and JSON files (up to 5,000 rows) is not part of this switch.
+
+## Limits on large selections
+
+Nothing processes part of a selection without saying so.
+
+| Action | Limit | Past the limit |
+| --- | --- | --- |
+| Export from the toolbar | None. Every record of the view, read page by page | A failure partway downloads nothing and says so |
+| Export from the selection bar | Every selected record, including any a later search hides | Not applicable |
+| Select all | 5,000 records | Nothing is selected. A message gives the count and the limit, and points to Export |
+| Shift-click a range on a partly loaded board | The rows loaded so far | A message says rows still loading aren't included |
+| Duplicating or deleting a group with its records on a large board | Not available | Refused with a message; nothing changes |
+| `POST` and `PATCH` record batches in the API | 5,000 per request, in one transaction | Refused with `400` |
+| Browser import of CSV or JSON | 5,000 rows | Refused before anything is written |
+| Excel and CSV import job | 100,000 rows, 25 MB | Refused before anything is written |
+
+## Search cutover
+
+The search index (`RECORD_SEARCH_INDEX=on`) is the intended implementation. Reading record cells directly remains only as a temporary recovery path: search uses it whenever the index isn't verified, and `RECORD_SEARCH_INDEX=off` selects it as the rollback. Remove that path, and the shadow comparison, once production has been verified on the index.
+
+1. Keep `RECORD_SEARCH_INDEX=shadow` until the cutover is approved.
+2. Confirm the index matches the records, read-only: `node server/scripts/search-index.js verify --target production --railway-stdin`. It must report 0 missing, 0 stale and 0 extra.
+3. Check the logs for `[search-index] shadow difference`. A difference within seconds of an edit is normal, because the index updates just after a save. Anything else needs explaining first.
+4. Set `RECORD_SEARCH_INDEX=on`. Railway restarts the service; search keeps answering from the records until the log says `[search-index] on: ready`.
+5. Verify global search, search on a large board, filtered views, and a search after an edit and after a deletion.
+
+**Rollback:** set `RECORD_SEARCH_INDEX=shadow`. Search answers from the records right after the restart. Records are never changed by the index, so no data needs restoring. `recordSearch` can be rebuilt at any time.

@@ -112,6 +112,10 @@ function resourceRoutes({ services, access }) {
     const page = await services.records.list(board._id, req.query);
     send(res, 200, { items: page.items.map(recordToApi), nextCursor: page.nextCursor, limit: page.limit });
   });
+  router.get("/boards/:boardId/records/count", async (req, res) => {
+    const { board } = await access.board(req.actor, boardId(req), "VIEWER");
+    send(res, 200, await services.records.count(board._id, req.query));
+  });
   router.post("/boards/:boardId/records", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "MEMBER");
     writable(board);

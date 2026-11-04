@@ -54,8 +54,31 @@ function eq(value, cond) {
   return equalValues(value, cond);
 }
 
+// The aggregation expressions a column sort uses (domain/record-filter.js). Values compare by BSON type order, like MongoDB.
+function evalExpr(e, doc, vars = {}) {
+  if (typeof e === "string" && e.startsWith("$$")) return vars[e.slice(2)];
+  if (typeof e === "string" && e.startsWith("$")) return getPath(doc, e.slice(1));
+  if (!isOperatorObject(e)) return e;
+  const [[op, arg]] = Object.entries(e), val = (x) => evalExpr(x, doc, vars), nullish = (v) => v === undefined || v === null;
+  switch (op) {
+    case "$literal": return arg;
+    case "$let": return evalExpr(arg.in, doc, { ...vars, ...Object.fromEntries(Object.entries(arg.vars).map(([k, v]) => [k, val(v)])) });
+    case "$cond": return val(arg[0]) ? val(arg[1]) : val(arg[2]);
+    case "$isArray": return Array.isArray(val(arg));
+    case "$ifNull": { const first = val(arg[0]); return nullish(first) ? val(arg[1]) : first; }
+    case "$min": case "$max": { const list = (val(arg) || []).filter((v) => !nullish(v)); if (!list.length) return null; return list.reduce((a, b) => ((op === "$min" ? compare(b, a) < 0 : compare(b, a) > 0) ? b : a)); }
+    case "$or": return arg.some((x) => val(x));
+    case "$and": return arg.every((x) => val(x));
+    case "$eq": return compare(val(arg[0]), val(arg[1])) === 0;
+    case "$gt": return compare(val(arg[0]), val(arg[1])) > 0;
+    case "$lt": return compare(val(arg[0]), val(arg[1])) < 0;
+    default: throw new Error(`fake-mongo: unsupported expression operator ${op}`);
+  }
+}
+
 function matches(doc, filter = {}) {
   for (const [key, cond] of Object.entries(filter)) {
+    if (key === "$expr") { if (!evalExpr(cond, doc)) return false; continue; }
     if (key === "$or") { if (!cond.some((f) => matches(doc, f))) return false; continue; }
     if (key === "$and") { if (!cond.every((f) => matches(doc, f))) return false; continue; }
     if (key.startsWith("$")) throw new Error(`fake-mongo: unsupported top-level operator ${key}`);
@@ -67,7 +90,9 @@ function matches(doc, filter = {}) {
         $eq: () => eq(value, arg), $ne: () => !eq(value, arg),
         $gt: () => comparable && compare(value, arg) > 0, $gte: () => comparable && compare(value, arg) >= 0,
         $lt: () => comparable && compare(value, arg) < 0, $lte: () => comparable && compare(value, arg) <= 0,
-        $in: () => arg.some((x) => eq(value, x)), $nin: () => !arg.some((x) => eq(value, x)),
+        // Like MongoDB: an array matches through any of its elements; null also matches a missing field.
+        $in: () => arg.some((x) => inMatch(value, x)), $nin: () => !arg.some((x) => inMatch(value, x)),
+        $not: () => !matches({ v: value }, { v: arg }),
         $exists: () => (value !== undefined) === Boolean(arg),
         // Like MongoDB: a regex matches a string, or any string in an array; $options handled with it.
         $regex: () => { const re = new RegExp(arg, cond.$options || ""); return (Array.isArray(value) ? value : [value]).some((v) => typeof v === "string" && re.test(v)); },
@@ -81,6 +106,12 @@ function matches(doc, filter = {}) {
   return true;
 }
 
+function inMatch(value, x) {
+  if (x === null && (value === undefined || value === null)) return true;
+  if (eq(value, x)) return true;
+  return Array.isArray(value) && value.some((v) => eq(v, x));
+}
+
 function applyUpdate(doc, update, { inserting = false } = {}) {
   const keys = Object.keys(update);
   if (!keys.length || !keys.every((k) => k.startsWith("$"))) throw new Error("fake-mongo: only operator updates are supported");
@@ -89,6 +120,7 @@ function applyUpdate(doc, update, { inserting = false } = {}) {
     else if (op === "$setOnInsert") { if (inserting) for (const [p, v] of Object.entries(fields)) setPath(doc, p, clone(v)); }
     else if (op === "$inc") for (const [p, v] of Object.entries(fields)) setPath(doc, p, (getPath(doc, p) ?? 0) + v);
     else if (op === "$unset") for (const p of Object.keys(fields)) unsetPath(doc, p);
+    else if (op === "$push") for (const [p, v] of Object.entries(fields)) { const cur = getPath(doc, p); if (cur !== undefined && !Array.isArray(cur)) throw new Error(`fake-mongo: $push to a non-array field ${p}`); if (v && typeof v === "object" && Array.isArray(v.$each)) { const next = [...(cur || []), ...v.$each]; setPath(doc, p, v.$slice === undefined ? next : v.$slice >= 0 ? next.slice(0, v.$slice) : next.slice(v.$slice)); continue; } setPath(doc, p, [...(cur || []), clone(v)]); }
     else throw new Error(`fake-mongo: unsupported update operator ${op}`);
   }
   return doc;
@@ -147,6 +179,24 @@ class FakeCollection {
     this.docs = next;
     return { acknowledged: true, insertedId: doc._id };
   }
+  // Only what record counts and column sorts use: $match, $group by one field with a $sum of 1, $addFields, $sort and $limit.
+  aggregate(stages, options = {}) {
+    this.record("aggregate", { stages, options });
+    const docs = () => {
+      let rows = this.docs.map(clone);
+      for (const stage of stages) {
+        if (stage.$match) rows = rows.filter((d) => matches(d, stage.$match));
+        else if (stage.$group) { const field = stage.$group._id.slice(1), counts = new Map(); for (const d of rows) { const k = getPath(d, field) ?? null; counts.set(k, (counts.get(k) || 0) + 1); } rows = [...counts].map(([_id, n]) => ({ _id, n })); }
+        else if (stage.$addFields) for (const d of rows) for (const [field, spec] of Object.entries(stage.$addFields)) d[field] = isOperatorObject(spec) ? evalExpr(spec, d) : Object.fromEntries(Object.entries(spec).map(([k, v]) => [k, evalExpr(v, d)]));
+        else if (stage.$sort) { const spec = Object.entries(stage.$sort); rows = [...rows].sort((a, b) => { for (const [k, dir] of spec) { const c = compare(getPath(a, k), getPath(b, k)); if (c) return dir === -1 ? -c : c; } return 0; }); }
+        else if (stage.$limit) rows = rows.slice(0, stage.$limit);
+        else throw new Error("fake-mongo: unsupported aggregate stage");
+      }
+      return rows;
+    };
+    return { toArray: async () => docs() };
+  }
+
   async insertMany(docs, options = {}) {
     this.record("insertMany", { count: docs.length, options });
     for (const doc of docs) { doc._id ??= new ObjectId(); const next = [...this.docs, clone(doc)]; this.assertUnique(next); this.docs = next; }

@@ -33,12 +33,42 @@ const COLLECTIONS = Object.freeze({
   storageUsage: "storageUsage",
   // Derived search text, one document per record; rebuilt from records at any time (see services/record-search-index.js).
   recordSearch: "recordSearch",
+  // Native forms and who submitted them (see services/form-service.js).
+  forms: "forms",
+  formSubmissions: "formSubmissions",
+  // Excel and CSV imports (see services/import-job-service.js). importBatches holds a file's rows only until its job ends.
+  importJobs: "importJobs",
+  importBatches: "importBatches",
   // Account Management audit trail (Phase M4.3; see repositories/mongo/account-audit-repository.js). Append-only.
   accountAudit: "accountAudit"
 });
 
+// Collections that belong to one optional feature: left out while it's switched off, so a deployment with the feature off adds
+// nothing to the database. Switching it on (which restarts the server) creates them.
+const FEATURE_COLLECTIONS = Object.freeze({ nativeForms: Object.freeze([COLLECTIONS.forms, COLLECTIONS.formSubmissions]), spreadsheetImports: Object.freeze([COLLECTIONS.importJobs, COLLECTIONS.importBatches]) });
+
 const present = { $exists: true };
 const INDEXES = Object.freeze({
+  forms: [
+    { name: "board_name", key: { boardId: 1, name: 1, _id: 1 } }
+  ],
+  importJobs: [
+    { name: "worker", key: { status: 1, leaseUntil: 1 } },
+    { name: "board_created", key: { boardId: 1, createdAt: -1 } },
+    { name: "board_file", key: { boardId: 1, fileHash: 1, status: 1 } },
+    { name: "creator_status", key: { createdBy: 1, status: 1 } },
+    // Abandoned uploads go; a job that ended has no expiresAt and stays as the record of what was imported.
+    { name: "expires", key: { expiresAt: 1 }, expireAfterSeconds: 0 }
+  ],
+  importBatches: [
+    { name: "uniq_job_batch", key: { jobId: 1, n: 1 }, unique: true },
+    { name: "expires", key: { expiresAt: 1 }, expireAfterSeconds: 0 }
+  ],
+  formSubmissions: [
+    // One attempt, one record: see FormService.submit.
+    { name: "uniq_form_attempt", key: { formId: 1, submissionKey: 1 }, unique: true },
+    { name: "board_created", key: { boardId: 1, createdAt: -1 } }
+  ],
   recordSearch: [
     { name: "board_updated", key: { boardId: 1, updatedAt: -1, _id: -1 } }
   ],
@@ -137,11 +167,13 @@ const INDEXES = Object.freeze({
   ]
 });
 
-async function ensureDatabase(db) {
+// features: which optional features are on (config/index.js). Without it, every collection is created.
+async function ensureDatabase(db, { features = null } = {}) {
+  const skipped = new Set(features ? Object.entries(FEATURE_COLLECTIONS).flatMap(([name, list]) => (features[name] ? [] : list)) : []);
   const existing = new Set((await db.listCollections({}, { nameOnly: true }).toArray()).map((c) => c.name));
   const createdCollections = [];
   for (const name of Object.values(COLLECTIONS)) {
-    if (existing.has(name)) continue;
+    if (existing.has(name) || skipped.has(name)) continue;
     try {
       await db.createCollection(name);
       createdCollections.push(name);
@@ -151,6 +183,7 @@ async function ensureDatabase(db) {
   }
   let indexes = 0;
   for (const [collection, specs] of Object.entries(INDEXES)) {
+    if (skipped.has(collection)) continue;
     for (const { key, ...options } of specs) {
       await db.collection(collection).createIndex(key, options); // no-op when the identical index exists
       indexes += 1;
@@ -159,4 +192,4 @@ async function ensureDatabase(db) {
   return { createdCollections, indexes };
 }
 
-module.exports = { ensureDatabase, COLLECTIONS, INDEXES };
+module.exports = { FEATURE_COLLECTIONS, ensureDatabase, COLLECTIONS, INDEXES };

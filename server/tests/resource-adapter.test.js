@@ -358,18 +358,18 @@ describe("Pagination and loading", () => {
     assert.equal(requests.filter((r) => r === `GET /api/v1/boards/${board.id}/records`).length, 3);
   });
 
-  test("a board over 2,000 records loads the first 2,000, then Load more; unloaded records are never deleted", async () => {
+  test("a board over 2,000 records loads a page at a time; unloaded records are never deleted", async () => {
     const a = await tab();
     const board = await newBoard(a, "Stage11 Large", "blank");
     await seed(board.id, 2150);
     const b = await tab();
     b.openBoard(board.id, a.workspace.id);
     const first = await boardStatus(b, board.id);
-    same([first.state, first.loaded, first.total], ["partial", 2000, 2150]);
-    assert.equal(b.rows.length, 2000);
+    same([first.state, first.loaded, first.total], ["partial", 200, 2150]);
+    assert.equal(b.rows.length, 200, "one page, not the whole board");
     b.updateCell(b.rows[0].id, "serial", "Stage11 edited"); await settle(b);
     assert.equal((await call("GET", `/api/v1/workspaces/${a.workspace.id}/boards`)).body.items[0].recordCount, 2150, "editing a partly loaded board deleted nothing");
-    await b.ensureBoardRecords(board.id, { more: true });
+    for (let i = 0; i < 20 && b.boardLoadState(board.id).state === "partial"; i += 1) await b.ensureBoardRecords(board.id, { more: true });
     assert.equal(b.boardLoadState(board.id).state, "full");
     assert.equal(b.rows.length, 2150);
     assert.equal(new Set(b.rows.map((r) => r.id)).size, 2150);

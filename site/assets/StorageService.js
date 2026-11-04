@@ -310,7 +310,11 @@ class StorageService {
   lastChangeFor(change) { return JSON.parse(JSON.stringify(change)); }
 
   // Resource mode only: fetch a board's records (in order with saves). Other modes already hold every record.
+  get canFilterOnServer() { return typeof this.adapter.loadFiltered === "function"; }
+  loadFiltered(boardId, options) { return this.adapter.loadFiltered(boardId, options); }
+  countFiltered(boardId, options) { return this.adapter.countFiltered(boardId, options); }
   searchStatus() { return this.adapter.searchStatus?.() ?? Promise.resolve({ boardSearch: false }); }
+  features() { return this.adapter.features?.() ?? Promise.resolve({ features: {} }); }
   searchBoard(boardId, q) { return this.adapter.searchBoard?.(boardId, q) ?? Promise.resolve({ records: [], more: false }); }
   loadBoard(boardId, options) {
     const result = this.queue.then(() => this.adapter.loadBoardRecords(boardId, options));

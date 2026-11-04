@@ -2,6 +2,7 @@
 const IMPORT_LIMITS = Object.freeze({ rows: 5000, fields: 200, cellLength: 10000 });
 
 class BoardModel {
+  static SELECT_ALL_LIMIT = 5000; // the most one select-all takes, which is what one batch request can change together (AppView names it on the checkbox)
   // The constructor builds configuration and a default (empty-storage) state synchronously. Stored data is loaded by
   // `await model.init()` (Stage 8), so the same model works with a network adapter later.
   constructor(storage = window.jarcStorage) {
@@ -140,6 +141,7 @@ class BoardModel {
   // and keeps the attempted state so a user-triggered Retry can apply and save it again.
   save(change = { op: "saveState" }) {
     if (this.collecting) { this.collecting.push(change); return Promise.resolve(true); } // inside applyAfterSave
+    if (change.op !== "updateUserState") this.scheduleViewCount();
     const state = this.toStorageState(), text = JSON.stringify(state), history = this.history.slice();
     this.pendingSaves += 1; this.saveState = "saving";
     window.dispatchEvent(new CustomEvent("jarc-save", {detail:"saving"}));
@@ -231,7 +233,7 @@ class BoardModel {
       delete this.boardLoading[boardId];
       this.mergeLoadedRecords(boardId, loaded);
       // Searching beyond what's loaded depends on the server's search index, so ask once a board is only partly loaded.
-      if (this.boardLoadState(boardId).state === "partial" && this.boardSearchAvailable === undefined) { this.boardSearchAvailable = false; try { this.boardSearchAvailable = Boolean((await this.storage.searchStatus()).boardSearch); } catch { this.boardSearchAvailable = false; } }
+      if (this.boardLoadState(boardId).state === "partial") await this.askBoardSearch();
     } catch (error) {
       this.boardLoading[boardId] = "error";
       const failure = StorageError.describe(error);
@@ -239,16 +241,157 @@ class BoardModel {
     }
     window.dispatchEvent(new CustomEvent("jarc-board-status", { detail: { boardId } }));
   }
-  // Search on a partly loaded board: rows the server finds outside what's loaded join the board like loaded rows.
-  async searchUnloadedRecords(boardId, query) {
-    this.remoteSearch = { query, state: "searching" };
-    try {
-      const { records, more } = await this.storage.searchBoard(boardId, query);
-      if (records.length) this.mergeLoadedRecords(boardId, { records, activity: null });
-      this.remoteSearch = { query, state: "done", added: records.length, more };
-    } catch { this.remoteSearch = { query, state: "error" }; }
-    return this.remoteSearch;
+  // ---- Conditions saved with a view (the same rules as the server's domain/record-filter.js). A column deleted since
+  // the view was saved simply drops out of its conditions.
+  get liveViewFilter(){
+    const f=this.viewFilter; if(!f||!this.board)return null;
+    const keys=new Set(this.board.columns.map((c)=>c.key)), keep=(rules=[])=>rules.filter((r)=>keys.has(r.key));
+    const rules=keep(f.rules), groups=(f.groups||[]).map((g)=>({op:g.op,rules:keep(g.rules)})).filter((g)=>g.rules.length);
+    if(!rules.length&&!groups.length)return null;
+    return {op:f.op,rules,...(groups.length?{groups}:{})};
   }
+  get liveOrderBy(){const keys=new Set([...(this.board?.columns||[]).map((c)=>c.key),"createdAt","updatedAt","position"]);const list=(this.viewOrderBy||[]).filter((s)=>keys.has(s.key));return list.length?list:null;}
+  static filterTokens(text){return String(text).split(", ").map((t)=>t.trim());}
+  matchesFilterRule(row,rule){
+    const raw=row[rule.key], list=Array.isArray(raw)?raw.map(String):raw===null||raw===undefined?[]:[String(raw)], text=list.join(", "), values=rule.values||[];
+    const has=(v)=>v===""?text==="":list.includes(v);
+    const tokens=()=>list.flatMap((t)=>BoardModel.filterTokens(t));
+    const token=(v)=>v===""?text==="":list.includes(v)||text===v||tokens().includes(v)||list.some((t)=>t.startsWith(v+", ")||t.endsWith(", "+v)||t.includes(", "+v+", "));
+    switch(rule.cmp){
+      case "in":return values.some(has);
+      case "notIn":return !values.some(has);
+      case "contains":return values.some((v)=>list.some((t)=>t.toLowerCase().includes(v.toLowerCase())));
+      case "notContains":return !values.some((v)=>list.some((t)=>t.toLowerCase().includes(v.toLowerCase())));
+      case "empty":return text==="";
+      case "notEmpty":return text!=="";
+      case "anyToken":return values.some(token);
+      case "noToken":return !values.some(token);
+      default:return true;
+    }
+  }
+  matchesFilterNode(row,node){const parts=[...(node.rules||[]).map((r)=>this.matchesFilterRule(row,r)),...(node.groups||[]).map((g)=>this.matchesFilterNode(row,g))];return node.op==="or"?parts.some(Boolean):parts.every(Boolean);}
+  matchesViewFilter(row){const f=this.liveViewFilter;return !f||this.matchesFilterNode(row,f);}
+  // What the board shows right now, as one query for the server: the view's conditions, the toolbar's filters, the search
+  // text and the sort. A large board always asks the server, so every record counts whether it's loaded here or not.
+  serverQuery(){
+    const rules=[], cf=this.columnFilter, today=new Date().toISOString().slice(0,10);
+    if(this.status!=="All"&&this.statusColumn)rules.push({key:this.statusColumn.key,cmp:"in",values:[this.status]});
+    if(this.personFilter&&this.ownerColumn)rules.push({key:this.ownerColumn.key,cmp:"in",values:[this.personFilter]});
+    if(cf&&this.board.columns.some((c)=>c.key===cf.key)){
+      const v=cf.value, one=[String(v??"")], map={in:["in",(Array.isArray(v)?v:[v]).map(String)],checked:["in",["true"]],unchecked:["notIn",["true"]],contains:["contains",one],equals:["equalsText",one],eq:["in",one],gt:["gt",one],lt:["lt",one],on:["in",one],before:["before",one],after:["after",one],empty:["empty"],"not-empty":["notEmpty"]}[cf.op];
+      if(map)rules.push({key:cf.key,cmp:map[0],...(map[1]?{values:map[1]}:{})});
+    }
+    if(this.quickFilter==="mine"&&this.ownerColumn){const mine=[this.me,this.profile.initials,this.profile.name,this.profile.email].filter(Boolean).map(String);rules.push({key:this.ownerColumn.key,cmp:"in",values:mine.length?mine:["-"]});}
+    if(this.quickFilter==="due"&&this.dueColumn()?.key)rules.push({key:this.dueColumn().key,cmp:"dateRange",values:[today,new Date(Date.now()+7*86400000).toISOString().slice(0,10)]});
+    if(this.quickFilter==="recent")rules.push({key:"updatedAt",cmp:"onOrAfter",values:[new Date(Date.now()-7*86400000).toISOString()]});
+    const text=this.query.trim(), sortKey=this.sortKey||this.sortColumn?.key;
+    const order=this.liveOrderBy||(!this.manualSort&&sortKey&&this.board.columns.some((c)=>c.key===sortKey)?[{key:sortKey,dir:this.sortDirection==="asc"?"asc":"desc"}]:[{key:"position",dir:"asc"}]);
+    return {filter:this.liveViewFilter,also:rules.length?{op:"and",rules}:null,q:text.length>=2&&this.boardSearchAvailable?text.slice(0,100):null,orderBy:[{key:"pinned",dir:"desc"},...order].slice(0,4),archived:Boolean(this.showArchived)};
+  }
+  // After the current render, and once for several changes together.
+  // group: only this group's rows changed (a page arrived). Anything else means the whole screen.
+  statusChanged(group){
+    const only=group===undefined?null:(this.statusGroups===undefined||this.statusGroups?new Set([...(this.statusGroups||[]),group]):null);
+    this.statusGroups=only;
+    clearTimeout(this.statusTimer);
+    this.statusTimer=setTimeout(()=>{const groups=this.statusGroups;this.statusGroups=undefined;window.dispatchEvent(new CustomEvent("jarc-server-view",{detail:{boardId:this.board?.id,groups:groups?[...groups]:null}}));},16);
+  }
+  // Sections by group, unless this layout shows one flat list (other layouts, Group by, archived records).
+  get serverViewFlat(){return this.currentView!=="table"||Boolean(this.groupByColumn)||Boolean(this.showArchived)||!this.board?.groups?.length;}
+  // Which optional features this server has switched on. Hidden unless the server says so, including when it can't be asked; this
+  // only decides what's shown, since the server's routes are what enforce it.
+  async loadFeatures(){try{this.features=(await this.storage.features()).features||{};}catch{this.features={};}}
+  // Called before each render: starts a new query when what's shown has changed. Text search waits for a pause in typing.
+  // Asked again while unavailable (at most every 15 s): the index is unavailable only until the server has verified it, shortly after a start.
+  async askBoardSearch(){
+    if(this.boardSearchAvailable===true||Date.now()-(this.boardSearchAskedAt||0)<15000)return;
+    this.boardSearchAskedAt=Date.now();
+    try{this.boardSearchAvailable=Boolean((await this.storage.searchStatus()).boardSearch);}catch{this.boardSearchAvailable=false;}
+  }
+  syncServerQuery(){
+    const boardId=this.board?.id;
+    if(this.screen!=="board"||!boardId||!this.storage.canFilterOnServer||this.boardLoadState(boardId).state!=="partial"){this.serverView=null;return;}
+    if(this.boardSearchAvailable!==true&&this.query.trim().length>=2)this.askBoardSearch().then(()=>{if(this.boardSearchAvailable===true){this.syncServerQuery();this.statusChanged?.();}});
+    const query=this.serverQuery(), flat=this.serverViewFlat, key=JSON.stringify([boardId,query,flat]);
+    if(this.serverView?.key===key||this.pendingServerKey===key)return;
+    const typing=this.serverView&&JSON.stringify([boardId,{...query,q:null},flat])===JSON.stringify([boardId,{...this.serverView.query,q:null},this.serverView.flat]);
+    clearTimeout(this.serverViewTimer); this.pendingServerKey=key;
+    if(typing){this.serverViewTimer=setTimeout(()=>this.startServerView(boardId,key,query,flat),300);return;}
+    this.startServerView(boardId,key,query,flat);
+  }
+  // known: rows already here; rows that arrive later without coming from this query (a new record) still show.
+  async startServerView(boardId,key,query,flat){
+    this.pendingServerKey=null;
+    const token=(this.serverViewToken=(this.serverViewToken||0)+1);
+    this.serverView={key,query,flat,token,known:new Set(this.rows.map((r)=>String(r.id))),order:new Map(),perGroup:new Map(),total:null,groups:{},error:false};
+    this.statusChanged();
+    try{
+      const count=await this.storage.countFiltered(boardId,query);
+      if(token!==this.serverViewToken)return;
+      this.serverView.total=count.total; this.serverView.groups=count.groups;
+      if(flat)await this.loadServerPage(null);
+    }catch{ if(token===this.serverViewToken)this.serverView.error=true; }
+    if(token===this.serverViewToken)this.statusChanged();
+  }
+  // The next page for one group (null: the flat list). Asked for by the scroll position; never more than one at a time per group.
+  async loadServerPage(group,{limit=100}={}){
+    const view=this.serverView, boardId=this.board?.id; if(!view||view.error)return false;
+    const name=group===null?"\u0000flat":group, entry=view.perGroup.get(name)||{cursor:null,done:false,loading:false,count:0};
+    if(entry.done||entry.loading)return false;
+    entry.loading=true; view.perGroup.set(name,entry);
+    try{
+      const page=await this.storage.loadFiltered(boardId,{...view.query,...(group===null?{}:{group}),cursor:entry.cursor,limit});
+      if(view.token!==this.serverViewToken)return false;
+      this.addServerPage(boardId,page);
+      page.ids.forEach((id)=>{if(!view.order.has(String(id)))view.order.set(String(id),view.order.size);});
+      entry.cursor=page.nextCursor; entry.done=!page.nextCursor; entry.count+=page.ids.length; entry.loading=false;
+      this.statusChanged(group===null?undefined:name);
+      return true;
+    }catch{ entry.loading=false; if(view.token===this.serverViewToken){view.error=true;this.statusChanged();} return false; }
+  }
+  groupHasMore(name){const v=this.serverView;if(!v||v.total===null||v.error||v.flat)return false;const e=v.perGroup.get(name);return !e?.done&&(v.groups[name]??0)>(e?.count||0);}
+  addServerPage(boardId,{records}){const known=new Set((this.board?.records||[]).map((r)=>String(r.id))),fresh=records.filter((r)=>!known.has(String(r.id)));if(fresh.length)this.mergeLoadedRecords(boardId,{records:fresh,activity:null});}
+  // Everything matching, in order, for an export: read page by page and handed on without being kept here, so a board of any size
+  // is fine. A row is passed on once, even if an edit moves it while this runs. Any failure stops it, so nothing is partly delivered.
+  // Search text the server didn't take (while its search index isn't in use) is applied here, with the same rule as the screen.
+  // → how many rows were passed on.
+  async eachMatchingPage(onRows){
+    const view=this.serverView, seen=new Set(), text=view.query.q?"":this.query.trim().toLowerCase(); let cursor=null, sent=0;
+    const wanted=(r)=>!text||this.board.columns.some((c)=>this.valueText(c,r[c.key]).toLowerCase().includes(text));
+    do{const page=await this.storage.loadFiltered(this.board.id,{...view.query,cursor,limit:200});const rows=page.records.filter((r)=>!seen.has(String(r.id))&&seen.add(String(r.id))).filter(wanted);sent+=rows.length;onRows(rows,seen.size);cursor=page.nextCursor;}while(cursor);
+    return sent;
+  }
+  // Select all acts through loaded rows, so it loads what's still on the server, up to what one batch can act on.
+  // → true when complete, false when too many, "changed" when the query changed meanwhile (a live reload).
+  async completeServerView(max=BoardModel.SELECT_ALL_LIMIT){
+    const view=this.serverView; if(!view)return true;
+    if(view.total>max)return false;
+    const rows=[]; let cursor=null;
+    do{const page=await this.storage.loadFiltered(this.board.id,{...view.query,cursor,limit:200});if(view.token!==this.serverViewToken)return "changed";rows.push(...page.records);page.ids.forEach((id)=>{if(!view.order.has(String(id)))view.order.set(String(id),view.order.size);});cursor=page.nextCursor;}while(cursor);
+    this.addServerPage(this.board.id,{records:rows});
+    for(const name of [...Object.keys(view.groups),"\u0000flat"])view.perGroup.set(name,{cursor:null,done:true,loading:false,count:view.groups[name]||rows.length});
+    return true;
+  }
+  get serverViewComplete(){const v=this.serverView;return !v||(v.total!==null&&v.order.size>=v.total);}
+  // The group's count: every matching record on the server, plus rows added here since.
+  groupDisplayCount(name,shown){const v=this.serverView;return v&&v.total!==null?Math.max(v.groups[name]??0,shown):shown;}
+  // Keeps the totals right after edits here or by colleagues.
+  scheduleViewCount(){
+    if(!this.serverView||this.viewCountTimer)return;
+    this.viewCountTimer=setTimeout(async()=>{this.viewCountTimer=null;const v=this.serverView;if(!v||v.total===null)return;try{const c=await this.storage.countFiltered(this.board.id,v.query);if(this.serverView===v){v.total=c.total;v.groups=c.groups;this.statusChanged();}}catch{}},800);
+  }
+  // A live reload replaced the board's loaded rows, which drops rows a view or a search fetched from further along: fetch
+  // the view again and forget selected rows that are gone, so totals and selections never quietly go wrong.
+  afterBoardReload(boardId){
+    if(String(this.board?.id)!==String(boardId))return;
+    const wanted=[...(this.selected||[])];
+    this.serverView=null;this.syncServerQuery();
+    const keep=(ids)=>{for(const id of wanted)if(ids.has(id))this.selected.add(id);else this.selected.delete(id);};
+    if(!wanted.length||!this.serverView){keep(new Set(this.rows.map((r)=>r.id)));return;}
+    // A selection can reach rows the reload dropped: load them again, and keep every selected row that still exists.
+    (async()=>{let done="changed";for(let i=0;i<3&&done==="changed";i+=1)done=await this.completeServerView().catch(()=>false);keep(new Set(this.rows.map((r)=>r.id)));this.statusChanged();})();
+  }
+  setViewFilter(filter){this.viewFilter=filter;this.selected?.clear?.();}
   // Adds loaded server records to the board in every copy of the state (visible, saved, failed, undo history), so
   // an undo or rollback never "forgets" records and asks the server to delete them.
   mergeLoadedRecords(boardId, { records, activity }) {
@@ -260,7 +403,7 @@ class BoardModel {
       if (activity) board.activity = JSON.parse(JSON.stringify(activity));
     };
     const fix = (text) => { const state = JSON.parse(text); merge(state.data.workspaces); return JSON.stringify(state); };
-    const live = this.toStorageState(); merge(live.data.workspaces); this.adoptState(JSON.stringify(live));
+    const live = this.toStorageState(), manualSort = this.manualSort; merge(live.data.workspaces); this.adoptState(JSON.stringify(live)); this.manualSort = manualSort; // new rows don't change how the board is sorted
     this.persisted = { ...this.persisted, text: fix(this.persisted.text) };
     if (this.failure) this.failure = { ...this.failure, text: fix(this.failure.text) };
     this.history = this.history.map((entry) => { const workspaces = JSON.parse(entry.workspaces); merge(workspaces); return { ...entry, workspaces: JSON.stringify(workspaces) }; });
@@ -350,14 +493,17 @@ class BoardModel {
 
   get visibleRows() {
     const query = this.query.trim().toLowerCase();
+    const place = new Map(this.rows.map((row, i) => [row, i])), server = this.serverView, serverOrder = server ? server.order : null, orderBy = this.liveOrderBy;
     return [...this.rows]
+      .filter((row) => !server || server.order.has(String(row.id)) || !server.known.has(String(row.id)))
+      .filter((row) => this.matchesViewFilter(row))
       .filter((row) => this.showArchived ? row.archived : !row.archived)
       .filter((row) => this.status === "All" || !this.statusColumn || row[this.statusColumn.key] === this.status)
       .filter((row) => this.matchesQuickFilter(row))
       .filter((row) => !this.personFilter || !this.ownerColumn || this.valueList(row[this.ownerColumn.key]).includes(this.personFilter))
       .filter((row) => this.matchesColumnFilter(row))
       .filter((row) => !query || this.board.columns.some((column) => this.valueText(column, row[column.key]).toLowerCase().includes(query)))
-      .sort((a, b) => { if(Boolean(a.pinned)!==Boolean(b.pinned))return a.pinned?-1:1; if(this.manualSort)return this.rows.indexOf(a)-this.rows.indexOf(b); const key=this.sortKey || this.sortColumn?.key; if(!key)return this.rows.indexOf(a)-this.rows.indexOf(b); const column=this.board.columns.find((c)=>c.key===key), x=this.sortText(column,a[key]), y=this.sortText(column,b[key]); return this.sortDirection === "desc" ? y.localeCompare(x,undefined,{numeric:true}) : x.localeCompare(y,undefined,{numeric:true}); });
+      .sort((a, b) => { if(!server&&Boolean(a.pinned)!==Boolean(b.pinned))return a.pinned?-1:1; if(serverOrder){const x=serverOrder.get(String(a.id))??-1,y=serverOrder.get(String(b.id))??-1;if(x!==y)return x-y;} if(orderBy){for(const s of orderBy){const col=this.board.columns.find((c)=>c.key===s.key),x=this.sortText(col,a[s.key]),y=this.sortText(col,b[s.key]),c=x.localeCompare(y,undefined,{numeric:true});if(c)return s.dir==="desc"?-c:c;}} if(this.manualSort)return place.get(a)-place.get(b); const key=this.sortKey || this.sortColumn?.key; if(!key)return place.get(a)-place.get(b); const column=this.board.columns.find((c)=>c.key===key), x=this.sortText(column,a[key]), y=this.sortText(column,b[key]); return this.sortDirection === "desc" ? y.localeCompare(x,undefined,{numeric:true}) : x.localeCompare(y,undefined,{numeric:true}); });
   }
 
   openScreen(screen) { this.screen = screen; this.selected.clear(); this.save({op:"updateUserState"}); }
@@ -529,8 +675,8 @@ class BoardModel {
   // Opens a view: its type, filters, sorting, grouping and (if it has its own) visible columns. The board's columns —
   // order, widths, visibility in Main Table — are never changed by opening a view (older views that stored a column
   // order or widths simply use the board's).
-  applyView(id) { const view = this.board.savedViews.find((item) => String(item.id) === String(this.idOf(id))); if (!view) return; Object.assign(this, { status: view.status||"All", query: view.query||"", grouped: Boolean(view.grouped), groupBy: typeof view.groupBy==="string"?view.groupBy:"", personFilter: typeof view.personFilter==="string"?view.personFilter:"", sortDirection: view.sortDirection||"desc" }); this.currentView=["table","list","kanban","calendar"].includes(view.view)?view.view:"table"; this.viewHidden=this.hiddenFrom(view); this.viewOrder=Array.isArray(view.columnOrder)?[...view.columnOrder]:null; this.viewWidths=view.columnWidths&&typeof view.columnWidths==="object"?Object.fromEntries(Object.entries(view.columnWidths).filter(([,w])=>Number.isFinite(w)&&w>0)):null; this.sortKey=view.sortKey||"";this.quickFilter=view.quickFilter||"all";this.showArchived=false;this.columnFilter=null;this.manualSort=false; this.activeSavedViewId=view.id; this.selected?.clear?.(); this.save({op:"updateUserState",boardId:this.board.id}); }
-  resetMainView() { this.viewHidden=null; this.viewOrder=null; this.viewWidths=null; this.sortKey="";this.quickFilter="all";this.columnFilter=null;this.query=""; this.status="All"; this.grouped=false; this.groupBy=""; this.personFilter=""; this.sortDirection="desc"; this.activeSavedViewId=null; this.showArchived=false; this.manualSort=Boolean(this.board?.manualOrder); }
+  applyView(id) { const view = this.board.savedViews.find((item) => String(item.id) === String(this.idOf(id))); if (!view) return; Object.assign(this, { status: view.status||"All", query: view.query||"", grouped: Boolean(view.grouped), groupBy: typeof view.groupBy==="string"?view.groupBy:"", personFilter: typeof view.personFilter==="string"?view.personFilter:"", sortDirection: view.sortDirection||"desc" }); this.currentView=["table","list","kanban","calendar"].includes(view.view)?view.view:"table"; this.viewHidden=this.hiddenFrom(view); this.viewOrder=Array.isArray(view.columnOrder)?[...view.columnOrder]:null; this.viewWidths=view.columnWidths&&typeof view.columnWidths==="object"?Object.fromEntries(Object.entries(view.columnWidths).filter(([,w])=>Number.isFinite(w)&&w>0)):null; this.sortKey=view.sortKey||"";this.quickFilter=view.quickFilter||"all";this.showArchived=false;this.columnFilter=null;this.manualSort=false; this.activeSavedViewId=view.id; this.viewFilter=view.filter||null; this.viewOrderBy=view.orderBy||null; this.selected?.clear?.(); this.save({op:"updateUserState",boardId:this.board.id}); }
+  resetMainView() { this.viewFilter=null; this.viewOrderBy=null; this.serverView=null; this.viewHidden=null; this.viewOrder=null; this.viewWidths=null; this.sortKey="";this.quickFilter="all";this.columnFilter=null;this.query=""; this.status="All"; this.grouped=false; this.groupBy=""; this.personFilter=""; this.sortDirection="desc"; this.activeSavedViewId=null; this.showArchived=false; this.manualSort=Boolean(this.board?.manualOrder); }
   deleteView(id) { this.board.savedViews = this.board.savedViews.filter((view) => view.id !== this.idOf(id)); if(this.activeSavedViewId===this.idOf(id))this.resetMainView(); this.save({op:"updateViews",boardId:this.board.id}); }
   toggleRow(id) { this.selected.has(id) ? this.selected.delete(id) : this.selected.add(id); }
   log(text) { if (!this.board) return; const at = new Date().toISOString(); this.board.updatedAt=at; this.board.activity.unshift({ id: Date.now(), text, at }); this.board.activity = this.board.activity.slice(0, 80); if(!this.settings.muteActivity)this.notifications.unshift({ id: Date.now() + 1, text, boardId: this.board.id, workspaceId: this.workspace.id, at, read: false }); this.notifications = this.notifications.slice(0,50); }
@@ -560,14 +706,14 @@ class BoardModel {
   }
   viewSnapshot(){
     const keys=new Set(this.board.columns.map((c)=>c.key));
-    return {status:this.status||"All",query:this.query||"",grouped:Boolean(this.grouped),groupBy:this.groupBy||"",personFilter:this.personFilter||"",sortDirection:this.sortDirection||"desc",sortKey:this.sortKey||"",quickFilter:this.quickFilter||"all",view:this.currentView||"table",
+    return {status:this.status||"All",query:this.query||"",grouped:Boolean(this.grouped),groupBy:this.groupBy||"",personFilter:this.personFilter||"",sortDirection:this.sortDirection||"desc",sortKey:this.sortKey||"",quickFilter:this.quickFilter||"all",view:this.currentView||"table",...(this.viewFilter?{filter:this.viewFilter}:{}),...(this.viewOrderBy?{orderBy:this.viewOrderBy}:{}),
       hiddenColumns:[...new Set(this.viewHidden||[])].filter((k)=>keys.has(k)).sort(),
       ...(Array.isArray(this.viewOrder)?{columnOrder:this.viewOrder.filter((k)=>keys.has(k))}:{}),
       ...(this.viewWidths&&Object.keys(this.viewWidths).length?{columnWidths:Object.fromEntries(Object.entries(this.viewWidths).filter(([k,w])=>keys.has(k)&&Number.isFinite(w)).sort(([a],[b])=>a.localeCompare(b)))}:{})};
   }
   savedSnapshot(v){
     const keys=new Set(this.board.columns.map((c)=>c.key)), widths=v.columnWidths&&typeof v.columnWidths==="object"?Object.entries(v.columnWidths).filter(([k,w])=>keys.has(k)&&Number.isFinite(w)):[];
-    return {status:v.status||"All",query:v.query||"",grouped:Boolean(v.grouped),groupBy:typeof v.groupBy==="string"?v.groupBy:"",personFilter:typeof v.personFilter==="string"?v.personFilter:"",sortDirection:v.sortDirection||"desc",sortKey:v.sortKey||"",quickFilter:v.quickFilter||"all",view:v.view||"table",
+    return {status:v.status||"All",query:v.query||"",grouped:Boolean(v.grouped),groupBy:typeof v.groupBy==="string"?v.groupBy:"",personFilter:typeof v.personFilter==="string"?v.personFilter:"",sortDirection:v.sortDirection||"desc",sortKey:v.sortKey||"",quickFilter:v.quickFilter||"all",view:v.view||"table",...(v.filter?{filter:v.filter}:{}),...(v.orderBy?{orderBy:v.orderBy}:{}),
       hiddenColumns:[...new Set(this.hiddenFrom(v))].filter((k)=>keys.has(k)).sort(),
       ...(Array.isArray(v.columnOrder)?{columnOrder:v.columnOrder.filter((k)=>keys.has(k))}:{}),
       ...(widths.length?{columnWidths:Object.fromEntries(widths.sort(([a],[b])=>a.localeCompare(b)))}:{})};

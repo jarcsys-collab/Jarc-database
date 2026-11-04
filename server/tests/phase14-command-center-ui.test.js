@@ -124,6 +124,21 @@ describe("Phase 14: Command Center (real app, headless browser, role_based)", { 
     await mia.key("Escape");
   });
 
+  test("a background refresh that arrives while the palette is open doesn't close the record opened from it", async () => {
+    await openApp(mia);
+    await palette(mia);
+    await type(mia, "kestrel");
+    // What a live update, a finished board load or the people list does: it waits, because a dialog is open.
+    await mia.evaluate("window.dispatchEvent(new CustomEvent('jarc-board-status', { detail: {} }))");
+    await click(mia, "section[aria-label=Updates] button[role=option]");
+    assert.ok(await mia.waitFor("document.querySelector('.record-drawer')?.dataset.tab === 'updates'", 5000), "record drawer on Updates");
+    await sleep(300);
+    assert.equal(await mia.evaluate("document.querySelector('.record-drawer')?.dataset.tab"), "updates", "still open after the waiting refresh");
+    await mia.key("Escape");
+    assert.ok(await mia.waitFor("!document.querySelector('.record-drawer')", 3000), "closing it still works");
+    assert.ok(await mia.waitFor("!!document.querySelector('#sidebar .tree-item')", 3000), "and the waiting refresh has drawn the screen");
+  });
+
   test("filters: status and assignee from the board's own columns, active chips, Clear filters; Show more loads the next page", async () => {
     await openApp(mia);
     await palette(mia);

@@ -27,6 +27,27 @@ class RecordRepository extends VersionedRepository {
     return { items: items.slice(0, limit), hasMore: items.length > limit };
   }
 
+  // A filtered, ordered page of one board (domain/record-filter.js builds query and after). Bounded by limit and maxTimeMS.
+  async listFiltered(boardId, { query, sort, collation, limit, maxTimeMS }) {
+    const items = await this.collection.find({ boardId, ...query }, { sort, limit: limit + 1, batchSize: limit + 1, maxTimeMS, ...(collation ? { collation } : {}) }).toArray();
+    return { items: items.slice(0, limit), hasMore: items.length > limit };
+  }
+
+  // The same, sorted by a column, which needs each row's sort value worked out (domain/record-filter.js). Returns the last row's
+  // sort values too, for the next page's cursor; the rows themselves come back as stored.
+  async listByColumn(boardId, { query, stages, sortField, collation, limit, maxTimeMS }) {
+    const rows = await this.collection.aggregate([{ $match: { boardId, ...query } }, ...stages, { $limit: limit + 1 }], { maxTimeMS, batchSize: limit + 1, allowDiskUse: true, ...(collation ? { collation } : {}) }).toArray();
+    const items = rows.slice(0, limit), lastSort = items.at(-1)?.[sortField] ?? null;
+    for (const row of items) delete row[sortField];
+    return { items, hasMore: rows.length > limit, lastSort };
+  }
+
+  // Matching records of one board, in total and per group.
+  async countFiltered(boardId, { query, maxTimeMS }) {
+    const rows = await this.collection.aggregate([{ $match: { boardId, ...query } }, { $group: { _id: "$groupId", n: { $sum: 1 } } }], { maxTimeMS }).toArray();
+    return { total: rows.reduce((sum, r) => sum + r.n, 0), groups: Object.fromEntries(rows.map((r) => [r._id ?? "", r.n])) };
+  }
+
   // New records go first, like the frontend (which adds new rows to the top).
   // Global search: non-archived records matching any clause ({ boardId, $or: [field regexes] } per board), only the
   // projected fields, at most `limit` documents, and never running longer than maxTimeMS on the server.

@@ -2,6 +2,7 @@
 // fields, so request bodies are never passed to MongoDB as they arrive.
 const { fail, requireBody, allowOnly, text, color, bool, finiteNumber, version, queryString, parseId, isObject, isSafeKey } = require("./common");
 const { ObjectId } = require("mongodb");
+const recordFilter = require("../domain/record-filter");
 const { iconValue } = require("./appearance");
 const { normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, groupColumnOf, checkValue, hasValue, isMultiColumn, valueList, PRIMARY_KEY, LIMITS, COLUMN_TYPES } = require("../domain/board-schema");
 
@@ -152,8 +153,42 @@ function recordPatch(raw, board) {
 const RECORD_SORTS = Object.freeze({ position: "position", createdAt: "createdAt", updatedAt: "updatedAt" });
 const PAGE = Object.freeze({ defaultLimit: 50, maxLimit: 200, maxIds: 100 });
 
+// ?filter= and ?orderBy= (JSON, see domain/record-filter.js). Null when neither is given: the list works as it always has.
+function parseJsonParam(raw, label) {
+  const text = queryString(raw, label);
+  if (text === undefined) return undefined;
+  if (text.length > recordFilter.MAX.text) fail(`${label} is too long.`);
+  try { return JSON.parse(text); } catch { return fail(`${label} is not valid.`); }
+}
+// ?q=: text anywhere in the record's searchable cells, among all the board's records.
+function searchText(query) {
+  const raw = queryString(query.q, "q");
+  if (raw === undefined) return null;
+  const q = raw.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  if (q.length < 2 || q.length > 100) fail("q must be 2 to 100 characters.");
+  return q;
+}
+function filteredQuery(query, board) {
+  const rawFilter = parseJsonParam(query.filter, "filter"), rawOrder = parseJsonParam(query.orderBy, "orderBy"), rawAlso = parseJsonParam(query.also, "also"), q = searchText(query);
+  if (rawFilter === undefined && rawOrder === undefined && rawAlso === undefined && q === null && query.group === undefined) return null;
+  return {
+    filter: rawFilter === undefined ? null : recordFilter.filterForBoard(rawFilter, board),
+    also: rawAlso === undefined ? null : recordFilter.filterForBoard(rawAlso, board),
+    q,
+    orderBy: rawOrder === undefined ? [{ key: "position", dir: "asc", path: "position" }] : recordFilter.orderByForBoard(rawOrder, board)
+  };
+}
+// GET /boards/:id/records/count
+function recordCountQuery(query, board) {
+  allowOnly(query, ["filter", "also", "q", "archived"], "the query");
+  const rawFilter = parseJsonParam(query.filter, "filter"), rawAlso = parseJsonParam(query.also, "also"), q = searchText(query);
+  const archived = queryString(query.archived, "archived");
+  if (archived !== undefined && !["true", "false"].includes(archived)) fail("archived must be true or false.");
+  return { filter: rawFilter === undefined ? null : recordFilter.filterForBoard(rawFilter, board), also: rawAlso === undefined ? null : recordFilter.filterForBoard(rawAlso, board), q, archived: archived === "true" };
+}
+
 function recordListQuery(query, board) {
-  allowOnly(query, ["limit", "cursor", "sort", "dir", "groupId", "status", "archived", "ids"], "the query");
+  allowOnly(query, ["limit", "cursor", "sort", "dir", "groupId", "status", "archived", "ids", "filter", "also", "orderBy", "q", "group"], "the query");
   const rawLimit = queryString(query.limit, "limit");
   let limit = PAGE.defaultLimit;
   if (rawLimit !== undefined) {
@@ -166,7 +201,7 @@ function recordListQuery(query, board) {
   const dir = queryString(query.dir, "dir") ?? "asc";
   if (!["asc", "desc"].includes(dir)) fail("dir must be asc or desc.");
   const filter = {};
-  const groupId = queryString(query.groupId, "groupId");
+  const groupId = queryString(query.groupId ?? query.group, "groupId");
   if (groupId !== undefined) filter.groupId = groupId === "none" ? null : groupIdFor(groupId, board);
   const status = queryString(query.status, "status");
   if (status !== undefined) {
@@ -184,6 +219,13 @@ function recordListQuery(query, board) {
   if (archived !== undefined) {
     if (!["true", "false"].includes(archived)) fail("archived must be true or false.");
     filter.archived = archived === "true";
+  }
+  const filtered = filteredQuery(query, board);
+  if (filtered) {
+    if (query.sort !== undefined || query.dir !== undefined) fail("Use orderBy, not sort and dir, with a filter.");
+    const cursor = queryString(query.cursor, "cursor");
+    if (filter.groupId !== undefined) filtered.groupId = filter.groupId;
+    return { limit, filtered: { ...filtered, archived: filter.archived ?? false, after: cursor === undefined ? null : recordFilter.decodeCursor(cursor, filtered.orderBy) } };
   }
   const sort = { field: RECORD_SORTS[sortName], name: sortName, dir };
   const cursorText = queryString(query.cursor, "cursor");
@@ -322,4 +364,4 @@ function activityQuery(query) {
   return { limit: Number(raw) };
 }
 
-module.exports = { boardMove, columnAdd, columnType, columnOptions, recordBatchCreate, recordBatchUpdate, recordBatchDelete, dryRunParam, activityQuery, BATCH_MAX, workspaceCreate, workspacePatch, boardCreate, boardPatch, recordCreate, recordPatch, recordListQuery, encodeCursor, decodeCursor, RECORD_SORTS, PAGE };
+module.exports = { recordCountQuery, boardMove, columnAdd, columnType, columnOptions, recordBatchCreate, recordBatchUpdate, recordBatchDelete, dryRunParam, activityQuery, BATCH_MAX, workspaceCreate, workspacePatch, boardCreate, boardPatch, recordCreate, recordPatch, recordListQuery, encodeCursor, decodeCursor, RECORD_SORTS, PAGE };

@@ -24,6 +24,9 @@
 //              matches are fetched first so an exact name isn't pushed out by many cell matches.
 //   access     the caller's role in each workspace decides canEdit (MEMBER or above, and never on a read-only
 //              synchronized board). Visibility and editing are separate: a VIEWER finds records but can't create.
+//
+// Regular search (the record queries below) is TEMPORARY: the index is the intended implementation, and this stays only as the
+// recovery path until production has been verified on the index. See server/README.md.
 const { ApiError } = require("../middleware/errors");
 const { RANK } = require("../auth/access");
 const { encodeCursor } = require("../validation/search");
@@ -52,11 +55,20 @@ class SearchService {
   constructor({ repos, index = null }) { this.repos = repos; this.index = index; }
 
   // The index finds the matching IDs; the records are then read in that order, with the same projection as a direct search.
+  // The record decides, not the index: one archived, deleted or on another board since its last index update is left out. Each
+  // document keeps its place in the index's order (cursorAt), because that order is what the next page continues from.
+  // The list's found is how many the index matched, so a left-out record doesn't end the results early.
   async fromIndex(boards, { projection, limit, maxTimeMS, ...options }) {
-    const ids = await this.index.ids(boards, { ...options, limit, maxTimeMS });
-    if (!ids.length) return [];
-    const byId = new Map((await this.repos.records.byIds(ids, { projection, maxTimeMS })).map((d) => [hex(d._id), d]));
-    return ids.map((id) => byId.get(hex(id))).filter(Boolean);
+    const hits = await this.index.hits(boards, { ...options, limit, maxTimeMS });
+    const out = [];
+    out.found = hits.length; out.lastHit = hits.at(-1) ?? null;
+    if (!hits.length) return out;
+    const byId = new Map((await this.repos.records.byIds(hits.map((h) => h._id), { projection: { ...projection, archived: 1 }, maxTimeMS })).map((d) => [hex(d._id), d]));
+    for (const hit of hits) {
+      const d = byId.get(hex(hit._id));
+      if (d && !d.archived && d.boardId.equals(hit.boardId)) { d.cursorAt = hit.updatedAt ?? null; out.push(d); }
+    }
+    return out;
   }
 
   // workspaceIds: ObjectIds the caller may see (null = all). Returns { items, more, partial }.
@@ -81,7 +93,8 @@ class SearchService {
       const projection = { _id: 1, boardId: 1, workspaceId: 1, ...Object.fromEntries([...projected].map((p) => [p, 1])) };
       const indexed = { pattern: escapeRegex(query.toLowerCase()), limit: limit + 1, maxTimeMS: MAX_TIME_MS }, boardsWithFields = searched.filter((b) => fieldsOf.has(hex(b._id)));
       docs = this.index?.active ? await this.fromIndex(boardsWithFields, { ...indexed, projection }) : await this.repos.records.searchText(clauses, { projection, limit: limit + 1, maxTimeMS: MAX_TIME_MS });
-      if (this.index?.shadowing) this.index.compare(docs.map((d) => d._id), boardsWithFields, indexed);
+      // This query has no order, so with more matches than a page the two sides can't be expected to pick the same ones.
+      if (this.index?.shadowing && docs.length <= limit) this.index.compare(docs.map((d) => d._id), boardsWithFields, indexed);
     } catch (error) {
       if (timedOut(error)) throw new ApiError(503, "SEARCH_TIMEOUT", "The search took too long. Try a longer or more specific search.");
       throw error;
@@ -99,7 +112,7 @@ class SearchService {
     // Item-name matches first (names starting with the query before the rest); then cell matches.
     const rank = (i) => (i.field ? 2 : i.title.toLowerCase().startsWith(needle) ? 0 : 1);
     items.sort((a, b) => rank(a) - rank(b));
-    return { items, more: docs.length > limit, partial };
+    return { items, more: (docs.found ?? docs.length) > limit, partial };
   }
 
   // ---- Command Center (Phase 14) ------------------------------------------------------------------------------
@@ -155,6 +168,8 @@ class SearchService {
     const empty = { type: "record", items: [], more: false, next: null };
     const pattern = q ? escapeRegex(q) : null, needle = q.toLowerCase();
     const cursorClause = !cursor ? null : cursor.time ? { $or: [{ updatedAt: { $lt: cursor.time } }, { updatedAt: cursor.time, _id: { $lt: cursor.id } }, { updatedAt: null }] } : { updatedAt: null, _id: { $lt: cursor.id } };
+    // Name matches that led an earlier page, out of their turn: they aren't shown a second time when their turn comes.
+    const alreadyShown = cursor?.exclude?.length ? { _id: { $nin: cursor.exclude } } : null;
     const plans = new Map(), clauses = [], nameClauses = [], projected = new Set(["values.serial"]);
     const keysOf = (b, type) => (b.columns || []).filter((c) => c.type === type).map((c) => c.key);
     const anyOf = (keys, value) => ({ $or: keys.map((k) => ({ [`values.${k}`]: value })) });
@@ -171,6 +186,7 @@ class SearchService {
       const clause = { boardId: b._id };
       if (from || to) clause.updatedAt = { ...(from ? { $gte: from } : {}), ...(to ? { $lt: to } : {}) };
       if (cursorClause) and.push(cursorClause);
+      if (alreadyShown) and.push(alreadyShown);
       if (and.length) clause.$and = and;
       clauses.push(clause);
       if (pattern && !cursor) nameClauses.push({ ...clause, $and: [{ "values.serial": { $regex: pattern, $options: "i" } }, ...and.slice(1)] });
@@ -185,36 +201,40 @@ class SearchService {
     const nameBudget = Math.floor(limit / 2);
     let docs, named = [];
     try {
-      // Status, priority and assignee filters need the cells themselves, so those searches stay on the records.
-      const plain = Boolean(pattern) && !status && !priority && !assignee;
+      // Status, priority and assignee filters use the same index: it holds those columns' values too.
       const searched = [...plans.values()].map((p) => p.board);
-      const indexed = { pattern: pattern && escapeRegex(needle), extra: from || to ? { updatedAt: { ...(from ? { $gte: from } : {}), ...(to ? { $lt: to } : {}) } } : {}, and: cursorClause ? [cursorClause] : [], maxTimeMS: MAX_TIME_MS };
-      if (plain && this.index?.active) {
+      const facets = { ...(status ? { status } : {}), ...(priority ? { priority } : {}), ...(assignee ? { owner: `user:${hex(assignee)}` } : {}) };
+      const indexed = { pattern: pattern && escapeRegex(needle), extra: { ...facets, ...(from || to ? { updatedAt: { ...(from ? { $gte: from } : {}), ...(to ? { $lt: to } : {}) } } : {}) }, and: [cursorClause, alreadyShown].filter(Boolean), maxTimeMS: MAX_TIME_MS };
+      if (this.index?.active) {
         docs = await this.fromIndex(searched, { ...indexed, projection, limit: limit + 1 });
         if (nameClauses.length && nameBudget) named = await this.fromIndex(searched, { ...indexed, field: "name", projection, limit: nameBudget });
       } else {
         docs = await this.repos.records.searchPage(clauses, { projection, limit: limit + 1, maxTimeMS: MAX_TIME_MS });
         if (nameClauses.length && nameBudget) named = await this.repos.records.searchPage(nameClauses, { projection, limit: nameBudget, maxTimeMS: MAX_TIME_MS });
-        if (plain && this.index?.shadowing) this.index.compare(docs.map((d) => d._id), searched, { ...indexed, limit: limit + 1 });
+        if (pattern && !status && !priority && !assignee && this.index?.shadowing) this.index.compare(docs.map((d) => d._id), searched, { ...indexed, limit: limit + 1 });
       }
     } catch (error) {
       if (timedOut(error)) throw new ApiError(503, "SEARCH_TIMEOUT", "The search took too long. Try a longer search or add a filter.");
       throw error;
     }
     const page = docs.slice(0, limit);
-    // Name matches lead the first page (newest first); then the page in its own order. The cursor follows the last
-    // page document that was shown, so page documents displaced by name matches come on the next page, never lost
-    // (a name match may show again there; the client skips repeats).
-    const seen = new Set(), merged = [];
+    // Name matches lead the first page (newest first); then the page in its own order. The cursor follows the last page document
+    // that was shown, so page documents displaced by name matches come on the next page, never lost. The cursor also lists the name
+    // matches its position hasn't reached, so they don't show again on a later page.
+    const seen = new Set(), merged = [], passed = new Set();
     for (const d of named) { seen.add(hex(d._id)); merged.push(d); }
     let last = null;
     for (const d of page) {
       if (merged.length >= limit) break;
-      last = d;
+      last = d; passed.add(hex(d._id));
       if (!seen.has(hex(d._id))) { seen.add(hex(d._id)); merged.push(d); }
     }
-    const more = docs.length > limit || (last !== null && last !== page.at(-1));
-    const next = more ? encodeCursor("record", last.updatedAt, last._id) : null;
+    const notYetShown = page.slice(last ? page.indexOf(last) + 1 : 0).some((d) => !seen.has(hex(d._id)));
+    const more = (docs.found ?? docs.length) > limit || notYetShown;
+    // Every record of a full page may have been left out (see fromIndex): the next page then continues from the last index match.
+    const tail = last || docs.lastHit;
+    const exclude = [...(cursor?.exclude || []), ...named.filter((d) => !passed.has(hex(d._id))).map((d) => d._id)];
+    const next = more && tail ? encodeCursor("record", tail.cursorAt !== undefined ? tail.cursorAt : tail.updatedAt, tail._id, exclude) : null;
     const items = merged.map((d) => {
       const plan = plans.get(hex(d.boardId)), b = plan.board, w = scope.workspaces.get(hex(b.workspaceId));
       const title = safe(textOf(d.values?.serial) || "Record");

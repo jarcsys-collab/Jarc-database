@@ -9,7 +9,7 @@ const PAGED_TYPES = Object.freeze(["record", "comment"]);
 const MIN_QUERY = 2, MAX_QUERY = 100, MAX_FILTER = 100;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const USER_REF = /^user:([0-9a-f]{24})$/;
-const CURSOR = /^[A-Za-z0-9_-]{1,200}$/;
+const CURSOR = /^[A-Za-z0-9_-]{1,2400}$/; // room for the IDs a cursor may list (MAX_CURSOR_EXCLUDED)
 // Control characters never take part in a search (they can't be typed and only make odd patterns).
 const clean = (text) => text.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
 
@@ -32,16 +32,18 @@ function day(raw, label, { end = false } = {}) {
   return end ? new Date(date.getTime() + 86400000) : date;
 }
 
-// Opaque position after the last result of a page: base64url JSON { k: type, t: time (ms) | null, i: id }.
-function encodeCursor(type, time, id) {
-  return Buffer.from(JSON.stringify({ k: type, t: time instanceof Date ? time.getTime() : null, i: id.toHexString() })).toString("base64url");
+// Opaque position after the last result of a page: base64url JSON { k: type, t: time (ms) | null, i: id, x?: IDs already shown }.
+const MAX_CURSOR_EXCLUDED = 50;
+function encodeCursor(type, time, id, exclude = []) {
+  return Buffer.from(JSON.stringify({ k: type, t: time instanceof Date ? time.getTime() : null, i: id.toHexString(), ...(exclude.length ? { x: exclude.map((e) => e.toHexString()) } : {}) })).toString("base64url");
 }
 function decodeCursor(raw, type) {
   if (!CURSOR.test(raw)) fail("cursor is not valid.");
   let value;
   try { value = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")); } catch { fail("cursor is not valid."); }
   if (!value || typeof value !== "object" || value.k !== type || !(value.t === null || Number.isSafeInteger(value.t)) || typeof value.i !== "string" || !/^[0-9a-f]{24}$/.test(value.i)) fail("cursor is not valid.");
-  return { time: value.t === null ? null : new Date(value.t), id: new ObjectId(value.i) };
+  if (value.x !== undefined && (!Array.isArray(value.x) || value.x.length > MAX_CURSOR_EXCLUDED || value.x.some((x) => typeof x !== "string" || !/^[0-9a-f]{24}$/.test(x)))) fail("cursor is not valid.");
+  return { time: value.t === null ? null : new Date(value.t), id: new ObjectId(value.i), exclude: (value.x || []).map((x) => new ObjectId(x)) };
 }
 
 // → { q, types, workspaceId, boardId, status, priority, assignee ("me" | ObjectId), from, to, cursor, limit }
