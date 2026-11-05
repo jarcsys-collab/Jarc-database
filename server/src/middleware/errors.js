@@ -23,10 +23,11 @@ function sendError(res, status, code, message, details) {
 // JSON 404 for any unknown /api/v1 path, so API calls never receive index.html.
 function apiNotFound(req, res) { sendError(res, 404, "NOT_FOUND"); }
 
-// Logged request path: search text (q and filter values) is personal and never written to the server log.
+// Logged request path: search text (q and filter values) is personal and never written to the server log; neither is the query
+// of the token API, where a mistaken client may have put a token.
 const loggedUrl = (req) => {
   const url = String(req.originalUrl || "");
-  return url.startsWith("/api/v1/search") && url.includes("?") ? `${url.split("?")[0]}?[redacted]` : url;
+  return (url.startsWith("/api/v1/search") || url.startsWith("/api/v1/external")) && url.includes("?") ? `${url.split("?")[0]}?[redacted]` : url;
 };
 
 // Final error middleware. Known errors keep their code; everything else becomes a generic INTERNAL_ERROR.

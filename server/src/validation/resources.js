@@ -68,6 +68,7 @@ function boardPatch(raw, board, { actorId, now }) {
       // One value ↔ several values rewrites stored values: POST /boards/:id/columns/:key/type { type, multiple }.
       if (Boolean(next.get(column.key).multiple) !== Boolean(column.multiple)) fail(`Switching "${column.label || column.key}" between one and several values can't be done with a board update.`);
     }
+    for (const column of columns) assertNotRetired(board, column);
     if (groupColumnOf(columns)?.key !== groupColumnOf(board.columns)?.key) fail("The board's group column can't be changed with a board update.");
     set.columns = columns;
   }
@@ -266,12 +267,23 @@ function boardMove(raw) {
   return { expectedVersion: version(body.expectedVersion), workspaceId: parseId(body.workspaceId, "workspaceId") };
 }
 
+// A deleted column's ID is never given to another column, so an old reference can't silently read different data. Undo re-adds the same
+// column: the same ID and type, soon after deleting it (the undo history lives only in an open browser tab).
+const RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
+function assertNotRetired(board, column, { restoring = false } = {}) {
+  const retired = board.retiredColumns?.find((r) => r.key === column.key);
+  if (!retired) return;
+  if (restoring && retired.type === column.type && Date.now() - new Date(retired.at).getTime() < RESTORE_WINDOW_MS) return;
+  fail(`The ID "${column.key}" belonged to a deleted column and can't be used again.`);
+}
+
 function columnAdd(raw, board) {
   const body = requireBody(raw);
   allowOnly(body, ["expectedVersion", "column", "index", "copyFrom"], "the new column");
   const expectedVersion = version(body.expectedVersion);
   const column = normalizeColumn(body.column, "The new column");
   if (board.columns.some((c) => c.key === column.key)) fail(`Column key "${column.key}" already exists on this board.`);
+  assertNotRetired(board, column, { restoring: true });
   if (board.columns.length >= LIMITS.columns) fail(`A board can have at most ${LIMITS.columns} columns.`);
   let index = board.columns.length;
   if (body.index !== undefined) {

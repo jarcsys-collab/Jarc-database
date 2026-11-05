@@ -12,6 +12,7 @@ const { ApiError } = require("../middleware/errors");
 const { notFound, conflict, activityEntry } = require("./shared");
 
 const invalid = (message) => new ApiError(400, "VALIDATION_ERROR", message);
+const MAX_RETIRED_COLUMNS = 1000;
 
 class BoardSchemaService {
   constructor({ repos, connection, searchIndex = null }) { Object.assign(this, { repos, connection, searchIndex }); }
@@ -67,7 +68,8 @@ class BoardSchemaService {
           return record.values[copyFrom.key] ?? column.defaultValue;
         };
         return {
-          boardSet: { columns: normalizeColumns(columns) },
+          // A column restored by undo is no longer retired; its ID means the same column again.
+          boardSet: { columns: normalizeColumns(columns), ...(current.retiredColumns?.some((r) => r.key === column.key) ? { retiredColumns: current.retiredColumns.filter((r) => r.key !== column.key) } : {}) },
           changes: becomesPrimaryGroup ? [] : records.map((record) => ({ record, set: { [`values.${column.key}`]: valueFor(record) } })),
           affected: 0,
           summary: `${copyFrom ? "Duplicated" : "Added"} column ${column.label}`
@@ -91,7 +93,8 @@ class BoardSchemaService {
           ? records.filter((r) => r.groupId !== null && r.groupId !== undefined).map((record) => ({ record, set: { groupId: null } }))
           : records.filter((r) => r.values[key] !== undefined).map((record) => ({ record, unset: { [`values.${key}`]: "" } }));
         return {
-          boardSet: { columns: board.columns.filter((c) => c.key !== key) },
+          // Its ID is retired, so no later column can take it (see validation/resources.js).
+          boardSet: { columns: board.columns.filter((c) => c.key !== key), retiredColumns: [...(board.retiredColumns || []).filter((r) => r.key !== key), { key, type: column.type, at: new Date() }].slice(-MAX_RETIRED_COLUMNS) },
           changes,
           affected: isPrimaryGroup ? changes.length : records.filter((r) => hasValue(r.values[key])).length,
           summary: `Deleted column ${column.label}`

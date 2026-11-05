@@ -215,6 +215,30 @@ The existing browser import of CSV and JSON files (up to 5,000 rows) is not part
 
 **Who may import:** JARC's usual rules: a signed-in session and the MEMBER role in the workspace, the same as creating a board. With `ACCESS_POLICY=development_shared` or `JARC_BETA_OPEN_EDITING=true`, that means every signed-in employee, in every workspace.
 
+## API tokens
+
+Other systems (Power BI, Power Automate, n8n, Excel, scripts) read JARC through a read-only API with a token. It is off in every environment until switched on.
+
+| Variable | Values | Effect |
+|---|---|---|
+| `JARC_FEATURE_API_TOKENS` | `true` or `false`, default off | While off, the paths don't exist, the Settings section is hidden and nothing is added to the database. Needs `AUTH_MODE=entra`. |
+| `JARC_API_TOKEN_KEY` | 32 random bytes, base64 (`openssl rand -base64 32`). Required when on | Tokens are stored as digests keyed with this secret. Replacing it ends every existing token. |
+| `JARC_API_TOKEN_RATE_PER_MINUTE` | 10 to 6000, default 120 | Requests per minute for each token, counted per server process. |
+
+Switching it on creates the `apiTokens` and `apiTokenAudit` collections and the `board_id` index on `records`.
+
+**Who may create or rotate a token:** only its owner, with their own `WORKSPACE_ADMIN` membership of the workspace. An owner can always revoke their own token while signed in, whatever their current role and even with no membership left, and nobody can revoke another person's token. `ACCESS_POLICY=development_shared`, `JARC_BETA_OPEN_EDITING`, the `JARC.Admin` app role and the Super Admin account role don't qualify.
+
+**What a token can do:** read the boards chosen for it, in one workspace, for at most 366 days. Each request also checks the owner: if they are disabled, blocked or no longer a member, the token stops at once. An owner who stays a member with a lower role keeps read access through the token, but can't rotate it. Columns hidden on the board are returned, because hiding isn't a permission; JARC has no column-level permissions. Archived workspaces, boards and records need `includeArchived=true`.
+
+Management, with a session and CSRF: `GET /api/v1/me/api-tokens`, `GET /api/v1/me/api-tokens/options`, `POST /api/v1/me/api-tokens`, `POST /api/v1/me/api-tokens/:id/rotate`, `POST /api/v1/me/api-tokens/:id/revoke`.
+
+Reading, with `Authorization: Bearer <token>` only: `GET /api/v1/external/` + `me`, `workspaces`, `workspaces/:id/boards`, `boards/:id`, `boards/:id/columns`, `boards/:id/columns/:columnId`, `boards/:id/columns/:columnId/values`, `boards/:id/groups`, `boards/:id/records` (with `?columns=a,b`), `boards/:id/records/:recordId/columns/:columnId`, `records/:id`.
+
+**Board and column IDs:** a board's API ID is its existing ID, and a column's is its existing `key`, unique on its board. Neither changes when something is renamed, reordered, hidden or moved, or when a column's type changes, so existing boards need no migration. IDs are identifiers, not secrets. Deleting a column records its key on the board (`retiredColumns`), and that key can't go to another column; undo may restore the same column, with the same type, within 24 hours. Columns deleted before this existed left no record, but JARC generates a random key for each new column, so they can only be reused by a direct API call that names the old key.
+
+Full usage, with Power BI, Power Automate, n8n, JavaScript and cURL examples, is in JARC under **Settings → API Tokens → Documentation**. Tokens belong in a secure backend or approved secret store, never in public JavaScript.
+
 ## Limits on large selections
 
 Nothing processes part of a selection without saying so.

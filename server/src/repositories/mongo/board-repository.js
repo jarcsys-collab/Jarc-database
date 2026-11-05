@@ -18,6 +18,11 @@ class BoardRepository extends VersionedRepository {
     return this.collection.find({ workspaceId }, { sort: { position: 1, _id: 1 }, limit: MAX_BOARDS_PER_WORKSPACE }).toArray();
   }
 
+  // The given boards, if they are in this workspace, in board order.
+  findManyInWorkspace(workspaceId, ids) {
+    return this.collection.find({ workspaceId, _id: { $in: ids } }, { sort: { position: 1, _id: 1 }, limit: ids.length }).toArray();
+  }
+
   async nextPosition(workspaceId, { session } = {}) {
     const last = await this.collection.findOne({ workspaceId }, { sort: { position: -1 }, projection: { position: 1 }, session });
     return (last?.position ?? 0) + 1000;

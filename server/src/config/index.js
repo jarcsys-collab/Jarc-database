@@ -67,6 +67,8 @@ function loadConfig(env = process.env) {
     recordSearch: loadRecordSearchMode(env),
     // Optional features, each with its own switch: { nativeForms, spreadsheetImports }. Off in production unless turned on.
     features: loadFeatureSwitches(env, nodeEnv),
+    // API tokens for other systems: { enabled, perMinute } and a key kept out of logs and inspection.
+    apiTokens: loadApiTokenConfig(env, authMode),
     // Requests slower than this are logged by route pattern (middleware/slow-requests.js). 0 turns it off.
     slowRequestMs: loadSlowRequestMs(env),
     // TEMPORARY beta collaboration (see auth/access.js). Only the exact value "true" turns it on.
@@ -97,6 +99,24 @@ function loadFeatureSwitches(env, nodeEnv) {
     out[feature] = value === undefined || value === "" ? nodeEnv !== "production" : value === "true";
   }
   return Object.freeze(out);
+}
+
+// API tokens (auth/api-token.js, routes/external-api.js). Off in every environment unless JARC_FEATURE_API_TOKENS=true, because they
+// need a secret of their own. While off, their API paths don't exist, the Settings section is hidden and nothing is added to the database.
+//   JARC_API_TOKEN_KEY         required when on: 32 random bytes, base64-encoded (openssl rand -base64 32). Tokens are stored as digests
+//                              keyed with it, so replacing it ends every existing token.
+//   JARC_API_TOKEN_RATE_PER_MINUTE  optional: requests per minute for each token (default 120).
+function loadApiTokenConfig(env, authMode) {
+  const value = env.JARC_FEATURE_API_TOKENS;
+  if (value !== undefined && value !== "" && value !== "true" && value !== "false") throw new ConfigError("JARC_FEATURE_API_TOKENS must be true or false.");
+  const enabled = value === "true";
+  let key = null;
+  if (env.JARC_API_TOKEN_KEY) { key = Buffer.from(env.JARC_API_TOKEN_KEY, "base64"); if (key.length !== 32) throw new ConfigError("JARC_API_TOKEN_KEY must be 32 random bytes, base64-encoded (for example: openssl rand -base64 32)."); }
+  if (enabled && authMode !== "entra") throw new ConfigError("JARC_FEATURE_API_TOKENS=true needs AUTH_MODE=entra.");
+  if (enabled && !key) throw new ConfigError("JARC_FEATURE_API_TOKENS=true needs JARC_API_TOKEN_KEY.");
+  const config = { enabled, perMinute: wholeNumberSetting(env, "JARC_API_TOKEN_RATE_PER_MINUTE", 120, 10, 6000) };
+  Object.defineProperty(config, "key", { value: key, enumerable: false });
+  return Object.freeze(config);
 }
 
 function loadRecordSearchMode(env) {

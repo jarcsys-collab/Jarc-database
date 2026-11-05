@@ -169,7 +169,7 @@ describe("Database bootstrap", () => {
     const result = await ensureDatabase(db);
     // Stage 12C added sessions and loginAttempts (server-side Entra sign-in sessions); Phase M4.1 storageUsage
     // (attachment storage counters).
-    assert.deepEqual(result.createdCollections.sort(), ["accountAudit", "activities", "attachmentFiles.chunks", "attachmentFiles.files", "attachments", "boards", "comments", "formSubmissions", "forms", "importBatches", "importJobs", "integrationEvents", "integrationJobs", "integrationMappings", "integrationOAuthStates", "integrations", "loginAttempts", "recordSearch", "records", "sessions", "storageUsage", "users", "workspaceMembers", "workspaces"]);
+    assert.deepEqual(result.createdCollections.sort(), ["accountAudit", "activities", "apiTokenAudit", "apiTokens", "attachmentFiles.chunks", "attachmentFiles.files", "attachments", "boards", "comments", "formSubmissions", "forms", "importBatches", "importJobs", "integrationEvents", "integrationJobs", "integrationMappings", "integrationOAuthStates", "integrations", "loginAttempts", "recordSearch", "records", "sessions", "storageUsage", "users", "workspaceMembers", "workspaces"]);
     assert.deepEqual(Object.values(COLLECTIONS).sort(), result.createdCollections.sort());
     const names = async (c) => (await db.collection(c).listIndexes().toArray()).map((i) => i.name).sort();
     assert.deepEqual(await names("workspaceMembers"), ["_id_", "uniq_workspace_user", "user_status"]);

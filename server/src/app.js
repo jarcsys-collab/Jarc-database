@@ -19,13 +19,15 @@ const { apiNotFound, errorHandler, sendError } = require("./middleware/errors");
 const { ActivityStream } = require("./realtime/activity-stream");
 const { eventRoutes, entraSessionCheck } = require("./routes/events");
 const { fileRoutes } = require("./routes/files");
-const { searchRoutes } = require("./routes/search");
+const { searchRoutes, searchLimiter: createSearchLimiter } = require("./routes/search");
 const { integrationRoutes, integrationPublicRoutes } = require("./routes/integrations");
 const { commentRoutes } = require("./routes/comments");
 const { formRoutes } = require("./routes/forms");
 const { importRoutes } = require("./routes/imports");
 const { preferenceRoutes } = require("./routes/preferences");
 const { accountRoutes } = require("./routes/accounts");
+const { apiTokenRoutes } = require("./routes/api-tokens");
+const { externalApiRoutes } = require("./routes/external-api");
 const { version } = require("../package.json");
 
 // Larger than any state the frontend can produce today: browser storage caps at roughly 5 MB, and backup and CSV
@@ -56,7 +58,8 @@ const resolveFeatures = (features = {}, environment = "development") => { const 
 // beta collaboration (JARC_BETA_OPEN_EDITING), see auth/access.js. accounts: Account Management (Phase M4.3,
 // auth/accounts.js) { mode: off | staged | enforced, superAdmin }; Entra sign-in only. features: the optional features switched
 // on, { nativeForms, spreadsheetImports } (config/index.js); anything not stated is off in production and on elsewhere.
-function createApp({ features = {}, repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console, slowRequestMs = 0 } = {}) {
+// apiTokens: { key, perMinute? } turns on API tokens for other systems (config/index.js); Entra sign-in only. Without it their paths don't exist.
+function createApp({ apiTokens = null, features = {}, repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console, slowRequestMs = 0 } = {}) {
   if (environment === "production" && (enableDevStateApi || enableDevResourceApi)) {
     throw new Error("Development (pre-auth) APIs can't be enabled in production.");
   }
@@ -73,6 +76,9 @@ function createApp({ features = {}, repository, environment = "development", ena
 
   const api = express.Router();
   api.use(slowRequestLog({ logger, thresholdMs: slowRequestMs }));
+  // The token API takes no request bodies, so it comes before the body parser. Filled in below when API tokens are on.
+  const external = express.Router();
+  api.use("/external", external);
   // inflate: false — compressed (gzip/deflate/br) request bodies are refused with 415 before anything is read or
   // decompressed. JARC's browser app never sends them, and this parser runs before authentication, so decompression
   // would be reachable without signing in (body-parser advisory GHSA-27r3-jxmh-p828).
@@ -97,6 +103,12 @@ function createApp({ features = {}, repository, environment = "development", ena
     const identify = (req, res, next) => (req.actor ? next() : authenticate(req, res, next));
     // Everything after `identify` requires a caller (in Entra mode, a valid session — including unknown paths).
     if (auth) api.use(identify, sessionRoutes({ repos: dataLayer.repos, access, accounts: accountService }));
+    // API tokens: managed with a session (and CSRF) here; used only under /external, which never reads a session.
+    const tokenService = auth && apiTokens ? dataLayer.services.apiTokens.configure({ key: apiTokens.key, access, tenantId: auth.entra.tenantId, ...(apiTokens.maxActive ? { maxActive: apiTokens.maxActive } : {}) }) : null;
+    if (tokenService) {
+      external.use(externalApiRoutes({ tokens: tokenService, repos: dataLayer.repos, environment, ...(apiTokens.perMinute ? { rate: { perWindow: apiTokens.perMinute, windowMs: 60 * 1000 } } : {}), ...(apiTokens.failedAuth ? { failedAuth: apiTokens.failedAuth } : {}) }));
+      api.use(identify, apiTokenRoutes({ tokens: tokenService, access, repos: dataLayer.repos, ...(apiTokens.issuePerHour ? { limiter: createSearchLimiter({ perWindow: apiTokens.issuePerHour, windowMs: 60 * 60 * 1000 }) } : {}) }));
+    }
     if (accountService) api.use(identify, accountRoutes({ services: dataLayer.services, repos: dataLayer.repos }));
     api.use(identify, meRoutes({ repos: dataLayer.repos, mode: auth ? "entra" : "dev", access }), memberRoutes({ services: dataLayer.services, access, repos: dataLayer.repos }), resourceRoutes({ services: dataLayer.services, access }));
     // Files columns (attachments in GridFS).
@@ -108,7 +120,7 @@ function createApp({ features = {}, repository, environment = "development", ena
     if (enabled.nativeForms && dataLayer.services?.forms) api.use(identify, formRoutes({ services: dataLayer.services, access }));
     if (enabled.spreadsheetImports && dataLayer.services?.importJobs) api.use(identify, importRoutes({ services: dataLayer.services, access }));
     // What this server has switched on, so the browser shows only what will work. The routes above are what enforce it.
-    api.get("/features", identify, (req, res) => res.status(200).set("Cache-Control", "no-store").json({ features: enabled }));
+    api.get("/features", identify, (req, res) => res.status(200).set("Cache-Control", "no-store").json({ features: tokenService ? { ...enabled, apiTokens: true } : enabled }));
     api.use(identify, preferenceRoutes({ repos: dataLayer.repos }));
     if (dataLayer.services?.integration) api.use(identify, integrationRoutes({ integration: dataLayer.services.integration, access }));
     // Live updates (Server-Sent Events) from the activity log; live: { pollMs, overlapMs, timings } for tests.

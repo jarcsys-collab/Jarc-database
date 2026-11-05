@@ -214,6 +214,25 @@ const finished = async (jobs, id) => { for (let i = 0; i < 600; i += 1) { const 
 const removeBoard = async (w, job) => { const { job: started } = await w.jobs.cleanUp(job, actor); assert.equal(started.status, "removing"); w.jobs.wake(); for (let i = 0; i < 600; i += 1) { const j = await w.jobs.find(job._id); if (j.status !== "removing") return j; await sleep(10); } throw new Error("the removal never ended"); };
 const importFile = async (w, file, { name = "m.xlsx", review = {}, start = { confirmNewBoard: true } } = {}) => { let job = await w.jobs.createFromFile(w.ws, file, { name }, actor); job = await w.jobs.review(job, review); job = await w.jobs.startNewBoard(job, start); w.jobs.wake(); return finished(w.jobs, job._id); };
 
+describe("API IDs of imported columns", () => {
+  test("an imported board's column IDs are unique, valid and unchanged by renaming, and another import doesn't disturb them", async () => {
+    const w = await world(), done = await importFile(w, xlsx([["Name", "Code", "When"], ["A", "1", "2026-03-04"], ["B", "2", "2026-03-05"]]), { name: "first.xlsx" });
+    assert.equal(done.status, "done", done.lastError);
+    const board = await w.dl.repos.boards.findById(done.boardId), keys = board.columns.map((c) => c.key);
+    assert.equal(new Set(keys).size, keys.length);
+    assert.ok(keys.includes("serial") && keys.every((k) => /^[A-Za-z0-9_-]{1,100}$/.test(k)));
+    const renamed = board.columns.map((c) => ({ ...c, label: `${c.label} renamed` }));
+    const after = await w.s.boards.update(board._id, { expectedVersion: board.version, columns: renamed }, actor);
+    assert.deepEqual(after.columns.map((c) => c.key), keys);
+    const stored = (await w.dl.repos.records.listAllForBoard(board._id)).map((r) => Object.keys(r.values).filter((k) => k !== "group").sort());
+    for (const row of stored) for (const k of row) assert.ok(keys.includes(k), `record value ${k} belongs to a column`);
+    const second = await importFile(w, xlsx([["Name", "Other"], ["C", "x"]]), { name: "second.xlsx" });
+    assert.equal(second.status, "done", second.lastError);
+    assert.notEqual(second.boardId.toHexString(), board._id.toHexString());
+    assert.deepEqual((await w.dl.repos.boards.findById(board._id)).columns.map((c) => c.key), keys, "the first board's IDs are untouched");
+  });
+});
+
 describe("A new board from a monday.com workbook", () => {
   test("the board, its columns and groups are made, and every value arrives exactly", async () => {
     const w = await world(), done = await importFile(w, mondayFile(), { name: "Installations.xlsx" });

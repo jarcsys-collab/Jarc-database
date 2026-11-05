@@ -96,7 +96,7 @@ class BoardModel {
     // Appearance defaults: JARC Default — Light, JARC Teal, comfortable (Phase 9C; appearanceVersion 2). A theme
     // saved by an earlier version is kept as the person left it; only the old built-in accent value moves to JARC Teal.
     this.settings = BoardModel.migrateAppearance({ theme: "light", palette: "default", density: "comfortable", accentColor: BoardModel.JARC_TEAL, fontSize: "normal", highContrast: false, reduceMotion: false, stickyFirstColumn: true, showInvoiceDate: true, showOwner: true, showPriority: true, showBoardCounts: true, showIcons: true, dateFormat: "DD/MM/YYYY", language: "English", autosave: true, settingsSection: "appearance", ...(saved.settings || {}) });
-    this.profile = { name: "medtek", email: "", role: "Workspace admin", initials: "M", avatar: "", color: "#0f9489", presence: "Available", startScreen: "Home", ...(saved.profile || {}) };
+    this.profile = { name: "medtek", email: "", role: "Workspace admin", initials: "M", avatar: "", color: "#0f9489", startScreen: "Home", ...(saved.profile || {}) };
     this.notifications = saved.notifications || [];
     this.collapsedGroups = saved.collapsedGroups && typeof saved.collapsedGroups === "object" ? saved.collapsedGroups : {}; // boardId → [group names]
     this.members = saved.members || [{id:"member-admin",name:this.profile.name,email:this.profile.email||"",role:"Owner",status:"Active"}];

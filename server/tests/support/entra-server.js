@@ -40,7 +40,8 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
   const verify = createEntraVerifier({ ...entra, keySet: issuer.keySet });
   // Optional 2nd argument "shared": ACCESS_POLICY=development_shared (as on Railway); default role_based.
   const accessPolicy = process.argv[3] === "shared" ? "development_shared" : "role_based";
-  const app = createApp({ ...(process.env.JARC_TEST_FEATURES === "off" ? { features: { nativeForms: false, spreadsheetImports: false } } : {}), repository: new MemoryStateRepository(), environment: "test", dataLayer, auth: { mode: "entra", entra, verify }, accessPolicy, betaOpenEditing: process.env.JARC_TEST_BETA === "1", ...(process.env.JARC_TEST_ACCOUNTS ? { accounts: { mode: process.env.JARC_TEST_ACCOUNTS, superAdmin: process.env.JARC_TEST_SUPER_ADMIN_OID ? { tenantId: entra.tenantId, objectId: process.env.JARC_TEST_SUPER_ADMIN_OID.toLowerCase(), email: null } : null } } : {}), logger: { error() {} } });
+  // JARC_TEST_API_TOKENS=1: API tokens on, with a key made up for this run.
+  const app = createApp({ ...(process.env.JARC_TEST_API_TOKENS === "1" ? { apiTokens: { key: require("crypto").randomBytes(32) } } : {}), ...(process.env.JARC_TEST_FEATURES === "off" ? { features: { nativeForms: false, spreadsheetImports: false } } : {}), repository: new MemoryStateRepository(), environment: "test", dataLayer, auth: { mode: "entra", entra, verify }, accessPolicy, betaOpenEditing: process.env.JARC_TEST_BETA === "1", ...(process.env.JARC_TEST_ACCOUNTS ? { accounts: { mode: process.env.JARC_TEST_ACCOUNTS, superAdmin: process.env.JARC_TEST_SUPER_ADMIN_OID ? { tenantId: entra.tenantId, objectId: process.env.JARC_TEST_SUPER_ADMIN_OID.toLowerCase(), email: null } : null } } : {}), logger: { error() {} } });
   const sim = { protected: 0, withSession: 0, withoutSession: [] };
 
   const outer = express();

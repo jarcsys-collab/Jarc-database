@@ -79,7 +79,7 @@ const entraEnv = (overrides = {}) => ({ ...TEST_ENTRA, ...overrides });
 // server sessions in the fake MongoDB. No development user exists in this mode.
 // accounts: Account Management settings ({ mode, superAdmin }; off by default). environment: e.g. "production" (no
 // development APIs) to test production behaviour on the fake database.
-async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient(), accessPolicy, live, fileStore = new MemoryFileStore(), monday = null, fetch = undefined, betaOpenEditing = false, searchLimiter = null, accounts = null, environment = null } = {}) {
+async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient(), accessPolicy, live, fileStore = new MemoryFileStore(), monday = null, fetch = undefined, betaOpenEditing = false, searchLimiter = null, accounts = null, environment = null, apiTokens = null } = {}) {
   const { createEntraVerifier } = require("../src/auth/entra-token");
   const connection = new MongoConnection({ uri: "mongodb://fake.invalid", dbName: "jarc_database", createClient: () => fake });
   await connection.connect();
@@ -88,7 +88,7 @@ async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient(),
   const dataLayer = createDataLayer({ connection, logger, fileStore, monday, ...(fetch ? { fetch } : {}) });
   const config = { ...issuer.config, ...entra };
   const verify = createEntraVerifier({ ...config, keySet: issuer.keySet });
-  const started = await startApp({ dataLayer, auth: { mode: "entra", entra: config, verify }, logger, ...(accessPolicy ? { accessPolicy } : {}), ...(betaOpenEditing ? { betaOpenEditing } : {}), ...(searchLimiter ? { searchLimiter } : {}), ...(live ? { live } : {}), ...(accounts ? { accounts } : {}), ...(environment ? { environment, enableDevStateApi: environment !== "production" } : {}) });
+  const started = await startApp({ dataLayer, auth: { mode: "entra", entra: config, verify }, logger, ...(accessPolicy ? { accessPolicy } : {}), ...(betaOpenEditing ? { betaOpenEditing } : {}), ...(searchLimiter ? { searchLimiter } : {}), ...(live ? { live } : {}), ...(accounts ? { accounts } : {}), ...(apiTokens ? { apiTokens } : {}), ...(environment ? { environment, enableDevStateApi: environment !== "production" } : {}) });
   return { ...started, fake, connection, dataLayer, db: connection.db, logger, entra: config, fileStore };
 }
 

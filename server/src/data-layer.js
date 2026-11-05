@@ -27,6 +27,8 @@ const { BoardSchemaService } = require("./services/board-schema-service");
 const { MembershipService } = require("./services/membership-service");
 const { AccountAuditRepository } = require("./repositories/mongo/account-audit-repository");
 const { AccountService } = require("./services/account-service");
+const { ApiTokenRepository } = require("./repositories/mongo/api-token-repository");
+const { ApiTokenService } = require("./services/api-token-service");
 
 // fileStore: where attachment bytes go (default GridFS in the same database; tests pass a MemoryFileStore).
 // maxFileStorageBytes: the cap on all attachments together (see services/file-service.js).
@@ -52,7 +54,8 @@ function createDataLayer({ connection, logger = console, fileStore = new GridFsF
     integrations: new IntegrationRepository(db),
     comments: new CommentRepository(db),
     storageUsage: new StorageUsageRepository(db),
-    accountAudit: new AccountAuditRepository(db)
+    accountAudit: new AccountAuditRepository(db),
+    apiTokens: new ApiTokenRepository(db)
   };
   const searchIndex = new RecordSearchIndex({ repos, logger, mode: recordSearch });
   const deps = { repos, connection, logger, searchIndex };
@@ -64,6 +67,8 @@ function createDataLayer({ connection, logger = console, fileStore = new GridFsF
     services: { workspaces: new WorkspaceService(deps), boards, records, imports: new ImportService(deps), schema: new BoardSchemaService(deps), members: new MembershipService(deps),
       // Account Management (Phase M4.3); unused while ACCOUNT_MANAGEMENT=off.
       accounts: new AccountService(deps),
+      // API tokens; unused unless the app is given their key (JARC_FEATURE_API_TOKENS).
+      apiTokens: new ApiTokenService(deps),
       search: new SearchService({ repos, index: searchIndex }),
       // access is attached when the routes are mounted (it depends on the access policy).
       comments: new CommentService({ repos, connection, logger }),

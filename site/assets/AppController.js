@@ -3,6 +3,7 @@ class AppController {
     this.root = root; this.auth = new AuthModel(); this.model = new BoardModel(); this.view = new AppView(root);this.view.onUndo=()=>{if(this.busy)return;const label=this.model.undo();this.update();this.view.toast(label);};
     this.integrations = typeof IntegrationsPanel === "function" ? new IntegrationsPanel(this) : null; this.view.integrations = this.integrations;
     this.accounts = typeof AccountsPanel === "function" ? new AccountsPanel(this) : null; this.view.accountsPanel = this.accounts;
+    this.apiTokens = typeof ApiTokensPanel === "function" ? new ApiTokensPanel(this) : null; this.view.apiTokensPanel = this.apiTokens;
     this.groupActions = typeof BoardGroupActions === "function" ? new BoardGroupActions(this) : null;
     this.appearance = typeof AppearanceActions === "function" ? new AppearanceActions(this) : null;
     this.comments = typeof CommentsPanel === "function" ? new CommentsPanel(this) : null;
@@ -335,7 +336,7 @@ class AppController {
   // With no workspaces (a new shared database) the full layout is shown, but most actions need a workspace. These work
   // without one; anything else opens "Create workspace" instead of acting on a workspace that doesn't exist.
   static READ_ONLY_BLOCKED = new Set(["add-column","add-group-column","add-group-form","cell-open","set-cell-option","inline-add","open-form","new-item","import","choose-import-file","duplicate-record","duplicate-column","delete","archive-item","pin-item","rename-column","edit-column-options","column-editor","edit-description","manage-groups","request-delete-column","request-delete-group","move-record-board","move-column","edit","files-input","request-remove-file","board-title-inline"]);
-  static NO_WORKSPACE_ACTIONS = new Set(["create-workspace","close-overlay","nav","toggle-nav","collapse-nav","toggle-workspace-section","command-palette","run-command","retry-save","dismiss-hint","notifications","notification-filter","mark-notifications","profile-menu","profile-settings","choose-avatar","remove-avatar","set-presence","settings","settings-section","setting","theme","shortcuts","request-logout","confirm-logout","lock-session"]);
+  static NO_WORKSPACE_ACTIONS = new Set(["create-workspace","close-overlay","nav","toggle-nav","collapse-nav","toggle-workspace-section","command-palette","run-command","retry-save","dismiss-hint","notifications","notification-filter","mark-notifications","profile-menu","profile-settings","choose-avatar","remove-avatar","settings","settings-section","setting","theme","shortcuts","request-logout","confirm-logout","lock-session"]);
   static NO_WORKSPACE_COMMANDS = new Set(["home","mywork","theme","settings","appearance","notifications","shortcuts"]);
   needsWorkspace(allowed) {
     if (this.model.workspaces.length || allowed) return false;
@@ -349,6 +350,7 @@ class AppController {
     if (action === "entra-sign-out" && this.entra) { this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true, signingOut: true }); this.entra.signOut(); return; }
     if (window.jarcStorage?.connection === "offline" && ["cell-open","set-cell-option","inline-add","open-form","new-item","new-board","add-column","create-workspace","import"].includes(action)) { this.view.toast(StorageError.describe(StorageError.CODES.OFFLINE).message); return; }
     if (action.startsWith("integration-") && this.integrations) { if (target.tagName !== "SELECT") this.integrations.onAction(action, target); return; }
+    if (action.startsWith("apitok-") && this.apiTokens) { if (!["SELECT", "INPUT", "FORM"].includes(target.tagName)) this.apiTokens.onAction(action, target); return; }
     if (action.startsWith("acct-") && this.accounts) { if (!["SELECT", "INPUT", "FORM"].includes(target.tagName)) this.accounts.onAction(action, target); return; }
     if ((action.startsWith("appearance-") || (["icon-picker", "icon-tab", "icon-choose"].includes(action))) && this.appearance) { if (target.tagName !== "INPUT") this.appearance.onAction(action, target); return; }
     if ((action.startsWith("group-") || action.startsWith("toolbar-")) && this.groupActions) { this.lastTrigger = target; this.groupActions.onAction(action, target); return; }
@@ -540,7 +542,6 @@ class AppController {
     if (action === "profile-settings") this.view.showProfileSettings(this.model);
     if (action === "choose-avatar") document.querySelector("#avatar-file").click();
     if (action === "remove-avatar") { this.model.setAvatar(""); this.view.showProfileSettings(this.model); }
-    if (action === "set-presence") { this.model.updateProfile({presence:target.dataset.value}); this.view.showProfileMenu(this.model,this.auth); this.markPanel("profile"); this.view.toast(`Status set to ${target.dataset.value}`); }
     if (action === "notifications") { const feed=Boolean(this.model.storage.adapter.loadActivityFeed); this.feedFilter="all"; if(this.togglePanel("notifications",()=>this.view.showNotifications(this.model,"all",{loading:feed&&!this.model.feed}))&&feed)this.loadFeed(); }
     if (action === "notification-filter") { this.feedFilter=target.dataset.filter; this.view.showNotifications(this.model,target.dataset.filter); this.markPanel("notifications"); }
     if (action === "mark-notifications") { if(this.model.feed)this.model.markFeedRead(); else this.model.markAllNotificationsRead(); this.view.showNotifications(this.model,this.feedFilter||"all"); this.markPanel("notifications"); const b=this.root.querySelector(".notification-button b"); if(b&&!this.model.unreadCount)b.remove(); }
@@ -665,6 +666,7 @@ class AppController {
     if (event.target.closest?.(".form-designer")) return;
     if (event.target.dataset?.action === "cc-filter") { this.command?.onFilterChange(event.target); return; }
     if (event.target.dataset?.action === "integration-wizard-workspace") { this.integrations?.onAction("integration-wizard-workspace", event.target); return; }
+    if (event.target.dataset?.action?.startsWith("apitok-")) { this.apiTokens?.onChange(event.target); return; }
     if (event.target.dataset?.action === "acct-filter") { this.accounts?.onFilter(event.target); return; }
     if (event.target.dataset?.action === "acct-ws-role") { this.accounts?.onChange(event.target); return; }
     // Display columns: show/hide one column, or all of them (Item always stays).
@@ -696,6 +698,7 @@ class AppController {
     if (action === "form-design-form") { if (this.model.features?.nativeForms) this.forms?.saveDesigner(); return; }
     if (action === "form-fill-form") { if (this.model.features?.nativeForms) this.forms?.submitFill(); return; }
     if (action?.startsWith("integration-")) { this.integrations?.onSubmit(action, data, event.target); return; }
+    if (action?.startsWith("apitok-")) { this.apiTokens?.onSubmit(action, event.target); return; }
     if (action?.startsWith("acct-")) { this.accounts?.onSubmit(action, data, event.target); return; }
     if ((action === "group-form" || action === "group-delete-form") && this.groupActions) { this.groupActions.onSubmit(action, data, event.target); return; }
     if (action === "workspace-form") { this.runBusy(event.submitter,()=>this.model.createWorkspace(data)?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast("Workspace created");}); return; }
@@ -766,6 +769,7 @@ class AppController {
     if(event.target.dataset?.action==="column-type-search"&&event.key==="Enter"){event.preventDefault();event.target.closest(".column-chooser")?.querySelector(".chooser-option:not([hidden]):not(:disabled)")?.click();return;}
     if(event.key==="Escape"){
       event.preventDefault();
+      if(document.querySelector("#overlay-root [data-keep-open]"))return; // a new API token is shown only once
       if(event.target.dataset.action==="board-title-inline"){event.target.value=event.target.dataset.beforeEdit??event.target.defaultValue;event.target.blur();return;}
       const palette=Boolean(document.querySelector("#overlay-root .command-modal"));
       this.view.closeOverlay();this.setNav(false);if(palette)this.command?.restoreFocus();return;

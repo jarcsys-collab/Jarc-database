@@ -65,7 +65,7 @@ describe("Feature switches: configuration", () => {
   test("the production server only runs the import worker when imports are on, and only creates what's switched on", () => {
     const server = fs.readFileSync(path.join(__dirname, "../src/server.js"), "utf8");
     assert.match(server, /if \(config\.features\.spreadsheetImports\) dataLayer\?\.services\.importJobs\.startWorker\(\);/);
-    assert.match(server, /ensureDatabase\(connection\.db, \{ features: config\.features \}\)/);
+    assert.match(server, /ensureDatabase\(connection\.db, \{ features: \{ \.\.\.config\.features, apiTokens: config\.apiTokens\.enabled \} \}\)/);
     assert.match(server, /createApp\(\{ features: config\.features,/);
   });
 });

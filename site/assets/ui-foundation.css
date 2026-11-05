@@ -583,13 +583,9 @@ input[type=date], input[type=time], input[type=datetime-local] { min-height: var
 
 .profile-summary { padding: 12px 10px; gap: 12px; align-items: center; }
 .profile-summary strong { font-size: var(--fs-md); }
-.profile-summary small, .profile-summary em { font-size: var(--fs-xs); }
+.profile-summary small { font-size: var(--fs-xs); }
 .profile-menu-section { border-top-color: var(--line); padding: 5px 0; }
 .profile-menu-section small { font-size: var(--fs-xs); padding: 1px 7px; border-radius: var(--radius-pill); background: var(--surface-2); color: var(--muted); }
-.presence-picker { padding: 6px 6px 8px; gap: 4px; }
-.presence-picker > span { font-size: var(--fs-xs); padding: 2px 4px 4px; }
-.presence-picker > button { font-size: var(--fs-xs); padding: 5px 8px; border-radius: var(--radius-sm); }
-.presence-picker .active { background: var(--selected); color: var(--accent-text); font-weight: 600; }
 
 /* Tooltips */
 .ui-tooltip { font-size: var(--fs-xs); font-weight: 550; padding: 5px 8px; border-radius: var(--radius-sm); box-shadow: var(--shadow-md); }
@@ -1662,4 +1658,38 @@ tr:hover .comment-indicator, .comment-indicator:focus-visible, .comment-indicato
   .account-table td:last-child{display:block}.account-table td:last-child .button{width:100%;margin-top:6px}
   .account-history li{grid-template-columns:1fr}
   .account-workspaces li{flex-wrap:wrap}
+}
+
+/* Settings → API Tokens */
+.apitok-tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:14px}
+.apitok-tabs button{padding:8px 12px;border:0;background:none;color:var(--muted);font:inherit;font-weight:600;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.apitok-tabs button.active{color:var(--accent-text);border-bottom-color:var(--accent)}
+.apitok-intro{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:14px}.apitok-intro p{margin:0}.apitok-intro .button{flex:none}
+.apitok-table code{font-size:12px}.apitok-table td small{overflow-wrap:anywhere}
+.apitok-actions{white-space:nowrap}.apitok-actions .button+.button{margin-left:6px}.apitok-actions .danger-text{color:var(--danger)}
+.apitok-modal .form-grid{margin-top:12px}.apitok-boards{border:1px solid var(--line);border-radius:10px;padding:8px 12px;min-width:0}.apitok-boards legend{padding:0 4px;font-size:13px;font-weight:600}
+.apitok-board-list{display:grid;gap:2px;max-height:200px;overflow-y:auto}.apitok-check{display:flex!important;align-items:center;gap:8px;padding:6px 2px;font-weight:400;overflow-wrap:anywhere}.apitok-check input{width:auto;flex:none}
+.apitok-error{color:var(--danger);min-height:1.4em}
+.apitok-secret{display:flex;gap:8px;margin:14px 0 8px}.apitok-secret input{flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:13px}
+.apitok-docs{line-height:1.55;min-width:0}.apitok-docs h3{margin:22px 0 6px}.apitok-docs h3:first-child{margin-top:4px}.apitok-docs h4{margin:16px 0 6px}.apitok-docs p,.apitok-docs ul{margin:6px 0}.apitok-docs ul{padding-left:20px}
+.apitok-docs :not(pre)>code,.apitok-docs td code{font-size:12px;padding:1px 5px;border-radius:5px;background:var(--surface-2);overflow-wrap:anywhere}
+.apitok-facts{display:grid;gap:6px;margin:10px 0}.apitok-facts>div{display:grid;grid-template-columns:130px minmax(0,1fr);gap:10px}.apitok-facts dt{color:var(--muted)}.apitok-facts dd{margin:0;min-width:0}
+.apitok-table-scroll{overflow-x:auto;margin:10px 0}.apitok-doc-table{width:100%;border-collapse:collapse;font-size:13px}.apitok-doc-table th,.apitok-doc-table td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}.apitok-doc-table th{color:var(--muted);font-weight:600;font-size:12px}.apitok-nowrap{white-space:nowrap}
+.apitok-code{margin:10px 0;border:1px solid var(--line);border-radius:10px;overflow:hidden;min-width:0}.apitok-code figcaption{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 10px;font-size:12px;font-weight:600;background:var(--surface-2)}.apitok-code figcaption .button{padding:3px 10px;min-height:0;font-size:12px}
+.apitok-code pre{margin:0;padding:12px;overflow-x:auto;font-size:12px;line-height:1.5;max-height:420px}
+@media (max-width: 760px){
+  .apitok-intro{flex-direction:column;align-items:stretch}.apitok-actions{white-space:normal}.apitok-actions .button{width:100%;margin:6px 0 0!important}
+  .apitok-facts>div{grid-template-columns:1fr;gap:0}.apitok-secret{flex-direction:column}.apitok-nowrap{white-space:normal}
+}
+.apitok-copy-list{display:grid;gap:8px;margin:12px 0}.apitok-copy-row{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px;align-items:center}.apitok-copy-row dt{color:var(--muted);font-size:13px}.apitok-copy-row dd{margin:0;min-width:0;display:flex;align-items:center;gap:8px;justify-content:space-between}.apitok-copy-row code{font-size:12px;overflow-wrap:anywhere;min-width:0}.apitok-copy-row .button{flex:none;padding:3px 10px;min-height:0;font-size:12px}
+.apitok-ex-pickers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:12px 0}.apitok-ex-pickers label{display:grid;gap:4px;font-size:13px;min-width:0}.apitok-ex-pickers select{width:100%;min-width:0}.apitok-ex-columns input{width:auto;margin:0}.apitok-ex-columns .button{padding:3px 10px;min-height:0;font-size:12px}
+.apitok-info .account-note code{font-size:12px;overflow-wrap:anywhere}
+@media (max-width: 760px){.apitok-copy-row{grid-template-columns:1fr;gap:2px}.apitok-ex-pickers{grid-template-columns:1fr}}
+.apitok-table td code{white-space:nowrap}
+.apitok-tabs{overflow-x:auto}.apitok-tabs button{white-space:nowrap;flex:none}
+@media (max-width: 760px){
+  .apitok-tabs button{padding:8px 9px}
+  .apitok-table td{align-items:center}.apitok-table td:last-child.apitok-actions{display:flex;flex-direction:column;gap:6px;height:auto}.apitok-actions .button{margin:0!important}
+  .apitok-access{min-width:0}.apitok-access strong,.apitok-access small{display:block}
+  .apitok-ex-columns th:nth-child(4),.apitok-ex-columns td:nth-child(4){display:none}.apitok-ex-columns th,.apitok-ex-columns td{padding:7px 6px}
 }

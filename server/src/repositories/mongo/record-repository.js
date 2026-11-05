@@ -27,6 +27,19 @@ class RecordRepository extends VersionedRepository {
     return { items: items.slice(0, limit), hasMore: items.length > limit };
   }
 
+  // One page for the token API (routes/external-api.js). Keyset pagination in an order other rows' changes can't disturb: by _id
+  // (index board_id), or from updatedSince by updatedAt then _id (index board_updated, walked backwards).
+  async listForExternalApi(boardId, { limit, byUpdated, updatedSince, after, filter, projection, maxTimeMS }) {
+    const query = { boardId, ...filter };
+    if (byUpdated) {
+      query.updatedAt = { $gte: updatedSince };
+      if (after) query.$or = [{ updatedAt: { $gt: after.updatedAt } }, { updatedAt: after.updatedAt, _id: { $gt: after.id } }];
+    } else if (after) query._id = { $gt: after.id };
+    const sort = byUpdated ? { updatedAt: 1, _id: 1 } : { _id: 1 };
+    const items = await this.collection.find(query, { sort, limit: limit + 1, batchSize: limit + 1, maxTimeMS, ...(projection ? { projection } : {}) }).toArray();
+    return { items: items.slice(0, limit), hasMore: items.length > limit };
+  }
+
   // A filtered, ordered page of one board (domain/record-filter.js builds query and after). Bounded by limit and maxTimeMS.
   async listFiltered(boardId, { query, sort, collation, limit, maxTimeMS }) {
     const items = await this.collection.find({ boardId, ...query }, { sort, limit: limit + 1, batchSize: limit + 1, maxTimeMS, ...(collation ? { collation } : {}) }).toArray();

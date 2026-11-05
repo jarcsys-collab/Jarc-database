@@ -40,12 +40,17 @@ const COLLECTIONS = Object.freeze({
   importJobs: "importJobs",
   importBatches: "importBatches",
   // Account Management audit trail (Phase M4.3; see repositories/mongo/account-audit-repository.js). Append-only.
-  accountAudit: "accountAudit"
+  accountAudit: "accountAudit",
+  // API tokens for other systems (see repositories/mongo/api-token-repository.js). Digests only, never tokens.
+  apiTokens: "apiTokens",
+  apiTokenAudit: "apiTokenAudit"
 });
 
 // Collections that belong to one optional feature: left out while it's switched off, so a deployment with the feature off adds
 // nothing to the database. Switching it on (which restarts the server) creates them.
-const FEATURE_COLLECTIONS = Object.freeze({ nativeForms: Object.freeze([COLLECTIONS.forms, COLLECTIONS.formSubmissions]), spreadsheetImports: Object.freeze([COLLECTIONS.importJobs, COLLECTIONS.importBatches]) });
+const FEATURE_COLLECTIONS = Object.freeze({ nativeForms: Object.freeze([COLLECTIONS.forms, COLLECTIONS.formSubmissions]), spreadsheetImports: Object.freeze([COLLECTIONS.importJobs, COLLECTIONS.importBatches]), apiTokens: Object.freeze([COLLECTIONS.apiTokens, COLLECTIONS.apiTokenAudit]) });
+// Indexes one optional feature adds to a collection that always exists. Also left out while the feature is off.
+const FEATURE_INDEXES = Object.freeze({ apiTokens: Object.freeze({ records: Object.freeze([{ name: "board_id", key: { boardId: 1, _id: 1 } }]) }) });
 
 const present = { $exists: true };
 const INDEXES = Object.freeze({
@@ -163,6 +168,15 @@ const INDEXES = Object.freeze({
     { name: "target_time", key: { targetUserId: 1, at: -1 } },
     { name: "time", key: { at: -1 } }
   ],
+  apiTokens: [
+    { name: "uniq_public_id", key: { publicId: 1 }, unique: true },
+    { name: "owner_created", key: { ownerUserId: 1, createdAt: -1, _id: -1 } }
+  ],
+  apiTokenAudit: [
+    { name: "token_time", key: { tokenId: 1, at: -1 } },
+    // Failed and refused use expires; entries about creating, rotating and revoking have no expiresAt and stay.
+    { name: "expires", key: { expiresAt: 1 }, expireAfterSeconds: 0 }
+  ],
   "attachmentFiles.chunks": [
     { name: "files_id_1_n_1", key: { files_id: 1, n: 1 }, unique: true }
   ]
@@ -190,7 +204,16 @@ async function ensureDatabase(db, { features = null } = {}) {
       indexes += 1;
     }
   }
+  for (const [feature, collections] of Object.entries(FEATURE_INDEXES)) {
+    if (!features?.[feature]) continue; // only when asked for by name, so tools that don't state features never add one
+    for (const [collection, specs] of Object.entries(collections)) {
+      for (const { key, ...options } of specs) {
+        await db.collection(collection).createIndex(key, options);
+        indexes += 1;
+      }
+    }
+  }
   return { createdCollections, indexes };
 }
 
-module.exports = { FEATURE_COLLECTIONS, ensureDatabase, COLLECTIONS, INDEXES };
+module.exports = { FEATURE_COLLECTIONS, FEATURE_INDEXES, ensureDatabase, COLLECTIONS, INDEXES };

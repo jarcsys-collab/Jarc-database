@@ -22,7 +22,7 @@ async function main() {
   if (config.dataStore === "mongodb") {
     connection = new MongoConnection({ uri: config.mongo.uri, dbName: config.mongo.dbName });
     await connection.connect();
-    const { createdCollections } = await ensureDatabase(connection.db, { features: config.features });
+    const { createdCollections } = await ensureDatabase(connection.db, { features: { ...config.features, apiTokens: config.apiTokens.enabled } });
     dataLayer = createDataLayer({ connection, maxFileStorageBytes: config.maxFileStorageBytes, attachments: config.attachments, monday: config.monday, recordSearch: config.recordSearch });
     if (config.enableDevResourceApi) devActor = await ensureDevelopmentActor(dataLayer.repos.users, { environment: config.nodeEnv });
     console.log(`MongoDB connected (database ${config.mongo.dbName}).${createdCollections.length ? ` Created collections: ${createdCollections.join(", ")}.` : ""}`);
@@ -31,11 +31,11 @@ async function main() {
   // Entra mode: the sign-in ID token is checked once against this tenant's published signing keys, then a server
   // session cookie is used. No client secret is involved.
   const auth = config.authMode === "entra" ? { mode: "entra", entra: config.entra, verify: createEntraVerifier(config.entra) } : null;
-  const app = createApp({ features: config.features, slowRequestMs: config.slowRequestMs, repository, environment: config.nodeEnv, enableDevStateApi: config.enableDevStateApi, dataLayer, devActor, auth, enableDevResourceApi: config.enableDevResourceApi, accessPolicy: config.accessPolicy, betaOpenEditing: config.betaOpenEditing, accounts: config.accounts });
+  const app = createApp({ features: config.features, apiTokens: config.apiTokens.enabled ? { key: config.apiTokens.key, perMinute: config.apiTokens.perMinute } : null, slowRequestMs: config.slowRequestMs, repository, environment: config.nodeEnv, enableDevStateApi: config.enableDevStateApi, dataLayer, devActor, auth, enableDevResourceApi: config.enableDevResourceApi, accessPolicy: config.accessPolicy, betaOpenEditing: config.betaOpenEditing, accounts: config.accounts });
   const server = app.listen(config.port, config.host, () => {
     const { port } = server.address();
     console.log(`JARC Database server (${config.nodeEnv}) on http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${port}/`);
-    console.log(`Optional features: native forms ${config.features.nativeForms ? "on" : "off"}, Excel and CSV imports ${config.features.spreadsheetImports ? "on" : "off"}.`);
+    console.log(`Optional features: native forms ${config.features.nativeForms ? "on" : "off"}, Excel and CSV imports ${config.features.spreadsheetImports ? "on" : "off"}, API tokens ${config.apiTokens.enabled ? "on" : "off"}.`);
     if (config.enableDevStateApi) console.log("Development state API enabled: data is kept in memory only and is cleared when the server restarts.");
     else console.log("Development state API disabled (production). Only health endpoints and the frontend are served.");
     if (config.enableDevResourceApi) console.log("Resource API enabled for DEVELOPMENT / PRE-AUTH use: no authentication; every change is attributed to the local development actor.");
