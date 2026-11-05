@@ -79,3 +79,55 @@ html[data-density=compact] .editable-table .inline-editor{min-height:30px;paddin
 .xl-errors ul,.xl-check ul{max-height:180px;overflow-y:auto;margin:8px 0;padding-left:18px;}
 .xl-import-open{display:grid;gap:4px;margin:0 0 12px;justify-items:start;}
 @media (max-width:600px){.xl-map-grid{grid-template-columns:1fr;}}
+
+/* New board from a file */
+.xl-wizard{width:min(920px,calc(100vw - 32px));max-height:90vh;overflow-y:auto;}
+.xl-wizard.small-modal{width:min(480px,calc(100vw - 32px));}
+.xl-wizard>.field,.xl-options .field{display:grid;gap:4px;margin:0 0 12px;}
+.xl-wizard>.field input,.xl-wizard>.field select,.xl-options .field select{width:100%;}
+.xl-wizard>.modal-actions{position:sticky;bottom:-24px;z-index:2;margin-top:16px;padding:12px 0;background:var(--surface,var(--panel,#fff));border-top:1px solid var(--line,#d9dee7);}
+.xl-steps{display:flex;gap:4px;list-style:none;margin:0 0 16px;padding:0;overflow-x:auto;}
+.xl-steps li{display:flex;align-items:center;gap:6px;flex:1 0 auto;padding:6px 8px;border-radius:6px;font-size:12px;color:var(--faint,#667085);}
+.xl-steps li span{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;border:1px solid currentColor;font-size:11px;}
+.xl-steps li em{font-style:normal;white-space:nowrap;}
+.xl-steps li.is-current{color:var(--accent,#2563eb);font-weight:600;}
+.xl-steps li.is-done{color:var(--text,#101828);}
+.xl-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px;margin:0 0 16px;}
+.xl-stats>div{display:grid;gap:2px;padding:10px 12px;border:1px solid var(--line,#d9dee7);border-radius:8px;}
+.xl-stats strong{font-size:20px;}
+.xl-stats span{font-size:12px;color:var(--faint,#667085);}
+.xl-stats .is-bad strong{color:var(--danger,#b42318);}
+.xl-note{font-size:13px;color:var(--faint,#667085);}
+.xl-working{display:flex;align-items:center;gap:8px;margin:0 auto 0 0;font-size:13px;font-weight:600;}
+.xl-working .loading-spinner{flex:none;width:16px;height:16px;}
+.xl-wizard>.modal-actions .xl-working{flex:1 1 100%;}
+.xl-good{color:var(--success,#067647);font-weight:600;}
+.xl-alert{margin:0 0 16px;padding:12px;border:1px solid var(--danger,#b42318);border-radius:8px;}
+.xl-alert ul,.xl-warnings ul,.xl-groups ul{margin:8px 0;padding-left:18px;max-height:220px;overflow-y:auto;}
+.xl-groups small{color:var(--faint,#667085);}
+.xl-table-wrap{overflow-x:auto;margin:8px 0 16px;}
+.xl-table-wrap table{border-collapse:collapse;font-size:13px;width:100%;}
+.xl-table-wrap th,.xl-table-wrap td{border:1px solid var(--line,#d9dee7);padding:6px 8px;text-align:left;vertical-align:top;}
+.xl-table-wrap td{max-width:240px;overflow:hidden;text-overflow:ellipsis;}
+.xl-map input:not([type=checkbox]),.xl-map select{width:100%;min-width:130px;}
+.xl-map .is-main{background:var(--surface-2,rgba(37,99,235,.06));}
+.xl-main-note{display:block;margin-top:2px;color:var(--faint,#667085);}
+.xl-example{color:var(--faint,#667085);white-space:nowrap;}
+.xl-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px;}
+.xl-confirm{display:flex;gap:8px;align-items:flex-start;margin:12px 0;font-weight:600;}
+.xl-choose-header{border:0;padding:0;margin:0 0 16px;}
+.xl-choose-header label{white-space:nowrap;}
+@media (max-width:640px){
+  .xl-options{grid-template-columns:1fr;}
+  .xl-steps li em{display:none;}
+  .xl-steps li.is-current em{display:inline;}
+  .xl-map thead{display:none;}
+  .xl-map,.xl-map tbody,.xl-map tr,.xl-map td{display:block;width:100%;}
+  .xl-map tr{margin-bottom:8px;border:1px solid var(--line,#d9dee7);border-radius:8px;padding:4px;}
+  .xl-map td{border:0;max-width:none;white-space:normal;overflow:visible;}
+  .xl-map input:not([type=checkbox]),.xl-map select{min-width:0;box-sizing:border-box;}
+  .xl-map tr,.xl-map td{height:auto;min-height:0;contain:none;}
+  .xl-map td{padding:6px 8px;}
+  .xl-wizard>.modal-actions{flex-wrap:wrap;justify-content:flex-end;}
+  .xl-map td::before{content:attr(data-label);display:block;font-size:11px;color:var(--faint,#667085);}
+}

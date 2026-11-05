@@ -31,12 +31,13 @@ class BoardService {
   // The workspace ID comes from the URL and is checked against the database; a board is never created for a
   // workspace that doesn't exist. If the workspace is deleted while the board is being written, the board is
   // removed again (the workspace delete also sweeps after committing), so no orphan board remains.
-  async create(workspaceId, raw, actor) {
+  // from: an import creating its own new board, with an ID fixed in advance so that a restarted job finds the same board again.
+  async create(workspaceId, raw, actor, { id = null, importJobId = null } = {}) {
     const now = new Date();
     const input = validate.boardCreate(raw, { actorId: actor.userId, now });
     if (!await this.repos.workspaces.findById(workspaceId)) throw notFound("workspace");
     const doc = {
-      _id: new ObjectId(), workspaceId, name: input.name, description: input.description, icon: input.icon, archived: input.archived,
+      _id: id || new ObjectId(), ...(importJobId ? { importJobId } : {}), workspaceId, name: input.name, description: input.description, icon: input.icon, archived: input.archived,
       position: input.position ?? await this.repos.boards.nextPosition(workspaceId), manualOrder: input.manualOrder,
       columns: input.columns ?? normalizeColumns(BLANK_BOARD_COLUMNS), groups: input.groups ?? normalizeGroups(LEGACY_DEFAULT_GROUPS.map((name) => ({ name }))),
       savedViews: input.savedViews ?? [], createdBy: actor.userId, createdAt: now, updatedAt: now, version: 1

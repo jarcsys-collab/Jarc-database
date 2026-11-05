@@ -193,7 +193,7 @@ Local mode (`/`) and `?storage=api` keep the temporary sign-in.
 
 **Forms** (`routes/forms.js`, `services/form-service.js`). Internal only: every route needs a signed-in session and the usual workspace role. Admins design forms, members submit them, and a submission is an ordinary record change. No public form exists, and a definition can't create one.
 
-**Excel and CSV imports** (`routes/imports.js`, `services/import-job-service.js`, `domain/spreadsheet.js`). Up to 25 MB and 100,000 rows. A background job, paced to about 250 database operations per second; it resumes after a restart, and every row has a fixed `legacyId`, so an interrupted batch can run again without repeating a row. A file's rows are kept in `importBatches` only until its job ends (7 days at most if abandoned). `.xls` and password-protected workbooks are refused.
+**Excel and CSV imports** (`routes/imports.js`, `services/import-job-service.js`, `services/workbook-runner.js`, `workers/workbook-worker.js`, `domain/spreadsheet.js`, `domain/workbook-structure.js`). A guided wizard makes a **new board** from a file, such as a monday.com export. Up to 25 MB and 100,000 rows; a wide file reaches the 25 MB limit first (about 40,000 rows at 84 columns). Files are read and every row is checked on a worker thread, so the app stays responsive. Imported columns are text unless chosen otherwise, which keeps IDs, leading zeros and dates as written. A file with an unclear structure needs a person's decision before it can start. The job is paced for Atlas Flex, resumes after a restart, and every row has a fixed `legacyId`, so an interrupted batch can run again without repeating a row. A file's rows are kept in `importBatches` only until its job ends (7 days at most if abandoned). `.xls` and password-protected workbooks are refused. Importing into an existing board is refused until a safe undo exists. A new board can be removed again through the import, in paced batches, as long as nobody has changed it.
 
 ## Optional features
 
@@ -202,7 +202,7 @@ Each has its own switch. Only `true` or `false` are accepted; anything else stop
 | Variable | Feature | Production default |
 | --- | --- | --- |
 | `JARC_FEATURE_FORMS` | Native forms | off |
-| `JARC_FEATURE_IMPORTS` | Excel and CSV import jobs (up to 100,000 rows) | off |
+| `JARC_FEATURE_IMPORTS` | Excel and CSV import wizard (new boards only) | off |
 
 While a feature is off:
 
@@ -212,6 +212,8 @@ While a feature is off:
 - **Database:** its collections and indexes aren't created at startup. Forms and imports already stored are kept and return when the feature is on again.
 
 The existing browser import of CSV and JSON files (up to 5,000 rows) is not part of this switch.
+
+**Who may import:** JARC's usual rules: a signed-in session and the MEMBER role in the workspace, the same as creating a board. With `ACCESS_POLICY=development_shared` or `JARC_BETA_OPEN_EDITING=true`, that means every signed-in employee, in every workspace.
 
 ## Limits on large selections
 
@@ -226,7 +228,7 @@ Nothing processes part of a selection without saying so.
 | Duplicating or deleting a group with its records on a large board | Not available | Refused with a message; nothing changes |
 | `POST` and `PATCH` record batches in the API | 5,000 per request, in one transaction | Refused with `400` |
 | Browser import of CSV or JSON | 5,000 rows | Refused before anything is written |
-| Excel and CSV import job | 100,000 rows, 25 MB | Refused before anything is written |
+| Excel and CSV import wizard | New boards only; 100,000 rows, 25 MB | Refused before anything is written |
 
 ## Search cutover
 

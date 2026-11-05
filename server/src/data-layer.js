@@ -56,19 +56,19 @@ function createDataLayer({ connection, logger = console, fileStore = new GridFsF
   };
   const searchIndex = new RecordSearchIndex({ repos, logger, mode: recordSearch });
   const deps = { repos, connection, logger, searchIndex };
-  const records = new RecordService(deps);
+  const records = new RecordService(deps), boards = new BoardService(deps);
   return {
     connection,
     repos,
     searchIndex,
-    services: { workspaces: new WorkspaceService(deps), boards: new BoardService(deps), records, imports: new ImportService(deps), schema: new BoardSchemaService(deps), members: new MembershipService(deps),
+    services: { workspaces: new WorkspaceService(deps), boards, records, imports: new ImportService(deps), schema: new BoardSchemaService(deps), members: new MembershipService(deps),
       // Account Management (Phase M4.3); unused while ACCOUNT_MANAGEMENT=off.
       accounts: new AccountService(deps),
       search: new SearchService({ repos, index: searchIndex }),
       // access is attached when the routes are mounted (it depends on the access policy).
       comments: new CommentService({ repos, connection, logger }),
       forms: new FormService({ repos, connection, logger, records }),
-      importJobs: new ImportJobService({ repos, connection, logger, searchIndex }),
+      importJobs: new ImportJobService({ boards, repos, connection, logger, searchIndex }),
       integration: new MondayIntegration({ repos, connection, config: monday, fetch, logger, searchIndex }),
       files: new FileService({ repos, storage, logger, ...(maxFileStorageBytes ? { maxTotalBytes: maxFileStorageBytes } : {}), limits: Object.fromEntries(Object.entries(limits).filter(([, v]) => v)) }),
       // Read-only views used by the notification feed and People columns.

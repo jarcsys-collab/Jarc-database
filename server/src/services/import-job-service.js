@@ -10,6 +10,11 @@
 //   duplicates  uniqueKey skips a row whose value is already on the board, or earlier in the file. The same file imported
 //               to the same board again is refused unless asked for explicitly.
 //   report      counts, and for rejected rows the row number and reason. Never the values.
+//
+// New boards (target "new-board", the only kind the API offers): the file is read and checked on a worker thread (services/workbook-runner.js),
+// a person confirms what it found and the columns, every row is validated, and only after an explicit confirmation does the job create its own
+// board and fill it. The board's ID is fixed in advance and the board records which job made it, so a restarted job finds the same board and a
+// job can only ever write to the board it created. That board can be removed again, as long as nobody has changed it since.
 const crypto = require("crypto");
 const { ObjectId } = require("mongodb");
 const { ApiError } = require("../middleware/errors");
@@ -18,12 +23,16 @@ const { fail, isObject, requireBody, allowOnly } = require("../validation/common
 const validate = require("../validation/resources");
 const { effectiveOptions, isMultiColumn, groupColumnOf, PRIMARY_KEY } = require("../domain/board-schema");
 const { parseSpreadsheet, LIMITS } = require("../domain/spreadsheet");
+const { convertCell, lineLookup, DEFAULT_GROUP, LIMITS: BOARD_LIMITS } = require("../domain/workbook-structure");
+const { readWorkbook, checkWorkbook } = require("./workbook-runner");
 const { activityEntry, appendActivity } = require("./shared");
 
 const BATCH_ROWS = 100, BATCH_BYTES = 4 * 1024 * 1024, KEEP_MS = 7 * 24 * 3600 * 1000, PREVIEW_ROWS = 500, MAX_ERRORS = 200;
 // A batch costs about 230 database operations. This pace keeps an import well under the Atlas Flex limit of 500 per second.
 const LEASE_MS = 60000, PAUSE_MS = 800, POLL_MS = 15000, MAX_ACTIVE_PER_USER = 3, MAX_ATTEMPTS = 5;
 const UNMAPPABLE = new Set(["files", "group"]);
+const REMOVE_BATCH = 200, REMOVE_PAUSE_MS = 500;
+const OPEN = ["mapping", "ready", "queued", "running", "paused"], WRITE_PIECES = 20, WRITE_PAUSE_MS = 50, MAX_READING = 2, COLUMN_TYPES = new Set(["text", "number", "date"]);
 const notFound = () => new ApiError(404, "NOT_FOUND", "This import doesn't exist or has ended.");
 const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, ms); t.unref?.(); });
 const safeName = (name) => String(name || "file").replace(/[\u0000-\u001f<>]/g, "").slice(-120);
@@ -89,8 +98,8 @@ function rowToInput(cells, job, board, context) {
 }
 
 class ImportJobService {
-  constructor({ repos, connection, logger = console, searchIndex = null, pauseMs = PAUSE_MS, pollMs = POLL_MS, leaseMs = LEASE_MS }) {
-    Object.assign(this, { repos, connection, logger, searchIndex, pauseMs, pollMs, leaseMs, workerId: crypto.randomBytes(6).toString("hex"), running: false, timer: null });
+  constructor({ boards = null, repos, connection, logger = console, searchIndex = null, pauseMs = PAUSE_MS, pollMs = POLL_MS, leaseMs = LEASE_MS }) {
+    Object.assign(this, { boards, repos, connection, logger, searchIndex, pauseMs, pollMs, leaseMs, workerId: crypto.randomBytes(6).toString("hex"), running: false, timer: null });
     this.jobs = connection.db.collection(COLLECTIONS.importJobs);
     this.batches = connection.db.collection(COLLECTIONS.importBatches);
   }
@@ -132,6 +141,160 @@ class ImportJobService {
     };
     await this.jobs.insertOne(doc);
     return doc;
+  }
+
+  // ---- A new board from a file. Reading happens on a worker thread; only the job's rows are stored here.
+  listForWorkspace(workspaceId, { userId = null } = {}) { return this.jobs.find({ workspaceId, target: "new-board", ...(userId ? { createdBy: userId } : {}) }, { sort: { createdAt: -1 }, limit: 20 }).toArray(); }
+
+  async createFromFile(workspace, buffer, { name, sheet }, actor) {
+    const active = await this.jobs.countDocuments({ createdBy: actor.userId, status: { $in: OPEN } });
+    if (active >= MAX_ACTIVE_PER_USER) throw new ApiError(409, "TOO_MANY_IMPORTS", `You have ${active} imports open. Finish or cancel one first.`);
+    const fileHash = crypto.createHash("sha256").update(buffer).digest("hex");
+    const open = await this.jobs.findOne({ workspaceId: workspace._id, fileHash, status: { $in: OPEN } }, { projection: { _id: 1 } });
+    if (open) throw new ApiError(409, "IMPORT_ALREADY_OPEN", "This same file is already being imported in this workspace. Open that import instead.", { importId: open._id.toHexString() });
+    const previous = await this.jobs.findOne({ workspaceId: workspace._id, fileHash, status: "done" }, { projection: { finishedAt: 1, imported: 1, boardName: 1 } });
+    if ((this.reading || 0) >= MAX_READING) throw new ApiError(429, "IMPORT_BUSY", "Other files are being read right now. Try again in a moment.");
+    this.reading = (this.reading || 0) + 1;
+    const now = new Date(), expiresAt = new Date(now.getTime() + KEEP_MS), jobId = new ObjectId();
+    let n = 0, pending = [];
+    const store = async (force = false) => { if (pending.length >= WRITE_PIECES || (force && pending.length)) { await this.batches.insertMany(pending, { ordered: true }); pending = []; await sleep(this.writePauseMs ?? WRITE_PAUSE_MS); } };
+    try {
+      const read = await readWorkbook({ buffer, name, sheet, onRows: async (rows) => { pending.push({ _id: new ObjectId(), jobId, n, rows, expiresAt }); n += 1; await store(); } });
+      await store(true);
+      const doc = {
+        _id: jobId, target: "new-board", workspaceId: workspace._id, boardId: null, plannedBoardId: new ObjectId(), createdBy: actor.userId, actorName: actor.displayName, status: "mapping",
+        fileName: safeName(name), fileHash, kind: read.kind, sheet: read.sheet, sheets: read.sheets, notes: read.notes, rowCount: read.validation?.records ?? 0, batchCount: n, nextBatch: 0,
+        structure: read.analysis, boardName: (read.analysis.boardTitle || safeName(name).replace(/\.[a-z0-9]+$/i, "")).slice(0, 200), columns: read.analysis.columns, itemColumn: read.analysis.itemColumn, uniqueColumn: null, dateOrder: "mdy", structureConfirmed: read.analysis.status === "clear",
+        validation: read.validation, previousImport: previous ? { at: previous.finishedAt, imported: previous.imported, boardName: previous.boardName } : null,
+        mapping: {}, groupId: null, groupFrom: null, uniqueKey: null, imported: 0, skippedDuplicates: 0, rejected: 0, errors: [], attempts: 0, lastError: null, leaseOwner: null, leaseUntil: null, createdAt: now, updatedAt: now, expiresAt
+      };
+      await this.jobs.insertOne(doc);
+      return doc;
+    } catch (error) { await this.batches.deleteMany({ jobId }).catch(() => {}); throw error; }
+    finally { this.reading -= 1; }
+  }
+
+  // The person's decisions: which row holds the column names, what lone rows are, the columns and the board's name. Re-reads every stored
+  // row on the worker thread, so the totals shown are always for the whole file. Writes no records.
+  async review(job, raw) {
+    const body = requireBody(raw);
+    allowOnly(body, ["headerLine", "itemColumn", "soloRows", "totalRows", "columns", "boardName", "uniqueColumn", "dateOrder"], "the import settings");
+    if (!["mapping", "ready"].includes(job.status)) throw new ApiError(409, "IMPORT_STARTED", "This import has already started.");
+    if (body.headerLine !== undefined && !Number.isInteger(body.headerLine)) fail("headerLine must be a row number.");
+    if (body.itemColumn !== undefined && !Number.isInteger(body.itemColumn)) fail("itemColumn must be a column number.");
+    if (body.soloRows !== undefined && !["groups", "records"].includes(body.soloRows)) fail("soloRows must be groups or records.");
+    if (body.totalRows !== undefined && !["skip", "records"].includes(body.totalRows)) fail("totalRows must be skip or records.");
+    if (body.dateOrder !== undefined && !["mdy", "dmy"].includes(body.dateOrder)) fail("dateOrder must be mdy or dmy.");
+    if (body.uniqueColumn !== undefined && body.uniqueColumn !== null && !Number.isInteger(body.uniqueColumn)) fail("uniqueColumn must be a column number or null.");
+    if (body.boardName !== undefined && (typeof body.boardName !== "string" || !body.boardName.trim() || body.boardName.length > 200)) fail("The board's name must be 1 to 200 characters.");
+    const headerChanged = body.headerLine !== undefined && body.headerLine !== job.structure.headerLine;
+    if (body.columns !== undefined) {
+      if (!Array.isArray(body.columns) || body.columns.length > BOARD_LIMITS.columns) fail("columns must be a list.");
+      for (const c of body.columns) {
+        if (!isObject(c) || !Number.isInteger(c.index)) fail("Each column needs its position in the file.");
+        allowOnly(c, ["index", "label", "type", "include"], "a column");
+        if (c.type !== undefined && !COLUMN_TYPES.has(c.type)) fail("A column can be text, a number or a date.");
+        if (c.label !== undefined && (typeof c.label !== "string" || !c.label.trim() || c.label.length > 200)) fail("A column's name must be 1 to 200 characters.");
+        if (c.include !== undefined && typeof c.include !== "boolean") fail("include must be true or false.");
+      }
+      const labels = body.columns.filter((c) => c.include !== false && c.label).map((c) => c.label.trim().toLowerCase());
+      if (new Set(labels).size !== labels.length) fail("Two columns have the same name. Give each its own.");
+    }
+    const choices = { headerLine: body.headerLine ?? job.structure.headerLine ?? undefined, itemColumn: headerChanged ? body.itemColumn : (body.itemColumn ?? job.itemColumn ?? undefined), soloRows: body.soloRows ?? job.soloRows, totalRows: body.totalRows ?? job.totalRows };
+    const settings = { columns: headerChanged ? undefined : (body.columns ?? job.columns), uniqueColumn: body.uniqueColumn === undefined ? job.uniqueColumn : body.uniqueColumn, dateOrder: body.dateOrder ?? job.dateOrder };
+    const { analysis, validation } = await checkWorkbook({ rows: this.batches.find({ jobId: job._id }, { sort: { n: 1 } }), choices, settings, notes: job.notes });
+    // Rows the file made ambiguous are settled by the person's choices; anything left is still shown and blocks starting.
+    const open = analysis.reasons.filter((r) => !(r.code === "header-unclear" && choices.headerLine !== undefined) && !(r.code === "item-column-unclear" && choices.itemColumn !== undefined) && r.code !== "header-differs");
+    const included = analysis.columns.filter((c) => c.include !== false);
+    if (analysis.headerLine !== null && !included.some((c) => c.index === analysis.itemColumn)) open.push({ code: "item-column-excluded", message: "The column that names each record has to be imported." });
+    const set = { structure: { ...analysis, reasons: open }, columns: analysis.columns, itemColumn: analysis.itemColumn, soloRows: choices.soloRows ?? null, totalRows: choices.totalRows ?? null, uniqueColumn: settings.uniqueColumn ?? null, dateOrder: settings.dateOrder, validation, rowCount: validation?.records ?? 0, structureConfirmed: open.length === 0, boardName: body.boardName?.trim() ?? job.boardName, status: open.length === 0 && validation && !validation.errorCount && validation.records ? "ready" : "mapping", updatedAt: new Date() };
+    const updated = await this.jobs.findOneAndUpdate({ _id: job._id, status: { $in: ["mapping", "ready"] } }, { $set: set }, { returnDocument: "after" });
+    if (!updated) throw new ApiError(409, "IMPORT_STARTED", "This import has already started.");
+    return updated;
+  }
+
+  // Only with an explicit confirmation. The board itself is created by the worker, so a restart can't lose or repeat it.
+  async startNewBoard(job, raw) {
+    const body = raw === undefined ? {} : requireBody(raw);
+    allowOnly(body, ["confirmNewBoard", "repeat"], "the request");
+    if (job.status !== "ready") throw new ApiError(409, "IMPORT_NOT_READY", job.validation?.errorCount ? "This file still has problems. Fix them in the file and upload it again." : "Check this file's columns first.");
+    if (body.confirmNewBoard !== true) throw new ApiError(409, "CONFIRMATION_NEEDED", "Confirm creating the new board first.");
+    if (job.previousImport && body.repeat !== true) throw new ApiError(409, "ALREADY_IMPORTED", "This same file was already imported in this workspace. Confirm importing it again to continue.", { previousImport: job.previousImport });
+    if (await this.batches.countDocuments({ jobId: job._id }) !== job.batchCount) throw new ApiError(409, "IMPORT_EXPIRED", "This upload has expired. Upload the file again.");
+    const keyOf = (c) => (c.index === job.itemColumn ? PRIMARY_KEY : `col_${c.index}`);
+    const included = job.columns.filter((c) => c.include !== false), mapping = Object.fromEntries(included.map((c) => [keyOf(c), c.index]));
+    const uniqueKey = job.uniqueColumn !== null && job.uniqueColumn !== undefined && mapping[`col_${job.uniqueColumn}`] !== undefined ? `col_${job.uniqueColumn}` : job.uniqueColumn === job.itemColumn && job.uniqueColumn !== null ? PRIMARY_KEY : null;
+    const updated = await this.jobs.findOneAndUpdate({ _id: job._id, status: "ready" }, { $set: { status: "queued", mapping, uniqueKey, basePosition: 0, everyone: false, startedAt: new Date(), updatedAt: new Date() } }, { returnDocument: "after" });
+    if (!updated) throw new ApiError(409, "IMPORT_NOT_READY", "This import has already started.");
+    this.logger.log?.(`[imports] ${job._id.toHexString()} started: ${job.rowCount} records, new board ${job.plannedBoardId.toHexString()}.`);
+    this.wake();
+    return updated;
+  }
+
+  // The job's own board. Found again if it was already made; a board this job didn't make is never used.
+  async ensureBoard(job) {
+    const existing = await this.repos.boards.findById(job.plannedBoardId);
+    if (existing) { if (!existing.importJobId?.equals?.(job._id)) throw new ApiError(409, "IMPORT_BOARD_MISMATCH", "This import's board belongs to something else."); return existing; }
+    if (job.boardId) return null; // it was made, and has since been deleted
+    const keyOf = (c) => (c.index === job.itemColumn ? PRIMARY_KEY : `col_${c.index}`), ordered = job.columns.filter((c) => c.include !== false).sort((a, b) => (a.index === job.itemColumn ? -1 : b.index === job.itemColumn ? 1 : a.index - b.index));
+    const columns = ordered.map((c) => ({ key: keyOf(c), label: c.label, type: c.index === job.itemColumn ? "text" : c.type || "text", required: c.index === job.itemColumn }));
+    const groups = (job.validation.groups.length ? job.validation.groups : [{ name: DEFAULT_GROUP }]).map((g) => ({ name: g.name.slice(0, 200) }));
+    const actor = { userId: job.createdBy, displayName: job.actorName };
+    try { return await this.boards.create(job.workspaceId, { name: job.boardName, columns, groups }, actor, { id: job.plannedBoardId, importJobId: job._id }); }
+    catch (error) { if (error?.code === 11000) return this.repos.boards.findById(job.plannedBoardId); throw error; }
+  }
+
+  // Removes a new board this import made, only if it's still exactly what the import put there. Never touches anything else.
+  async cleanUp(job, actor) {
+    if (job.target !== "new-board") throw new ApiError(409, "IMPORT_NOT_REMOVABLE", "Only a new board made by an import can be removed this way.");
+    if (!["done", "failed", "cancelled"].includes(job.status)) throw new ApiError(409, "IMPORT_RUNNING", "Stop this import first.");
+    const board = await this.repos.boards.findById(job.plannedBoardId);
+    if (!board) { const ended = await this.jobs.findOneAndUpdate({ _id: job._id }, { $set: { status: "removed", removedAt: new Date(), updatedAt: new Date() } }, { returnDocument: "after" }); return { removed: false, job: ended }; }
+    if (!board.importJobId?.equals?.(job._id)) throw new ApiError(409, "IMPORT_BOARD_MISMATCH", "This board wasn't made by this import, so it wasn't removed.");
+    const prefix = `^import:${job._id.toHexString()}:`, records = this.repos.records.collection;
+    const foreign = await records.countDocuments({ boardId: board._id, $or: [{ legacyId: { $not: { $regex: prefix } } }, { version: { $ne: 1 } }] });
+    const talk = await this.repos.comments.collection.countDocuments({ boardId: board._id }), files = await this.repos.attachments.collection.countDocuments({ boardId: board._id });
+    if (foreign || talk || files) throw new ApiError(409, "IMPORT_BOARD_CHANGED", "People have changed this board since the import, so it wasn't removed. Delete the board from its menu if you're sure.", { changedRecords: foreign, comments: talk, files });
+    // Paced by the worker, like the import itself: a large board's records can't all be deleted at once on a shared cluster.
+    const started = await this.jobs.findOneAndUpdate({ _id: job._id, status: { $in: ["done", "failed", "cancelled"] } }, { $set: { status: "removing", removedBy: actor.userId, removedByName: actor.displayName, removedRecords: 0, leaseOwner: null, leaseUntil: null, lastError: null, updatedAt: new Date() } }, { returnDocument: "after" });
+    if (!started) throw new ApiError(409, "IMPORT_RUNNING", "This import has changed. Open it again.");
+    this.wake();
+    return { removed: true, job: started };
+  }
+
+  // Deletes only what the import wrote and nobody has changed, in paced batches, then the board. A restart continues it. If anything else is
+  // on the board by the end, the board stays and the job says why.
+  async runRemoval(job) {
+    const board = await this.repos.boards.findById(job.plannedBoardId);
+    const done = (set) => this.jobs.findOneAndUpdate({ _id: job._id, leaseOwner: this.workerId }, { $set: { leaseOwner: null, leaseUntil: null, updatedAt: new Date(), ...set } }, { returnDocument: "after" });
+    if (!board) return done({ status: "removed", removedAt: new Date() });
+    if (!board.importJobId?.equals?.(job._id)) return done({ status: "failed", lastError: "This board wasn't made by this import, so it wasn't removed." });
+    const records = this.repos.records.collection, mine = { boardId: board._id, version: 1, legacyId: { $regex: `^import:${job._id.toHexString()}:` } };
+    let removed = job.removedRecords || 0;
+    while (!this.stopping) {
+      const ids = (await records.find(mine, { projection: { _id: 1 }, limit: REMOVE_BATCH }).toArray()).map((r) => r._id);
+      if (!ids.length) break;
+      const { deletedCount } = await records.deleteMany({ ...mine, _id: { $in: ids } });
+      removed += deletedCount;
+      const held = await this.jobs.findOneAndUpdate({ _id: job._id, leaseOwner: this.workerId }, { $set: { removedRecords: removed, leaseUntil: new Date(Date.now() + this.leaseMs), updatedAt: new Date() } });
+      if (!held) return undefined;
+      await sleep(this.removePauseMs ?? REMOVE_PAUSE_MS);
+    }
+    if (this.stopping) return undefined;
+    if (await records.countDocuments({ boardId: board._id })) return done({ status: "failed", removedRecords: removed, lastError: "Someone changed this board during the removal, so the board and those records were kept." });
+    const current = await this.repos.boards.findById(board._id);
+    await this.boards.delete(board._id, current.version, { userId: job.removedBy, displayName: job.removedByName });
+    this.logger.log?.(`[imports] ${job._id.toHexString()} removed its board ${board._id.toHexString()} and ${removed} records.`);
+    return done({ status: "removed", removedRecords: removed, removedAt: new Date() });
+  }
+
+  // Every problem found in the file, as a CSV to download. Row numbers, column names and reasons, never the values.
+  reportCsv(job) {
+    const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`, lines = [["Row", "Column", "Problem"].map(q).join(",")];
+    const list = job.status === "mapping" || job.status === "ready" ? job.validation?.errors || [] : [...(job.validation?.errors || []), ...(job.errors || []).map((e) => ({ row: e.row, column: "", reason: e.reason }))];
+    for (const e of list) lines.push([e.row, e.column, e.reason].map(q).join(","));
+    if ((job.validation?.errorCount || 0) > (job.validation?.errors?.length || 0)) lines.push(q(`And ${job.validation.errorCount - job.validation.errors.length} more of the same kinds.`));
+    return `${lines.join("\r\n")}\r\n`;
   }
 
   // ---- Settings and the check before starting
@@ -195,7 +358,7 @@ class ImportJobService {
   }
   // Records already imported stay on the board; what hasn't run yet is dropped.
   async cancel(job) {
-    const updated = await this.jobs.findOneAndUpdate({ _id: job._id, status: { $in: ["mapping", "ready", "queued", "running", "paused"] } }, { $set: { status: "cancelled", finishedAt: new Date(), leaseOwner: null, leaseUntil: null, updatedAt: new Date() } }, { returnDocument: "after" });
+    const updated = await this.jobs.findOneAndUpdate({ _id: job._id, status: { $in: ["mapping", "ready", "queued", "running", "paused"] } }, { $set: { status: "cancelled", finishedAt: new Date(), leaseOwner: null, leaseUntil: null, updatedAt: new Date() }, $unset: { "validation.preview": "" } }, { returnDocument: "after" });
     if (!updated) throw new ApiError(409, "IMPORT_ENDED", "This import has already ended.");
     await this.batches.deleteMany({ jobId: job._id });
     if (updated.imported) await this.announce(updated);
@@ -213,17 +376,39 @@ class ImportJobService {
   wake() { if (!this.running) this.drain().catch((error) => this.logger.error?.(`[imports] worker: ${error?.name || "Error"}`)); }
   async drain() {
     this.running = true;
-    try { while (!this.stopping) { const job = await this.claim(); if (!job) return; await this.run(job); } }
+    try {
+      while (!this.stopping) {
+        const removal = await this.claimRemoval();
+        if (removal) { await this.runRemoval(removal); continue; }
+        const job = await this.claim();
+        if (!job) return;
+        await this.run(job);
+      }
+    }
     finally { this.running = false; }
+  }
+  claimRemoval() {
+    const now = new Date();
+    return this.jobs.findOneAndUpdate({ status: "removing", $or: [{ leaseUntil: null }, { leaseUntil: { $lt: now } }] }, { $set: { leaseOwner: this.workerId, leaseUntil: new Date(now.getTime() + this.leaseMs), updatedAt: now } }, { sort: { updatedAt: 1 }, returnDocument: "after" });
   }
   claim() {
     const now = new Date();
     return this.jobs.findOneAndUpdate({ $or: [{ status: "queued" }, { status: "running", leaseUntil: { $lt: now } }] }, { $set: { status: "running", leaseOwner: this.workerId, leaseUntil: new Date(now.getTime() + this.leaseMs), updatedAt: now } }, { sort: { updatedAt: 1 }, returnDocument: "after" });
   }
   async run(job) {
+    if (job.target === "new-board" && !job.boardId) {
+      let made;
+      try { made = await this.ensureBoard(job); }
+      catch (error) { this.logger.error?.(`[imports] couldn't create the board: ${error?.code || error?.name || "Error"}`); return this.finish(job, "failed", error instanceof ApiError ? error.message : "The new board couldn't be created. Nothing was imported."); }
+      const held = await this.jobs.findOneAndUpdate({ _id: job._id, leaseOwner: this.workerId, status: "running" }, { $set: { boardId: made._id, updatedAt: new Date() } }, { returnDocument: "after" });
+      if (!held) return undefined;
+      job = held;
+    }
     while (!this.stopping) {
       const board = await this.repos.boards.findById(job.boardId);
       if (!board) return this.finish(job, "failed", "The board was deleted.");
+      // A job only ever writes to the board it made.
+      if (job.target === "new-board" && !board.importJobId?.equals?.(job._id)) return this.finish(job, "failed", "This import's board belongs to something else. Nothing more was imported.");
       const columns = new Set(board.columns.map((c) => c.key)), gone = Object.keys(job.mapping).find((k) => !columns.has(k));
       if (gone) return this.halt(job, "A column this import uses was removed from the board. Resume after restoring it, or cancel.");
       const batch = await this.batches.findOne({ jobId: job._id, n: job.nextBatch });
@@ -258,12 +443,13 @@ class ImportJobService {
   }
   async runBatch(job, board, batch) {
     const hex = job._id.toHexString(), legacyOf = (line) => `import:${hex}:${line}`;
-    const context = { people: await this.peopleFor(board, job.everyone), dateOrder: job.dateOrder };
+    if (job.target === "new-board") { const { skip, groupOf } = lineLookup(job.structure), groupIds = new Map(board.groups.map((g) => [g.name, g.id])); batch = { ...batch, rows: batch.rows.filter(([line]) => !skip.has(line) && line >= job.structure.headerLine) }; job = { ...job, groupOf: (line) => groupIds.get(groupOf(line)) ?? board.groups[0]?.id ?? null }; }
+    const context = job.target === "new-board" ? { dateOrder: job.dateOrder } : { people: await this.peopleFor(board, job.everyone), dateOrder: job.dateOrder };
     const written = await this.repos.records.collection.find({ boardId: board._id, legacyId: { $in: batch.rows.map(([line]) => legacyOf(line)) } }, { projection: { legacyId: 1 } }).toArray();
     const already = new Set(written.map((r) => r.legacyId));
     const errors = [], prepared = [];
     for (const [line, cells] of batch.rows) {
-      const { input, error } = rowToInput(cells, job, board, context);
+      const { input, error } = job.target === "new-board" ? newBoardInput(line, cells, job, board, context) : rowToInput(cells, job, board, context);
       if (error) errors.push({ row: line, reason: error }); else prepared.push({ line, input });
     }
     let skippedDuplicates = 0, candidates = prepared;
@@ -297,7 +483,8 @@ class ImportJobService {
   }
   halt(job, reason) { return this.jobs.updateOne({ _id: job._id, leaseOwner: this.workerId }, { $set: { status: "paused", lastError: reason, leaseOwner: null, leaseUntil: null, updatedAt: new Date() } }); }
   async finish(job, status, reason = null) {
-    const updated = await this.jobs.findOneAndUpdate({ _id: job._id, leaseOwner: this.workerId }, { $set: { status, lastError: reason, finishedAt: new Date(), leaseOwner: null, leaseUntil: null, updatedAt: new Date() }, $unset: { expiresAt: "" } }, { returnDocument: "after" });
+    const updated = await this.jobs.findOneAndUpdate({ _id: job._id, leaseOwner: this.workerId }, { $set: { status, lastError: reason, finishedAt: new Date(), leaseOwner: null, leaseUntil: null, updatedAt: new Date() }, $unset: { expiresAt: "", "validation.preview": "" } }, { returnDocument: "after" });
+    this.logger.log?.(`[imports] ${job._id.toHexString()} ${status}: ${updated?.imported ?? 0} imported, ${updated?.skippedDuplicates ?? 0} skipped, ${updated?.rejected ?? 0} rejected.`);
     await this.batches.deleteMany({ jobId: job._id });
     if (updated?.imported) await this.announce(updated);
   }
@@ -305,6 +492,19 @@ class ImportJobService {
   announce(job) {
     return appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: job.workspaceId, boardId: job.boardId, actorUserId: job.createdBy, actorName: job.actorName, action: "records.created", entityType: "board", entityId: job.boardId, summary: `Imported ${job.imported} record${job.imported === 1 ? "" : "s"} from ${job.fileName}`, now: new Date() }));
   }
+}
+
+// One row → a record of the job's new board. Text is kept exactly as written; only a date or number column the person chose converts it.
+function newBoardInput(line, cells, job, board, { dateOrder }) {
+  const columns = new Map(board.columns.map((c) => [c.key, c])), values = {};
+  for (const [key, index] of Object.entries(job.mapping)) {
+    const column = columns.get(key), { value, error } = convertCell(column.type, cells[index], { dateOrder });
+    if (error) return { error: `${column.label || key} ${error}` };
+    if (value !== undefined) values[key] = value;
+  }
+  const groupId = job.groupOf(line);
+  try { return { input: validate.recordCreate({ values, ...(groupId ? { groupId } : {}) }, board) }; }
+  catch (error) { return { error: error instanceof ApiError ? error.message : "It couldn't be read" }; }
 }
 
 const hasKey = (v) => v !== undefined && v !== null && v !== "" && !Array.isArray(v);

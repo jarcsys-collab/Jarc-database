@@ -56,6 +56,7 @@ const INDEXES = Object.freeze({
     { name: "worker", key: { status: 1, leaseUntil: 1 } },
     { name: "board_created", key: { boardId: 1, createdAt: -1 } },
     { name: "board_file", key: { boardId: 1, fileHash: 1, status: 1 } },
+    { name: "workspace_file", key: { workspaceId: 1, fileHash: 1, status: 1 } },
     { name: "creator_status", key: { createdBy: 1, status: 1 } },
     // Abandoned uploads go; a job that ended has no expiresAt and stays as the record of what was imported.
     { name: "expires", key: { expiresAt: 1 }, expireAfterSeconds: 0 }

@@ -8,7 +8,7 @@ class AppController {
     this.comments = typeof CommentsPanel === "function" ? new CommentsPanel(this) : null;
     this.forms = typeof FormsPanel === "function" ? new FormsPanel(this) : null;
     this.imports = typeof ImportPanel === "function" ? new ImportPanel(this) : null;
-    window.addEventListener("jarc-import-open", () => { if (this.model.features?.spreadsheetImports) this.imports?.fillList(); });
+    window.addEventListener("jarc-import-open", () => { if (this.imports?.enabled) this.imports.fillList(); });
     // An import finished: the same reload as a colleague's change arriving.
     window.addEventListener("jarc-board-changed", (event) => { const boardId = event.detail?.boardId; if (!boardId || !this.model.storage?.canFilterOnServer) return; (this.remoteQueue ??= []).push({ action: "board.updated", boardId: this.model.serverId(boardId), workspaceId: this.model.serverId(this.model.workspace?.id) }); this.processRemote(); });
     this.view.onRecordDrawer = (row) => this.comments?.open(row.id);
@@ -351,7 +351,7 @@ class AppController {
     if (action.startsWith("acct-") && this.accounts) { if (!["SELECT", "INPUT", "FORM"].includes(target.tagName)) this.accounts.onAction(action, target); return; }
     if ((action.startsWith("appearance-") || (["icon-picker", "icon-tab", "icon-choose"].includes(action))) && this.appearance) { if (target.tagName !== "INPUT") this.appearance.onAction(action, target); return; }
     if ((action.startsWith("group-") || action.startsWith("toolbar-")) && this.groupActions) { this.lastTrigger = target; this.groupActions.onAction(action, target); return; }
-    if (action.startsWith("xl-import-")) { if (this.model.features?.spreadsheetImports) this.imports?.onAction(action, target); return; }
+    if (action.startsWith("xl-import-")) { if (target.tagName === "INPUT" && target.type !== "checkbox") return; if (this.imports?.enabled) this.imports.onAction(action, target); return; }
     if (action.startsWith("form-") && !["form-design-form", "form-fill-form"].includes(action)) { if (this.model.features?.nativeForms) this.forms?.onAction(action, target); return; }
     if (action.startsWith("comment-") && this.comments && action !== "comment-input") { this.comments.onAction(action, target); return; }
     if (action.startsWith("cc-") && this.command) { if (target.tagName !== "SELECT" && target.tagName !== "INPUT") this.command.onAction(action, target); return; }
@@ -687,7 +687,7 @@ class AppController {
     if (action === "setting-select") { const key=event.target.dataset.key; const value=["density","fontSize"].includes(key)?event.target.value.toLowerCase():event.target.value; this.model.updateSetting(key,value); this.update(); this.view.showSettings(this.model,this.model.settings.settingsSection); }
     if (action === "board-title-inline") { this.model.renameBoard(this.model.currentBoardId,event.target.value); this.update(); this.view.toast("Board name saved"); }
     if (action === "import-file") this.importData(event.target.files[0]);
-    if (action === "xl-import-file") { const file = event.target.files[0]; event.target.value = ""; if (file && this.model.features?.spreadsheetImports) this.imports?.upload(file); return; }
+    if (action === "xl-import-file") { const file = event.target.files[0]; event.target.value = ""; if (file && this.imports?.enabled) this.imports.upload(file); return; }
     if (action === "avatar-file") this.loadAvatar(event.target.files[0]);
   }
   onSubmit(event) {

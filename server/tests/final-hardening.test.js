@@ -92,7 +92,7 @@ describe("Feature switches: database", () => {
 });
 
 describe("Feature switches: the API refuses a hidden feature, however it's asked", () => {
-  let on, off, formsOnly, importsOnly, board, form, job;
+  let on, off, formsOnly, importsOnly, board, form, job, wsId;
   const CSV = Buffer.from("Item,Code\nOne,1\n");
   const raw = (app, method, p, body, type = "text/csv") => fetch(`${app.url}/api/v1${p}`, { method, headers: { "Content-Type": type, "X-Requested-With": "x" }, body });
   before(async () => {
@@ -104,11 +104,12 @@ describe("Feature switches: the API refuses a hidden feature, however it's asked
     const ws = (await api(on.url, "POST", "/api/v1/workspaces", { name: "W" })).body.workspace;
     board = (await api(on.url, "POST", `/api/v1/workspaces/${ws.id}/boards`, { name: "B", columns: COLUMNS })).body.board;
     form = (await api(on.url, "POST", `/api/v1/boards/${board.id}/forms`, { name: "F", status: "published", fields: [{ key: "serial" }] })).body.form;
-    job = await (await raw(on, "POST", `/boards/${board.id}/imports?name=a.csv`, CSV)).json();
+    job = await (await raw(on, "POST", `/workspaces/${ws.id}/imports?name=a.csv`, CSV)).json();
+    wsId = ws.id;
   });
   after(async () => { for (const a of [formsOnly, importsOnly, off, on]) await a?.close(); });
   const formRoutes = () => [["GET", `/boards/${board.id}/forms`], ["POST", `/boards/${board.id}/forms`], ["GET", `/forms/${form.id}`], ["PATCH", `/forms/${form.id}`], ["DELETE", `/forms/${form.id}?expectedVersion=1`], ["POST", `/forms/${form.id}/submit`]];
-  const importRoutes = () => [["GET", `/boards/${board.id}/imports`], ["POST", `/boards/${board.id}/imports`], ["GET", `/imports/${job.import.id}`], ["PATCH", `/imports/${job.import.id}`], ["POST", `/imports/${job.import.id}/start`], ["POST", `/imports/${job.import.id}/pause`], ["POST", `/imports/${job.import.id}/resume`], ["POST", `/imports/${job.import.id}/cancel`]];
+  const importRoutes = () => [["GET", `/workspaces/${wsId}/imports`], ["POST", `/workspaces/${wsId}/imports`], ["GET", `/boards/${board.id}/imports`], ["POST", `/boards/${board.id}/imports`], ["GET", `/imports/${job.import.id}`], ["GET", `/imports/${job.import.id}/report`], ["POST", `/imports/${job.import.id}/remove-board`], ["PATCH", `/imports/${job.import.id}`], ["POST", `/imports/${job.import.id}/start`], ["POST", `/imports/${job.import.id}/pause`], ["POST", `/imports/${job.import.id}/resume`], ["POST", `/imports/${job.import.id}/cancel`]];
   const notFound = async (app, list) => { for (const [m, p] of list) { const r = await api(app.url, m, `/api/v1${p}`, m === "GET" || m === "DELETE" ? undefined : {}); assert.equal(r.status, 404, `${m} ${p}`); assert.equal(r.body.error.code, "NOT_FOUND", `${m} ${p}`); } };
 
   test("off: every form and import path answers 404, like an unknown path", async () => {
@@ -121,7 +122,7 @@ describe("Feature switches: the API refuses a hidden feature, however it's asked
     assert.equal(await on.dataLayer.repos.records.collection.countDocuments({ boardId: new ObjectId(board.id) }), before);
   });
   test("off: a file upload is refused before it's read", async () => {
-    const r = await raw(off, "POST", `/boards/${board.id}/imports?name=a.csv`, CSV);
+    const r = await raw(off, "POST", `/workspaces/${wsId}/imports?name=a.csv`, CSV);
     assert.equal(r.status, 404);
     assert.equal(await on.db.collection(COLLECTIONS.importJobs).countDocuments({ boardId: new ObjectId(board.id), fileName: "b.csv" }), 0);
   });
@@ -129,7 +130,7 @@ describe("Feature switches: the API refuses a hidden feature, however it's asked
     await notFound(formsOnly, importRoutes());
     assert.equal((await api(formsOnly.url, "GET", `/api/v1/boards/${board.id}/forms`)).status, 200);
     await notFound(importsOnly, formRoutes());
-    assert.equal((await api(importsOnly.url, "GET", `/api/v1/boards/${board.id}/imports`)).status, 200);
+    assert.equal((await api(importsOnly.url, "GET", `/api/v1/workspaces/${wsId}/imports`)).status, 200);
   });
   test("what's stored is kept: on again, the same form and import are there", async () => {
     assert.equal((await api(on.url, "GET", `/api/v1/forms/${form.id}`)).body.form.name, "F");
@@ -175,7 +176,7 @@ describe("Feature switches: the screens (real app, headless browser)", { skip: B
     await b.evaluate("document.querySelector('[data-action=import]')?.click()");
     await b.waitFor("!!document.querySelector('.import-modal') || !!document.querySelector('[data-action=view-overflow]')", 3000);
     if (!await b.evaluate("!!document.querySelector('.import-modal')")) { await b.evaluate("document.querySelector('[data-action=view-overflow]').click()"); await sleep(100); await b.evaluate("document.querySelector('[data-action=import]')?.click()"); await b.waitFor("!!document.querySelector('.import-modal')", 3000); }
-    assert.equal(await b.evaluate("!!document.querySelector('[data-action=xl-import-choose]')"), false);
+    assert.equal(await b.evaluate("!!document.querySelector('[data-action=xl-import-new]')"), false);
     assert.equal(await b.evaluate("!!document.querySelector('[data-action=choose-import-file]')"), true);
     await b.evaluate("document.querySelector('[data-action=close-overlay]')?.click()");
   });
@@ -186,6 +187,7 @@ describe("Feature switches: the screens (real app, headless browser)", { skip: B
     assert.equal((await call("GET", `/boards/${board.id}/forms`)).status, 404);
     assert.equal((await call("POST", `/boards/${board.id}/forms`, { name: "X", fields: [{ key: "serial" }] })).status, 404);
     assert.equal((await call("GET", `/boards/${board.id}/imports`)).status, 404);
+    assert.equal((await call("GET", `/workspaces/${ws.id}/imports`)).status, 404);
     assert.deepEqual((await call("GET", "/features")).body, { features: { nativeForms: false, spreadsheetImports: false } });
   });
   test("no session: still 401, not a hint about what exists", async () => {
