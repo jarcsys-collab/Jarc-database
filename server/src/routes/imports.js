@@ -15,7 +15,12 @@ const { LIMITS } = require("../domain/spreadsheet");
 const jobToApi = (j) => ({
   id: j._id.toHexString(), target: j.target || "existing-board", workspaceId: j.workspaceId?.toHexString() ?? null, boardId: j.boardId?.toHexString() ?? null, plannedBoardId: j.plannedBoardId?.toHexString() ?? null, boardName: j.boardName ?? null,
   status: j.status, fileName: j.fileName, kind: j.kind, sheet: j.sheet, sheets: j.sheets, rowCount: j.rowCount, structure: j.structure ?? null, structureConfirmed: Boolean(j.structureConfirmed), columns: j.columns ?? [], itemColumn: j.itemColumn ?? null, uniqueColumn: j.uniqueColumn ?? null, dateOrder: j.dateOrder,
-  validation: j.validation ?? null, previousImport: j.previousImport, imported: j.imported, skippedDuplicates: j.skippedDuplicates, rejected: j.rejected, removedRecords: j.removedRecords ?? 0, processedBatches: j.nextBatch, batchCount: j.batchCount, errors: j.errors, lastError: j.lastError, createdAt: j.createdAt?.toISOString() ?? null, finishedAt: j.finishedAt?.toISOString() ?? null
+  validation: j.validation ?? null, previousImport: j.previousImport, imported: j.imported, skippedDuplicates: j.skippedDuplicates, rejected: j.rejected, removedRecords: j.removedRecords ?? 0, processedBatches: j.nextBatch, batchCount: j.batchCount, errors: j.errors, lastError: j.lastError, createdAt: j.createdAt?.toISOString() ?? null, finishedAt: j.finishedAt?.toISOString() ?? null, updatedAt: j.updatedAt?.toISOString() ?? null
+});
+// The small form the progress tracker polls: no file structure or preview, plus the records its board really holds.
+const progressToApi = (j) => ({
+  id: j._id.toHexString(), workspaceId: j.workspaceId?.toHexString() ?? null, boardId: j.boardId?.toHexString() ?? null, boardName: j.boardName ?? null, status: j.status, fileName: j.fileName, sheet: j.sheet, rowCount: j.rowCount,
+  imported: j.imported, skippedDuplicates: j.skippedDuplicates, rejected: j.rejected, removedRecords: j.removedRecords ?? 0, processedBatches: j.nextBatch, batchCount: j.batchCount, errors: j.errors, lastError: j.lastError, recordsOnBoard: j.recordsOnBoard ?? null, createdAt: j.createdAt?.toISOString() ?? null, finishedAt: j.finishedAt?.toISOString() ?? null, updatedAt: j.updatedAt?.toISOString() ?? null
 });
 
 function importRoutes({ services, access }) {
@@ -33,7 +38,11 @@ function importRoutes({ services, access }) {
   router.all(["/boards/:boardId/imports", "/boards/:boardId/imports/*rest"], () => { throw new ApiError(403, "IMPORT_NEW_BOARDS_ONLY", "Files can only be imported into a new board for now, so existing boards can't be affected."); });
   router.get("/workspaces/:workspaceId/imports", async (req, res) => {
     const { workspace, role } = await access.workspace(req.actor, parseId(req.params.workspaceId, "workspaceId"), "MEMBER");
-    allowOnly(req.query, [], "the query");
+    allowOnly(req.query, ["view"], "the query");
+    const view = queryString(req.query.view, "view");
+    if (view !== undefined && view !== null && view !== "progress") throw new ApiError(400, "VALIDATION_ERROR", "view must be progress.");
+    // The tracker follows a person's own imports, whatever their role.
+    if (view === "progress") { send(res, 200, { items: (await services.importJobs.progressForWorkspace(workspace._id, req.actor.userId)).map(progressToApi) }); return; }
     send(res, 200, { items: (await services.importJobs.listForWorkspace(workspace._id, Access.atLeast(role, "WORKSPACE_ADMIN") ? {} : { userId: req.actor.userId })).map(jobToApi) });
   });
   router.post("/workspaces/:workspaceId/imports", member, express.raw({ type: () => true, limit: LIMITS.fileBytes, inflate: false }), async (req, res) => {

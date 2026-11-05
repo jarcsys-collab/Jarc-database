@@ -2,7 +2,8 @@
 // The work happens on the server, so closing this window or the browser doesn't stop an import; reopening Import shows it again.
 // Existing boards are never touched. The server checks the person's session and workspace role on every request.
 class ImportPanel {
-  constructor(controller) { this.c = controller; this.job = null; this.step = null; this.timer = null; this.changeHeader = false; }
+  static POLL_MS = 2500; static DISCOVER_MS = 60000; static MAX_BACKOFF_MS = 30000; static SETTLE_MS = 15000; static SHOW_FINISHED_MS = 24 * 3600 * 1000;
+  constructor(controller) { this.c = controller; this.job = null; this.step = null; this.changeHeader = false; this.tracked = new Map(); this.trackerOn = false; this.failures = 0; this.lastDiscovery = 0; }
   get model() { return this.c.model; }
   get view() { return this.c.view; }
   get adapter() { return this.c.model.storage?.adapter; }
@@ -10,7 +11,14 @@ class ImportPanel {
   esc(v) { return this.view.escape(v ?? ""); }
   attr(v) { return this.view.attr(v ?? ""); }
   workspaceId() { const id = this.model.workspace?.id; return this.model.serverId ? this.model.serverId(id) : id; }
-  percent(j) { return j.batchCount ? Math.min(100, Math.round(j.processedBatches / j.batchCount * 100)) : 100; }
+  // Records imported so far. A paused job's last batch may have been written after its counter stopped, so the board's own count is the truth there.
+  importedOf(j) { const counted = j.imported || 0; return j.status === "paused" && typeof j.recordsOnBoard === "number" ? Math.max(counted, j.recordsOnBoard) : counted; }
+  // From what the server has confirmed: 100% only once it says the job is done.
+  percent(j) {
+    if (j.status === "done") return 100;
+    const handled = this.importedOf(j) + (j.skippedDuplicates || 0) + (j.rejected || 0), share = j.rowCount ? handled / j.rowCount : j.batchCount ? j.processedBatches / j.batchCount : 0;
+    return Math.min(99, Math.floor(share * 100));
+  }
   isLive(j) { return ["queued", "running", "removing"].includes(j.status); }
   plural(n, one, many = `${one}s`) { return `${Number(n).toLocaleString()} ${n === 1 ? one : many}`; }
 
@@ -87,6 +95,7 @@ class ImportPanel {
     catch (e) { this.view.toast(e?.message || "That import couldn't be opened."); return; }
     this.step = ["mapping", "ready"].includes(this.job.status) ? "structure" : "run"; this.changeHeader = false;
     this.render();
+    if (this.step === "run") this.follow(this.job);
   }
 
   // ---- Steps
@@ -216,7 +225,7 @@ class ImportPanel {
     if (!form.querySelector('[name="confirmNewBoard"]').checked || (repeat && !repeat.checked)) return;
     const body = { confirmNewBoard: true, ...(repeat ? { repeat: true } : {}) };
     await this.whileWorking("Starting the import…", async (stillOpen) => {
-      try { const { import: job } = await this.adapter.request("POST", `/imports/${this.job.id}/start`, body); if (!stillOpen()) return; this.job = job; this.step = "run"; this.renderProgress(); }
+      try { const { import: job } = await this.adapter.request("POST", `/imports/${this.job.id}/start`, body); this.follow(job); if (!stillOpen()) return; this.job = job; this.step = "run"; this.renderProgress(); }
       catch (e) { if (stillOpen()) this.view.toast(e?.message || "The import couldn't start."); }
     });
   }
@@ -224,6 +233,7 @@ class ImportPanel {
     await this.whileWorking({ pause: "Pausing…", resume: "Resuming…", cancel: "Cancelling…" }[what], async (stillOpen) => {
       try {
         const { import: job } = await this.adapter.request("POST", `/imports/${this.job.id}/${what}`, {});
+        if (this.tracked.has(job.id) || job.boardId) this.follow(job);
         if (!stillOpen()) return;
         this.job = job;
         if (what === "cancel" && !job.boardId) { this.view.closeOverlay(); this.view.toast("Import cancelled. Nothing was created."); return; }
@@ -233,27 +243,146 @@ class ImportPanel {
   }
 
   renderProgress() {
-    clearTimeout(this.timer);
     const j = this.job, ended = ["done", "failed", "cancelled", "removed"].includes(j.status), pct = this.percent(j), madeBoard = Boolean(j.boardId) && !["removed", "removing"].includes(j.status);
     const errors = j.errors?.length ? `<details class="xl-errors"><summary>${this.plural(j.rejected, "row")} couldn't be imported</summary><ul>${j.errors.map((e) => `<li>Row ${e.row}: ${this.esc(e.reason)}</li>`).join("")}</ul>${j.rejected > j.errors.length ? `<p>Showing the first ${j.errors.length}.</p>` : ""}<button type="button" class="button secondary small" data-action="xl-import-report">Download the list</button></details>` : "";
     const title = { done: "Import finished", failed: "Import stopped", cancelled: "Import cancelled", paused: "Import paused", removing: "Removing the board", removed: "Board removed" }[j.status] || "Importing";
     const removed = j.status === "removed" ? "<p role=\"status\">The new board and its records were removed. Nothing else changed.</p>" : j.status === "removing" ? `<p role="status">${this.plural(j.removedRecords || 0, "record")} removed so far. You can close this window.</p>` : "";
     const leftovers = madeBoard && ["failed", "cancelled"].includes(j.status) ? `<p class="xl-note">The new board holds the ${this.plural(j.imported, "record")} imported so far. You can keep it or remove it.</p>` : "";
     this.frame("run", title, `<div class="xl-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${j.status === "removed" ? 0 : pct}%"></span></div>
-      <p role="status"><strong>${j.imported.toLocaleString()}</strong> imported · ${j.skippedDuplicates.toLocaleString()} skipped as repeats · ${j.rejected.toLocaleString()} rejected, of ${this.plural(j.rowCount, "record")}</p>
+      <p role="status"><strong>${this.importedOf(j).toLocaleString()}</strong> imported · ${j.skippedDuplicates.toLocaleString()} skipped as repeats · ${j.rejected.toLocaleString()} rejected, of ${this.plural(j.rowCount, "record")}</p>
       ${j.lastError ? `<p class="xl-warning" role="alert">${this.esc(j.lastError)}</p>` : ""}${errors}${removed}${leftovers}${ended || j.status === "removing" ? "" : "<p>You can close this window. The import keeps running on the server.</p>"}`,
     `${madeBoard && ended ? '<button type="button" class="button secondary" data-action="xl-import-remove">Remove the new board</button>' : ""}${["queued", "running"].includes(j.status) ? '<button type="button" class="button secondary" data-action="xl-import-pause">Pause</button>' : ""}${j.status === "paused" ? '<button type="button" class="button secondary" data-action="xl-import-resume">Resume</button>' : ""}${ended || j.status === "removing" ? "" : '<button type="button" class="button secondary" data-action="xl-import-cancel">Stop import</button>'}${madeBoard && ended ? '<button type="button" class="button primary" data-action="xl-import-open-board">Open the board</button>' : `<button type="button" class="button primary" data-action="close-overlay">${ended ? "Done" : "Close"}</button>`}`);
-    if (this.isLive(j)) this.timer = setTimeout(() => this.poll(), 2000);
   }
-  async poll() {
-    if (!document.querySelector(".xl-step-run") || !this.job) return;
-    try { const { import: job } = await this.adapter.request("GET", `/imports/${this.job.id}`); this.job = job; if (document.querySelector(".xl-step-run")) this.renderProgress(); }
-    catch { this.timer = setTimeout(() => this.poll(), 5000); }
+
+  // ---- The progress tracker: a small card that stays after the window closes. Everything it shows comes from the server, so it returns after a refresh or on
+  // another device. One timer feeds it and the open progress window, and rests while the tab is hidden. Closing either never touches the import itself.
+  // Only dismissing a finished import and minimizing the card are remembered in this browser, as conveniences.
+  ensureTracker() {
+    const allowed = this.enabled && this.c.auth?.authenticated && !this.c.entraGate;
+    if (!allowed) { if (this.trackerOn) this.stopTracker(); return; }
+    if (this.trackerOn) return;
+    this.trackerOn = true;
+    this.trackerEl = Object.assign(document.createElement("section"), { className: "import-tracker", hidden: true });
+    this.trackerEl.setAttribute("aria-label", "Imports");
+    this.trackerEl.addEventListener("click", (event) => this.onTrackerClick(event));
+    this.trackerAnnounce = Object.assign(document.createElement("div"), { className: "xt-announce" });
+    this.trackerAnnounce.setAttribute("role", "status");
+    document.body.append(this.trackerEl, this.trackerAnnounce);
+    this.onVisible = () => { if (!document.hidden) this.refreshTracker(true); }; // back on this tab: see everything that happened meanwhile
+    document.addEventListener("visibilitychange", this.onVisible);
+    this.refreshTracker(true);
+  }
+  stopTracker() {
+    this.trackerOn = false; clearTimeout(this.trackerTimer); this.tracked.clear();
+    document.removeEventListener("visibilitychange", this.onVisible);
+    this.trackerEl?.remove(); this.trackerAnnounce?.remove(); this.trackerEl = null; this.trackerAnnounce = null;
+  }
+  isUnfinished(j) { return !["done", "failed", "cancelled", "removed"].includes(j.status); }
+  // Worth checking often: it's running, or was paused moments ago and its last batch may still be landing.
+  isMoving(j) { return this.isLive(j) || (j.status === "paused" && Date.now() - (Date.parse(j.updatedAt || 0) || 0) < ImportPanel.SETTLE_MS); }
+  // Starts following a job right away, and picks up its next state from the server.
+  follow(job) { this.merge(job); this.renderTracker(); this.refreshTracker(); }
+  async refreshTracker(discover = false) {
+    if (!this.trackerOn) return;
+    if (this.refreshing) { this.refreshAgain = true; return; } // one request at a time, however many things ask
+    clearTimeout(this.trackerTimer);
+    if (document.hidden) return; // the visibility listener resumes it
+    const now = Date.now(), everywhere = discover || now - this.lastDiscovery >= ImportPanel.DISCOVER_MS;
+    const ids = new Set([...this.tracked.values()].filter((j) => this.isMoving(j)).map((j) => j.workspaceId));
+    if (everywhere) { this.lastDiscovery = now; for (const w of this.model.workspaces || []) if (!w.archived) ids.add(this.model.serverId ? this.model.serverId(w.id) : w.id); }
+    this.refreshing = true;
+    let failed = false;
+    try {
+      for (const id of ids) {
+        try { const { items } = await this.adapter.background(`/workspaces/${encodeURIComponent(id)}/imports?view=progress`); for (const job of items) this.merge(job); }
+        catch (error) { if (error?.status !== 404 && error?.code !== "NOT_FOUND") failed = true; }
+        if (!this.trackerOn) return undefined;
+      }
+    } finally { this.refreshing = false; }
+    this.failures = failed ? this.failures + 1 : 0;
+    this.renderTracker();
+    if (this.refreshAgain) { this.refreshAgain = false; return this.refreshTracker(); }
+    const live = [...this.tracked.values()].some((j) => this.isMoving(j));
+    const wait = this.failures ? Math.min(ImportPanel.MAX_BACKOFF_MS, ImportPanel.POLL_MS * 2 ** this.failures) : live ? ImportPanel.POLL_MS : ImportPanel.DISCOVER_MS;
+    this.trackerTimer = setTimeout(() => this.refreshTracker(), wait);
+    return undefined;
+  }
+  // Takes a job's newer state. A response older than what's already known (it was overtaken while on its way) is ignored, so progress can't go backwards.
+  merge(job) {
+    const known = this.tracked.get(job.id), at = (j) => Date.parse(j?.updatedAt || 0) || 0;
+    if (known && at(job) < at(known)) return;
+    const was = known?.status, next = { ...known, ...job };
+    this.tracked.set(job.id, next);
+    this.applyCount(next);
+    if (was !== next.status && was) { if (this.trackerAnnounce) this.trackerAnnounce.textContent = `${next.boardName || next.fileName}: ${this.stateWord(next)}`; if (this.isUnfinished({ status: was }) && !this.isUnfinished(next)) this.c.refreshWhenIdle?.(); }
+    // The progress window, if it's showing this job. It stays put while one of its own actions is on its way.
+    const box = document.querySelector(".xl-step-run");
+    if (box && this.job?.id === job.id && box.getAttribute("aria-busy") !== "true" && (!known || at(job) !== at(known) || was !== next.status || known.recordsOnBoard !== next.recordsOnBoard)) { this.job = { ...this.job, ...job }; this.renderProgress(); }
+  }
+  // The sidebar's count for the board this job is filling, as the server counted it.
+  applyCount(job) {
+    if (!job.boardId || typeof job.recordsOnBoard !== "number") return;
+    const board = this.findBoard(job.boardId);
+    if (!board) return;
+    this.model.noteBoardCount?.(board, job.recordsOnBoard, this.isUnfinished(job));
+    this.view.patchBoardCount?.(board.id, job.recordsOnBoard);
+  }
+  findBoard(serverBoardId) { return (this.model.workspaces || []).flatMap((w) => w.boards || []).find((b) => String(this.model.serverId ? this.model.serverId(b.id) : b.id) === String(serverBoardId)); }
+  stateWord(j) {
+    if (j.status === "queued" || (j.status === "running" && !j.imported && !j.skippedDuplicates && !j.rejected && !j.processedBatches)) return "Preparing";
+    return { running: "Importing", paused: "Paused", done: "Completed", failed: "Failed", cancelled: "Cancelled", removing: "Removing the board", removed: "Board removed" }[j.status] || j.status;
+  }
+  remembered(key) { try { return JSON.parse(localStorage.getItem(`jarc-import-tracker-${key}`)); } catch { return null; } }
+  remember(key, value) { try { localStorage.setItem(`jarc-import-tracker-${key}`, JSON.stringify(value)); } catch { /* a convenience: it simply isn't remembered */ } }
+  visibleJobs() {
+    const dismissed = new Set(this.remembered("dismissed") || []), now = Date.now();
+    const time = (j) => Date.parse(j.createdAt || 0) || 0; // what's still going comes first, then the newest
+    return [...this.tracked.values()].filter((j) => this.isUnfinished(j) || (!dismissed.has(j.id) && now - (Date.parse(j.finishedAt || j.updatedAt || 0) || 0) < ImportPanel.SHOW_FINISHED_MS)).sort((a, b) => (this.isUnfinished(b) - this.isUnfinished(a)) || (time(b) - time(a)));
+  }
+  counts(j) { return `${Number(this.importedOf(j)).toLocaleString()} / ${Number(j.rowCount || 0).toLocaleString()}`; }
+  trackerRow(j) {
+    const pct = this.percent(j), word = this.stateWord(j), finished = !this.isUnfinished(j), hasBoard = Boolean(j.boardId) && !["removed", "removing"].includes(j.status), name = j.boardName || j.fileName;
+    return `<div class="xt-job is-${this.attr(j.status)}"><button type="button" class="xt-open" data-xt="open" data-id="${this.attr(j.id)}" title="Open this import"><strong class="xt-name">${this.esc(name)}</strong><span class="xt-line"><span class="xt-state">${this.esc(word)}</span> ${j.status === "removing" ? this.esc(`${Number(j.removedRecords || 0).toLocaleString()} removed`) : j.status === "removed" ? "" : `${this.counts(j)} (${pct}%)`}</span>${["failed", "paused"].includes(j.status) && j.lastError ? `<span class="xt-error">${this.esc(j.lastError)}</span>` : ""}${j.rejected ? `<span class="xt-note">${this.plural(j.rejected, "row")} rejected</span>` : ""}</button>
+      <div class="xl-progress xt-bar" role="progressbar" aria-label="${this.attr(name)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${j.status === "removed" ? 0 : pct}%"></span></div>
+      ${finished ? `<div class="xt-actions">${j.status === "done" && hasBoard ? `<button type="button" class="button secondary small" data-xt="board" data-id="${this.attr(j.id)}">Open board</button>` : ""}<button type="button" class="button secondary small" data-xt="dismiss" data-id="${this.attr(j.id)}" aria-label="Dismiss ${this.attr(name)}">Dismiss</button></div>` : ""}</div>`;
+  }
+  renderTracker() {
+    const el = this.trackerEl;
+    if (!el) return;
+    const jobs = this.visibleJobs();
+    if (!jobs.length) { el.hidden = true; el.innerHTML = ""; this.trackerHtml = ""; return; }
+    const live = jobs.filter((j) => this.isUnfinished(j)), minimized = this.remembered("minimized") === true;
+    const total = jobs.reduce((n, j) => n + (j.rowCount || 0), 0), handled = jobs.reduce((n, j) => n + Math.min(j.rowCount || 0, (j.imported || 0) + (j.skippedDuplicates || 0) + (j.rejected || 0)), 0), overall = jobs.length === 1 ? this.percent(jobs[0]) : total ? Math.min(jobs.every((j) => j.status === "done") ? 100 : 99, Math.floor(handled / total * 100)) : 0;
+    const reconnecting = this.failures > 1 ? '<span class="xt-note">Reconnecting…</span>' : "";
+    const summary = jobs.length === 1 ? `${this.stateWord(jobs[0])} ${overall}%` : `${jobs.length} imports · ${live.length} active`;
+    let html;
+    if (minimized) html = `<button type="button" class="xt-pill" data-xt="restore" aria-label="Show imports: ${this.attr(summary)}">${icon("import")}<span>${this.esc(summary)}</span></button>`;
+    else {
+      const head = `<div class="xt-head"><strong>${jobs.length === 1 ? "Import" : this.esc(summary)}</strong>${reconnecting}<span class="xt-head-actions">${jobs.length > 1 ? `<button type="button" class="link-button" data-xt="toggle" aria-expanded="${this.trackerExpanded ? "true" : "false"}">${this.trackerExpanded ? "Hide list" : "Show list"}</button>` : ""}<button type="button" class="icon-button" data-xt="minimize" aria-label="Minimize" title="Minimize">${icon("chevron")}</button></span></div>`;
+      const body = jobs.length === 1 ? this.trackerRow(jobs[0]) : this.trackerExpanded ? `<div class="xt-list">${jobs.map((j) => this.trackerRow(j)).join("")}</div>` : `<div class="xl-progress xt-bar" role="progressbar" aria-label="All imports" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${overall}"><span style="width:${overall}%"></span></div>`;
+      html = head + body;
+    }
+    el.hidden = false; el.classList.toggle("is-minimized", minimized);
+    if (html === this.trackerHtml) return;
+    const focused = document.activeElement && el.contains(document.activeElement) ? document.activeElement : null, key = focused && `[data-xt="${focused.dataset.xt}"]${focused.dataset.id ? `[data-id="${focused.dataset.id}"]` : ""}`;
+    el.innerHTML = html; this.trackerHtml = html;
+    if (key) (el.querySelector(key) || el.querySelector("button"))?.focus();
+  }
+  async onTrackerClick(event) {
+    const button = event.target.closest("[data-xt]");
+    if (!button) return;
+    const id = button.dataset.id, what = button.dataset.xt;
+    if (what === "open") return this.open(id);
+    if (what === "toggle") { this.trackerExpanded = !this.trackerExpanded; return this.renderTracker(); }
+    if (what === "minimize" || what === "restore") { this.remember("minimized", what === "minimize"); return this.renderTracker(); }
+    if (what === "dismiss") { this.remember("dismissed", [id, ...(this.remembered("dismissed") || [])].slice(0, 50)); return this.renderTracker(); } // only hides the card: the board and the job stay
+    if (what === "board") { this.job = this.tracked.get(id); return this.openBoard(); }
+    return undefined;
   }
   async removeBoard(confirmed = false) {
     if (!confirmed) { this.view.showMessage?.("Remove the new board?", ""); const box = document.querySelector("#overlay-root .modal"); if (box) { box.querySelector("p")?.remove(); box.querySelector(".modal-actions")?.remove(); box.insertAdjacentHTML("beforeend", `<p>This removes “${this.esc(this.job.boardName)}” and everything this import put in it. It's refused if anyone has changed the board since. Nothing else is touched.</p><div class="modal-actions"><button type="button" class="button secondary" data-action="close-overlay">Keep it</button><button type="button" class="button danger" data-action="xl-import-remove-go">Remove the board</button></div>`); } return; }
     await this.whileWorking("Starting the removal…", async (stillOpen) => {
-      try { const { import: job } = await this.adapter.request("POST", `/imports/${this.job.id}/remove-board`, {}); if (!stillOpen()) return; this.job = job; this.step = "run"; this.renderProgress(); }
+      try { const { import: job } = await this.adapter.request("POST", `/imports/${this.job.id}/remove-board`, {}); this.follow(job); if (!stillOpen()) return; this.job = job; this.step = "run"; this.renderProgress(); }
       catch (e) { if (!stillOpen()) return; this.view.closeOverlay(); this.view.showMessage("Board not removed", e?.message || "That didn't work."); }
     });
   }

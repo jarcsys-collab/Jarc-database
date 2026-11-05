@@ -87,7 +87,7 @@ function resourceRoutes({ services, access }) {
   router.get("/boards/:boardId", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "VIEWER");
     noQuery(req);
-    send(res, 200, { board: boardToApi(board) });
+    send(res, 200, { board: boardToApi({ ...board, recordCount: await services.boards.recordCount(board._id) }) });
   });
   // Members edit names, descriptions, columns, groups and views; archiving a board is for workspace admins.
   router.patch("/boards/:boardId", async (req, res) => {

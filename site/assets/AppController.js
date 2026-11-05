@@ -240,6 +240,7 @@ class AppController {
   }
   update() {
     this.pendingRefresh = false;
+    this.imports?.ensureTracker();
     this.model.syncServerQuery?.();
     this.view.commentsEnabled = Boolean(this.comments?.available);
     if (this.view.commentsEnabled && this.model.screen === "board" && this.model.board && this.countsBoardId !== this.model.board.id) { this.countsBoardId = this.model.board.id; this.model.commentCounts = {}; this.comments.loadCounts(this.model.board.id); }
@@ -894,7 +895,8 @@ class AppController {
     if(this.needsWorkspace(false))return;
     if(this.model.screen==="board"&&this.model.board&&!this.model.board.archived){action==="import"?this.view.showImport(this.model):this.view.showRecordForm(this.model);return;}
     const boards=this.model.workspaces.filter(w=>!w.archived).flatMap(w=>w.boards.filter(b=>!b.archived).map(b=>({...b,workspaceId:w.id,workspaceName:w.name})));
-    this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>${action==="import"?"Import into a board":"Create a record in…"}</h2>${this.view.closeButton()}</div><div class="choice-list">${boards.map(b=>`<button data-action="choose-board-action" data-mode="${this.view.attr(action)}" data-id="${this.view.attr(b.id)}" data-workspace="${this.view.attr(b.workspaceId)}">${icon("board")}<span><strong>${this.view.escape(b.name)}</strong><small>${this.view.escape(b.workspaceName)}</small></span></button>`).join("")||'<p>Create a board first to add records.</p><button data-action="new-board" class="button primary">Create board</button>'}</div></div>`);
+    const fromFile=action==="import"&&this.view.canImportFile(this.model);
+    this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>${fromFile?"Import data":action==="import"?"Import into a board":"Create a record in…"}</h2>${this.view.closeButton()}</div><div class="choice-list">${fromFile?`<button data-action="xl-import-new">${icon("import")}<span><strong>New board from a file</strong><small>Excel or CSV, in ${this.view.escape(this.model.workspace.name)}</small></span></button>`:""}${boards.map(b=>`<button data-action="choose-board-action" data-mode="${this.view.attr(action)}" data-id="${this.view.attr(b.id)}" data-workspace="${this.view.attr(b.workspaceId)}">${icon("board")}<span><strong>${this.view.escape(b.name)}</strong><small>${this.view.escape(b.workspaceName)}</small></span></button>`).join("")||'<p>Create a board first to add records.</p><button data-action="new-board" class="button primary">Create board</button>'}</div></div>`);
   }
   toggleSidebar(){document.body.classList.toggle("nav-collapsed");window.jarcStorage.setPreference("navCollapsed",document.body.classList.contains("nav-collapsed")?"1":"0");}
   saveFeedback(){

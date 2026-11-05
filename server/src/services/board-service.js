@@ -14,6 +14,7 @@ class BoardService {
     const boards = await this.repos.boards.listByWorkspace(workspaceId);
     return Promise.all(boards.map(async (board) => ({ ...board, recordCount: await this.repos.records.countActive(board._id) })));
   }
+  recordCount(boardId) { return this.repos.records.countActive(boardId); }
 
   // Board history, newest first. Read-only: the API offers no way to write activity.
   async activity(boardId, query) {

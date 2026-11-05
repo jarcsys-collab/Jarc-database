@@ -31,7 +31,8 @@ const BATCH_ROWS = 100, BATCH_BYTES = 4 * 1024 * 1024, KEEP_MS = 7 * 24 * 3600 *
 // A batch costs about 230 database operations. This pace keeps an import well under the Atlas Flex limit of 500 per second.
 const LEASE_MS = 60000, PAUSE_MS = 800, POLL_MS = 15000, MAX_ACTIVE_PER_USER = 3, MAX_ATTEMPTS = 5;
 const UNMAPPABLE = new Set(["files", "group"]);
-const REMOVE_BATCH = 200, REMOVE_PAUSE_MS = 500;
+const REMOVE_BATCH = 200, REMOVE_PAUSE_MS = 500, COUNT_AFTER_END_MS = 10 * 60 * 1000;
+const PROGRESS_FIELDS = Object.freeze(Object.fromEntries(["workspaceId", "boardId", "boardName", "status", "fileName", "sheet", "rowCount", "imported", "skippedDuplicates", "rejected", "removedRecords", "nextBatch", "batchCount", "errors", "lastError", "createdAt", "finishedAt", "updatedAt"].map((field) => [field, 1])));
 const OPEN = ["mapping", "ready", "queued", "running", "paused"], WRITE_PIECES = 20, WRITE_PAUSE_MS = 50, MAX_READING = 2, COLUMN_TYPES = new Set(["text", "number", "date"]);
 const notFound = () => new ApiError(404, "NOT_FOUND", "This import doesn't exist or has ended.");
 const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, ms); t.unref?.(); });
@@ -145,6 +146,17 @@ class ImportJobService {
 
   // ---- A new board from a file. Reading happens on a worker thread; only the job's rows are stored here.
   listForWorkspace(workspaceId, { userId = null } = {}) { return this.jobs.find({ workspaceId, target: "new-board", ...(userId ? { createdBy: userId } : {}) }, { sort: { createdAt: -1 }, limit: 20 }).toArray(); }
+
+  // What the progress tracker shows: this person's own imports that have started, without the file's structure and preview, each with how many records
+  // its board really holds. The count is taken while a job is running and for a while after it ends, using the index on boardId and archived.
+  async progressForWorkspace(workspaceId, userId) {
+    const jobs = await this.jobs.find({ workspaceId, target: "new-board", createdBy: userId, startedAt: { $exists: true } }, { projection: PROGRESS_FIELDS, sort: { createdAt: -1 }, limit: 20 }).toArray();
+    const recently = Date.now() - COUNT_AFTER_END_MS;
+    return Promise.all(jobs.map(async (job) => {
+      const counting = job.boardId && job.status !== "removed" && (!job.finishedAt || job.finishedAt.getTime() > recently);
+      return { ...job, recordsOnBoard: counting ? await this.repos.records.countActive(job.boardId) : null };
+    }));
+  }
 
   async createFromFile(workspace, buffer, { name, sheet }, actor) {
     const active = await this.jobs.countDocuments({ createdBy: actor.userId, status: { $in: OPEN } });
@@ -351,7 +363,7 @@ class ImportJobService {
     return updated;
   }
   async resume(job) {
-    const updated = await this.jobs.findOneAndUpdate({ _id: job._id, status: "paused" }, { $set: { status: "queued", attempts: 0, lastError: null, updatedAt: new Date() } }, { returnDocument: "after" });
+    const updated = await this.jobs.findOneAndUpdate({ _id: job._id, status: "paused" }, { $set: { status: "queued", attempts: 0, lastError: null, updatedAt: new Date() }, $unset: { uncounted: "" } }, { returnDocument: "after" });
     if (!updated) throw new ApiError(409, "IMPORT_NOT_PAUSED", "This import isn't paused.");
     this.wake();
     return updated;
@@ -361,8 +373,19 @@ class ImportJobService {
     const updated = await this.jobs.findOneAndUpdate({ _id: job._id, status: { $in: ["mapping", "ready", "queued", "running", "paused"] } }, { $set: { status: "cancelled", finishedAt: new Date(), leaseOwner: null, leaseUntil: null, updatedAt: new Date() }, $unset: { "validation.preview": "" } }, { returnDocument: "after" });
     if (!updated) throw new ApiError(409, "IMPORT_ENDED", "This import has already ended.");
     await this.batches.deleteMany({ jobId: job._id });
-    if (updated.imported) await this.announce(updated);
-    return updated;
+    const settled = await this.settleCancelled(updated);
+    if (settled.imported) await this.announce(settled);
+    return settled;
+  }
+  // A batch on its way when an import is paused or cancelled still does its work, but its counters are refused, so a resumed job can't count them twice.
+  // A cancelled job is never resumed, so its figures are settled here, once: imported from what it really wrote, skipped and rejected from that last batch's own
+  // result. late: the result of a batch that was still on its way; otherwise the one kept when it landed during a pause, which is removed as it's applied.
+  async settleCancelled(job, late = job.uncounted) {
+    if (job.target !== "new-board" || !job.boardId) return job;
+    const imported = await this.repos.records.collection.countDocuments({ boardId: job.boardId, legacyId: { $regex: `^import:${job._id.toHexString()}:` } });
+    const change = { $set: { imported, updatedAt: new Date() }, $unset: { uncounted: "" } };
+    if (late) { change.$inc = { skippedDuplicates: late.skippedDuplicates, rejected: late.rejected }; if (late.errors?.length) change.$push = { errors: { $each: late.errors, $slice: MAX_ERRORS } }; }
+    return (await this.jobs.findOneAndUpdate({ _id: job._id, status: "cancelled" }, change, { returnDocument: "after" })) || job;
   }
 
   // ---- The worker
@@ -406,7 +429,13 @@ class ImportJobService {
     }
     while (!this.stopping) {
       const board = await this.repos.boards.findById(job.boardId);
-      if (!board) return this.finish(job, "failed", "The board was deleted.");
+      if (!board) { // a batch on its way when the board was deleted may have written after that: nothing stays on a board that no longer exists
+        if (job.target === "new-board" && job.boardId) {
+          const records = this.repos.records.collection, mine = { boardId: job.boardId, legacyId: { $regex: `^import:${job._id.toHexString()}:` } }, left = (await records.find(mine, { projection: { _id: 1 } }).toArray()).map((r) => r._id);
+          if (left.length) { await records.deleteMany({ ...mine, _id: { $in: left } }); this.searchIndex?.refresh(job.boardId, left); }
+        }
+        return this.finish(job, "failed", "The board was deleted.");
+      }
       // A job only ever writes to the board it made.
       if (job.target === "new-board" && !board.importJobId?.equals?.(job._id)) return this.finish(job, "failed", "This import's board belongs to something else. Nothing more was imported.");
       const columns = new Set(board.columns.map((c) => c.key)), gone = Object.keys(job.mapping).find((k) => !columns.has(k));
@@ -434,7 +463,12 @@ class ImportJobService {
         $inc: { imported: outcome.imported, skippedDuplicates: outcome.skippedDuplicates, rejected: outcome.errors.length },
         ...(outcome.errors.length ? { $push: { errors: { $each: outcome.errors, $slice: MAX_ERRORS } } } : {})
       }, { returnDocument: "after" });
-      if (!moved) return undefined; // paused, cancelled or taken over: whoever holds it carries on
+      if (!moved) { // paused, cancelled or taken over: whoever holds it carries on
+        const now = await this.jobs.findOne({ _id: job._id }), late = { skippedDuplicates: outcome.skippedDuplicates, rejected: outcome.errors.length, errors: outcome.errors };
+        if (now?.status === "cancelled") await this.settleCancelled(now, late);
+        else if (now?.status === "paused") await this.jobs.updateOne({ _id: job._id, status: "paused" }, { $set: { uncounted: late } }); // resuming runs this batch again; cancelling applies it
+        return undefined;
+      }
       job = moved;
       await this.batches.deleteOne({ _id: batch._id });
       await sleep(this.pauseMs);

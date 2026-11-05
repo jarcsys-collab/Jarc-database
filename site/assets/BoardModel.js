@@ -219,8 +219,17 @@ class BoardModel {
   }
   // Active (non-archived) record count for lists: counted from loaded records, or the server's count before loading.
   boardRecordCount(board) {
+    const live = this.liveRecordCounts?.get(String(board.id)); // an import is filling this board: the server's count, even if the board was loaded earlier
+    if (live !== undefined) return live;
     const state = this.boardLoadState(board.id).state;
     return state === "full" || board.recordCount === undefined ? (board.records || []).filter((r) => !r.archived).length : board.recordCount;
+  }
+  // The server's count for a board an import is filling. live: keep using it while the import is unfinished. Not saved anywhere, and never sent back.
+  noteBoardCount(board, count, live) {
+    board.recordCount = count;
+    this.liveRecordCounts ||= new Map();
+    if (live) this.liveRecordCounts.set(String(board.id), count); else this.liveRecordCounts.delete(String(board.id));
+    this.storage?.adapter?.noteBoardCount?.(this.serverId(board.id), count);
   }
   async ensureBoardRecords(boardId, { more = false } = {}) {
     if (!this.storage.loadBoard || !boardId) return;

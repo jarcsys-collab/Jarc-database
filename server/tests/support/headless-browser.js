@@ -40,7 +40,7 @@ async function shutDown(proc, profile, askToClose = null) {
   let exited = hasExited(proc);
   if (!exited && askToClose) { try { askToClose(); exited = await waitForExit(proc, GRACEFUL_MS); } catch { /* no connection: force it */ } }
   if (!exited) { forceStop(proc); exited = await waitForExit(proc, FORCED_MS); }
-  if (!exited) proc.unref(); // it will go when the CPU frees up; it mustn't keep the tests open until then
+  if (!exited) { proc.unref(); proc.once("exit", () => { removeProfile(profile).catch(() => {}); }); } // it will go when the CPU frees up: it mustn't keep the tests open until then, and its profile goes with it
   await removeProfile(profile);
   return exited;
 }
@@ -179,7 +179,9 @@ async function waitForServer(base, { timeoutMs = 60000, child = null } = {}) {
     try { const res = await fetch(`${base}/api/v1/health`); if (res.ok) return; } catch { /* not listening yet */ }
     await sleep(100);
   }
+  // Whoever asked gets an error instead of a handle to the server, so nobody else can stop it, and it would hold the test file open for good.
+  if (child && child.exitCode === null) child.kill();
   throw new Error(`The test server at ${base} did not become ready within ${timeoutMs / 1000} s.`);
 }
 
-module.exports = { findBrowser, launch, sleep, freePort, waitForServer, sweepProfiles };
+module.exports = { findBrowser, launch, sleep, freePort, waitForServer, shutDown, sweepProfiles };

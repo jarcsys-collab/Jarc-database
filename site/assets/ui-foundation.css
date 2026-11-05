@@ -651,7 +651,7 @@ input[type=date], input[type=time], input[type=datetime-local] { min-height: var
   .brand { padding: 0 0 18px; }
   .workspace-switch { border-color: transparent; background: transparent; margin: 14px 0 10px; padding: 7px 0; }
   .workspace-switch:hover { background: var(--hover); }
-  .sidebar.open .workspace-switch { border-color: var(--line); background: var(--surface); padding: 7px 8px; }
+  .sidebar.open .workspace-switch { border-color: var(--sidebar-line, var(--line)); background: var(--sidebar-chip, var(--surface)); padding: 7px 8px; }
   /* Drawer fixes: stack workspace name over its board count; left-align "New board". */
   .sidebar.open .workspace-name { display: grid !important; }
   .sidebar.open .new-board-nav { justify-content: flex-start; padding: 5px 8px; }

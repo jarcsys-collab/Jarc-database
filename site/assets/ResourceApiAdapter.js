@@ -138,6 +138,7 @@ class ResourceApiAdapter {
   }
   // The app's own refreshes (feed, people, live updates): authenticated as usual, but not counted as activity.
   background(path) { return this.http.request("GET", path, undefined, { background: true }); }
+  noteBoardCount(boardId, count) { const board = this.boards.get(boardId); if (board) board.recordCount = count; }
   resolve(id) { return id === null || id === undefined ? id : this.aliases.has(String(id)) ? this.aliases.get(String(id)) : id; }
   alias(from, to, reconcile) { if (String(from) === String(to)) return; this.aliases.set(String(from), to); reconcile.mapId(from, to); }
 
@@ -380,6 +381,8 @@ class ResourceApiAdapter {
       else if (ResourceApiAdapter.RECORD_ACTIONS.has(e.action) && e.recordId && e.boardId) (recordsByBoard.get(e.boardId) || recordsByBoard.set(e.boardId, new Set()).get(e.boardId)).add(e.recordId);
       else if (e.boardId) boardIds.add(e.boardId);
     }
+    // A board that isn't loaded here has no records to update, but its count in the lists has just changed.
+    for (const boardId of recordsByBoard.keys()) if (this.boards.get(boardId)?.load.state === "none") boardIds.add(boardId);
     const get = async (path) => { try { return await this.background(path); } catch (error) { if (error instanceof StorageError && error.code === StorageError.CODES.NOT_FOUND) return null; throw error; } };
     if (structure.size) {
       const { items } = await this.background("/workspaces");
@@ -451,6 +454,8 @@ class ResourceApiAdapter {
     for (const [boardId, { board, records }] of plan.boards) {
       if (!this.boards.has(boardId)) continue;
       if (!board) { this.forgetBoard(boardId); reconcile.removeBoard(boardId); summary.removedBoards.add(boardId); continue; }
+      // Imported and colleagues' records don't change the board's version, so its count is taken on its own.
+      if (board.recordCount !== undefined && board.recordCount !== this.boards.get(boardId).recordCount) { this.boards.get(boardId).recordCount = board.recordCount; reconcile.replaceBoard(boardId, { recordCount: board.recordCount }); summary.boards.add(boardId); }
       let changed = false;
       if (board.version > this.boards.get(boardId).version) { this.boards.set(boardId, this.boardFrom(board)); reconcile.replaceBoard(boardId, this.modelBoardFields(this.boards.get(boardId))); changed = true; summary.boardConfig.add(boardId); }
       if (records) {

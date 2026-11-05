@@ -426,6 +426,84 @@ describe("Recovery, cancelling and removing the board", () => {
     const done = await finished(w.jobs, job._id);
     assert.equal(done.status, "done"); assert.equal(await w.records.countDocuments({ boardId: done.boardId }), 400);
   });
+  test("cancelling while a batch is being written: its count matches the rows it really left on the board", async () => {
+    const w = await world(); let job = await w.jobs.createFromFile(w.ws, big(400), { name: "b.xlsx" }, actor);
+    job = await w.jobs.review(job, {}); job = await w.jobs.startNewBoard(job, { confirmNewBoard: true });
+    // Holds a batch's write open, so the cancel lands exactly while it's on its way.
+    const realRun = w.jobs.runBatch.bind(w.jobs); let release, holding = false; const held = new Promise((r) => { release = r; });
+    w.jobs.runBatch = async (...a) => { const out = await realRun(...a); if (!holding) { holding = true; await held; } return out; };
+    w.jobs.wake();
+    for (let i = 0; i < 300 && !holding; i += 1) await sleep(10);
+    assert.equal(holding, true);
+    const cancelled = await w.jobs.cancel(await w.jobs.find(job._id));
+    assert.equal(cancelled.status, "cancelled");
+    release();
+    let ended; for (let i = 0; i < 300; i += 1) { ended = await w.jobs.find(job._id); if (ended.imported === await w.records.countDocuments({ boardId: ended.boardId }) && !w.jobs.running) break; await sleep(10); }
+    const onBoard = await w.records.countDocuments({ boardId: ended.boardId });
+    assert.ok(onBoard > 0); assert.equal(ended.imported, onBoard); assert.equal(ended.status, "cancelled");
+  });
+  // A file where some rows repeat a chosen column, and a stand-in for one row the last batch rejects, with that batch held open on request.
+  const repeating = () => xlsx([["Name", "Code"], ...Array.from({ length: 450 }, (_, i) => [`Row ${i}`, i % 5 === 0 ? "SAME" : `C${i}`])]);
+  const holdFirstBatch = (w) => { const real = w.jobs.runBatch.bind(w.jobs), hold = { holding: false }; const held = new Promise((r) => { hold.release = r; }); w.jobs.runBatch = async (...a) => { const out = await real(...a); if (!hold.holding) { hold.holding = true; out.errors.push({ row: 2, reason: "a stand-in rejection" }); hold.out = { skipped: out.skippedDuplicates, rejected: out.errors.length, imported: out.imported }; await held; } return out; }; return hold; };
+  const startRepeating = async (w) => { let job = await w.jobs.createFromFile(w.ws, repeating(), { name: "r.xlsx" }, actor); job = await w.jobs.review(job, { uniqueColumn: 1 }); job = await w.jobs.startNewBoard(job, { confirmNewBoard: true }); const hold = holdFirstBatch(w); w.jobs.wake(); for (let i = 0; i < 300 && !hold.holding; i += 1) await sleep(10); assert.equal(hold.holding, true); return { job, hold }; };
+  const idle = async (w) => { for (let i = 0; i < 300 && w.jobs.running; i += 1) await sleep(10); };
+  test("cancelled mid-batch: that batch's skipped and rejected rows are counted, once", async () => {
+    const w = await world(), { job, hold } = await startRepeating(w);
+    assert.ok(hold.out.skipped > 0, "the batch has repeats");
+    await w.jobs.cancel(await w.jobs.find(job._id)); hold.release(); await idle(w);
+    const ended = await w.jobs.find(job._id);
+    assert.equal(ended.skippedDuplicates, hold.out.skipped); assert.equal(ended.rejected, hold.out.rejected); assert.equal(ended.imported, hold.out.imported);
+    assert.ok(ended.errors.some((e) => e.reason === "a stand-in rejection"), "and it's in the report"); assert.equal(ended.uncounted, undefined);
+    assert.equal(await w.records.countDocuments({ boardId: ended.boardId }), ended.imported);
+  });
+  test("paused mid-batch, then cancelled: that batch's figures are applied when cancelling, once", async () => {
+    const w = await world(), { job, hold } = await startRepeating(w);
+    await w.jobs.pause(await w.jobs.find(job._id)); hold.release(); await idle(w);
+    const paused = await w.jobs.find(job._id);
+    assert.equal(paused.status, "paused"); assert.equal(paused.skippedDuplicates, 0, "not counted while it can still run again"); assert.equal(paused.uncounted.skippedDuplicates, hold.out.skipped);
+    const ended = await w.jobs.cancel(paused);
+    assert.equal(ended.skippedDuplicates, hold.out.skipped); assert.equal(ended.rejected, hold.out.rejected); assert.equal(ended.uncounted, undefined); assert.equal(ended.imported, await w.records.countDocuments({ boardId: ended.boardId }));
+  });
+  test("paused mid-batch, then resumed: that batch runs again and nothing is counted twice", async () => {
+    const w = await world(), { job, hold } = await startRepeating(w);
+    await w.jobs.pause(await w.jobs.find(job._id)); hold.release(); await idle(w);
+    assert.ok((await w.jobs.find(job._id)).uncounted);
+    w.jobs.runBatch = Object.getPrototypeOf(w.jobs).runBatch.bind(w.jobs);
+    await w.jobs.resume(await w.jobs.find(job._id));
+    const done = await finished(w.jobs, job._id), unique = 361; // 450 rows: 360 with a code of their own, plus the first "SAME"
+    assert.equal(done.status, "done"); assert.equal(done.uncounted, undefined);
+    assert.equal(done.imported, unique); assert.equal(done.skippedDuplicates, 450 - unique); assert.equal(done.imported + done.skippedDuplicates + done.rejected, 450, "every row counted once");
+    assert.equal(await w.records.countDocuments({ boardId: done.boardId }), unique);
+  });
+  test("the board deleted while a batch is being written: the job fails, saying why, and leaves no rows behind", async () => {
+    const w = await world(); let job = await w.jobs.createFromFile(w.ws, big(450), { name: "b.xlsx" }, actor);
+    job = await w.jobs.review(job, {}); job = await w.jobs.startNewBoard(job, { confirmNewBoard: true });
+    const real = w.jobs.runBatch.bind(w.jobs); let holding = false, release; const held = new Promise((r) => { release = r; });
+    w.jobs.runBatch = async (...a) => { if (!holding) { holding = true; await held; } return real(...a); }; // the board goes just before this batch writes
+    w.jobs.wake(); for (let i = 0; i < 300 && !holding; i += 1) await sleep(10);
+    const running = await w.jobs.find(job._id), board = await w.dl.repos.boards.findById(running.boardId);
+    await w.s.boards.delete(board._id, board.version, actor); release();
+    const ended = await finished(w.jobs, job._id);
+    assert.equal(ended.status, "failed"); assert.match(ended.lastError, /deleted/);
+    assert.equal(await w.records.countDocuments({ boardId: running.boardId }), 0, "nothing is left on a board that no longer exists");
+    assert.equal(await w.jobs.batches.countDocuments({ jobId: job._id }), 0);
+  });
+  test("pausing while a batch is being written doesn't count its rows twice after resuming", async () => {
+    const w = await world(); let job = await w.jobs.createFromFile(w.ws, big(400), { name: "b.xlsx" }, actor);
+    job = await w.jobs.review(job, {}); job = await w.jobs.startNewBoard(job, { confirmNewBoard: true });
+    const realRun = w.jobs.runBatch.bind(w.jobs); let release, holding = false; const held = new Promise((r) => { release = r; });
+    w.jobs.runBatch = async (...a) => { const out = await realRun(...a); if (!holding) { holding = true; await held; } return out; };
+    w.jobs.wake();
+    for (let i = 0; i < 300 && !holding; i += 1) await sleep(10);
+    await w.jobs.pause(await w.jobs.find(job._id));
+    release();
+    for (let i = 0; i < 300 && w.jobs.running; i += 1) await sleep(10);
+    const paused = await w.jobs.find(job._id), onBoard = await w.records.countDocuments({ boardId: paused.boardId });
+    assert.equal(paused.status, "paused"); assert.ok(onBoard > paused.imported, "the batch landed after the counter stopped");
+    await w.jobs.resume(paused);
+    const done = await finished(w.jobs, job._id);
+    assert.equal(done.status, "done"); assert.equal(done.imported, 400); assert.equal(await w.records.countDocuments({ boardId: done.boardId }), 400, "no row twice");
+  });
   test("the search index reaches a new board's records and forgets a removed one", async () => {
     const w = await world({ search: "on" }); await w.dl.searchIndex.catchUp();
     const done = await importFile(w, mondayFile()); await w.dl.searchIndex.flush();
@@ -509,6 +587,21 @@ describe("The import API", () => {
     assert.equal(state.status, "removed"); assert.equal(state.removedRecords, 3);
     assert.equal((await api(allowed.url, "GET", `/api/v1/boards/${state.boardId}`)).status, 404);
   });
+  test("the tracker's view: started imports only, small, with the board's real count; a board carries its count too", async () => {
+    const list = async () => (await api(allowed.url, "GET", `/api/v1/workspaces/${ws.id}/imports?view=progress`)).body.items;
+    const up = await raw(allowed, "POST", `/workspaces/${ws.id}/imports?name=progress.csv`, "Name,Code\nP1,1\nP2,2\n"), { import: job } = await up.json();
+    assert.equal((await list()).some((j) => j.id === job.id), false, "not started yet");
+    await api(allowed.url, "PATCH", `/api/v1/imports/${job.id}`, {}); await api(allowed.url, "POST", `/api/v1/imports/${job.id}/start`, { confirmNewBoard: true });
+    let item; for (let i = 0; i < 300; i += 1) { item = (await list()).find((j) => j.id === job.id); if (item?.status === "done") break; await sleep(10); }
+    assert.equal(item.status, "done"); assert.equal(item.imported, 2); assert.equal(item.recordsOnBoard, 2); assert.ok(item.updatedAt); assert.equal(item.rowCount, 2);
+    for (const heavy of ["structure", "validation", "columns", "mapping"]) assert.equal(item[heavy], undefined, heavy);
+    assert.equal((await api(allowed.url, "GET", `/api/v1/boards/${item.boardId}`)).body.board.recordCount, 2);
+    assert.equal((await api(allowed.url, "GET", `/api/v1/workspaces/${ws.id}/imports?view=other`)).status, 400);
+    assert.equal((await api(allowed.url, "GET", `/api/v1/workspaces/${ws.id}/imports?other=1`)).status, 400);
+    await api(allowed.url, "POST", `/api/v1/imports/${job.id}/remove-board`, {});
+    for (let i = 0; i < 300; i += 1) { item = (await list()).find((j) => j.id === job.id); if (item.status === "removed") break; await sleep(10); }
+    assert.equal(item.recordsOnBoard, null, "no board left to count");
+  });
   test("an oversized file is refused", async () => {
     assert.equal((await raw(allowed, "POST", `/workspaces/${ws.id}/imports?name=x.csv`, Buffer.alloc(26 * 1024 * 1024, 65))).status, 413);
   });
@@ -573,9 +666,21 @@ describe("Access and screens, with Microsoft sign-in (real app, headless browser
     await b.evaluate(`[...document.querySelectorAll('#sidebar .tree-item')].find((el) => el.textContent.includes("Existing"))?.click()`);
     assert.ok(await b.waitFor("!!document.querySelector('.board-tools')", 10000));
   };
-  test("a viewer isn't offered the import", async () => {
+  // The ways in: a board's Import dialog, and Home's Import data. The sidebar has neither button.
+  const startWizard = async (b) => {
+    assert.equal(await click(b, "[data-action=import]"), true, "the board's Import button"); await reached(b, ".import-modal", 5000);
+    assert.equal(await click(b, "[data-action=xl-import-new]"), true, "offered in the Import dialog");
+    assert.ok(await b.waitFor("!!document.querySelector('#xl-import-file')", 5000), "the upload step");
+  };
+  const goHome = async (b) => { await click(b, ".nav-item[data-screen=home]"); assert.ok(await b.waitFor("!!document.querySelector('.page-head [data-action=new-board]')", 10000), "Home"); };
+  const homeChooser = async (b) => { assert.equal(await click(b, "[data-action=home-import]"), true); assert.ok(await b.waitFor("!!document.querySelector('.choice-list')", 5000), "Home's Import data"); };
+  const sidebarHasNoBoardButtons = (b) => b.evaluate("!document.querySelector('#sidebar [data-action=new-board], #sidebar [data-action=xl-import-new]')");
+  test("a viewer isn't offered the import, anywhere", async () => {
     const b = browsers.vic; await openApp(b);
     assert.equal(await b.evaluate("!!document.querySelector('[data-action=xl-import-new]')"), false);
+    await goHome(b); await homeChooser(b);
+    assert.equal(await b.evaluate("!!document.querySelector('[data-action=xl-import-new]')"), false, "nor in Home's Import data");
+    await click(b, "#overlay-root [data-action=close-overlay]");
   });
   test("with the feature off, nobody is offered it and its routes don't exist", async () => {
     const port = await freePort(), off = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port)], { stdio: "ignore", env: { ...process.env, JARC_TEST_FEATURES: "off" } });
@@ -586,15 +691,15 @@ describe("Access and screens, with Microsoft sign-in (real app, headless browser
         await b.open(`http://localhost:${port}/api/v1/health`, { width: 1440, height: 900 }); await signIn(b, "root", true);
         const made = await b.evaluate(`(async () => { const { csrfToken } = await (await fetch("/api/v1/auth/session")).json(); const r = await fetch("/api/v1/workspaces", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: JSON.stringify({ name: "Off" }) }); return (await r.json()).workspace.id; })()`);
         assert.equal(await b.evaluate(`(async () => (await fetch("/api/v1/workspaces/${made}/imports")).status)()`), 404);
-        await b.send("Page.navigate", { url: `http://localhost:${port}/` }); assert.ok(await b.waitFor("!!document.querySelector('.new-board-nav')", 15000));
+        await b.send("Page.navigate", { url: `http://localhost:${port}/` }); assert.ok(await b.waitFor("!!document.querySelector('.page-head [data-action=new-board]')", 15000));
         assert.equal(await b.evaluate("!!document.querySelector('[data-action=xl-import-new]')"), false);
+        assert.equal(await b.evaluate("document.querySelector('[data-action=home-import]').disabled"), true, "with no boards and no wizard, Home's Import data has nothing to offer");
       } finally { await b.close(); }
     } finally { off.kill(); }
   });
   test("on screen, step by step: upload, what's found, columns, the check, explicit confirmation, a new board", async () => {
     const b = browsers.ann; await openApp(b);
-    assert.equal(await click(b, "[data-action=xl-import-new]"), true, "offered to a member");
-    assert.ok(await b.waitFor("!!document.querySelector('#xl-import-file')", 5000));
+    await startWizard(b);
     await pickFile(b, files.monday, "Installations.xlsx");
     assert.ok(await b.waitFor("!!document.querySelector('.xl-step-structure')", 15000), "what's in the file");
     const found = await b.evaluate("document.querySelector('.xl-step-structure').textContent");
@@ -623,7 +728,7 @@ describe("Access and screens, with Microsoft sign-in (real app, headless browser
   });
   test("on screen: the same file again needs its own confirmation", async () => {
     const b = browsers.ann; await openApp(b);
-    await click(b, "[data-action=xl-import-new]"); assert.ok(await b.waitFor("!!document.querySelector('#xl-import-file')", 5000), "the upload step");
+    await startWizard(b);
     await pickFile(b, files.monday, "Installations again.xlsx");
     await reached(b, ".xl-step-structure", 15000);
     await click(b, "[data-action=xl-import-structure]"); await reached(b, ".xl-step-columns", 10000);
@@ -639,7 +744,7 @@ describe("Access and screens, with Microsoft sign-in (real app, headless browser
   });
   test("on screen: a problem blocks importing and offers the full list", async () => {
     const b = browsers.ann; await openApp(b);
-    await click(b, "[data-action=xl-import-new]"); assert.ok(await b.waitFor("!!document.querySelector('#xl-import-file')", 5000), "the upload step");
+    await startWizard(b);
     await pickFile(b, xlsx([["Name", "Code"], ["A", "1"], ["", "no name here"]]).toString("base64"), "bad.xlsx");
     await reached(b, ".xl-step-structure", 15000);
     await click(b, "[data-action=xl-import-structure]"); await reached(b, ".xl-step-columns", 10000);
@@ -652,7 +757,7 @@ describe("Access and screens, with Microsoft sign-in (real app, headless browser
   // Holds this browser's next PATCH until told to continue (or to fail), counting how many were sent.
   const holdPatches = (b, outcome = "pass") => b.evaluate(`(() => { const real = window.__realFetch ||= window.fetch; window.__patches = 0; window.__release = null; window.fetch = (url, options) => { if (options?.method !== "PATCH") return real(url, options); window.__patches += 1; return new Promise((resolve) => { window.__release = () => resolve(${outcome === "fail" ? `new Response(JSON.stringify({ error: { code: "VALIDATION_ERROR", message: "Test refusal." } }), { status: 400, headers: { "Content-Type": "application/json" } })` : "real(url, options)"}); }); }; })()`);
   const toColumns = async (b, name, rows) => {
-    await openApp(b); await click(b, "[data-action=xl-import-new]"); assert.ok(await b.waitFor("!!document.querySelector('#xl-import-file')", 5000), "the upload step");
+    await openApp(b); await startWizard(b);
     await pickFile(b, xlsx(rows).toString("base64"), name); await reached(b, ".xl-step-structure", 15000);
     await click(b, "[data-action=xl-import-structure]"); await reached(b, ".xl-step-columns", 10000);
   };
@@ -703,14 +808,243 @@ describe("Access and screens, with Microsoft sign-in (real app, headless browser
   });
   test("on a phone: the steps fit, with no sideways scrolling of the page", async () => {
     const b = browsers.ann; await openApp(b, 390);
-    await b.evaluate("document.querySelector('.nav-toggle, [data-action=toggle-nav]')?.click()");
-    await click(b, "[data-action=xl-import-new]"); assert.ok(await b.waitFor("!!document.querySelector('#xl-import-file')", 5000), "the upload step");
+    await goHome(b); await homeChooser(b);
+    assert.equal(await click(b, ".choice-list [data-action=xl-import-new]"), true); assert.ok(await b.waitFor("!!document.querySelector('#xl-import-file')", 5000), "the upload step");
     await pickFile(b, xlsx([["Name", "Code", "Site"], ["P1", "1", "x"]]).toString("base64"), "phone.xlsx");
     await reached(b, ".xl-step-structure", 15000);
     await click(b, "[data-action=xl-import-structure]"); await reached(b, ".xl-step-columns", 10000);
     assert.equal(await b.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true);
     assert.ok(await b.evaluate("document.querySelector('.xl-wizard').getBoundingClientRect().width <= window.innerWidth"));
     await click(b, "[data-action=xl-import-cancel]");
+  });
+  test("the sidebar has no board buttons, while its other controls and the boards stay", async () => {
+    for (const [width, label] of [[1440, "desktop"], [390, "phone"]]) {
+      const b = browsers.ann; await openApp(b, width);
+      assert.equal(await sidebarHasNoBoardButtons(b), true, label);
+      assert.equal(await b.evaluate("[...document.querySelectorAll('#sidebar .tree-item')].some((el) => el.textContent.includes('Existing'))"), true, `${label}: the boards`);
+      for (const sel of [".nav-item[data-screen=home]", ".nav-item[data-screen=mywork]", "#sidebar [data-action=command-palette]", "#sidebar [data-action=workspace-menu]", "#sidebar [data-action=board-menu]", "#sidebar [data-action=create-workspace]"]) assert.equal(await b.evaluate(`!!document.querySelector(${JSON.stringify(sel)})`), true, `${label}: ${sel}`);
+    }
+  });
+  test("a new board is still made from Home, once, and from the command palette", async () => {
+    const b = browsers.ann; await openApp(b); await goHome(b);
+    assert.equal(await b.evaluate("document.querySelectorAll('[data-action=new-board]').length"), 1, "one button on Home");
+    await click(b, ".page-head [data-action=new-board]"); await reached(b, "#overlay-root .modal [name=name]", 5000);
+    await b.evaluate("(() => { const form = document.querySelector('#overlay-root form'); form.querySelector('[name=name]').value = 'Made from Home'; form.requestSubmit(); })()");
+    assert.ok(await b.waitFor("[...document.querySelectorAll('#sidebar .tree-item')].some((el) => el.textContent.includes('Made from Home'))", 10000), "it's in the sidebar");
+    await goHome(b);
+    await click(b, "#sidebar [data-action=command-palette]"); await reached(b, ".command-modal", 5000);
+    assert.ok(await b.waitFor("!!document.querySelector('[data-command=new-board]')", 5000), "Create board in the palette");
+    await b.key("Escape");
+  });
+  test("Home's Import data offers a new board from a file, above the existing boards", async () => {
+    const b = browsers.ann; await openApp(b); await goHome(b); await homeChooser(b);
+    assert.equal(await b.evaluate("document.querySelector('.choice-list > button').dataset.action"), "xl-import-new", "first in the list");
+    assert.match(await b.evaluate("document.querySelector('.choice-list [data-action=xl-import-new]').textContent"), /New board from a file[\s\S]*Excel or CSV/);
+    assert.equal(await b.evaluate("document.querySelectorAll('.choice-list [data-action=xl-import-new]').length"), 1);
+    assert.equal(await b.evaluate("document.querySelectorAll('.choice-list [data-action=choose-board-action]').length > 0"), true, "importing into a board is still there");
+    await click(b, ".choice-list [data-action=xl-import-new]"); assert.ok(await b.waitFor("!!document.querySelector('#xl-import-file')", 5000), "the wizard's upload step");
+    await click(b, "#overlay-root [data-action=close-overlay]");
+  });
+  // ---- The progress tracker.
+  const csv = (prefix, n) => `Name,Code\n${Array.from({ length: n }, (_, i) => `${prefix} ${i},${prefix}${i}`).join("\n")}\n`;
+  const startImport = async (who, prefix, n) => {
+    const up = await uploadAs(who, csv(prefix, n), `${prefix}.csv`); assert.equal(up.status, 201, JSON.stringify(up.body));
+    const id = up.body.import.id;
+    assert.equal((await call(who, "PATCH", `/imports/${id}`, {})).status, 200);
+    assert.equal((await call(who, "POST", `/imports/${id}/start`, { confirmNewBoard: true })).status, 200);
+    return id;
+  };
+  const jobOf = async (who, id) => (await call(who, "GET", `/imports/${id}`)).body.import;
+  const until = async (who, id, test, ms = 60000) => { const end = Date.now() + ms; for (;;) { const j = await jobOf(who, id); if (test(j)) return j; if (Date.now() > end) throw new Error(`waited too long: ${j.status} ${j.imported}`); await sleep(100); } };
+  const trackerText = (b) => b.evaluate("document.querySelector('.import-tracker:not([hidden])')?.textContent.replace(/\\s+/g, ' ') || ''");
+  const clearTracker = (b) => b.evaluate("(() => { try { localStorage.removeItem('jarc-import-tracker-minimized'); } catch {} })()");
+  const badgeOf = (b, name) => b.evaluate(`[...document.querySelectorAll('#sidebar .board-nav')].find((n) => n.textContent.includes(${JSON.stringify(name)}))?.querySelector('.nav-count')?.textContent`);
+  // Clears what earlier tests finished, after the tracker has had its first look at the server.
+  const dismissAll = async (b) => {
+    await sleep(800);
+    for (let i = 0; i < 30; i += 1) {
+      await b.evaluate("document.querySelector('.import-tracker [data-xt=toggle][aria-expanded=false]')?.click()");
+      if (!await click(b, ".import-tracker [data-xt=dismiss]")) return;
+      await sleep(30);
+    }
+  };
+  test("the tracker: from the wizard's Close to a finished board, through a refresh, with the sidebar's count following", async () => {
+    const b = browsers.ann; await clearTracker(b); await openApp(b); await dismissAll(b);
+    await startWizard(b); await pickFile(b, Buffer.from(csv("Tracked", 1200)).toString("base64"), "Tracked.csv"); await reached(b, ".xl-step-structure", 15000);
+    await click(b, "[data-action=xl-import-structure]"); await reached(b, ".xl-step-columns", 10000);
+    await click(b, "[data-action=xl-import-columns]"); await reached(b, ".xl-step-check", 10000);
+    await b.evaluate("document.querySelector('[data-step=confirm]').click()"); await reached(b, ".xl-step-confirm", 5000);
+    await click(b, "[name=confirmNewBoard]"); await click(b, "[data-action=xl-import-start]"); await reached(b, ".xl-step-run", 10000);
+    const id = (await call("ann", "GET", `/workspaces/${ws.id}/imports?view=progress`)).body.items[0].id;
+    await click(b, ".xl-step-run [data-action=close-overlay]");
+    assert.ok(await b.waitFor("!document.querySelector('.xl-wizard')", 5000), "the window closed");
+    assert.ok(await b.waitFor("/Tracked/.test(document.querySelector('.import-tracker:not([hidden])')?.textContent || '')", 10000), "the tracker stays");
+    assert.ok(await b.waitFor("/(Preparing|Importing) [\\d,]+ \\/ 1,200 \\(\\d+%\\)/.test(document.querySelector('.import-tracker').textContent.replace(/\\s+/g, ' '))", 10000), await trackerText(b));
+    assert.notEqual((await jobOf("ann", id)).status, "cancelled", "closing never stops it");
+    // The right job reopens from the tracker.
+    await click(b, ".import-tracker [data-xt=open]"); await reached(b, ".xl-step-run", 5000);
+    assert.match(await b.evaluate("document.querySelector('.xl-step-run').textContent"), /Tracked\.csv/);
+    await click(b, ".xl-step-run [data-action=close-overlay]");
+    // It stays through navigation, the same card, and keeps moving.
+    await b.evaluate("window.__card = document.querySelector('.import-tracker')");
+    for (const [sel, ready] of [[".nav-item[data-screen=mywork]", ".nav-item[data-screen=mywork].active"], [".nav-item[data-screen=home]", ".page-head [data-action=new-board]"], ["#sidebar .board-nav .tree-item", ".board-tools"]]) {
+      await click(b, sel); assert.ok(await b.waitFor(`!!document.querySelector(${JSON.stringify(ready)})`, 10000), ready);
+      assert.equal(await b.evaluate("window.__card === document.querySelector('.import-tracker') && !window.__card.hidden && /Tracked/.test(window.__card.textContent)"), true, `the tracker after ${sel}`);
+    }
+    const onBoard = (await jobOf("ann", id)).imported;
+    assert.ok(await b.waitFor(`Number(/([\\d,]+) \\/ 1,200/.exec(document.querySelector('.import-tracker').textContent)?.[1]?.replace(/,/g, '')) > ${onBoard}`, 15000), "it keeps moving after navigating");
+    // The sidebar's count rises while it runs, and a refresh brings the tracker back.
+    assert.ok(await b.waitFor("[...document.querySelectorAll('#sidebar .board-nav')].some((n) => n.textContent.includes('Tracked') && Number(n.querySelector('.nav-count')?.textContent.replace(/\\D/g, '')) > 0)", 30000), "the count moves off zero while importing");
+    await b.open(`${base}/`, { width: 1440, height: 900 });
+    assert.ok(await b.waitFor("/Tracked/.test(document.querySelector('.import-tracker:not([hidden])')?.textContent || '')", 15000), "back after a refresh");
+    const seen = []; for (let i = 0; i < 400; i += 1) { const t = await b.evaluate("Number(/([\\d,]+) \\/ 1,200/.exec(document.querySelector('.import-tracker')?.textContent || '')?.[1]?.replace(/,/g, '') ?? -1)"); if (t >= 0) seen.push(t); if (/Completed/.test(await trackerText(b))) break; await sleep(100); }
+    assert.ok(seen.length > 1); assert.deepEqual(seen, [...seen].sort((x, y) => x - y), "progress never goes backwards");
+    const text = await trackerText(b);
+    assert.match(text, /Completed 1,200 \/ 1,200 \(100%\)/);
+    assert.equal(await badgeOf(b, "Tracked"), "1,200", "the sidebar shows the finished count without a refresh");
+    await b.open(`${base}/`, { width: 1440, height: 900 }); await b.waitFor("!!document.querySelector('#sidebar .board-nav')", 15000);
+    assert.equal(await badgeOf(b, "Tracked"), "1,200", "and after one");
+    // Open Board, then Dismiss, which only hides the card and stays hidden after a refresh.
+    assert.ok(await b.waitFor("!!document.querySelector('.import-tracker [data-xt=board]')", 15000));
+    await click(b, ".import-tracker [data-xt=board]");
+    assert.ok(await b.waitFor("[...document.querySelectorAll('tr[data-record-context]')].some((r) => r.textContent.includes('Tracked 0'))", 15000), "the board opens");
+    await click(b, ".import-tracker [data-xt=dismiss]"); assert.ok(await b.waitFor("document.querySelector('.import-tracker').hidden", 3000), "dismissed");
+    await b.open(`${base}/`, { width: 1440, height: 900 }); await b.waitFor("!!document.querySelector('#sidebar .board-nav')", 15000); await sleep(1200);
+    assert.equal((await trackerText(b)).includes("Tracked"), false, "stays dismissed");
+    assert.equal(await badgeOf(b, "Tracked"), "1,200", "the board is untouched");
+    assert.equal((await jobOf("ann", id)).status, "done");
+  });
+  test("the tracker: pause, resume and cancel show as they happen, and a cancelled import keeps the records it made", async () => {
+    const b = browsers.ann; await clearTracker(b); await openApp(b); await dismissAll(b);
+    const id = await startImport("ann", "Controlled", 1500);
+    await b.open(`${base}/`, { width: 1440, height: 900 });
+    assert.ok(await b.waitFor("/Controlled/.test(document.querySelector('.import-tracker:not([hidden])')?.textContent || '')", 15000), "the tracker finds an import started elsewhere");
+    await until("ann", id, (j) => j.imported > 0);
+    assert.equal((await call("ann", "POST", `/imports/${id}/pause`, {})).status, 200);
+    assert.ok(await b.waitFor("/Paused/.test(document.querySelector('.import-tracker').textContent)", 10000), await trackerText(b));
+    // A batch on its way at the moment of pausing still lands: the sidebar and the tracker show what's really on the board, and agree.
+    await sleep(1500);
+    const paused = await jobOf("ann", id), onBoard = (await call("ann", "GET", `/workspaces/${ws.id}/imports?view=progress`)).body.items.find((j) => j.id === id).recordsOnBoard;
+    assert.ok(onBoard >= paused.imported && onBoard - paused.imported <= 100, `${onBoard} on the board, ${paused.imported} counted`);
+    const shown = onBoard.toLocaleString("en-US");
+    assert.ok(await b.waitFor(`[...document.querySelectorAll('#sidebar .board-nav')].some((n) => n.textContent.includes('Controlled') && n.querySelector('.nav-count')?.textContent === '${shown}')`, 10000), `the sidebar: ${await badgeOf(b, "Controlled")} for ${shown}`);
+    assert.ok(await b.waitFor(`document.querySelector('.import-tracker').textContent.replace(/\\s+/g, ' ').includes('Paused ${shown} / 1,500')`, 10000), `the tracker agrees: ${await trackerText(b)}`);
+    assert.equal((await call("ann", "POST", `/imports/${id}/resume`, {})).status, 200);
+    await until("ann", id, (j) => j.imported > onBoard);
+    assert.ok(await b.waitFor("/(Preparing|Importing)/.test(document.querySelector('.import-tracker').textContent)", 10000));
+    assert.equal((await call("ann", "POST", `/imports/${id}/cancel`, {})).status, 200);
+    assert.ok(await b.waitFor("/Cancelled/.test(document.querySelector('.import-tracker').textContent)", 10000), await trackerText(b));
+    await sleep(1500); // a batch on its way at that moment lands, and its rows are counted
+    const ended = await jobOf("ann", id), board = (await call("ann", "GET", `/boards/${ended.boardId}`)).body.board;
+    assert.ok(ended.imported > 0); assert.equal(ended.imported, board.recordCount, "a cancelled import's count is what it really wrote");
+    assert.ok(await b.waitFor(`[...document.querySelectorAll('#sidebar .board-nav')].some((n) => n.textContent.includes('Controlled') && n.querySelector('.nav-count')?.textContent === '${ended.imported.toLocaleString("en-US")}')`, 15000), `the sidebar: ${await badgeOf(b, "Controlled")} for ${ended.imported}`);
+    await dismissAll(b);
+  });
+  test("the tracker: several imports stay apart, as a summary that opens into a list, and another member doesn't see them", async () => {
+    const b = browsers.ann; await clearTracker(b); await openApp(b); await dismissAll(b);
+    const first = await startImport("ann", "Alpha", 900), second = await startImport("ann", "Beta", 150);
+    await b.open(`${base}/`, { width: 1440, height: 900 });
+    assert.ok(await b.waitFor("/2 imports/.test(document.querySelector('.import-tracker:not([hidden])')?.textContent || '')", 15000), await trackerText(b));
+    assert.equal(await b.evaluate("document.querySelectorAll('.import-tracker .xt-job').length"), 0, "a compact summary first");
+    await click(b, ".import-tracker [data-xt=toggle]");
+    assert.equal(await b.evaluate("document.querySelectorAll('.import-tracker .xt-job').length"), 2);
+    assert.match(await trackerText(b), /Alpha/); assert.match(await trackerText(b), /Beta/);
+    await b.evaluate(`document.querySelector('.import-tracker [data-xt=open][data-id="${second}"]').click()`); await reached(b, ".xl-step-run", 5000);
+    assert.match(await b.evaluate("document.querySelector('.xl-step-run').textContent"), /Beta\.csv/, "each opens its own");
+    await click(b, ".xl-step-run [data-action=close-overlay]");
+    await browsers.ben.open(`${base}/`, { width: 1440, height: 900 }); await browsers.ben.waitFor("!!document.querySelector('#sidebar')", 15000); await sleep(1500);
+    const benSees = await trackerText(browsers.ben); assert.equal(/Alpha|Beta/.test(benSees), false, "another member's tracker shows only their own");
+    const a = await until("ann", first, (j) => j.status === "done", 90000), c = await until("ann", second, (j) => j.status === "done", 90000);
+    assert.equal(a.imported, 900); assert.equal(c.imported, 150);
+    assert.ok(await b.waitFor("/2 imports · 0 active/.test(document.querySelector('.import-tracker').textContent)", 15000), await trackerText(b));
+    assert.equal(await badgeOf(b, "Alpha"), "900"); assert.equal(await badgeOf(b, "Beta"), "150");
+    await dismissAll(b);
+  });
+  test("the tracker: a failed import says why and stays inspectable; a stale response can't move it back; minimizing keeps it", async () => {
+    const b = browsers.ann; await clearTracker(b); await openApp(b); await dismissAll(b); await sleep(300);
+    const id = "f".repeat(24), boardFree = { id, workspaceId: ws.id, boardId: null, boardName: "Failing board", status: "failed", fileName: "failing.csv", rowCount: 500, imported: 100, skippedDuplicates: 0, rejected: 2, removedRecords: 0, processedBatches: 1, batchCount: 5, errors: [{ row: 3, reason: "Name is missing" }], lastError: "The database couldn't be reached.", recordsOnBoard: null, updatedAt: "2099-01-01T00:00:00.000Z", finishedAt: new Date().toISOString() };
+    await b.evaluate(`(() => { const real = window.fetch, stub = ${JSON.stringify(boardFree)}; window.__view = (extra) => ({ items: [{ ...stub, ...extra }] }); window.__next = window.__view({}); window.fetch = async (url, o) => { if (String(url).includes('view=progress')) return new Response(JSON.stringify(window.__next), { status: 200, headers: { "Content-Type": "application/json" } }); return real(url, o); }; document.dispatchEvent(new Event('visibilitychange')); })()`);
+    assert.ok(await b.waitFor("/Failed 100 \\/ 500/.test(document.querySelector('.import-tracker:not([hidden])')?.textContent.replace(/\\s+/g, ' ') || '')", 10000), await trackerText(b));
+    assert.match(await trackerText(b), /The database couldn't be reached/); assert.match(await trackerText(b), /2 rows rejected/);
+    // An older answer arriving late is ignored.
+    await b.evaluate(`(() => { window.__next = window.__view({ status: "running", imported: 5, updatedAt: "2001-01-01T00:00:00.000Z" }); document.dispatchEvent(new Event('visibilitychange')); })()`); await sleep(600);
+    assert.match(await trackerText(b), /Failed 100 \/ 500/, "not moved back");
+    // Minimizing keeps it, across a refresh of what's shown.
+    await click(b, ".import-tracker [data-xt=minimize]");
+    assert.equal(await b.evaluate("!!document.querySelector('.import-tracker.is-minimized .xt-pill')"), true); assert.match(await trackerText(b), /Failed/);
+    await click(b, ".import-tracker [data-xt=restore]"); assert.equal(await b.evaluate("!!document.querySelector('.import-tracker .xt-job')"), true);
+    await dismissAll(b); await clearTracker(b);
+  });
+  test("the tracker, on a real failure: the board is deleted during the import, it says why, and the job can still be inspected", async () => {
+    const b = browsers.ann; await clearTracker(b); await openApp(b); await dismissAll(b);
+    const id = await startImport("ann", "Doomed", 1500);
+    await b.open(`${base}/`, { width: 1440, height: 900 });
+    assert.ok(await b.waitFor("/Doomed/.test(document.querySelector('.import-tracker:not([hidden])')?.textContent || '')", 15000), await trackerText(b));
+    const running = await until("ann", id, (j) => j.imported > 0 && j.boardId), board = (await call("root", "GET", `/boards/${running.boardId}`)).body.board;
+    assert.equal((await call("root", "DELETE", `/boards/${running.boardId}?expectedVersion=${board.version}`)).status, 200, "a real deletion, by an administrator");
+    const failed = await until("ann", id, (j) => j.status === "failed");
+    assert.match(failed.lastError, /deleted/);
+    assert.ok(await b.waitFor("/Failed/.test(document.querySelector('.import-tracker').textContent)", 15000), await trackerText(b));
+    assert.match(await trackerText(b), /The board was deleted/);
+    assert.equal(await b.evaluate("!!document.querySelector('.import-tracker [data-xt=board]')"), false, "no Open board for a board that's gone");
+    await click(b, ".import-tracker [data-xt=open]"); await reached(b, ".xl-step-run", 5000);
+    const shown = await b.evaluate("document.querySelector('.xl-step-run').textContent"); assert.match(shown, /Import stopped/); assert.match(shown, /The board was deleted/);
+    await click(b, ".xl-step-run [data-action=close-overlay]");
+    assert.equal((await call("ann", "GET", `/imports/${id}`)).status, 200, "the job stays to inspect");
+    await dismissAll(b);
+  });
+  test("the tracker, on a real halt: a column it needs is removed, it pauses and says why; cancelling then keeps what it made", async () => {
+    const b = browsers.ann; await clearTracker(b); await openApp(b); await dismissAll(b);
+    const id = await startImport("ann", "Halted", 1500);
+    await b.open(`${base}/`, { width: 1440, height: 900 });
+    assert.ok(await b.waitFor("/Halted/.test(document.querySelector('.import-tracker:not([hidden])')?.textContent || '')", 15000), await trackerText(b));
+    const running = await until("ann", id, (j) => j.imported > 0 && j.boardId), board = (await call("root", "GET", `/boards/${running.boardId}`)).body.board, code = board.columns.find((c) => c.label === "Code");
+    assert.equal((await call("root", "DELETE", `/boards/${running.boardId}/columns/${code.key}?expectedVersion=${board.version}`)).status, 200, "a real column removal");
+    const halted = await until("ann", id, (j) => j.status === "paused");
+    assert.match(halted.lastError, /column this import uses was removed/);
+    assert.ok(await b.waitFor("/Paused/.test(document.querySelector('.import-tracker').textContent) && /column this import uses/.test(document.querySelector('.import-tracker').textContent)", 15000), await trackerText(b));
+    const ended = (await call("ann", "POST", `/imports/${id}/cancel`, {})).body.import;
+    assert.equal(ended.status, "cancelled"); assert.equal(ended.imported, (await call("ann", "GET", `/boards/${ended.boardId}`)).body.board.recordCount);
+    assert.ok(await b.waitFor("/Cancelled/.test(document.querySelector('.import-tracker').textContent)", 15000));
+    await dismissAll(b);
+  });
+  test("the tracker on a phone: fits the screen, with no sideways scrolling", async () => {
+    const b = browsers.ann; await clearTracker(b); await openApp(b, 390); await dismissAll(b);
+    const id = await startImport("ann", "Phone", 800);
+    await b.open(`${base}/`, { width: 390, height: 844 });
+    assert.ok(await b.waitFor("/Phone/.test(document.querySelector('.import-tracker:not([hidden])')?.textContent || '')", 15000), await trackerText(b));
+    const box = await b.evaluate("(() => { const r = document.querySelector('.import-tracker').getBoundingClientRect(); return { left: r.left, right: r.right, bottom: r.bottom, height: r.height, w: innerWidth, h: innerHeight, sideways: document.documentElement.scrollWidth > innerWidth }; })()");
+    assert.ok(box.left >= 0 && box.right <= box.w && box.bottom <= box.h, JSON.stringify(box)); assert.equal(box.sideways, false); assert.ok(box.height < box.h / 3, "it stays small");
+    await b.evaluate("document.querySelector('[data-action=toggle-nav]')?.click()"); await sleep(200);
+    assert.equal(await b.evaluate("getComputedStyle(document.querySelector('.import-tracker')).display"), "none", "out of the way of the menu");
+    await b.evaluate("document.querySelector('[data-action=toggle-nav]')?.click()");
+    await call("ann", "POST", `/imports/${id}/cancel`, {});
+    assert.ok(await b.waitFor("/Cancelled/.test(document.querySelector('.import-tracker').textContent)", 10000)); await dismissAll(b);
+  });
+  test("a colleague's browser sees a count change on a board it hasn't opened", async () => {
+    const b = browsers.ben; await b.open(`${base}/`, { width: 1440, height: 900 }); assert.ok(await b.waitFor("!!document.querySelector('#sidebar .board-nav')", 15000)); await sleep(1000);
+    const made = (await call("root", "POST", `/workspaces/${ws.id}/boards`, { name: "Shared count", columns: [{ key: "serial", label: "Item", type: "text", required: true }] })).body.board;
+    assert.ok(await b.waitFor("[...document.querySelectorAll('#sidebar .board-nav')].some((n) => n.textContent.includes('Shared count'))", 15000), "the board arrives");
+    assert.equal(await badgeOf(b, "Shared count"), "0");
+    assert.equal((await call("root", "POST", `/boards/${made.id}/records`, { values: { serial: "One" } })).status, 201);
+    assert.ok(await b.waitFor("[...document.querySelectorAll('#sidebar .board-nav')].some((n) => n.textContent.includes('Shared count') && n.querySelector('.nav-count')?.textContent === '1')", 15000), `the count follows: ${await badgeOf(b, "Shared count")}`);
+  });
+  test("a workspace with no boards can still reach the wizard from Home, and its sidebar says it's empty", async () => {
+    const empty = (await call("root", "POST", "/workspaces", { name: "No boards here" })).body.workspace;
+    assert.equal((await call("root", "POST", `/workspaces/${empty.id}/members`, { userId: (await call("ben", "GET", "/me")).body.user.id, role: "MEMBER" })).status, 201);
+    const b = browsers.ben; await b.open(`${base}/`, { width: 1440, height: 900 }); assert.ok(await b.waitFor("!!document.querySelector('#sidebar [data-action=workspace-menu]')", 15000));
+    await click(b, "#sidebar [data-action=workspace-menu]"); assert.ok(await b.waitFor("!!document.querySelector('[data-action=switch-workspace]')", 5000));
+    await b.evaluate(`[...document.querySelectorAll('[data-action=switch-workspace]')].find((el) => el.textContent.includes("No boards here")).click()`);
+    assert.ok(await b.waitFor("[...document.querySelectorAll('#sidebar .nav-empty')].some((el) => /No boards yet/.test(el.textContent))", 10000), "the sidebar says so");
+    assert.equal(await sidebarHasNoBoardButtons(b), true);
+    await goHome(b);
+    assert.equal(await b.evaluate("document.querySelector('[data-action=home-import]').disabled"), false, "Import data stays available");
+    await homeChooser(b);
+    await click(b, ".choice-list [data-action=xl-import-new]"); assert.ok(await b.waitFor("!!document.querySelector('#xl-import-file')", 5000), "the wizard");
+    await pickFile(b, xlsx([["Name", "Code"], ["Empty start", "1"]]).toString("base64"), "empty-workspace.xlsx"); await reached(b, ".xl-step-structure", 15000);
+    assert.match(await b.evaluate("document.querySelector('.xl-step-structure').textContent"), /1\s*records?/);
+    await click(b, "[data-action=xl-import-cancel]");
+    await reached(b, ".page-head [data-action=new-board]", 5000);
   });
 });
 
