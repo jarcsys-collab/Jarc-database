@@ -288,4 +288,4 @@ function externalApiRoutes({ tokens, repos, environment = "development", rate = 
   return router;
 }
 
-module.exports = { externalApiRoutes, windowLimiter, columnsOf, parseColumns, projectionFor, recordToExternal, PAGE, RATE, QUERY_TIME_MS };
+module.exports = { externalApiRoutes, windowLimiter, columnsOf, groupsOf, boardSummary, cellToExternal, parseColumns, projectionFor, recordToExternal, PAGE, RATE, QUERY_TIME_MS };

@@ -132,12 +132,29 @@ describe("Limits on issuing", () => {
 });
 
 describe("Who may issue a token", () => {
-  test("only a workspace admin; members, viewers and outsiders can't; nobody can reach beyond their workspace", async () => {
-    const f = await workspace("Issuers");
-    assert.equal((await issue(people.admin, { ws: f.ws, boards: [f.one] })).status, 201);
-    assert.equal((await issue(people.member, { ws: f.ws, boards: [f.one] })).status, 403);
-    assert.equal((await issue(people.viewer, { ws: f.ws, boards: [f.one] })).status, 403);
+  test("any real member (admin, member or viewer) may issue a read-only token; outsiders can't; nobody can reach beyond their workspace", async () => {
+    const f = await workspace("Issuers"), other = await workspace("Issuers elsewhere");
+    for (const who of ["admin", "member", "viewer"]) {
+      const res = await issue(people[who], { ws: f.ws, boards: [f.one, f.two], name: `${who} token` });
+      assert.equal(res.status, 201, `${who}: ${res.text}`);
+      assert.deepEqual(res.body.token.scopes, ["read"]);
+      // One token, both boards and every column on them: no token per board or column.
+      assert.equal((await call(res.body.secret, `/boards/${f.one.board.id}/columns/status/values`)).status, 200);
+      assert.equal((await call(res.body.secret, `/boards/${f.two.board.id}/records?columns=serial,status`)).status, 200);
+      assert.equal((await call(res.body.secret, `/boards/${other.one.board.id}/records`)).status, 404, `${who}: not another workspace`);
+    }
     assert.equal((await issue(people.outsider, { ws: f.ws, boards: [f.one] })).status, 404, "an outsider can't tell the workspace exists");
+    // A member can't name a board from a workspace they aren't in.
+    assert.equal((await issue(people.viewer, { ws: f.ws, boards: [other.one] })).status, 400);
+  });
+
+  test("a token covers only the boards chosen: a board created afterwards is never added", async () => {
+    const f = await workspace("No growth");
+    const { token, secret } = (await issue(people.viewer, { ws: f.ws, boards: [f.one] })).body;
+    const later = (await as(people.sysadmin, "POST", `/api/v1/workspaces/${f.ws.id}/boards`, { name: "Later", columns: COLUMNS })).body.board;
+    assert.equal((await call(secret, `/boards/${later.id}`)).status, 404);
+    assert.deepEqual((await call(secret, `/workspaces/${f.ws.id}/boards`)).body.items.map((b) => b.name), ["Alpha"]);
+    assert.deepEqual((await as(people.viewer, "GET", "/api/v1/me/api-tokens")).body.items.find((t) => t.id === token.id).boards.map((b) => b.id), [f.one.board.id]);
   });
 
   test("the JARC.Admin app role alone isn't enough: it exists only in a session, which a token outlives", async () => {
@@ -145,14 +162,15 @@ describe("Who may issue a token", () => {
     await app.db.collection(COLLECTIONS.workspaceMembers).deleteOne({ workspaceId: new ObjectId(f.ws.id), userId: new ObjectId(await userId(people.sysadmin)) });
     const res = await issue(people.sysadmin, { ws: f.ws, boards: [f.one] });
     assert.equal(res.status, 403);
-    assert.match(res.body.error.message, /Workspace admin membership/);
+    assert.match(res.body.error.message, /your own workspace membership/);
   });
 
   test("the options list only the workspaces this person could issue a token for", async () => {
     const f = await workspace("Options");
     const names = async (p) => (await as(p, "GET", "/api/v1/me/api-tokens/options")).body.workspaces.map((w) => w.name);
     assert.ok((await names(people.admin)).includes("Options"));
-    assert.ok(!(await names(people.member)).includes("Options"));
+    assert.ok((await names(people.member)).includes("Options"));
+    assert.ok((await names(people.viewer)).includes("Options"));
     assert.ok(!(await names(people.outsider)).includes("Options"));
     const listed = (await as(people.admin, "GET", "/api/v1/me/api-tokens/options")).body.workspaces.find((w) => w.id === f.ws.id);
     assert.deepEqual(listed.boards.map((b) => b.name), ["Alpha", "Beta"]);
@@ -321,24 +339,22 @@ describe("Expiry, revocation and rotation", () => {
     assert.equal((await as(people.admin, "POST", `/api/v1/me/api-tokens/${next.body.token.id}/rotate`, { graceHours: 9999 })).status, 400);
   });
 
-  test("rotating needs a real Workspace Admin membership; a demoted or removed owner can't create or rotate", async () => {
+  test("rotating needs a real membership; a demoted owner still can, a removed one can't create or rotate", async () => {
     const f = await workspace("Rotation rights"), members = app.db.collection(COLLECTIONS.workspaceMembers);
     const filter = { workspaceId: new ObjectId(f.ws.id), userId: new ObjectId(await userId(people.admin)) };
     const { token, secret } = (await issue(people.admin, { ws: f.ws, boards: [f.one] })).body;
     const rotate = async () => as(people.admin, "POST", `/api/v1/me/api-tokens/${token.id}/rotate`, {});
     const row = async () => (await as(people.admin, "GET", "/api/v1/me/api-tokens")).body.items.find((t) => t.id === token.id);
     assert.equal((await row()).canRotate, true);
-    for (const role of ["MEMBER", "VIEWER"]) {
-      await members.updateOne(filter, { $set: { role } });
-      assert.equal((await rotate()).status, 403, `rotate as ${role}`);
-      assert.equal((await row()).canRotate, false);
-      assert.equal((await call(secret, `/boards/${f.one.board.id}/records`)).status, 200, `still reads as ${role}`);
-      assert.equal((await issue(people.admin, { ws: f.ws, boards: [f.one] })).status, 403, `create as ${role}`);
-    }
+    await members.updateOne(filter, { $set: { role: "VIEWER" } });
+    assert.equal((await row()).canRotate, true, "a viewer may still rotate");
+    assert.equal((await call(secret, `/boards/${f.one.board.id}/records`)).status, 200, "still reads as a viewer");
+    assert.equal((await issue(people.admin, { ws: f.ws, boards: [f.one] })).status, 201, "and create");
     const doc = await members.findOne(filter);
     await members.deleteOne(filter);
     assert.equal(code(await call(secret, "/me")), "TOKEN_ACCESS_REVOKED");
     assert.equal((await rotate()).status, 403);
+    assert.equal((await issue(people.admin, { ws: f.ws, boards: [f.one] })).status, 404, "no membership: can't create");
     const gone = await row();
     assert.deepEqual([gone.status, gone.canRotate, gone.workspace.name, gone.boards[0].name], ["no_access", false, null, null], "names are hidden without access");
     await members.insertOne({ ...doc, role: "WORKSPACE_ADMIN" });
@@ -381,13 +397,14 @@ describe("Expiry, revocation and rotation", () => {
       const { f, filter, members, token, secret } = await setup("Revoke grants nothing");
       await members.updateOne(filter, { $set: { role: "VIEWER" } });
       const [before, memberBefore] = [await stored(token.id), await members.findOne(filter)];
+      const optionsBefore = (await as(people.admin, "GET", "/api/v1/me/api-tokens/options")).body;
       await revoke(token.id);
       const after = await stored(token.id);
       assert.ok(after.revokedAt instanceof Date);
       const { revokedAt: _a, ...kept } = after, { revokedAt: _b, ...was } = before;
       assert.deepEqual(kept, was, "only revokedAt changed");
       assert.deepEqual(await members.findOne(filter), memberBefore, "the membership is untouched");
-      assert.equal((await issue(people.admin, { ws: f.ws, boards: [f.one] })).status, 403, "still can't create one");
+      assert.deepEqual((await as(people.admin, "GET", "/api/v1/me/api-tokens/options")).body, optionsBefore, "the right to create tokens is exactly as it was");
       assert.equal((await as(people.admin, "POST", `/api/v1/me/api-tokens/${token.id}/rotate`, {})).status, 409, "and a revoked token can't be rotated back");
       await members.updateOne(filter, { $set: { role: "WORKSPACE_ADMIN" } });
       assert.equal(code(await call(secret, "/me")), "TOKEN_REVOKED", "an admin again: it stays revoked");
@@ -585,7 +602,7 @@ describe("Permission changes after a token is created", () => {
       const issued = await as(owner, "POST", "/api/v1/me/api-tokens", { name: "T", workspaceId: wsId.toHexString(), boardIds: [boardId.toHexString()], scopes: ["read"], expiresAt: inDays(3) }, managed);
       assert.equal(issued.status, 201, issued.text);
       assert.equal((await call(issued.body.secret, "/me", { target: managed })).status, 200);
-      // Capped to a Viewer: can no longer issue, can still read.
+      // Capped to a Viewer: still reads (and, below, may still issue: a read-only token needs only Viewer).
       await users.updateOne({ _id: ownerId }, { $set: { "account.role": "VIEWER" } });
       assert.equal((await call(issued.body.secret, "/me", { target: managed })).status, 200);
       // A Super Admin account without a membership can't issue one, and its role keeps no token alive.
@@ -598,7 +615,12 @@ describe("Permission changes after a token is created", () => {
       await managed.db.collection(COLLECTIONS.workspaceMembers).insertOne(membership);
       await users.updateOne({ _id: ownerId }, { $set: { "account.role": "VIEWER" } });
       const capped = await as(owner, "POST", "/api/v1/me/api-tokens", { name: "T2", workspaceId: wsId.toHexString(), boardIds: [boardId.toHexString()], scopes: ["read"], expiresAt: inDays(3) }, managed);
-      assert.equal(capped.status, 403);
+      assert.equal(capped.status, 201, "capped to Viewer: a read-only token is still within reach");
+      // Not yet approved (pending): the cap removes the membership's effect, so nothing can be issued.
+      await users.updateOne({ _id: ownerId }, { $set: { "account.status": "pending" } });
+      const pending = await as(owner, "POST", "/api/v1/me/api-tokens", { name: "T3", workspaceId: wsId.toHexString(), boardIds: [boardId.toHexString()], scopes: ["read"], expiresAt: inDays(3) }, managed);
+      assert.ok([401, 403, 404].includes(pending.status), `pending: ${pending.status}`);
+      await users.updateOne({ _id: ownerId }, { $set: { "account.status": "active" } });
       // Blocked: stops.
       await users.updateOne({ _id: ownerId }, { $set: { "account.status": "blocked" } });
       assert.equal(code(await call(issued.body.secret, "/me", { target: managed })), "TOKEN_OWNER_DISABLED");
@@ -846,6 +868,46 @@ describe("Reading specific columns", () => {
     const browser = await browserOf(people.viewer);
     assert.equal((await browser.request("GET", url, undefined, { headers: { Authorization: "Bearer jarc_ignored" } })).status, 200, "it reads the session, never a bearer token");
     assert.equal((await as(people.viewer, "GET", `${url}?token=x`)).status, 400);
+  });
+
+  test("API Explorer previews match the token API exactly: the board with its groups, and one column's values", async () => {
+    const url = `/api/v1/me/api-explorer/boards/${boardId}`;
+    const plain = await as(people.viewer, "GET", url);
+    assert.equal(plain.status, 200, plain.text);
+    assert.deepEqual(plain.body.board, (await call(secret, `/boards/${boardId}`)).body.board, "the same board, columns and groups as GET /boards/:boardId");
+    assert.equal(plain.body.values, undefined, "values only for exactly one chosen column");
+    const one = await as(people.viewer, "GET", `${url}?columns=qty`);
+    const viaToken = (await call(secret, `/boards/${boardId}/columns/qty/values`)).body.items;
+    for (const entry of one.body.values.items) assert.deepEqual(entry, viaToken.find((v) => v.recordId === entry.recordId));
+    assert.ok(one.body.values.items.length <= 3);
+    assert.equal((await as(people.viewer, "GET", `${url}?columns=qty,state`)).body.values, undefined);
+  });
+
+  test("every employee sees the same board and column IDs, but only within their own access", async () => {
+    const ids = async (person) => {
+      const viaExplorer = await as(person, "GET", `/api/v1/me/api-explorer/boards/${boardId}`);
+      const viaList = await as(person, "GET", `/api/v1/workspaces/${f.ws.id}/boards`);
+      return { status: [viaExplorer.status, viaList.status], board: viaExplorer.body?.board?.id, columns: viaExplorer.body?.columns?.map((c) => c.id), listed: viaList.body?.items?.find((b) => b.id === boardId)?.columns.map((c) => c.key) };
+    };
+    const [admin, member, viewer] = [await ids(people.admin), await ids(people.member), await ids(people.viewer)];
+    assert.deepEqual(admin.status, [200, 200]);
+    assert.deepEqual(member, admin, "a member sees exactly what the admin sees");
+    assert.deepEqual(viewer, admin, "and so does a viewer");
+    assert.deepEqual(admin.columns, ALL_TYPES.map((c) => c.key), "the column IDs are the stored keys");
+    assert.deepEqual(admin.listed, admin.columns);
+    // Opening it again changes nothing: nothing is generated per person or per visit.
+    assert.deepEqual(await ids(people.viewer), viewer);
+    // Someone outside the workspace learns nothing, and an ID alone opens nothing.
+    assert.deepEqual((await ids(people.outsider)).status, [404, 404]);
+    assert.equal((await call(null, `/boards/${boardId}/records`)).status, 401);
+    const outsiderWs = await as(people.sysadmin, "POST", "/api/v1/workspaces", { name: "Outsider's own" });
+    await as(people.sysadmin, "POST", `/api/v1/workspaces/${outsiderWs.body.workspace.id}/members`, { userId: await userId(people.outsider), role: "VIEWER" });
+    const ownBoard = (await as(people.sysadmin, "POST", `/api/v1/workspaces/${outsiderWs.body.workspace.id}/boards`, { name: "Own", columns: COLUMNS })).body.board;
+    const theirs = (await issue(people.outsider, { ws: outsiderWs.body.workspace, boards: [{ board: ownBoard }] })).body.secret;
+    assert.equal((await call(theirs, `/boards/${ownBoard.id}/records`)).status, 200, "their own token reads their own board");
+    assert.equal((await call(theirs, `/boards/${boardId}/records`)).status, 404, "but not a board they only know the ID of");
+    assert.equal((await call(theirs, `/boards/${boardId}/columns/qty/values`)).status, 404);
+    assert.equal((await issue(people.outsider, { ws: f.ws, boards: [{ board: { id: boardId } }] })).status, 404, "nor can they issue one for it");
   });
 });
 

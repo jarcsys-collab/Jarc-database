@@ -336,7 +336,7 @@ class AppController {
   // With no workspaces (a new shared database) the full layout is shown, but most actions need a workspace. These work
   // without one; anything else opens "Create workspace" instead of acting on a workspace that doesn't exist.
   static READ_ONLY_BLOCKED = new Set(["add-column","add-group-column","add-group-form","cell-open","set-cell-option","inline-add","open-form","new-item","import","choose-import-file","duplicate-record","duplicate-column","delete","archive-item","pin-item","rename-column","edit-column-options","column-editor","edit-description","manage-groups","request-delete-column","request-delete-group","move-record-board","move-column","edit","files-input","request-remove-file","board-title-inline"]);
-  static NO_WORKSPACE_ACTIONS = new Set(["create-workspace","close-overlay","nav","toggle-nav","collapse-nav","toggle-workspace-section","command-palette","run-command","retry-save","dismiss-hint","notifications","notification-filter","mark-notifications","profile-menu","profile-settings","choose-avatar","remove-avatar","settings","settings-section","setting","theme","shortcuts","request-logout","confirm-logout","lock-session"]);
+  static NO_WORKSPACE_ACTIONS = new Set(["create-workspace","close-overlay","nav","toggle-nav","collapse-nav","toggle-workspace-section","command-palette","run-command","retry-save","dismiss-hint","notifications","notification-filter","mark-notifications","profile-menu","profile-settings","developer","choose-avatar","remove-avatar","settings","settings-section","setting","theme","shortcuts","request-logout","confirm-logout","lock-session"]);
   static NO_WORKSPACE_COMMANDS = new Set(["home","mywork","theme","settings","appearance","notifications","shortcuts"]);
   needsWorkspace(allowed) {
     if (this.model.workspaces.length || allowed) return false;
@@ -528,6 +528,7 @@ class AppController {
     if (action === "bulk-priority") this.view.showQuickChoice("Set selected priority",["Low","Medium","High","Critical"],"apply-bulk-priority","");
     if (action === "apply-bulk-priority") { this.model.bulkUpdate([...this.model.selected],this.model.priorityColumn.key,target.dataset.value); this.model.selected.clear(); this.view.closeOverlay(); this.update(); this.view.toast("Priorities updated"); }
     if (action === "settings") this.togglePanel("settings",()=>this.view.showSettings(this.model));
+    if (action === "developer" || (action === "settings-section" && target.dataset.section === "api-tokens")) { if (this.apiTokens?.visible()) this.apiTokens.open(target.dataset.section === "api-tokens" ? "tokens" : target.dataset.section || "overview"); return; }
     if (action === "settings-section") { this.model.updateSetting("settingsSection",target.dataset.section); this.view.showSettings(this.model,target.dataset.section); this.markPanel("settings"); }
     if (action === "workspace-manage") this.view.showSettings(this.model,"workspace");
     if (action === "request-delete-workspace") { const workspace=this.model.workspaces.find((w)=>String(w.id)===String(target.dataset.id)), files=workspace?.boards?.some((x)=>x.columns?.some((c)=>c.type==="files")); this.view.showConfirm("Delete workspace?",`All boards and records in this workspace will be deleted${this.model.filesAvailable()?"":" from this browser"}.${files?" Files in Files columns are deleted permanently.":""}`,"confirm-delete-workspace",target.dataset.id); }
@@ -571,6 +572,7 @@ class AppController {
     if (this.appearance?.onInput(event.target)) return;
     if (event.target.dataset?.action === "comment-input") { this.comments?.onInput(event.target); return; }
     if (event.target.dataset?.action === "acct-search") { this.accounts?.onSearch(event.target); return; }
+    if (event.target.dataset?.action?.startsWith("apitok-")) { this.apiTokens?.onInput(event.target); return; }
     if (event.target.dataset.action === "cell-option-search") { this.view.filterOptions(event.target.closest(".cell-options-popover"),event.target.value); return; }
     if (event.target.dataset.action === "workspace-search") { const term=event.target.value.toLowerCase(); document.querySelectorAll(".workspace-list > button").forEach((button)=>{button.hidden=!button.textContent.toLowerCase().includes(term);}); return; }
     if (event.target.dataset.action === "column-picker-search") { this.view.showColumnPicker(this.model,event.target.value); return; }

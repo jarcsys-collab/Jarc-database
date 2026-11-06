@@ -1693,3 +1693,40 @@ tr:hover .comment-indicator, .comment-indicator:focus-visible, .comment-indicato
   .apitok-access{min-width:0}.apitok-access strong,.apitok-access small{display:block}
   .apitok-ex-columns th:nth-child(4),.apitok-ex-columns td:nth-child(4){display:none}.apitok-ex-columns th,.apitok-ex-columns td{padding:7px 6px}
 }
+
+/* Developer Center (ApiTokensPanel.js): the Settings window's layout, with its own sections. */
+.developer-window .settings-nav [data-action=apitok-tab]:hover{background:var(--hover)}
+.developer-window .settings-nav [data-action=apitok-tab].active,.developer-window .settings-nav [data-action=apitok-tab][aria-current]{background:var(--surface);color:var(--accent-text);font-weight:var(--weight-semibold,600);box-shadow:var(--shadow-row)}
+.developer-window .settings-body{min-width:0}
+.apitok-lead{font-size:14px!important;margin:0 0 14px}
+.apitok-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:0 0 14px}.apitok-stats>div{border:1px solid var(--line);border-radius:12px;padding:10px 14px;display:grid;gap:2px;background:var(--surface)}.apitok-stats span{color:var(--muted);font-size:12px}.apitok-stats strong{font-size:22px;line-height:1.2}
+.apitok-steps{list-style:none;padding:0;margin:16px 0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.apitok-step{display:flex;gap:10px;border:1px solid var(--line);border-radius:12px;padding:12px;background:var(--surface);min-width:0}.apitok-step>div{min-width:0;display:grid;gap:6px;align-content:start}.apitok-step p{margin:0}.apitok-step .button{justify-self:start;padding:4px 12px;min-height:0;font-size:12px}
+.apitok-step-n{flex:none;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;background:var(--accent-fill,var(--accent));color:var(--on-accent,#fff)}
+.apitok-auth{margin:16px 0 0;border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:grid;gap:6px;background:var(--surface)}.apitok-auth p{margin:0}.apitok-auth code{font-size:12px;overflow-wrap:anywhere}
+.apitok-all{border-bottom:1px solid var(--line);margin-bottom:4px;font-weight:600!important}.apitok-boards>small{display:block;margin-top:6px;font-size:12px}
+.apitok-ex-pickers-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.apitok-ex-pickers input[type=search]{width:100%;min-width:0}
+.apitok-ex-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr)) auto;gap:12px;align-items:end;margin:8px 0}.apitok-ex-options label{display:grid;gap:4px;font-size:13px;min-width:0}.apitok-ex-options input:not([type=checkbox]),.apitok-ex-options select{width:100%;min-width:0}.apitok-ex-options .apitok-check{display:flex!important;padding:8px 2px}
+.apitok-dir{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;margin-top:4px}
+.apitok-dir-boards{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:6px;max-height:170px;overflow-y:auto;min-width:0;padding:2px}
+.apitok-dir-boards>.account-empty{grid-column:1/-1}
+.apitok-dir-board{display:grid;gap:2px;text-align:left;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:none;color:var(--text);font:inherit;cursor:pointer;min-width:0}.apitok-dir-board:hover{background:var(--hover)}.apitok-dir-board.active{background:var(--selected);border-color:var(--accent)}
+.apitok-dir-board small{color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.apitok-dir-board code{font-size:11px}
+.apitok-dir-detail{min-width:0}.apitok-dir-head{display:flex;gap:12px;align-items:flex-start;justify-content:space-between}.apitok-dir-head>div{min-width:0;flex:1}.apitok-dir-head h3{margin:0}.apitok-dir-head>.button{flex:none}
+.apitok-dir-search{display:grid;gap:4px;font-size:13px;margin:8px 0 0}.apitok-dir-search input{width:100%}
+.apitok-dir-columns .apitok-url code{font-size:12px;white-space:nowrap}
+/* The app's "sticky first column" preference is for board tables, not these. */
+html[data-sticky-column=on] .apitok th:nth-child(2),html[data-sticky-column=on] .apitok td:nth-child(2){position:static;background:transparent}.apitok-dir-columns td code{font-size:12px}
+.apitok-dir-copy{min-width:132px}.apitok-dir-copy .button{padding:3px 8px;min-height:0;font-size:12px;margin:0 4px 4px 0}
+.apitok-board-info .modal-actions,.apitok-info .modal-actions{flex-wrap:wrap}
+@media (max-width: 900px){.apitok-steps{grid-template-columns:1fr}.apitok-ex-options{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width: 760px){
+  .apitok-ex-pickers-3,.apitok-ex-options,.apitok-stats{grid-template-columns:1fr}
+  .apitok-dir-boards{grid-template-columns:1fr;max-height:180px}.apitok-dir-columns .apitok-url code{white-space:normal;overflow-wrap:anywhere}
+  .apitok-dir-head{flex-direction:column;align-items:stretch}
+  .apitok-dir-columns thead{display:none}.apitok-dir-columns tr{display:grid;grid-template-columns:1fr;padding:8px 0;border-bottom:1px solid var(--line)}
+  .apitok-dir-columns td{border:0;padding:2px 4px;display:grid;grid-template-columns:96px minmax(0,1fr);gap:8px}.apitok-dir-columns td::before{content:attr(data-label);color:var(--muted);font-size:12px}
+  .apitok-dir-columns td.apitok-dir-copy{display:flex;flex-wrap:wrap;gap:6px;padding-top:6px}.apitok-dir-copy .button{margin:0}
+  .apitok-dir-columns td[colspan]{display:block}.apitok-dir-columns td[colspan]::before{content:none}
+}

@@ -9,9 +9,11 @@
 // administrators: open access (ACCESS_POLICY=development_shared and JARC_BETA_OPEN_EDITING) lets every employee in, and the JARC.Admin
 // app role and the Super Admin account role aren't memberships.
 //
-//   create or rotate  a real WORKSPACE_ADMIN membership of the token's workspace, and only your own tokens
+//   create or rotate  any real membership of the token's workspace (VIEWER or above), and only your own tokens. A read-only token
+//                     never reads more than its owner already can with their own membership, so admin rights aren't needed.
 //   revoke            only your own tokens, whatever your role now: it only ever removes access
 //   use               any real membership of the token's workspace (a read-only token is never more than a VIEWER can do)
+// The boards are always chosen explicitly: a token never grows to cover a board created after it.
 const { ObjectId } = require("mongodb");
 const { ApiError } = require("../middleware/errors");
 const { Access } = require("../auth/access");
@@ -21,6 +23,8 @@ const { generateToken, digestOf, publicIdOf, sameDigest, displayPrefix } = requi
 const { hex, iso } = require("../api/serialize");
 
 const SCOPES = Object.freeze(["read"]);
+// The least real membership that may issue a read-only token.
+const ISSUER_ROLE = "VIEWER";
 const LIMITS = Object.freeze({ boardsPerToken: 100, activePerOwner: 25, maxLifetimeDays: 366, maxGraceHours: 168, defaultGraceHours: 24 });
 const DAY_MS = 24 * 60 * 60 * 1000;
 const USE_RECORD_INTERVAL_MS = 60 * 1000;
@@ -62,17 +66,17 @@ class ApiTokenService {
     if (!actor) throw new ApiError(403, "FORBIDDEN", "Your JARC account can't manage API tokens.");
     const role = await this.roleOf(actor, workspaceId);
     if (!role && !ownToken && !await this.access.roleIn(sessionActor, workspaceId)) throw new ApiError(404, "NOT_FOUND", "This workspace doesn't exist or you don't have access to it.");
-    if (!Access.atLeast(role, "WORKSPACE_ADMIN")) throw new ApiError(403, "FORBIDDEN", "Only an admin member of this workspace can create or rotate its API tokens. Open access doesn't count: you need your own Workspace admin membership.");
+    if (!Access.atLeast(role, ISSUER_ROLE)) throw new ApiError(403, "FORBIDDEN", "Only a member of this workspace can create or rotate its API tokens. Open access doesn't count: you need your own workspace membership.");
     return actor;
   }
 
   // ---- Managing tokens (a signed-in session; CSRF is checked by the session middleware)
-  // What this person could issue a token for: their workspaces with admin rights, and those workspaces' current boards.
+  // What this person could issue a token for: the workspaces they really belong to, and those workspaces' current boards.
   async options(sessionActor) {
     const actor = await this.ownerActor(sessionActor.userId);
     if (!actor) return { workspaces: [] };
     const roles = new Map((await this.repos.memberships.listForUser(actor.userId)).map((m) => [m.workspaceId.toHexString(), this.access.effective(actor, m.role)]));
-    const all = (await this.repos.workspaces.list()).filter((w) => Access.atLeast(roles.get(w._id.toHexString()), "WORKSPACE_ADMIN"));
+    const all = (await this.repos.workspaces.list()).filter((w) => Access.atLeast(roles.get(w._id.toHexString()), ISSUER_ROLE));
     const workspaces = await Promise.all(all.map(async (w) => ({ id: hex(w._id), name: w.name, archived: Boolean(w.archived), boards: (await this.repos.boards.listByWorkspace(w._id)).map((b) => ({ id: hex(b._id), name: b.name, archived: Boolean(b.archived) })) })));
     return { workspaces };
   }
@@ -129,7 +133,7 @@ class ApiTokenService {
     const names = new Map(boards.map((b) => [hex(b._id), b.name]));
     const now = new Date();
     const status = doc.revokedAt ? "revoked" : doc.expiresAt <= now ? "expired" : role ? (doc.rotatedToId ? "rotating" : "active") : "no_access";
-    const canRotate = Access.atLeast(role, "WORKSPACE_ADMIN");
+    const canRotate = Access.atLeast(role, ISSUER_ROLE);
     return {
       id: hex(doc._id), name: doc.name, prefix: displayPrefix(doc.publicId), status, canRotate, scopes: [...doc.scopes],
       workspace: { id: hex(doc.workspaceId), name: workspace?.name ?? null },
@@ -230,4 +234,4 @@ class ApiTokenService {
   }
 }
 
-module.exports = { ApiTokenService, SCOPES, LIMITS };
+module.exports = { ApiTokenService, SCOPES, LIMITS, ISSUER_ROLE };

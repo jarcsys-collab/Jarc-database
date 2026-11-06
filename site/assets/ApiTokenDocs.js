@@ -1,4 +1,4 @@
-// Settings → API Tokens → Documentation. Text only: placeholders stand in for every secret, and the base URL is this server's own.
+// Developer → Documentation. Text only: placeholders stand in for every secret, and the base URL is this server's own.
 // Every path and field here is checked against the real API by server/tests/api-tokens.test.js.
 const ApiTokenDocs = {
   html(esc, base) {
@@ -22,11 +22,12 @@ const ApiTokenDocs = {
       <p>A token is accepted only in the ${c("Authorization")} header. A token in the URL is refused, because URLs end up in logs and browser history.</p>
 
       <h3>Who can create a token</h3>
-      <p>You need your own <strong>Workspace admin</strong> membership of the workspace to create or rotate a token. Shared or beta access and administrator roles don't count. A token is limited to one workspace and the boards you select, and it can never see more than you can.</p>
-      <p>JARC checks your access on every request. If your membership is removed or your account is disabled, your tokens stop working at once. If you stay a member with a lower role, they keep reading, but you can't rotate them until you are an admin again. You can always revoke your own tokens while you can sign in, even with no membership left.</p>
+      <p>Any employee with their own membership of a workspace, Viewer or above, can create read-only tokens for it under <strong>Developer → API Tokens</strong>. Shared or beta access and administrator roles don't count on their own: you need a real membership. A token is limited to one workspace and the boards you select, and it can never see more than you can.</p>
+      <p>One token reads every board you selected, and every column on those boards: you don't need a token per board or per column. Boards created later aren't added to an existing token; rotate it or create a new one to include them. Each token is personal: don't share it, create one per integration instead.</p>
+      <p>JARC checks your access on every request. If your membership is removed or your account is disabled, your tokens stop working at once. You can always revoke your own tokens while you can sign in, even with no membership left.</p>
 
       <h3>Board and column IDs</h3>
-      <p>Every board and column has a permanent ID. Copy a board's from its menu and a column's from its header menu, or look them up in the API Explorer tab. An ID stays the same when something is renamed, moved, reordered or hidden, and isn't used again after deletion. A column ID is unique within its board, so identify a column by its board ID and column ID together.</p>
+      <p>Every board and column has a permanent ID, the same for everyone in the company. Copy a board's from its menu and a column's from its header menu (each also has <strong>API Information</strong>), or look them up under <strong>Developer → Boards &amp; Columns</strong>. An ID stays the same when something is renamed, moved, reordered or hidden, and isn't used again after deletion. A column ID is unique within its board, so identify a column by its board ID and column ID together.</p>
       <p>IDs aren't secrets, and knowing one grants nothing. The token is what authorises a request, and it must cover the board.</p>
 
       <h3>Endpoints</h3>
