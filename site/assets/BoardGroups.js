@@ -24,7 +24,7 @@ Object.assign(AppView.prototype, {
     return `<section class="data-region board-groups">${table}${footer}</section>`;
   },
   groupHeaderRow(model, { name, label, color, count, collapsed, loose = false, editable = true, note = "", toggle = true, ids = [] }) {
-    const span = model.visibleColumns.length + 3;
+    const span = model.visibleColumns.length + model.systemColumnCount + 3;
     return `<tr class="group-header-row"><th colspan="${span}" scope="rowgroup"><div class="group-header">
       ${toggle ? `<button type="button" class="group-toggle" data-action="group-toggle" data-group="${this.attr(name)}" aria-expanded="${!collapsed}" aria-label="${collapsed ? "Expand" : "Collapse"} ${this.attr(label)}" ${loose ? "disabled" : ""}>${icon("chevron")}</button>` : `<span class="group-toggle is-static" aria-hidden="true">${icon("group")}</span>`}
       <h3 class="group-name">${!loose && editable && toggle ? `<button type="button" data-action="group-rename" data-group="${this.attr(name)}" title="Rename group">${this.escape(label)}</button>` : `<span>${this.escape(label)}</span>`}</h3>
@@ -36,7 +36,7 @@ Object.assign(AppView.prototype, {
   // The rows of a group that are near the viewport, between spacers that keep the scroll height right. The controller moves
   // the range as the table scrolls and rebuilds only that group's body (AppController.syncVirtual).
   groupRowsHtml(model, name, rows) {
-    const key = `group:${name}`, span = model.visibleColumns.length + 3, h = this.rowHeight || AppView.ROW_HEIGHT;
+    const key = `group:${name}`, span = model.visibleColumns.length + model.systemColumnCount + 3, h = this.rowHeight || AppView.ROW_HEIGHT;
     const first = !this.virtual.size, range = this.rowRanges?.get(key) || (first ? [0, AppView.ROW_WINDOW] : [0, 0]);
     const start = Math.min(range[0], rows.length), end = Math.min(range[1], rows.length);
     this.virtual.set(key, { name, count: rows.length, start, end });
@@ -57,7 +57,7 @@ Object.assign(AppView.prototype, {
     if (from < info.start) staying[0].insertAdjacentHTML("beforebegin", html(from, info.start));
     if (to > info.end) staying.at(-1).insertAdjacentHTML("afterend", html(info.end, to));
     for (const spacer of body.querySelectorAll(":scope > tr.row-spacer:not(.row-reserved)")) spacer.remove();
-    const spacer = (n) => (n > 0 ? `<tr class="row-spacer" aria-hidden="true"><td colspan="${model.visibleColumns.length + 3}" style="height:${n * h}px"></td></tr>` : "");
+    const spacer = (n) => (n > 0 ? `<tr class="row-spacer" aria-hidden="true"><td colspan="${model.visibleColumns.length + model.systemColumnCount + 3}" style="height:${n * h}px"></td></tr>` : "");
     const now = [...body.querySelectorAll(":scope > tr[data-record-context]")];
     now[0].insertAdjacentHTML("beforebegin", spacer(from));
     now.at(-1).insertAdjacentHTML("afterend", spacer(rows.length - to));

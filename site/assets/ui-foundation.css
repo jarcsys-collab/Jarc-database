@@ -1730,3 +1730,41 @@ html[data-sticky-column=on] .apitok th:nth-child(2),html[data-sticky-column=on] 
   .apitok-dir-columns td.apitok-dir-copy{display:flex;flex-wrap:wrap;gap:6px;padding-top:6px}.apitok-dir-copy .button{margin:0}
   .apitok-dir-columns td[colspan]{display:block}.apitok-dir-columns td[colspan]::before{content:none}
 }
+
+/* No icon rail (2026-11). The narrow column of stacked icons (tablets, and the collapsed desktop sidebar) only repeated what the
+   full sidebar holds. Tablets now work like phones: the sidebar is a drawer opened by the top bar's menu button. Collapsing the
+   sidebar on a desktop hides it completely, and the same menu button brings it back (AppController, toggle-nav). While hidden,
+   the sidebar is out of the tab order too. */
+@media (max-width: 1024px) {
+  .app-shell, body.nav-collapsed .app-shell { display: block; }
+  .sidebar, body.nav-collapsed .sidebar { transform: translateX(-100%); width: 236px; visibility: hidden; transition: transform .18s ease, visibility 0s linear .18s; }
+  .sidebar.open, body.nav-collapsed .sidebar.open { transform: none; visibility: visible; transition: transform .18s ease, visibility 0s; }
+  .topbar, body.nav-collapsed .topbar { left: 0; }
+}
+@media (min-width: 1025px) {
+  body.nav-collapsed .app-shell { display: block; }
+  body.nav-collapsed .sidebar { transform: translateX(-100%); width: 236px; visibility: hidden; }
+  body.nav-collapsed .topbar { left: 0; }
+  body.nav-collapsed .topbar .nav-toggle { display: inline-flex; width: 40px; height: 40px; margin-left: -6px; }
+}
+@media (prefers-reduced-motion: reduce) { .sidebar, .sidebar.open { transition: none !important; } }
+/* With no sidebar beside them, the page and top bar don't need the shell's rounded left corners (they showed a sliver of the
+   sidebar colour). */
+@media (max-width: 1024px) { .workspace, .topbar { border-top-left-radius: 0; border-bottom-left-radius: 0; } }
+@media (min-width: 1025px) { body.nav-collapsed .workspace, body.nav-collapsed .topbar { border-top-left-radius: 0; border-bottom-left-radius: 0; } }
+
+/* Record ID: the read-only system column at the end of every shared board (AppView.recordIdHeader/recordIdCell). Wide enough
+   for the whole 24-character ID, which is never cut short. */
+.editable-table th.record-id-col, .editable-table td.record-id-cell { width: 236px; min-width: 236px; max-width: 236px; }
+.editable-table th.record-id-col .column-label { cursor: default; }
+.record-id-cell { padding: 0 10px; vertical-align: middle; }
+.record-id-value { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.record-id-value code { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; color: var(--muted); white-space: nowrap; user-select: all; letter-spacing: 0; }
+.record-id-copy { flex: none; display: inline-grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; opacity: 0; }
+.record-id-copy .icon { width: 14px; height: 14px; }
+tr:hover .record-id-copy, .record-id-copy:focus-visible { opacity: 1; }
+.record-id-copy:hover { background: var(--hover); color: var(--text); }
+.record-id-pending { color: var(--muted); font-style: italic; font-size: 12px; }
+@media (hover: none) { .record-id-copy { opacity: 1; } }
+.column-pick-system { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 8px; }
+.column-pick-system small { margin-left: auto; color: var(--muted); font-size: 11px; }

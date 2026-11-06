@@ -69,6 +69,10 @@ describe("dry run on a synthetic extraction", () => {
     const again = dryRun(dir);
     assert.equal(again.digest, r.digest);
     assert.deepEqual(again.plan.records.map((x) => x._id.toHexString()), r.plan.records.map((x) => x._id.toHexString()));
+    // Subitems too: each keeps the same permanent ID on every run, and none is shared with an item or another subitem.
+    assert.deepEqual(again.plan.subRecords.map((x) => x._id.toHexString()), r.plan.subRecords.map((x) => x._id.toHexString()));
+    const all = [...r.plan.records, ...r.plan.subRecords].map((x) => x._id.toHexString());
+    assert.equal(new Set(all).size, all.length, "every item and subitem has its own ID");
   });
 
   test("every source column has an explicit decision", () => {

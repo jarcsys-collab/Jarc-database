@@ -29,6 +29,9 @@ const ApiTokenDocs = {
       <h3>Board and column IDs</h3>
       <p>Every board and column has a permanent ID, the same for everyone in the company. Copy a board's from its menu and a column's from its header menu (each also has <strong>API Information</strong>), or look them up under <strong>Developer → Boards &amp; Columns</strong>. An ID stays the same when something is renamed, moved, reordered or hidden, and isn't used again after deletion. A column ID is unique within its board, so identify a column by its board ID and column ID together.</p>
       <p>IDs aren't secrets, and knowing one grants nothing. The token is what authorises a request, and it must cover the board.</p>
+      <h4>Record IDs</h4>
+      <p>Every record (row) also has a permanent <strong>Record ID</strong>, shown in the board's Record ID column and in each row's menu (<strong>Copy Record ID</strong>, <strong>API Information</strong>). It is the ${c("id")} of every record the API returns, it is set by JARC when the record is created or imported, and it never changes when the record is renamed, edited, moved to another group or reordered. <strong>Moving a record to another board gives it a new Record ID</strong>: the record is recreated on that board, so update any integration that stored the old one. It isn't the same as an imported <em>Item ID</em> or reference column (such as a monday.com item number or a code like BH-112…): those stay ordinary columns, unchanged. One token reads any record on the boards it covers; there are no per-record tokens.</p>
+      ${code("record", "One record, by its Record ID", `curl -H "Authorization: Bearer $JARC_API_TOKEN" \\\n  "${api}/records/RECORD_ID"`)}
 
       <h3>Endpoints</h3>
       ${table(["Request", "Returns"], [

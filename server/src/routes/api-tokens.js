@@ -8,6 +8,7 @@
 //   POST   /me/api-tokens/:tokenId/revoke
 //   GET    /me/api-explorer/boards/:boardId?columns=a,b  a board as GET /external/boards/:boardId returns it, and example records (and,
 //                                                 for exactly one column, that column's values), with the caller's own access
+//                                                 &record=ID  also that record as GET /external/records/:id returns it (it must be on this board)
 const express = require("express");
 const { allowOnly, parseId } = require("../validation/common");
 const { sendError } = require("../middleware/errors");
@@ -42,19 +43,23 @@ function apiTokenRoutes({ tokens, access, repos, limiter = searchLimiter({ perWi
   router.get("/me/api-explorer/boards/:boardId", async (req, res) => {
     const id = parseId(req.params.boardId, "boardId");
     const { board } = await access.board(req.actor, id, "VIEWER");
-    allowOnly(req.query, ["columns"], "the query");
+    allowOnly(req.query, ["columns", "record"], "the query");
     const selected = parseColumns(req.query.columns, board) || board.columns;
+    const recordId = req.query.record === undefined ? null : parseId(req.query.record, "record");
     if (!explorerLimiter(req.actor.userId.toHexString())) return sendError(res, 429, "RATE_LIMITED", "Too many requests. Wait a moment and try again.");
-    const [page, recordCount] = await Promise.all([
+    const [page, recordCount, record] = await Promise.all([
       repos.records.listForExternalApi(board._id, { limit: EXAMPLE_RECORDS, byUpdated: false, updatedSince: null, after: null, filter: { archived: false }, projection: projectionFor(selected), maxTimeMS: QUERY_TIME_MS }),
-      repos.records.countActive(board._id)
+      repos.records.countActive(board._id),
+      recordId ? repos.records.findById(recordId) : null
     ]);
+    if (recordId && (!record || !record.boardId.equals(board._id))) return sendError(res, 404, "NOT_FOUND", "This record isn't on this board, or doesn't exist.");
     const pagination = { limit: EXAMPLE_RECORDS, hasMore: page.hasMore };
     const single = selected.length === 1 && req.query.columns !== undefined ? selected[0] : null;
     send(res, 200, {
       board: { ...boardSummary(board, recordCount), columns: columnsOf(board), groups: groupsOf(board) }, columns: columnsOf(board),
       example: { items: page.items.map((r) => recordToExternal(r, board, selected)), pagination },
-      ...(single ? { values: { items: page.items.map((r) => cellToExternal(r, single, board)), pagination } } : {})
+      ...(single ? { values: { items: page.items.map((r) => cellToExternal(r, single, board)), pagination } } : {}),
+      ...(record ? { record: recordToExternal(record, board, board.columns) } : {})
     });
   });
   return router;

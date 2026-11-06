@@ -12,14 +12,14 @@ class ApiTokensPanel {
   static CODES = { FORBIDDEN: "You need your own membership of this workspace. Shared or beta access doesn't count.", TOKEN_LIMIT_REACHED: "You've reached the limit of 25 active tokens. Revoke one you no longer need.", TOKEN_ALREADY_ROTATED: "This token was already rotated. Rotate its replacement instead.", TOKEN_NOT_ACTIVE: "This token has ended. Create a new one instead.", TOKEN_NO_BOARDS: "None of this token's boards are available any more. Create a new token instead.", RATE_LIMITED: "Too many new tokens in the last hour. Try again later." };
   static SECTIONS = [["overview", "Overview", "home"], ["tokens", "API Tokens", "lock"], ["explorer", "API Explorer", "search"], ["directory", "Boards & Columns", "board"], ["docs", "Documentation", "records"], ["activity", "API Activity", "refresh"]];
   // [id, label, path after /boards/:boardId, which columns it takes, whether it is paged]
-  static OPERATIONS = [["records", "List records", "/records", "many", true], ["values", "One column's values", "/columns/{column}/values", "one", true], ["column", "One column", "/columns/{column}", "one", false], ["columns", "All columns", "/columns", "none", false], ["groups", "Groups", "/groups", "none", false], ["board", "Board, with columns and groups", "", "none", false]];
+  static OPERATIONS = [["records", "List records", "/records", "many", true], ["values", "One column's values", "/columns/{column}/values", "one", true], ["column", "One column", "/columns/{column}", "one", false], ["columns", "All columns", "/columns", "none", false], ["groups", "Groups", "/groups", "none", false], ["board", "Board, with columns and groups", "", "none", false], ["record", "One record, by Record ID", "", "record", false]];
   static PAGE_MAX = 500;
   static PAGE_DEFAULT = 100;
 
   constructor(controller) {
     this.c = controller; this.items = null; this.options = null; this.loading = false; this.error = ""; this.tab = "overview"; this.secret = null; this.pending = null;
     this.resetCatalog();
-    this.ex = { workspaceId: "", boardId: "", data: null, error: "", selected: new Set(), column: "", op: "records", params: { limit: "", groupId: "", includeArchived: false, updatedSince: "" }, preview: null, previewBusy: false, previewError: "", preset: null };
+    this.ex = { workspaceId: "", boardId: "", data: null, error: "", selected: new Set(), column: "", op: "records", params: { limit: "", groupId: "", includeArchived: false, updatedSince: "" }, record: "", preview: null, previewBusy: false, previewError: "", preset: null };
     this.dir = { workspaceId: "", boardId: "", boardQuery: "", columnQuery: "" };
   }
   get view() { return this.c.view; }
@@ -236,6 +236,17 @@ class ApiTokensPanel {
       <div class="modal-actions">${this.copyButton(column.key, "Column ID", "Copy Column ID")}<button type="button" class="button primary" data-action="apitok-open-explorer" data-workspace="${this.esc(workspaceId)}" data-board="${this.esc(board.id)}" data-column="${this.esc(column.key)}">Open in API Explorer</button></div></div>`, "apitok-overlay");
   }
 
+  // ---- A record's API details (row menu). The Record ID is the record's permanent ID; one token covering the board reads it.
+  showRecordInfo(rowId) {
+    const model = this.c.model, board = model.board, row = model.rows.find((r) => r.id === model.idOf(rowId)), id = model.recordIdOf?.(row);
+    if (!board || !id) { this.view.toast("This record is still being saved"); return; }
+    const workspace = this.locate(board.id)?.workspace, url = this.endpoint(`/records/${id}`);
+    this.view.overlay(`<div class="modal apitok-modal apitok-info apitok-record-info" role="dialog" aria-modal="true" aria-labelledby="apitok-info-title"><div class="modal-head"><div><div class="eyebrow">API Information</div><h2 id="apitok-info-title">${this.esc(row.serial || "Record")}</h2></div>${this.view.closeButton()}</div>
+      <dl class="apitok-copy-list">${this.copyRow("Record ID", id, "Record ID")}${this.plainRow("Board name", board.name)}${this.copyRow("Board API ID", board.id, "Board ID")}${this.plainRow("Workspace", workspace?.name || "")}${this.copyRow("Record endpoint", url, "Endpoint")}</dl>
+      <p class="account-note">The Record ID never changes, and isn't the same as an imported Item ID or reference column. ${"Requests also need an API token that covers this board, sent as"} <code>Authorization: Bearer YOUR_JARC_API_TOKEN</code>. Knowing the ID alone opens nothing.</p>
+      <div class="modal-actions">${this.copyButton(id, "Record ID", "Copy Record ID")}${this.copyButton(url, "Endpoint", "Copy Endpoint")}<button type="button" class="button primary" data-action="apitok-open-explorer" data-workspace="${this.esc(workspace?.id || "")}" data-board="${this.esc(board.id)}" data-record="${this.esc(id)}">Open in API Explorer</button></div></div>`, "apitok-overlay");
+  }
+
   // ---- Workspaces and boards, read with the person's own session (only what they can already see), shared by the Explorer and the
   // directory. Read again each time the Developer Center opens.
   resetCatalog() { this.catalog = { loaded: false, loading: false, error: "", workspaces: [], boards: new Map(), pending: new Map() }; }
@@ -330,7 +341,7 @@ class ApiTokensPanel {
     const boardId = boards.some((b) => b.id === preset?.boardId) ? preset.boardId : workspaceId === ex.workspaceId && boards.some((b) => b.id === ex.boardId) ? ex.boardId : boards[0]?.id || "";
     if (workspaceId === ex.workspaceId && boardId === ex.boardId && ex.data && !preset) return;
     ex.workspaceId = workspaceId;
-    await this.explorerBoard(boardId, preset?.column);
+    await this.explorerBoard(boardId, preset?.column, preset?.record);
   }
   async explorerWorkspace(id) {
     const ex = this.ex;
@@ -338,16 +349,19 @@ class ApiTokensPanel {
     ex.workspaceId = id;
     await this.explorerBoard(boards[0]?.id || "");
   }
-  async explorerBoard(id, column = null) {
+  async explorerBoard(id, column = null, record = null) {
     const ex = this.ex;
-    Object.assign(ex, { boardId: id, data: null, error: "", preview: null, previewError: "", column: "", params: { ...ex.params, groupId: "" } }); ex.selected = new Set();
+    Object.assign(ex, { boardId: id, data: null, error: "", preview: null, previewError: "", column: "", record: record || "", params: { ...ex.params, groupId: "" } }); ex.selected = new Set();
     if (column) { ex.op = "values"; ex.column = column; }
+    if (record) ex.op = "record";
     if (!id) return;
     try { ex.data = await this.explorerFetch(); }
     catch (error) { ex.error = this.message(error); return; }
     if (!ex.data.columns.some((c) => c.id === ex.column)) ex.column = ex.data.columns[0]?.id || "";
+    if (!ex.record) ex.record = ex.data.example.items[0]?.id || "";
   }
-  explorerFetch(columns = []) { return this.adapter.request("GET", `/me/api-explorer/boards/${encodeURIComponent(this.ex.boardId)}${columns.length ? `?columns=${columns.map(encodeURIComponent).join(",")}` : ""}`); }
+  explorerFetch(columns = [], record = null) { const q = [...(columns.length ? [`columns=${columns.map(encodeURIComponent).join(",")}`] : []), ...(record ? [`record=${encodeURIComponent(record)}`] : [])]; return this.adapter.request("GET", `/me/api-explorer/boards/${encodeURIComponent(this.ex.boardId)}${q.length ? `?${q.join("&")}` : ""}`); }
+  validRecord() { return /^[0-9a-f]{24}$/i.test(this.ex.record || ""); }
   // In board order, so the address doesn't depend on the order they were ticked.
   explorerSelected() { return (this.ex.data?.columns || []).filter((c) => this.ex.selected.has(c.id)).map((c) => c.id); }
   // The options, checked here as the server would; a value it would refuse is left out and explained.
@@ -360,10 +374,11 @@ class ApiTokensPanel {
       if (ex.params.groupId) q.push(`groupId=${encodeURIComponent(ex.params.groupId)}`);
       if (ex.params.updatedSince) { const at = new Date(ex.params.updatedSince); if (Number.isNaN(at.getTime())) problems.push("Choose a valid date and time."); else q.push(`updatedSince=${encodeURIComponent(at.toISOString())}`); }
     }
+    if (takes === "record" && !this.validRecord()) problems.push("A Record ID has 24 characters, 0-9 and a-f. Copy it from the board's Record ID column.");
     if (ex.params.includeArchived) q.push("includeArchived=true");
     return { query: q.length ? `?${q.join("&")}` : "", problems };
   }
-  explorerPath() { const [, , path] = this.operation(); return this.boardPath(this.ex.boardId, path.replace("{column}", encodeURIComponent(this.ex.column))); }
+  explorerPath() { const [id, , path] = this.operation(); if (id === "record") return `/records/${encodeURIComponent(this.validRecord() ? this.ex.record.toLowerCase() : "RECORD_ID")}`; return this.boardPath(this.ex.boardId, path.replace("{column}", encodeURIComponent(this.ex.column))); }
   explorerUrl() { return `${this.endpoint(this.explorerPath())}${this.explorerQuery().query}`; }
   explorerCode(url) {
     const paged = this.operation()[4];
@@ -386,6 +401,7 @@ class ApiTokensPanel {
     if (!ex.data) return `${intro}${pickers}<p class="account-empty" aria-busy="true">Loading board…</p>`;
     const input = (c) => takes === "many" ? `<input type="checkbox" data-action="apitok-ex-column" value="${this.esc(c.id)}" aria-label="Include ${this.esc(c.name)}" ${ex.selected.has(c.id) ? "checked" : ""}>` : takes === "one" ? `<input type="radio" name="apitok-ex-one" data-action="apitok-ex-one" value="${this.esc(c.id)}" aria-label="Use ${this.esc(c.name)}" ${ex.column === c.id ? "checked" : ""}>` : "";
     const columns = `<div class="apitok-table-scroll" tabindex="0"><table class="apitok-doc-table apitok-ex-columns"><thead><tr><th><span class="sr-only">${takes === "none" ? "" : "Select"}</span></th><th>Column</th><th>Column API ID</th><th>Type</th><th><span class="sr-only">Copy</span></th></tr></thead><tbody>${ex.data.columns.map((c) => `<tr><td>${input(c)}</td><td>${this.esc(c.name)}${c.visible === false ? ' <small class="muted">Hidden</small>' : ""}</td><td><code>${this.esc(c.id)}</code></td><td>${this.esc(this.typeLabel(c.type))}</td><td>${this.copyButton(c.id, "Column ID")}</td></tr>`).join("")}</tbody></table></div>`;
+    const recordField = takes === "record" ? `<div class="apitok-ex-options apitok-ex-record"><label>Record ID<input type="text" spellcheck="false" autocomplete="off" maxlength="24" data-action="apitok-ex-record" value="${this.esc(ex.record)}" placeholder="24 characters, from the Record ID column"></label></div>` : "";
     const columnHelp = takes === "many" ? "Select columns to narrow the response. With none selected, it returns every column." : takes === "one" ? "Choose the column." : "Every column's ID, for reference.";
     const groups = ex.data.board?.groups || [];
     const options = `<h3>Options</h3><div class="apitok-ex-options">${paged ? `<label>Records per page<input type="number" inputmode="numeric" min="1" max="${ApiTokensPanel.PAGE_MAX}" placeholder="${ApiTokensPanel.PAGE_DEFAULT}" data-action="apitok-ex-param" data-param="limit" value="${this.esc(ex.params.limit)}"></label><label>Group<select data-action="apitok-ex-param" data-param="groupId"><option value="">All groups</option>${groups.filter((g) => !g.archived).map((g) => `<option value="${this.esc(g.id)}" ${g.id === ex.params.groupId ? "selected" : ""}>${this.esc(g.name)}</option>`).join("")}<option value="none" ${ex.params.groupId === "none" ? "selected" : ""}>No group</option></select></label><label>Changed since<input type="datetime-local" data-action="apitok-ex-param" data-param="updatedSince" value="${this.esc(ex.params.updatedSince)}"></label>` : ""}<label class="apitok-check"><input type="checkbox" data-action="apitok-ex-param" data-param="includeArchived" ${ex.params.includeArchived ? "checked" : ""}><span>Include archived</span></label></div>
@@ -395,7 +411,7 @@ class ApiTokensPanel {
     const preview = ex.preview ? `<figure class="apitok-code"><figcaption><span>${opId === "records" || opId === "values" ? `Example response, from your own access (first ${ex.data.example.pagination.limit} active records at most; options aren't applied)` : "Example response, from your own access"}</span></figcaption><pre tabindex="0" id="apitok-ex-example"><code>${this.esc(JSON.stringify(ex.preview, null, 2))}</code></pre></figure>` : ex.previewError ? `<p class="account-empty" role="alert">${this.esc(ex.previewError)}</p>` : "";
     return `${intro}${pickers}
       <dl class="apitok-copy-list">${this.copyRow("Board API ID", ex.boardId)}</dl>
-      <h3>Columns</h3><p class="account-note">${columnHelp}</p>${columns}
+      ${recordField}<h3>Columns</h3><p class="account-note">${columnHelp}</p>${columns}
       ${options}
       <h3>Endpoint</h3>${problems.length ? `<p class="apitok-error" role="alert">${this.esc(problems.join(" "))}</p>` : ""}<dl class="apitok-copy-list">${this.copyRow(`GET`, url, "Endpoint")}${related}</dl>
       <p class="account-note">Send your token in a header, never in the address: <code>Authorization: Bearer YOUR_JARC_API_TOKEN</code></p>
@@ -409,6 +425,7 @@ class ApiTokensPanel {
     try {
       if (opId === "records") ex.preview = (await this.explorerFetch(this.explorerSelected())).example;
       else if (opId === "values") ex.preview = (await this.explorerFetch([ex.column])).values;
+      else if (opId === "record") { if (!this.validRecord()) throw new Error("Enter a Record ID first."); ex.preview = { record: (await this.explorerFetch([], ex.record.toLowerCase())).record }; }
       else {
         const data = await this.explorerFetch();
         ex.data = { ...ex.data, board: data.board, columns: data.columns };
@@ -428,10 +445,17 @@ class ApiTokensPanel {
     if (next && scroll) next.scrollLeft = scroll;
     document.querySelector(`#apitok-root ${selector}`)?.focus();
   }
+  // Typing a Record ID: the address and examples follow, and the cursor stays where it was.
+  refreshExplorerAddress() {
+    const before = document.querySelector('#apitok-root [data-action="apitok-ex-record"]'), at = before?.selectionStart ?? null;
+    this.redrawKeeping('[data-action="apitok-ex-record"]');
+    const input = document.querySelector('#apitok-root [data-action="apitok-ex-record"]');
+    if (input && at !== null) input.setSelectionRange(at, at);
+  }
   openExplorer(target) {
-    this.ex.preset = { workspaceId: target.dataset.workspace, boardId: target.dataset.board, column: target.dataset.column || null };
+    this.ex.preset = { workspaceId: target.dataset.workspace, boardId: target.dataset.board, column: target.dataset.column || null, record: target.dataset.record || null };
     this.ex.preview = null; this.ex.previewError = "";
-    if (!target.dataset.column) this.ex.op = "records";
+    if (!target.dataset.column && !target.dataset.record) this.ex.op = "records";
     // From the directory: the workspaces are already read. From a board or column menu: read them afresh, then start there.
     const inside = Boolean(document.querySelector("#apitok-root")) && this.catalog.loaded;
     this.open("explorer", { fresh: !inside });
@@ -448,6 +472,7 @@ class ApiTokensPanel {
     if (action === "apitok-copy-column") { this.view.closeOverlay(); this.copyText(target.dataset.key, "Column ID"); return; }
     if (action === "apitok-board-info") { this.showBoardInfo(target.dataset.id); return; }
     if (action === "apitok-column-info") { this.showColumnInfo(target.dataset.key); return; }
+    if (action === "apitok-record-info") { this.showRecordInfo(target.dataset.id); return; }
     if (action === "apitok-open-explorer") { this.openExplorer(target); return; }
     if (action === "apitok-catalog-retry") { this.resetCatalog(); this.redraw(); return; }
     if (action === "apitok-dir-board") { this.dir.boardId = target.dataset.id; this.dir.columnQuery = ""; this.redraw(); document.querySelector(`#apitok-root [data-action="apitok-dir-board"][data-id="${CSS.escape(target.dataset.id)}"]`)?.focus(); return; }
@@ -462,13 +487,14 @@ class ApiTokensPanel {
     if (action === "apitok-revoke" && token) this.showRevoke(token);
   }
   onInput(input) {
+    if (input.dataset.action === "apitok-ex-record") { this.ex.record = input.value.trim(); this.ex.preview = null; this.refreshExplorerAddress(); return; }
     if (input.dataset.action === "apitok-dir-board-search" || input.dataset.action === "apitok-dir-column-search") this.directorySearch(input);
   }
   onChange(select) {
     const change = select.dataset.action, ex = this.ex;
     if (change === "apitok-ex-workspace") { this.explorerChange(() => this.explorerWorkspace(select.value)); return; }
     if (change === "apitok-ex-board") { this.explorerChange(() => this.explorerBoard(select.value)); return; }
-    if (change === "apitok-ex-op") { ex.op = select.value; ex.preview = null; ex.previewError = ""; if (this.operation()[3] === "one" && !ex.column) ex.column = ex.data?.columns[0]?.id || ""; this.redrawKeeping('[data-action="apitok-ex-op"]'); return; }
+    if (change === "apitok-ex-op") { ex.op = select.value; ex.preview = null; ex.previewError = ""; if (this.operation()[3] === "one" && !ex.column) ex.column = ex.data?.columns[0]?.id || ""; if (this.operation()[3] === "record" && !ex.record) ex.record = ex.data?.example.items[0]?.id || ""; this.redrawKeeping('[data-action="apitok-ex-op"]'); return; }
     if (change === "apitok-ex-column") { if (select.checked) ex.selected.add(select.value); else ex.selected.delete(select.value); ex.preview = null; this.redrawKeeping(`[data-action="apitok-ex-column"][value="${CSS.escape(select.value)}"]`); return; }
     if (change === "apitok-ex-one") { ex.column = select.value; ex.preview = null; this.redrawKeeping(`[data-action="apitok-ex-one"][value="${CSS.escape(select.value)}"]`); return; }
     if (change === "apitok-ex-param") { const name = select.dataset.param; ex.params[name] = select.type === "checkbox" ? select.checked : select.value; ex.preview = null; this.redrawKeeping(`[data-action="apitok-ex-param"][data-param="${CSS.escape(name)}"]`); return; }

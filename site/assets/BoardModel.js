@@ -293,9 +293,11 @@ class BoardModel {
     if(this.quickFilter==="mine"&&this.ownerColumn){const mine=[this.me,this.profile.initials,this.profile.name,this.profile.email].filter(Boolean).map(String);rules.push({key:this.ownerColumn.key,cmp:"in",values:mine.length?mine:["-"]});}
     if(this.quickFilter==="due"&&this.dueColumn()?.key)rules.push({key:this.dueColumn().key,cmp:"dateRange",values:[today,new Date(Date.now()+7*86400000).toISOString().slice(0,10)]});
     if(this.quickFilter==="recent")rules.push({key:"updatedAt",cmp:"onOrAfter",values:[new Date(Date.now()-7*86400000).toISOString()]});
-    const text=this.query.trim(), sortKey=this.sortKey||this.sortColumn?.key;
-    const order=this.liveOrderBy||(!this.manualSort&&sortKey&&this.board.columns.some((c)=>c.key===sortKey)?[{key:sortKey,dir:this.sortDirection==="asc"?"asc":"desc"}]:[{key:"position",dir:"asc"}]);
-    return {filter:this.liveViewFilter,also:rules.length?{op:"and",rules}:null,q:text.length>=2&&this.boardSearchAvailable?text.slice(0,100):null,orderBy:[{key:"pinned",dir:"desc"},...order].slice(0,4),archived:Boolean(this.showArchived)};
+    // Searching for an exact Record ID finds that record, whatever the board's search index holds.
+    const text=this.query.trim(), byId=this.serverBacked&&BoardModel.isRecordId(text), sortKey=this.sortKey||this.sortColumn?.key;
+    if(byId)rules.push({key:BoardModel.RECORD_ID,cmp:"in",values:[text.toLowerCase()]});
+    const order=this.liveOrderBy||(!this.manualSort&&sortKey&&(this.board.columns.some((c)=>c.key===sortKey)||(sortKey===BoardModel.RECORD_ID&&this.serverBacked))?[{key:sortKey,dir:this.sortDirection==="asc"?"asc":"desc"}]:[{key:"position",dir:"asc"}]);
+    return {filter:this.liveViewFilter,also:rules.length?{op:"and",rules}:null,q:!byId&&text.length>=2&&this.boardSearchAvailable?text.slice(0,100):null,orderBy:[{key:"pinned",dir:"desc"},...order].slice(0,4),archived:Boolean(this.showArchived)};
   }
   // After the current render, and once for several changes together.
   // group: only this group's rows changed (a page arrived). Anything else means the whole screen.
@@ -493,6 +495,17 @@ class BoardModel {
   get ownerColumn() { return this.board.columns.find((column)=>column.type==="owner"); }
   get priorityColumn() { return this.board.columns.find((column)=>column.type==="priority"); }
   get sortColumn() { return this.board.columns.find((column)=>column.type==="date"); }
+  // ---- Record ID: each record's permanent ID (the server's record ID), shown as a read-only system column on shared server
+  // boards. It is the same for everyone, never changes, and is what the API's /records/{id} takes. Not a board column: it is
+  // never stored in records or the board's columns, and the key can't be used by a real column (the server refuses it).
+  static RECORD_ID = "__record_id";
+  static isRecordId(text) { return /^[0-9a-f]{24}$/i.test(String(text ?? "")); }
+  get serverBacked() { return this.storage?.adapter?.mode === "resource"; }
+  get recordIdShown() { return this.serverBacked && !this.settings?.hideRecordId; }
+  get systemColumnCount() { return this.recordIdShown ? 1 : 0; }
+  // The record's permanent ID, or null while a new record is still being saved (it has only a temporary local ID until then).
+  recordIdOf(row) { const id = this.serverId(row?.id); return BoardModel.isRecordId(id) ? id.toLowerCase() : null; }
+  cellOf(row, key) { return key === BoardModel.RECORD_ID ? (this.recordIdOf(row) || "") : row[key]; }
   get archivedCount() { return this.rows.filter((row)=>row.archived).length; }
   get canUndo() { return this.history.length > 0; }
   get canRedo() { return Boolean(this.future?.length); }
@@ -511,8 +524,8 @@ class BoardModel {
       .filter((row) => this.matchesQuickFilter(row))
       .filter((row) => !this.personFilter || !this.ownerColumn || this.valueList(row[this.ownerColumn.key]).includes(this.personFilter))
       .filter((row) => this.matchesColumnFilter(row))
-      .filter((row) => !query || this.board.columns.some((column) => this.valueText(column, row[column.key]).toLowerCase().includes(query)))
-      .sort((a, b) => { if(!server&&Boolean(a.pinned)!==Boolean(b.pinned))return a.pinned?-1:1; if(serverOrder){const x=serverOrder.get(String(a.id))??-1,y=serverOrder.get(String(b.id))??-1;if(x!==y)return x-y;} if(orderBy){for(const s of orderBy){const col=this.board.columns.find((c)=>c.key===s.key),x=this.sortText(col,a[s.key]),y=this.sortText(col,b[s.key]),c=x.localeCompare(y,undefined,{numeric:true});if(c)return s.dir==="desc"?-c:c;}} if(this.manualSort)return place.get(a)-place.get(b); const key=this.sortKey || this.sortColumn?.key; if(!key)return place.get(a)-place.get(b); const column=this.board.columns.find((c)=>c.key===key), x=this.sortText(column,a[key]), y=this.sortText(column,b[key]); return this.sortDirection === "desc" ? y.localeCompare(x,undefined,{numeric:true}) : x.localeCompare(y,undefined,{numeric:true}); });
+      .filter((row) => !query || this.board.columns.some((column) => this.valueText(column, row[column.key]).toLowerCase().includes(query)) || (BoardModel.isRecordId(query) && this.recordIdOf(row) === query))
+      .sort((a, b) => { if(!server&&Boolean(a.pinned)!==Boolean(b.pinned))return a.pinned?-1:1; if(serverOrder){const x=serverOrder.get(String(a.id))??-1,y=serverOrder.get(String(b.id))??-1;if(x!==y)return x-y;} if(orderBy){for(const s of orderBy){const col=this.board.columns.find((c)=>c.key===s.key),x=this.sortText(col,this.cellOf(a,s.key)),y=this.sortText(col,this.cellOf(b,s.key)),c=x.localeCompare(y,undefined,{numeric:true});if(c)return s.dir==="desc"?-c:c;}} if(this.manualSort)return place.get(a)-place.get(b); const key=this.sortKey || this.sortColumn?.key; if(!key)return place.get(a)-place.get(b); const column=this.board.columns.find((c)=>c.key===key), x=this.sortText(column,this.cellOf(a,key)), y=this.sortText(column,this.cellOf(b,key)); return this.sortDirection === "desc" ? y.localeCompare(x,undefined,{numeric:true}) : x.localeCompare(y,undefined,{numeric:true}); });
   }
 
   openScreen(screen) { this.screen = screen; this.selected.clear(); this.save({op:"updateUserState"}); }

@@ -41,7 +41,7 @@ class AppController {
     // Leaving a cell editor saves it (Esc cancels first); leaving an empty draft row discards it.
     root.addEventListener("focusout",e=>{const a=e.target.dataset?.action;if(a==="cell-input")this.commitCell(e.target,"none");else if(a==="draft-input")this.commitDraft(e.target);});
     document.addEventListener("pointerdown",e=>{const overlay=this.root.querySelector('#overlay-root');if(overlay?.querySelector('.popover,.profile-popover')&&!overlay.contains(e.target)&&!e.target.closest('[data-action]'))this.view.closeOverlay();});
-    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("jarc-session-expired",()=>{if(this.entra)this.showEntraGate("expired");});window.addEventListener("jarc-access-denied",()=>{if(this.entra)this.showEntraGate("denied");});window.addEventListener("jarc-account-pending",()=>{if(this.entra)this.showEntraGate("pending");});window.addEventListener("jarc-board-status",()=>this.refreshWhenIdle());window.addEventListener("jarc-server-view",(e)=>this.renderServerView(e.detail?.groups||null));this.root.addEventListener("scroll",()=>this.scheduleVirtual(),true);window.addEventListener("jarc-ids-changed",()=>this.refreshWhenIdle());window.addEventListener("jarc-rollback",(event)=>this.onRollback(event.detail));window.addEventListener("jarc-connection",()=>this.saveFeedback());window.addEventListener("online",()=>this.saveFeedback());window.addEventListener("offline",()=>this.saveFeedback());
+    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("jarc-session-expired",()=>{if(this.entra)this.showEntraGate("expired");});window.addEventListener("jarc-access-denied",()=>{if(this.entra)this.showEntraGate("denied");});window.addEventListener("jarc-account-pending",()=>{if(this.entra)this.showEntraGate("pending");});window.addEventListener("jarc-board-status",()=>this.refreshWhenIdle());window.addEventListener("jarc-server-view",(e)=>this.renderServerView(e.detail?.groups||null));this.root.addEventListener("scroll",()=>this.scheduleVirtual(),true);window.addEventListener("jarc-ids-changed",()=>{this.patchRecordIds();this.refreshWhenIdle();});window.addEventListener("jarc-rollback",(event)=>this.onRollback(event.detail));window.addEventListener("jarc-connection",()=>this.saveFeedback());window.addEventListener("online",()=>this.saveFeedback());window.addEventListener("offline",()=>this.saveFeedback());
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>this.view.applyDisplay(this.model));
     root.addEventListener("pointerover",e=>{
       const target=e.target.closest('button');if(!target)return;
@@ -95,6 +95,10 @@ class AppController {
       if (this.model.profile.name !== this.auth.username || this.model.profile.email !== this.auth.email || this.model.profile.role !== role) this.model.updateProfile({ name: this.auth.username, email: this.auth.email, role });
     }
     if (this.entra && this.auth.userId) this.model.me = `user:${this.auth.userId}`;
+    // Sidebar choices are saved per account, and the account is only known now: read them again (the first read, at startup,
+    // couldn't find a signed-in person's choice, so a collapsed sidebar used to reopen after every reload).
+    document.body.classList.toggle("nav-collapsed", window.jarcStorage.getPreference("navCollapsed")==="1");
+    document.body.classList.toggle("workspace-section-collapsed", window.jarcStorage.getPreference("workspaceSectionCollapsed")==="1");
     this.root.onclick = null; this.ready = true; this.update(); this.integrations?.afterStart(); this.appearance?.afterStart();
     this.loadPeople(); this.loadFeed(); this.startLive();
     if (!this.feedTimer && this.model.storage.adapter.loadActivityFeed) this.feedTimer = setInterval(() => { if (this.ready && document.visibilityState === "visible") this.loadFeed(); }, 60000);
@@ -271,6 +275,15 @@ class AppController {
   // Resource mode: re-render after records load or server IDs replace temporary ones, but never under an open
   // dialog (it re-renders when the dialog closes) or while a field is being edited (the next update shows it; old
   // temporary IDs on the page still resolve through the model, so nothing breaks in the meantime).
+  // A new record's Record ID cell says "Saving…" until the server gives it its permanent ID. Fill those cells in at once, even
+  // while someone is still typing (a full redraw waits until they stop).
+  patchRecordIds() {
+    if (!this.model.recordIdShown) return;
+    for (const cell of this.root.querySelectorAll("tr[data-record-context] td.record-id-cell .record-id-pending")) {
+      const td = cell.closest("td"), tr = td.closest("tr"), row = this.model.rows.find((r) => r.id === this.model.idOf(tr.dataset.recordContext));
+      if (row && this.model.recordIdOf(row)) td.outerHTML = this.view.recordIdCell(row, this.model);
+    }
+  }
   refreshWhenIdle() {
     if (!this.ready || !this.auth.authenticated) return;
     const active = document.activeElement, overlay = this.root.querySelector("#overlay-root");
@@ -364,6 +377,8 @@ class AppController {
     if (this.model.screen === "board" && this.model.board?.source?.readOnly && AppController.READ_ONLY_BLOCKED.has(action)) { this.view.toast("This board is synced from monday.com and is read-only"); return; }
     if(action==="login-theme-choice"){this.model.updateSetting("theme",target.dataset.theme);this.view.applyDisplay(this.model);this.root.querySelectorAll('[data-action="login-theme-choice"]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.theme===target.dataset.theme)));return;}
     this.lastTrigger=target;
+    // On a desktop the menu button only shows while the sidebar is collapsed (there is no icon rail): it brings the sidebar back.
+    if(action==="toggle-nav"&&!(this.drawerMedia?this.drawerMedia.matches:true)){if(document.body.classList.contains("nav-collapsed")){this.toggleSidebar();this.root.querySelector('#sidebar [data-action="collapse-nav"]')?.focus({preventScroll:true});}return;}
     if(action==="toggle-nav"){this.setNav(!this.navOpen);return;}
     // Choosing anything in the drawer (a screen, board, workspace, settings…) closes it first.
     if(this.navOpen&&target.closest("#sidebar")&&action!=="toggle-workspace-section")this.setNav(false,{restoreFocus:false});
@@ -392,11 +407,15 @@ class AppController {
     if (action === "nav") { this.model.openScreen(target.dataset.screen); this.update(); }
     if (action === "open-board") { this.view.closeOverlay();this.model.openBoard(target.dataset.id); this.update(); }
     if (action === "open-record-board") { this.model.openBoard(target.dataset.board,target.dataset.workspace); this.update(); }
-    if (action === "collapse-nav") { document.body.classList.toggle("nav-collapsed"); window.jarcStorage.setPreference("navCollapsed",document.body.classList.contains("nav-collapsed")?"1":"0"); }
+    if (action === "collapse-nav") { document.body.classList.toggle("nav-collapsed"); window.jarcStorage.setPreference("navCollapsed",document.body.classList.contains("nav-collapsed")?"1":"0"); if(document.body.classList.contains("nav-collapsed"))this.root.querySelector('.topbar [data-action="toggle-nav"]')?.focus({preventScroll:true}); }
     if (action === "toggle-workspace-section") { document.body.classList.toggle("workspace-section-collapsed"); const collapsed=document.body.classList.contains("workspace-section-collapsed"); window.jarcStorage.setPreference("workspaceSectionCollapsed",collapsed?"1":"0"); if(!collapsed)this.view.play(this.root.querySelector(".sidebar .nav-tree"),"section-reveal"); }
     if (action === "workspace-menu") this.togglePanel("workspace",()=>this.view.showWorkspaceMenu(this.model));
     if (action === "create-workspace") this.view.showWorkspaceForm();
-    if (action === "record-menu") this.togglePanel(`record-${target.dataset.id}`,()=>this.view.showRecordMenu(this.model.rows.find((row)=>row.id===this.model.idOf(target.dataset.id))));
+    if (action === "record-menu") this.togglePanel(`record-${target.dataset.id}`,()=>this.view.showRecordMenu(this.model.rows.find((row)=>row.id===this.model.idOf(target.dataset.id)),this.model));
+    // Record ID (the system column): copy it, its header menu, and hiding or showing it for this person.
+    if (action === "copy-record-id") { this.view.closeOverlay(); const row=this.model.rows.find((r)=>r.id===this.model.idOf(target.dataset.id)), id=this.model.recordIdOf(row); if(id)this.copyText(id,"Record ID"); else this.view.toast("This record is still being saved"); return; }
+    if (action === "record-id-menu") { this.togglePanel("column-menu-record-id",()=>this.view.showRecordIdMenu(this.model)); return; }
+    if (action === "record-id-visibility") { this.model.updateSetting("hideRecordId",target.dataset.show!=="1"); this.view.closeOverlay(); this.update(); this.view.toast(target.dataset.show==="1"?"Record ID shown":"Record ID hidden. Show it again from Columns."); return; }
     if (action === "switch-workspace") { this.model.switchWorkspace(target.dataset.id); this.view.closeOverlay(); this.update(); }
     if(action==="board-menu"){this.boardMenuWorkspace=target.dataset.workspace||this.model.currentWorkspaceId;const ws=this.model.workspaces.find(w=>w.id===this.boardMenuWorkspace);this.togglePanel(`board-${target.dataset.id}`,()=>this.view.showBoardMenu(ws.boards.find(b=>b.id===target.dataset.id),{current:target.dataset.current==="1",archivedCount:this.model.archivedCount}));}
     if (action === "new-board") this.view.showBoardForm(null);
@@ -672,6 +691,8 @@ class AppController {
     if (event.target.dataset?.action === "acct-filter") { this.accounts?.onFilter(event.target); return; }
     if (event.target.dataset?.action === "acct-ws-role") { this.accounts?.onChange(event.target); return; }
     // Display columns: show/hide one column, or all of them (Item always stays).
+    // The Record ID system column: shown or hidden for this person only (it is never part of the board or a view).
+    if (event.target.dataset?.action === "record-id-toggle") { this.model.updateSetting("hideRecordId",!event.target.checked); this.refreshViewChrome(); document.querySelector('#overlay-root [data-action="record-id-toggle"]')?.focus(); return; }
     if (event.target.dataset?.action === "column-toggle" || event.target.dataset?.action === "column-toggle-all") {
       const all=event.target.dataset.action==="column-toggle-all";
       const changed=all?this.model.setAllColumnsVisible(event.target.checked):this.model.setColumnVisible(event.target.dataset.key,event.target.checked);
@@ -1468,6 +1489,8 @@ class AppController {
     else if(event.key==="Tab"&&!event.shiftKey){event.preventDefault();this.commitDraft(input,{next:true});}
   }
   // Sorting from the column menu reuses model.sortKey/sortDirection. It leaves the board's saved manual order intact.
+  // Copies an identifier (never a secret); if the browser refuses, shows it so it can be copied by hand.
+  async copyText(text,label){try{await navigator.clipboard.writeText(text);this.view.toast(`${label} copied`);}catch{this.view.showMessage(label,text);}}
   applySort(key,direction){
     this.model.sortKey=key; this.model.sortDirection=direction||"desc";
     this.model.manualSort=key?false:Boolean(this.model.board.manualOrder);

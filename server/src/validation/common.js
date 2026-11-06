@@ -86,4 +86,7 @@ function versionParam(value) {
   return version(Number(raw));
 }
 
-module.exports = { fail, isObject, isPrimitive, isSafeKey, assertSafeJson, requireBody, allowOnly, parseId, text, color, bool, finiteNumber, version, versionParam, queryString, FORBIDDEN_KEYS, SAFE_KEY, OBJECT_ID };
+// A record's permanent ID (its stored _id), as the boards' system "Record ID" column: usable in sorts and filters, never a real column key.
+const RECORD_ID_KEY = "__record_id";
+
+module.exports = { RECORD_ID_KEY, fail, isObject, isPrimitive, isSafeKey, assertSafeJson, requireBody, allowOnly, parseId, text, color, bool, finiteNumber, version, versionParam, queryString, FORBIDDEN_KEYS, SAFE_KEY, OBJECT_ID };

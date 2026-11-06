@@ -215,6 +215,25 @@ const removeBoard = async (w, job) => { const { job: started } = await w.jobs.cl
 const importFile = async (w, file, { name = "m.xlsx", review = {}, start = { confirmNewBoard: true } } = {}) => { let job = await w.jobs.createFromFile(w.ws, file, { name }, actor); job = await w.jobs.review(job, review); job = await w.jobs.startNewBoard(job, start); w.jobs.wake(); return finished(w.jobs, job._id); };
 
 describe("API IDs of imported columns", () => {
+  test("every imported row gets its own permanent Record ID, and a workbook's own Item ID column keeps its values", async () => {
+    const rows = [["Name", "Item ID", "Qty"], ...Array.from({ length: 30 }, (_, i) => [`Row ${i + 1}`, `BH-1120${String(i).padStart(3, "0")}`, String(i)])];
+    const w = await world(), done = await importFile(w, xlsx(rows), { name: "with-item-ids.xlsx" });
+    assert.equal(done.status, "done", done.lastError);
+    const board = await w.dl.repos.boards.findById(done.boardId), records = await w.dl.repos.records.listAllForBoard(board._id);
+    assert.equal(records.length, 30);
+    const ids = records.map((r) => r._id.toHexString());
+    assert.ok(ids.every((id) => /^[0-9a-f]{24}$/.test(id)) && new Set(ids).size === 30, "30 different permanent IDs");
+    const itemId = board.columns.find((c) => c.label === "Item ID");
+    assert.ok(itemId && itemId.key !== "__record_id", "the workbook's Item ID is an ordinary column");
+    assert.deepEqual(records.map((r) => r.values[itemId.key]).sort(), rows.slice(1).map((r) => r[1]).sort(), "its BH- values are unchanged");
+    // A second import adds new rows with new IDs; the first rows keep theirs.
+    const again = await importFile(w, xlsx([["Name", "Item ID"], ["Later", "BH-9"]]), { name: "later.xlsx" });
+    assert.equal(again.status, "done", again.lastError);
+    const later = (await w.dl.repos.records.listAllForBoard(again.boardId)).map((r) => r._id.toHexString());
+    assert.ok(later.every((id) => !ids.includes(id)));
+    assert.deepEqual((await w.dl.repos.records.listAllForBoard(board._id)).map((r) => r._id.toHexString()).sort(), [...ids].sort());
+  });
+
   test("an imported board's column IDs are unique, valid and unchanged by renaming, and another import doesn't disturb them", async () => {
     const w = await world(), done = await importFile(w, xlsx([["Name", "Code", "When"], ["A", "1", "2026-03-04"], ["B", "2", "2026-03-05"]]), { name: "first.xlsx" });
     assert.equal(done.status, "done", done.lastError);

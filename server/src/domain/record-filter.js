@@ -10,17 +10,19 @@
 //            equalsText         the text equals a value, ignoring case
 //            gt, lt             numerically greater or less than the value (numbers may be stored as text)
 //            before, after, onOrAfter, dateRange   dates, compared as their ISO text; dateRange is [from, to] inclusive
-//   key      a column; also updatedAt with onOrAfter (a date and time)
-//   orderBy  [{ key, dir }], at most four: a column, or pinned / createdAt / updatedAt / position. _id always breaks ties.
+//   key      a column; also updatedAt with onOrAfter (a date and time), and __record_id with in (exact record IDs)
+//   orderBy  [{ key, dir }], at most four: a column, or pinned / createdAt / updatedAt / position / __record_id (the record's
+//            permanent ID). _id always breaks ties, so nothing after __record_id changes the order and it is dropped.
 //
 // Column keys must exist on the board and values are compared literally (regular expressions are escaped), so nothing from
 // a request reaches MongoDB as an operator or a field name. The same rules run in the browser (BoardModel.matchesViewFilter).
-const { fail, isSafeKey } = require("../validation/common");
+const { ObjectId } = require("mongodb");
+const { fail, isSafeKey, RECORD_ID_KEY, OBJECT_ID } = require("../validation/common");
 
 const CMPS = Object.freeze(["in", "notIn", "contains", "notContains", "empty", "notEmpty", "anyToken", "noToken", "equalsText", "gt", "lt", "before", "after", "onOrAfter", "dateRange"]);
 const NO_VALUES = new Set(["empty", "notEmpty"]);
-const META_SORTS = Object.freeze({ pinned: "pinned", createdAt: "createdAt", updatedAt: "updatedAt", position: "position" });
-const META_FILTERS = new Set(["updatedAt"]);
+const META_SORTS = Object.freeze({ pinned: "pinned", createdAt: "createdAt", updatedAt: "updatedAt", position: "position", [RECORD_ID_KEY]: "_id" });
+const META_FILTERS = new Set(["updatedAt", RECORD_ID_KEY]);
 const MAX = Object.freeze({ rules: 25, groups: 10, values: 100, value: 500, orderBy: 4, text: 6000 });
 const isPlain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const escapeRegex = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -65,17 +67,22 @@ const rulesIn = (filter) => [...filter.rules, ...(filter.groups || []).flatMap((
 // Against a board: every column must exist. Filtering by the group column isn't a cell comparison, so it is refused.
 function filterForBoard(raw, board) {
   const filter = cleanFilter(raw), byKey = new Map(board.columns.map((c) => [c.key, c]));
-  for (const r of rulesIn(filter)) { if (META_FILTERS.has(r.key) && !byKey.has(r.key)) { if (r.cmp !== "onOrAfter" || Number.isNaN(Date.parse(r.values?.[0]))) fail("updatedAt can only be filtered from a date."); continue; } const c = byKey.get(r.key); if (!c || c.type === "group") fail(`The filter names a column this board doesn't have (${r.key.slice(0, 40)}).`); }
+  for (const r of rulesIn(filter)) {
+    if (r.key === RECORD_ID_KEY && !byKey.has(r.key)) { if (r.cmp !== "in" || !r.values.every((v) => OBJECT_ID.test(v))) fail("A Record ID filter needs exact record IDs (24 hexadecimal characters)."); continue; }
+    if (META_FILTERS.has(r.key) && !byKey.has(r.key)) { if (r.cmp !== "onOrAfter" || Number.isNaN(Date.parse(r.values?.[0]))) fail("updatedAt can only be filtered from a date."); continue; } const c = byKey.get(r.key); if (!c || c.type === "group") fail(`The filter names a column this board doesn't have (${r.key.slice(0, 40)}).`); }
   return filter;
 }
 function orderByForBoard(raw, board) {
   const orderBy = cleanOrderBy(raw), byKey = new Map(board.columns.map((c) => [c.key, c]));
-  return orderBy.map(({ key, dir }) => {
+  const out = orderBy.map(({ key, dir }) => {
     if (META_SORTS[key] && !byKey.has(key)) return { key, dir, path: META_SORTS[key] };
     const c = byKey.get(key);
     if (!c || c.type === "group") fail(`orderBy names a column this board doesn't have (${key.slice(0, 40)}).`);
     return { key, dir, path: `values.${key}` };
   });
+  // Record IDs are unique: anything sorted after one can't change the order, and _id must stay the last key.
+  const id = out.findIndex((s) => s.path === "_id");
+  return id === -1 ? out : out.slice(0, id + 1);
 }
 
 // Values as a column stores them: numbers and checkboxes aren't text.
@@ -95,6 +102,7 @@ function ruleQuery(rule, byKey) {
   const path = `values.${rule.key}`, column = byKey.get(rule.key), values = rule.values || [];
   const numeric = (op) => ({ $expr: { [op]: [{ $convert: { input: `$${path}`, to: "double", onError: null, onNull: null } }, Number(values[0])] } });
   if (!column && rule.key === "updatedAt") return { updatedAt: { $gte: new Date(values[0]) } };
+  if (!column && rule.key === RECORD_ID_KEY) return { _id: { $in: values.map((v) => new ObjectId(v)) } };
   switch (rule.cmp) {
     case "equalsText": return { [path]: { $regex: `^${escapeRegex(values[0].trim())}$`, $options: "i" } };
     case "gt": return { $and: [numeric("$gt"), { [path]: { $nin: ["", null] } }] };
@@ -127,6 +135,8 @@ function filterQuery(filter, board) {
 // Everything after the last row of a page: lexicographic on the sort keys, then _id, with MongoDB's order for missing
 // values (null sorts lowest).
 function afterQuery(orderBy, values, id) {
+  // A cursor carries a record ID as text; compared with _id it must be an ObjectId again.
+  values = values.map((v, i) => (orderBy[i].path === "_id" && typeof v === "string" && OBJECT_ID.test(v) ? new ObjectId(v) : v));
   const beyond = ({ path, dir }, value) => {
     if (dir === "asc") return value === null ? { [path]: { $ne: null } } : { [path]: { $gt: value } };
     return value === null ? null : { $or: [{ [path]: { $lt: value } }, { [path]: null }] };
@@ -189,4 +199,4 @@ function decodeCursor(text, orderBy) {
 // Sorting by a column: numbers kept as text order numerically, as people expect, and comparisons stay case-sensitive.
 const COLLATION = Object.freeze({ locale: "en", numericOrdering: true });
 
-module.exports = { columnSortStages, SORT_FIELD, cleanFilter, cleanOrderBy, filterForBoard, orderByForBoard, filterQuery, afterQuery, encodeCursor, decodeCursor, rulesIn, escapeRegex, COLLATION, CMPS, MAX };
+module.exports = { RECORD_ID_KEY, columnSortStages, SORT_FIELD, cleanFilter, cleanOrderBy, filterForBoard, orderByForBoard, filterQuery, afterQuery, encodeCursor, decodeCursor, rulesIn, escapeRegex, COLLATION, CMPS, MAX };

@@ -1,7 +1,7 @@
 // Board configuration rules shared by the resource API and the legacy migration: flexible columns, groups with
 // stable IDs, saved views and record values. They mirror the current frontend (site/assets/BoardModel.js).
 const crypto = require("crypto");
-const { fail, isObject, isPrimitive, isSafeKey, text, color, bool } = require("../validation/common");
+const { fail, isObject, isPrimitive, isSafeKey, text, color, bool, RECORD_ID_KEY } = require("../validation/common");
 const { cleanFilter, cleanOrderBy } = require("./record-filter");
 
 const COLUMN_TYPES = Object.freeze(["text", "number", "status", "dropdown", "checkbox", "priority", "owner", "date", "email", "phone", "link", "group", "files"]);
@@ -37,6 +37,7 @@ function normalizeColumn(column, where = "a column") {
   if (!isObject(column)) fail(`${where} is not a column.`);
   for (const key of Object.keys(column)) if (!COLUMN_FIELDS.includes(key)) fail(`${where} has an unknown setting "${key.slice(0, 40)}".`);
   if (!isSafeKey(column.key)) fail(`${where} needs a key made of letters, digits, "_" or "-".`);
+  if (column.key === RECORD_ID_KEY) fail(`${where} can't use the key "${RECORD_ID_KEY}": it is the system Record ID.`);
   const label = text(column.label ?? "", `The label of column "${column.key}"`, { max: 200 });
   if (!COLUMN_TYPES.includes(column.type)) fail(`Column "${column.key}" has an unsupported type.`);
   const result = {
