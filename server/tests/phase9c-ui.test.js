@@ -204,11 +204,12 @@ describe("Phase 9C: JARC Default theme and personalization (real app)", { skip: 
     assert.ok(await a.waitFor("document.querySelectorAll('.icon-picker .icon-grid:not(.is-recent) [data-action=icon-choose]').length === 1", 2000), "search narrows the icons");
     await click(a, ".icon-picker .icon-grid:not(.is-recent) [data-action=icon-choose]");
     assert.ok(await a.waitFor(`fetch("/api/v1/boards/${board.id}").then((r) => r.json()).then((x) => x.board.icon === "icon:rocket")`, 6000), "saved as an icon name");
-    assert.ok(await b2.waitFor(`!!document.querySelector('.sidebar .board-nav [data-id="${board.id}"] .entity-icon.is-glyph svg path')`, 12000), "Ben sees it without reloading");
+    // The sidebar's board list shows names only (no icons since 2026-11); the board header shows the board's icon.
+    assert.ok(await b2.waitFor(`!!document.querySelector('.board-head .board-icon-button[data-id="${board.id}"] .entity-icon.is-glyph svg path')`, 12000), "Ben sees it without reloading");
     await click(a, ".board-head [data-action=icon-picker][data-kind=board]"); await a.waitFor("!!document.querySelector('.icon-picker')", 3000);
     await click(a, ".icon-picker [data-action=icon-tab][data-tab=emoji]"); await sleep(150);
     await click(a, '.icon-picker [data-action=icon-choose][data-value="📦"]');
-    assert.ok(await b2.waitFor(`document.querySelector('.sidebar .board-nav [data-id="${board.id}"] .entity-icon.is-emoji')?.textContent === "📦"`, 12000), "emoji, live");
+    assert.ok(await b2.waitFor(`document.querySelector('.board-head .board-icon-button[data-id="${board.id}"] .entity-icon.is-emoji')?.textContent === "📦"`, 12000), "emoji, live");
     await click(a, ".board-head [data-action=icon-picker][data-kind=board]"); await a.waitFor("!!document.querySelector('.icon-picker')", 3000);
     await click(a, '.icon-picker [data-action=icon-choose][data-value=""]');
     assert.ok(await a.waitFor(`fetch("/api/v1/boards/${board.id}").then((r) => r.json()).then((x) => x.board.icon === "")`, 6000), "Reset to default");

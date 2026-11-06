@@ -54,11 +54,13 @@ describe("Sidebar without the icon rail, and Record IDs (real app)", { skip: BRO
   after(async () => { await b?.close(); server?.proc?.kill(); });
 
   // ---- Sidebar
-  test("desktop: the full sidebar is unchanged (board icons, counts, workspace badge, sections)", async () => {
+  test("desktop: the full sidebar keeps its names, counts, workspace badge and sections, with no icons in the board list", async () => {
     await openApp(DESKTOP);
-    const sidebar = JSON.parse(await b.evaluate(`JSON.stringify((() => { const s = document.querySelector("#sidebar"), r = s.getBoundingClientRect(); return { width: Math.round(r.width), left: Math.round(r.left), visible: getComputedStyle(s).visibility, boardIcons: s.querySelectorAll(".tree-item .icon, .board-nav .icon").length, counts: [...s.querySelectorAll(".nav-count")].map((c) => c.textContent.trim()), text: s.textContent }; })())`));
+    const sidebar = JSON.parse(await b.evaluate(`JSON.stringify((() => { const s = document.querySelector("#sidebar"), r = s.getBoundingClientRect(); return { width: Math.round(r.width), left: Math.round(r.left), visible: getComputedStyle(s).visibility, boardIcons: s.querySelectorAll(".board-nav .tree-item .icon, .board-nav .tree-item .entity-icon, .board-nav .tree-icon").length, boardItems: s.querySelectorAll(".board-nav .tree-item").length, nameLeft: Math.round(s.querySelector(".board-nav .tree-item .nav-text").getBoundingClientRect().left - s.querySelector(".board-nav .tree-item").getBoundingClientRect().left), counts: [...s.querySelectorAll(".nav-count")].map((c) => c.textContent.trim()), text: s.textContent }; })())`));
     assert.deepEqual([sidebar.width, sidebar.left, sidebar.visible], [236, 0, "visible"]);
-    assert.ok(sidebar.boardIcons >= 2, "board list icons kept");
+    assert.equal(sidebar.boardIcons, 0, "no icons in front of board names (the symbols in the To Remove reference)");
+    assert.ok(sidebar.boardItems >= 2, "the boards themselves are still listed");
+    assert.ok(sidebar.nameLeft <= 12, `no empty icon space before the name (${sidebar.nameLeft}px)`);
     assert.ok(sidebar.counts.includes("3"), `board record counts kept: ${sidebar.counts}`);
     for (const label of ["Home", "My work", "Integrations", "Workspaces", "Synthetic Records", "Customer Database", "Orders", "Settings"]) assert.match(sidebar.text, new RegExp(label, "i"), label);
     assert.equal(await b.evaluate(`getComputedStyle(document.querySelector('.topbar [data-action="toggle-nav"]')).display`), "none", "no menu button while the sidebar is open");
