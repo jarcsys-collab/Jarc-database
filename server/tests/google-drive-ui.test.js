@@ -1,6 +1,7 @@
 // The Google Drive card on the Integrations page, in the REAL app in a headless browser, against the MOCK Google only: the browser
-// never navigates to Google. Hidden while the server has it off and from everyone but administrators; a confirmation before leaving
-// JARC; connected, reconnect and disconnected states; and the message after returning from Google. Skipped without Chrome or Edge.
+// never navigates to Google. Hidden while the server has it off; a read-only card for every employee (JARC.Admin included) and the
+// buttons only for Drive administrators (GOOGLE_DRIVE_ADMIN_OIDS); a confirmation before leaving JARC; connected, reconnect and
+// disconnected states; and the message after returning from Google. Skipped without Chrome or Edge.
 const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("path");
@@ -8,7 +9,8 @@ const { spawn } = require("child_process");
 const { findBrowser, launch, freePort, waitForServer } = require("./support/headless-browser");
 
 const BROWSER = findBrowser();
-const OIDS = { ada: "0a7a7a7a-0000-4000-8000-000000000081", mia: "0b7b7b7b-0000-4000-8000-000000000082" };
+// ada: Drive administrator (allowlisted) and JARC.Admin; mia: an employee; jay: JARC.Admin but not allowlisted.
+const OIDS = { ada: "0a7a7a7a-0000-4000-8000-000000000081", mia: "0b7b7b7b-0000-4000-8000-000000000082", jay: "0c7c7c7c-0000-4000-8000-000000000083" };
 const CARD = '[aria-labelledby="int-gdrive-title"]';
 
 describe("Google Drive card (real app, mock Google)", { skip: BROWSER ? false : "no Chrome or Edge installed" }, () => {
@@ -35,7 +37,7 @@ describe("Google Drive card (real app, mock Google)", { skip: BROWSER ? false : 
 
   before(async () => {
     ({ proc: off, base: offBase } = await start({ JARC_TEST_GDRIVE: "" }));
-    ({ proc: on, base: onBase } = await start({ JARC_TEST_GDRIVE: "1" }));
+    ({ proc: on, base: onBase } = await start({ JARC_TEST_GDRIVE: "1", JARC_TEST_GDRIVE_ADMINS: OIDS.ada }));
     b = await launch(BROWSER);
   });
   after(async () => { await b?.close(); off?.kill(); on?.kill(); });
@@ -49,13 +51,18 @@ describe("Google Drive card (real app, mock Google)", { skip: BROWSER ? false : 
     assert.doesNotMatch(await text("#integrations-root"), /couldn't|Google/);
   });
 
-  test("a member sees no card and no mention of Google", async () => {
-    await b.open(`${onBase}/api/v1/health`, { width: 1440 });
-    assert.equal(await signIn("mia", "Mia Member", false), 201);
-    await openIntegrations(onBase);
-    await new Promise((r) => setTimeout(r, 400));
-    assert.equal(await has(CARD), false);
-    assert.doesNotMatch(await text("#integrations-root"), /Google/);
+  test("an employee, and a JARC.Admin who isn't a Drive administrator, see a read-only card: the state, no buttons, no account", async () => {
+    for (const [who, name, admin] of [["mia", "Mia Member", false], ["jay", "Jay Jarcadmin", true]]) {
+      await b.open(`${onBase}/api/v1/health`, { width: 1440 });
+      assert.equal(await signIn(who, name, admin), 201);
+      await openIntegrations(onBase);
+      assert.ok(await b.waitFor(`!!document.querySelector(${JSON.stringify(CARD)})`, 5000), `card for ${who}`);
+      assert.match(await text(`${CARD} .integration-badge`), /Not connected/);
+      assert.match(await text(CARD), /isn't connected yet/);
+      assert.match(await text(CARD), /Google Drive administrators manage this connection/);
+      assert.equal(await has(`${CARD} [data-action^="integration-gdrive-"]`), false, `no buttons for ${who}`);
+      assert.doesNotMatch(await text(CARD), /attachments@example\.invalid/);
+    }
   });
 
   test("an administrator: Not connected, a confirmation before leaving JARC, then connected, reconnect-needed and disconnected", async () => {
@@ -84,7 +91,7 @@ describe("Google Drive card (real app, mock Google)", { skip: BROWSER ? false : 
 
     await control({ revoke: true });
     await click('[data-action="integration-gdrive-test"]');
-    assert.ok(await b.waitFor(`/Reconnect needed/.test(document.querySelector(${JSON.stringify(`${CARD} .integration-badge`)})?.textContent || "")`, 5000), "needs reconnect");
+    assert.ok(await b.waitFor(`/Reconnect required/.test(document.querySelector(${JSON.stringify(`${CARD} .integration-badge`)})?.textContent || "")`, 5000), "needs reconnect");
     await click('#overlay-root [data-action="close-overlay"]');
     assert.equal(await has(`${CARD} [data-action="integration-gdrive-connect"]`), true);
     assert.match(await text(CARD), /no longer accepts/);
@@ -94,6 +101,19 @@ describe("Google Drive card (real app, mock Google)", { skip: BROWSER ? false : 
     await click('#overlay-root [data-action="integration-gdrive-disconnect-go"]');
     assert.ok(await b.waitFor(`/Not connected/.test(document.querySelector(${JSON.stringify(`${CARD} .integration-badge`)})?.textContent || "")`, 5000), "disconnected");
     assert.match(await text(CARD), /JARC Attachments/, "the folder is remembered");
+  });
+
+  test("once connected, an employee sees Connected and still no account, folder or buttons", async () => {
+    await b.open(`${onBase}/api/v1/health`, { width: 1440 });
+    assert.equal(await signIn("ada", "Ada Admin", true), 201);
+    assert.equal(await control({ connect: true }), 200);
+    assert.equal(await signIn("mia", "Mia Member", false), 201);
+    await openIntegrations(onBase);
+    assert.ok(await b.waitFor(`/Connected/.test(document.querySelector(${JSON.stringify(`${CARD} .integration-badge`)})?.textContent || "")`, 5000), "connected");
+    assert.match(await text(CARD), /connected for the whole company/);
+    assert.equal(await has(`${CARD} a`), false, "no folder link");
+    assert.equal(await has(`${CARD} [data-action^="integration-gdrive-"]`), false);
+    assert.doesNotMatch(await text(CARD), /attachments@example\.invalid|Ada Admin|JARC Attachments/);
   });
 
   test("returning from Google opens the page, explains what happened, and clears the address bar", async () => {

@@ -54,12 +54,16 @@ class GoogleDriveService {
     return { client: this.client, folderId: rec.folderId };
   }
 
-  // Administrators only (routes/google-drive.js). No secrets.
-  async status() {
+  // Every signed-in employee sees the state; only Drive administrators (canManage) see the account, folder and problems.
+  // No secrets, tokens or file IDs either way. "unavailable": connected, but Drive can't be used as it should right now.
+  async status({ canManage = false } = {}) {
     const rec = await this.record(), connected = Boolean(rec?.refreshToken);
+    const problem = ["GDRIVE_FOLDER_MISSING", "GDRIVE_FILES_UNREACHABLE"].includes(rec?.lastError) || String(rec?.lastError || "").startsWith("GDRIVE_REFRESH_");
+    const state = !connected ? "not_connected" : rec.status === "needs_reconnect" ? "needs_reconnect" : problem ? "unavailable" : "connected";
+    const base = { provider: PROVIDER, enabled: true, connected, state, activeForNewUploads: this.activeForUploads, canManage: Boolean(canManage), adminsConfigured: (this.config.adminObjectIds || []).length > 0 };
+    if (!canManage) return base;
     return {
-      provider: PROVIDER, enabled: true, connected, state: !connected ? "not_connected" : rec.status === "needs_reconnect" ? "needs_reconnect" : "connected",
-      activeForNewUploads: this.activeForUploads, configuredAccount: this.config.accountEmail,
+      ...base, configuredAccount: this.config.accountEmail,
       account: connected ? { email: rec.accountEmail || null, connectedAt: iso(rec.connectedAt), connectedByName: rec.connectedByName || null } : null,
       folder: rec?.folderId ? { name: rec.folderName || FOLDER_NAME, url: `https://drive.google.com/drive/folders/${encodeURIComponent(rec.folderId)}` } : null,
       lastCheckedAt: iso(rec?.lastCheckedAt), lastError: rec?.lastError || null, lastErrorAt: iso(rec?.lastErrorAt)
@@ -76,13 +80,13 @@ class GoogleDriveService {
     return { authorizeUrl: url.toString(), browserSecret };
   }
 
-  // The return from Google. stillAdmin(saved) re-checks that the person who started this may still manage integrations.
+  // The return from Google. stillAdmin(saved) re-checks that the person who started this may still manage Google Drive.
   async completeConnect({ code, state, error, browserSecret, stillAdmin }) {
     if (typeof state !== "string" || !/^[A-Za-z0-9_-]{20,100}$/.test(state)) throw fail(400, "OAUTH_STATE_INVALID", "This sign-in link is invalid. Start again from JARC.");
     const saved = await this.repos.integrations.takeState(state, this.now(), PROVIDER);
     if (!saved) throw fail(400, "OAUTH_STATE_INVALID", "This sign-in link has expired or was already used. Start again from JARC.");
     if (typeof browserSecret !== "string" || !sameText(sha256(browserSecret), saved.browserHash)) throw fail(403, "OAUTH_BROWSER_MISMATCH", "Finish connecting in the browser that started it.");
-    if (!await stillAdmin(saved)) throw fail(403, "FORBIDDEN", "The administrator who started this connection can't complete it.");
+    if (!await stillAdmin(saved)) throw fail(403, "GDRIVE_ADMIN_REQUIRED", "The person who started this connection isn't a Google Drive administrator for JARC (any more).");
     if (error !== undefined) return { cancelled: true };
     if (typeof code !== "string" || !code || code.length > 2000) throw fail(400, "OAUTH_CODE_MISSING", "Google didn't send an authorization code.");
 

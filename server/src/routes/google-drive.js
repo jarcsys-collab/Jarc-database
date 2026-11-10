@@ -3,9 +3,10 @@
 //
 // Public (no JARC session: the Strict session cookie isn't sent on a redirect from Google):
 //   GET  /integrations/google-drive/callback?code&state   protected by the single-use state and a browser-bound cookie;
-//                                                         re-checks the administrator; then redirects into the app
-// JARC administrators only (session, plus CSRF on changes):
-//   GET  /integrations/google-drive                       status, without secrets
+//                                                         re-checks the Drive administrator; then redirects into the app
+// Every signed-in employee (session):
+//   GET  /integrations/google-drive                       status, without secrets; the details only for Drive administrators
+// Google Drive administrators only, the Entra object IDs in GOOGLE_DRIVE_ADMIN_OIDS (session, plus CSRF on changes):
 //   POST /integrations/google-drive/connect               → { authorizeUrl } (the browser then goes to Google)
 //   POST /integrations/google-drive/disconnect | /test
 const express = require("express");
@@ -42,11 +43,15 @@ function googleDrivePublicRoutes({ drive, stillAdmin, logger = console }) {
   return router;
 }
 
-function googleDriveRoutes({ drive, access }) {
+// canManage(actor): the Drive administrator rule (integrations/google-drive/access.js), checked on every management request.
+function googleDriveRoutes({ drive, canManage }) {
   const router = express.Router();
   const send = (res, body, status = 200) => res.status(status).set("Cache-Control", "no-store").json(body);
-  const admin = (req) => { access.requireSystemAdmin(req.actor); allowOnly(req.query, [], "the query"); };
-  router.get("/integrations/google-drive", async (req, res) => { admin(req); send(res, await drive.status()); });
+  const admin = (req) => {
+    allowOnly(req.query, [], "the query");
+    if (!canManage(req.actor)) throw new ApiError(403, "GDRIVE_ADMIN_REQUIRED", "Only the Google Drive administrators set up for JARC can do this.");
+  };
+  router.get("/integrations/google-drive", async (req, res) => { allowOnly(req.query, [], "the query"); send(res, await drive.status({ canManage: canManage(req.actor) })); });
   router.post("/integrations/google-drive/connect", async (req, res) => {
     admin(req);
     const { authorizeUrl, browserSecret } = await drive.startConnect(req.actor);

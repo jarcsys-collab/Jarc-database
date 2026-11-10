@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+# Google Cloud OAuth client downloads (they contain the client secret)
+client_secret_*.json
 
 # Dependencies
 node_modules/

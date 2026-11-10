@@ -10,7 +10,8 @@
 //   JARC_TEST_ACCOUNTS=staged|enforced: Account Management; JARC_TEST_SUPER_ADMIN_OID: the configured Super Admin
 //   JARC_TEST_MONDAY=1: the monday.com integration is configured against the MOCK monday.com (tests/support/mock-monday)
 //   POST /__test/monday { connect, run }  → store a (mock) connection directly / run due integration jobs once
-//   JARC_TEST_GDRIVE=1: Google Drive storage is on, against the MOCK Google (tests/support/mock-google-drive)
+//   JARC_TEST_GDRIVE=1: Google Drive storage is on, against the MOCK Google (tests/support/mock-google-drive);
+//   JARC_TEST_GDRIVE_ADMINS: the Drive administrators' object IDs (GOOGLE_DRIVE_ADMIN_OIDS)
 //   POST /__test/google-drive { connect, revoke }  → store a (mock) connection directly / make Google refuse it
 const express = require("express");
 const { ObjectId } = require("mongodb");
@@ -39,7 +40,8 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
   const mondayConfig = monday ? require("../../src/config").loadMondayConfig(monday.ENV) : null;
   const googleMock = process.env.JARC_TEST_GDRIVE === "1" ? require("./mock-google-drive") : null;
   const google = googleMock?.mockGoogle();
-  const googleConfig = googleMock ? require("../../src/config").loadGoogleDriveConfig(googleMock.ENV, "test", "entra") : null;
+  // JARC_TEST_GDRIVE_ADMINS: GOOGLE_DRIVE_ADMIN_OIDS for this run (comma-separated test object IDs).
+  const googleConfig = googleMock ? require("../../src/config").loadGoogleDriveConfig({ ...googleMock.ENV, GOOGLE_DRIVE_ADMIN_OIDS: process.env.JARC_TEST_GDRIVE_ADMINS || "" }, "test", "entra") : null;
   const dataLayer = createDataLayer({ connection, logger: { error() {} }, fileStore: new MemoryFileStore(), monday: mondayConfig, googleDrive: googleConfig, recordSearch: process.env.JARC_TEST_RECORD_SEARCH || "off", ...(mock ? { fetch: mock.fetch } : google ? { fetch: google.fetch } : {}) });
   await dataLayer.searchIndex.catchUp();
   const verify = createEntraVerifier({ ...entra, keySet: issuer.keySet });

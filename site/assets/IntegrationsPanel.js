@@ -38,13 +38,14 @@ class IntegrationsPanel {
   async load() {
     if (!this.available) return;
     this.loading = true;
-    try { this.status = await this.api("GET", ""); this.error = ""; if (this.status?.canManage) await this.loadDrive(); }
+    try { this.status = await this.api("GET", ""); this.error = ""; await this.loadDrive(); }
     catch (error) { this.error = error?.message || "Integrations couldn't be loaded."; }
     finally { this.loading = false; }
     this.redraw(); this.schedule();
   }
-  // Google Drive attachment storage: administrators only. While the server has it switched off the route doesn't exist and
-  // no card is shown. Its own problems never hide the rest of the page.
+  // Google Drive attachment storage: every signed-in employee sees its state; the server says whether this person may manage
+  // it (canManage) and only then sends the details. While the server has it switched off the route doesn't exist and no card
+  // is shown. Its own problems never hide the rest of the page.
   async loadDrive() {
     try { this.drive = await this.adapter.request("GET", "/integrations/google-drive"); this.driveError = ""; }
     catch (error) { this.drive = null; this.driveError = error?.code === StorageError.CODES.NOT_FOUND ? "" : error?.message || "Google Drive's status couldn't be loaded."; }
@@ -64,22 +65,36 @@ class IntegrationsPanel {
   }
 
   driveProblem(code) {
-    const known = { GDRIVE_WRONG_ACCOUNT: "That isn't the Google account configured for JARC's attachments", GDRIVE_ACCOUNT_CHANGED: "JARC's files belong to a different Google account", GDRIVE_SCOPE_DENIED: "Google Drive access wasn't allowed", GDRIVE_CHECK_FAILED: "Google Drive didn't pass the connection check, so nothing was saved", OAUTH_BROWSER_MISMATCH: "Finish connecting in the browser that started it", OAUTH_STATE_INVALID: "That connection link expired or was already used" };
+    const known = { GDRIVE_ADMIN_REQUIRED: "Only JARC's Google Drive administrators can connect Google Drive", GDRIVE_WRONG_ACCOUNT: "That isn't the Google account configured for JARC's attachments", GDRIVE_ACCOUNT_CHANGED: "JARC's files belong to a different Google account", GDRIVE_SCOPE_DENIED: "Google Drive access wasn't allowed", GDRIVE_CHECK_FAILED: "Google Drive didn't pass the connection check, so nothing was saved", OAUTH_BROWSER_MISMATCH: "Finish connecting in the browser that started it", OAUTH_STATE_INVALID: "That connection link expired or was already used" };
     return known[code] || `Google Drive wasn't connected${code ? ` (${code})` : ""}`;
   }
+  driveBadge(state) {
+    const [label, tone] = { connected: ["Connected", "ok"], not_connected: ["Not connected", "muted"], needs_reconnect: ["Reconnect required", "warn"], unavailable: ["Unavailable", "warn"] }[state] || ["Unavailable", "warn"];
+    return `<span class="integration-badge is-${tone}">${label}</span>`;
+  }
+  driveShell(badge, inner) {
+    return `<article class="integration-card" aria-labelledby="int-gdrive-title"><header class="integration-head"><span class="integration-logo" aria-hidden="true">D</span><div><h2 id="int-gdrive-title">Google Drive attachments</h2><p>Keeps attachment files in one Google Drive account that only this server uses. Employees keep signing in with Microsoft and don't need a Google account.</p></div>${badge}</header>${inner}</article>`;
+  }
   driveCard() {
-    if (this.driveError) return `<div class="integration-alert" role="alert">${this.esc(this.driveError)}</div>`;
+    if (this.driveError) return this.driveShell(this.driveBadge("unavailable"), `<p class="integration-note" role="alert">${this.esc(this.driveError)}</p>`);
     const s = this.drive;
     if (!s) return "";
+    const uploads = s.activeForNewUploads ? "Go to Google Drive" : "Not going to Google Drive yet";
+    if (!s.canManage) {
+      // Employees: the state only. Who connected it, the account and the folder are for Drive administrators.
+      const note = { connected: "Google Drive is connected for the whole company.", not_connected: "Google Drive isn't connected yet.", needs_reconnect: "Google Drive needs to be reconnected by an administrator.", unavailable: "Google Drive is connected but can't be used right now." }[s.state] || "Google Drive can't be used right now.";
+      const who = s.adminsConfigured ? "JARC's Google Drive administrators manage this connection." : "No Google Drive administrator is set up for JARC yet.";
+      return this.driveShell(this.driveBadge(s.state), `<dl class="integration-facts"><div><dt>New attachments</dt><dd>${uploads}</dd></div></dl><p class="integration-note">${note} ${who}</p>`);
+    }
     const actions = !s.connected ? `<button class="button primary" data-action="integration-gdrive-connect">Connect Google Drive</button>`
       : `<button class="button secondary" data-action="integration-gdrive-test">Test connection</button>${s.state === "needs_reconnect" ? `<button class="button primary" data-action="integration-gdrive-connect">Reconnect</button>` : ""}<button class="button secondary" data-action="integration-gdrive-disconnect">Disconnect</button>`;
     const fact = (label, value) => `<div><dt>${label}</dt><dd>${value}</dd></div>`;
-    const facts = [fact("Google account", this.esc(s.account?.email || s.configuredAccount || "—")), ...(s.connected ? [fact("Connected by", this.esc(s.account?.connectedByName || "—")), fact("Since", this.date(s.account?.connectedAt)), fact("Last checked", this.date(s.lastCheckedAt))] : []), ...(s.folder ? [fact("Folder", `<a href="${this.esc(s.folder.url)}" target="_blank" rel="noopener noreferrer">${this.esc(s.folder.name)}</a>`)] : []), fact("New attachments", s.activeForNewUploads ? "Go to Google Drive" : "Not going to Google Drive yet")].join("");
+    const facts = [fact("Google account", this.esc(s.account?.email || s.configuredAccount || "—")), ...(s.connected ? [fact("Connected by", this.esc(s.account?.connectedByName || "—")), fact("Since", this.date(s.account?.connectedAt)), fact("Last checked", this.date(s.lastCheckedAt))] : []), ...(s.folder ? [fact("Folder", `<a href="${this.esc(s.folder.url)}" target="_blank" rel="noopener noreferrer">${this.esc(s.folder.name)}</a>`)] : []), fact("New attachments", uploads)].join("");
     const warning = s.state === "needs_reconnect" ? `<div class="integration-alert" role="alert">Google no longer accepts JARC's access${s.activeForNewUploads ? ", so attachments stored in Google Drive can't be uploaded or opened" : ""}. Reconnect with ${this.esc(s.configuredAccount)}.</div>`
       : s.lastError ? `<div class="integration-alert" role="status">${this.esc({ GDRIVE_FILES_UNREACHABLE: "Google Drive is connected, but some of JARC's existing files can't be reached.", GDRIVE_FOLDER_REPLACED: "JARC's earlier Google Drive folder couldn't be reached, so new files go to a new one.", GDRIVE_FOLDER_MISSING: "JARC's Google Drive folder is missing or in Trash." }[s.lastError] || `Last problem: ${s.lastError}`)}</div>` : "";
-    return `<article class="integration-card" aria-labelledby="int-gdrive-title"><header class="integration-head"><span class="integration-logo" aria-hidden="true">D</span><div><h2 id="int-gdrive-title">Google Drive attachments</h2><p>Keeps attachment files in one Google Drive account that only this server uses. Employees keep signing in with Microsoft and don't need a Google account.</p></div>${this.badge(s)}</header>
+    return this.driveShell(this.driveBadge(s.state), `
       <ul class="integration-features"><li>JARC creates its own private folder and can only reach files it created</li><li>Files are stored under internal IDs; people see the original names in JARC</li><li>Removing an attachment moves its file to Google Drive Trash</li><li>Attachments already stored elsewhere stay where they are</li></ul>
-      <dl class="integration-facts">${facts}</dl>${warning}<div class="integration-actions">${actions}</div></article>`;
+      <dl class="integration-facts">${facts}</dl>${warning}<div class="integration-actions">${actions}</div>`);
   }
   async onDriveAction(action) {
     const api = (method, path, body) => this.adapter.request(method, `/integrations/google-drive${path}`, body);

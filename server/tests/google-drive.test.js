@@ -18,13 +18,16 @@ const config = (extra = {}) => loadGoogleDriveConfig({ ...ENV, ...extra }, "prod
 const OPTIONS = { sleep: async () => {}, chunkBytes: CHUNK };
 const entraOf = (issuer) => ({ ...issuer.config, redirectUri: REDIRECT.replace(/api.*/, ""), appOrigin: new URL(REDIRECT).origin });
 
-async function start({ provider = "gridfs", googleDrive = config(), google = mockGoogle(), monday = null, fetch = null, accounts = null } = {}) {
+// People: Ada holds JARC.Admin AND is a Drive administrator (she also sets up workspaces); Mia is an ordinary employee;
+// Jay holds only JARC.Admin; Dee is only a Drive administrator. admins(people) → the object IDs in GOOGLE_DRIVE_ADMIN_OIDS.
+async function start({ provider = "gridfs", googleDrive, admins = (p) => [p.ada.oid, p.dee.oid], google = mockGoogle(), monday = null, fetch = null, accounts = null } = {}) {
   const issuer = await createTokenIssuer();
-  const app = await startEntraApp({ issuer, entra: entraOf(issuer), googleDrive, googleDriveOptions: OPTIONS, attachments: { defaultProvider: provider, s3: null }, monday, accounts, fetch: fetch || google.fetch });
-  const admin = new SessionClient(app.url, app.entra.appOrigin), member = new SessionClient(app.url, app.entra.appOrigin);
-  await admin.signIn(issuer.person("Ada Admin", { admin: true }));
-  await member.signIn(issuer.person("Mia Member"));
-  return { app, issuer, admin, member, google, drive: app.dataLayer.services.googleDrive };
+  const people = { ada: issuer.person("Ada Admin", { admin: true }), mia: issuer.person("Mia Member"), jay: issuer.person("Jay Jarcadmin", { admin: true }), dee: issuer.person("Dee Drive") };
+  const adminOids = admins(people).join(",");
+  const app = await startEntraApp({ issuer, entra: entraOf(issuer), googleDrive: googleDrive === undefined ? config({ GOOGLE_DRIVE_ADMIN_OIDS: adminOids }) : googleDrive, googleDriveOptions: OPTIONS, attachments: { defaultProvider: provider, s3: null }, monday, accounts, fetch: fetch || google.fetch });
+  const client = async (person) => { const c = new SessionClient(app.url, app.entra.appOrigin); await c.signIn(person); return c; };
+  const [admin, member, jarcAdmin, driveAdmin] = [await client(people.ada), await client(people.mia), await client(people.jay), await client(people.dee)];
+  return { app, issuer, people, adminOids, admin, member, jarcAdmin, driveAdmin, google, drive: app.dataLayer.services.googleDrive };
 }
 const cookieHeader = (client) => [...client.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
 // The browser's return from Google: the Strict session cookie isn't sent; only the Lax browser cookie is.
@@ -116,13 +119,17 @@ describe("connecting: only an administrator, only through a valid return", () =>
   beforeEach(async () => { ctx = await start(); });
   const afterEachClose = () => ctx.app.close();
 
-  test("administrators only; signed-out people and members are refused; changes need CSRF", async () => {
+  test("management is for Drive administrators only: signed-out people, employees and JARC.Admin alone are refused; changes need CSRF", async () => {
     assert.equal((await fetch(`${ctx.app.url}/api/v1/integrations/google-drive`)).status, 401);
-    for (const [method, path] of [["GET", ""], ["POST", "/connect"], ["POST", "/test"], ["POST", "/disconnect"]]) {
-      assert.equal((await ctx.member.request(method, `/api/v1/integrations/google-drive${path}`, method === "POST" ? {} : undefined)).status, 403, path);
+    for (const who of [ctx.member, ctx.jarcAdmin]) {
+      for (const path of ["/connect", "/test", "/disconnect"]) {
+        const res = await who.request("POST", `/api/v1/integrations/google-drive${path}`, path === "/disconnect" ? { confirm: true } : undefined);
+        assert.equal(res.status, 403, path); assert.equal(res.body.error.code, "GDRIVE_ADMIN_REQUIRED", path);
+      }
     }
     assert.equal((await ctx.admin.request("POST", "/api/v1/integrations/google-drive/connect", undefined, { csrf: "wrong" })).status, 403);
-    assert.equal(ctx.google.calls.length, 0);
+    assert.equal(ctx.google.calls.length, 0, "nobody refused reached Google");
+    assert.equal(await ctx.app.db.collection("integrationOAuthStates").findOne({ provider: "google-drive" }), null, "and no state was created");
     await afterEachClose();
   });
 
@@ -185,13 +192,29 @@ describe("connecting: only an administrator, only through a valid return", () =>
     await afterEachClose();
   });
 
-  test("an administrator who lost the role or the session before returning can't finish", async () => {
+  test("removed from the allowlist, or signed out, before returning from Google: the connection can't finish", async () => {
+    const original = ctx.drive.config;
+    let res = await ctx.admin.request("POST", "/api/v1/integrations/google-drive/connect");
+    let { code, state } = ctx.google.approve(res.body.authorizeUrl);
+    ctx.drive.config = config({ GOOGLE_DRIVE_ADMIN_OIDS: ctx.people.dee.oid }); // Ada taken off the list while she's at Google
+    assert.match((await callback(ctx.app, ctx.admin, { code, state })).location, /code=GDRIVE_ADMIN_REQUIRED/);
+    ctx.drive.config = original;
+    res = await ctx.admin.request("POST", "/api/v1/integrations/google-drive/connect");
+    ({ code, state } = ctx.google.approve(res.body.authorizeUrl));
+    const saved = await ctx.app.db.collection("integrationOAuthStates").findOne({ _id: state });
+    await ctx.app.db.collection("sessions").deleteOne({ _id: saved.sessionId });
+    assert.match((await callback(ctx.app, ctx.admin, { code, state })).location, /code=GDRIVE_ADMIN_REQUIRED/);
+    assert.equal(await stored(ctx), null);
+    assert.equal(ctx.google.calls.filter((c) => /oauth2\.googleapis\.com\/token/.test(c.url)).length, 0, "the code was never exchanged");
+    await afterEachClose();
+  });
+
+  test("losing the JARC.Admin app role changes nothing for a Drive administrator", async () => {
     const res = await ctx.admin.request("POST", "/api/v1/integrations/google-drive/connect");
     const { code, state } = ctx.google.approve(res.body.authorizeUrl);
     const saved = await ctx.app.db.collection("integrationOAuthStates").findOne({ _id: state });
     await ctx.app.db.collection("sessions").updateOne({ _id: saved.sessionId }, { $set: { isSystemAdmin: false } });
-    assert.match((await callback(ctx.app, ctx.admin, { code, state })).location, /code=FORBIDDEN/);
-    assert.equal(await stored(ctx), null);
+    assert.match((await callback(ctx.app, ctx.admin, { code, state })).location, /result=connected/);
     await afterEachClose();
   });
 
@@ -552,7 +575,7 @@ describe("when the connection is lost", () => {
     await connect(ctx);
     const up = await upload(ctx, record.id);
     ctx.drive.cached = null;
-    ctx.drive.config = config({ GOOGLE_DRIVE_TOKEN_KEY: Buffer.alloc(32, 9).toString("base64") });
+    ctx.drive.config = config({ GOOGLE_DRIVE_TOKEN_KEY: Buffer.alloc(32, 9).toString("base64"), GOOGLE_DRIVE_ADMIN_OIDS: ctx.adminOids });
     assert.equal((await download(ctx, up.body.attachment.id)).status, 503);
     assert.equal((await ctx.admin.request("GET", "/api/v1/integrations/google-drive")).body.lastError, "GDRIVE_TOKEN_KEY_MISMATCH");
     await ctx.app.close();
@@ -606,7 +629,7 @@ describe("keeping access to files already in Drive", () => {
     assert.equal(tested.status, 409); assert.equal(tested.body.error.code, "GDRIVE_FILES_UNREACHABLE");
     assert.match((await connect(ctx)).location, /result=connected/);
     const status = await ctx.admin.request("GET", "/api/v1/integrations/google-drive");
-    assert.equal(status.body.state, "connected"); assert.equal(status.body.lastError, "GDRIVE_FILES_UNREACHABLE");
+    assert.equal(status.body.state, "unavailable", "connected, but existing files can't be reached"); assert.equal(status.body.connected, true); assert.equal(status.body.lastError, "GDRIVE_FILES_UNREACHABLE");
     ctx.drive.cached = null;
     await upload(ctx, record.id);
     assert.equal((await stored(ctx)).lastError, "GDRIVE_FILES_UNREACHABLE");
@@ -733,6 +756,138 @@ describe("re-checking the administrator on the return from Google", () => {
     assert.equal(await check(session, { status: "active", account: { role: "MEMBER", status: "blocked" } }, "staged"), false);
     assert.equal(await check(session, { status: "active", account: { role: "SUPER_ADMIN", status: "active" } }, "enforced"), true);
     assert.equal(await check(session, { status: "active", account: { role: "MEMBER", status: "active" } }, "enforced"), false);
+  });
+});
+
+describe("who may see and who may manage Google Drive", () => {
+  const { canManageDrive } = require("../src/integrations/google-drive/access");
+  const { stillAllowed } = require("../src/auth/session");
+  const TENANT = "00000000-0000-4000-8000-00000000a001", OTHER = "00000000-0000-4000-8000-0000000000ff";
+  const EMPLOYEE_FIELDS = ["activeForNewUploads", "adminsConfigured", "canManage", "connected", "enabled", "provider", "state"];
+
+  test("the allowlist: object IDs only, case and separators don't matter, duplicates collapse, malformed or too many stop startup, unset means nobody", () => {
+    const oid = "0A7A7A7A-0000-4000-8000-000000000071", other = "0b7b7b7b-0000-4000-8000-000000000072";
+    assert.deepEqual(config({ GOOGLE_DRIVE_ADMIN_OIDS: ` ${oid}, ${other};${oid.toLowerCase()} ` }).adminObjectIds, [oid.toLowerCase(), other]);
+    assert.deepEqual(config({ GOOGLE_DRIVE_ADMIN_OIDS: "" }).adminObjectIds, []);
+    assert.deepEqual(config().adminObjectIds, []);
+    for (const bad of ["ada@example.invalid", `${oid},not-a-guid`, "*", "00000000-0000-4000-8000-00000000000"]) assert.throws(() => config({ GOOGLE_DRIVE_ADMIN_OIDS: bad }), /GOOGLE_DRIVE_ADMIN_OIDS must list/, bad);
+    const many = Array.from({ length: 21 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`).join(",");
+    assert.throws(() => config({ GOOGLE_DRIVE_ADMIN_OIDS: many }), /at most 20/);
+    assert.doesNotMatch(JSON.stringify(loadGoogleDriveConfig({}, "production", "entra")), /admin/i, "nothing is read while Drive is off");
+  });
+
+  test("the rule: allowlisted object ID AND JARC's own tenant; nothing else counts", () => {
+    const cfg = { adminObjectIds: ["0a7a7a7a-0000-4000-8000-000000000071"] };
+    assert.equal(canManageDrive({ tenantId: TENANT, objectId: "0A7A7A7A-0000-4000-8000-000000000071" }, cfg, TENANT), true);
+    assert.equal(canManageDrive({ tenantId: OTHER, objectId: "0a7a7a7a-0000-4000-8000-000000000071" }, cfg, TENANT), false, "wrong tenant");
+    assert.equal(canManageDrive({ tenantId: TENANT, objectId: "0b7b7b7b-0000-4000-8000-000000000072" }, cfg, TENANT), false, "not listed");
+    assert.equal(canManageDrive({ tenantId: TENANT, objectId: "0a7a7a7a-0000-4000-8000-000000000071" }, { adminObjectIds: [] }, TENANT), false, "empty list");
+    assert.equal(canManageDrive({ tenantId: TENANT, objectId: "0a7a7a7a-0000-4000-8000-000000000071" }, cfg, null), false, "no tenant configured");
+    assert.equal(canManageDrive({ tenantId: TENANT }, cfg, TENANT), false);
+    assert.equal(canManageDrive(null, cfg, TENANT), false);
+  });
+
+  test("the return from Google re-checks the live session's verified identity, tenant included", async () => {
+    const later = new Date(Date.now() + 60000), oid = "0a7a7a7a-0000-4000-8000-000000000071";
+    const session = { userId: "u1", tenantId: TENANT, objectId: oid, expiresAt: later, idleExpiresAt: later };
+    const user = { status: "active", tenantId: TENANT, entraObjectId: oid };
+    const allow = (identity) => canManageDrive(identity, { adminObjectIds: [oid] }, TENANT);
+    const check = (s, u, accountMode = "off") => stillAllowed({ accountMode, allow, sessions: { findById: async () => s }, users: { findById: async () => u } })({ sessionId: "s", userId: "u1" });
+    assert.equal(await check(session, user), true);
+    assert.equal(await check({ ...session, tenantId: OTHER }, { ...user, tenantId: OTHER }), false, "another tenant");
+    assert.equal(await check(session, { ...user, entraObjectId: "0b7b7b7b-0000-4000-8000-000000000072" }), false, "the user record no longer matches the session");
+    assert.equal(await check({ ...session, expiresAt: new Date(0) }, user), false);
+    assert.equal(await check(session, { ...user, status: "disabled" }), false);
+    assert.equal(await check(session, { ...user, account: { status: "blocked", role: "EDITOR" } }, "staged"), false, "a blocked account");
+    assert.equal(await stillAllowed({ sessions: {}, users: {}, allow })({ sessionId: null, userId: "u1" }), false);
+  });
+
+  test("every employee sees the status, reduced to the state; Drive administrators see the details; nothing secret either way", async () => {
+    const ctx = await start({ provider: "gdrive" });
+    let s = await ctx.member.request("GET", "/api/v1/integrations/google-drive");
+    assert.equal(s.status, 200);
+    assert.deepEqual(Object.keys(s.body).sort(), EMPLOYEE_FIELDS);
+    assert.deepEqual([s.body.state, s.body.canManage, s.body.adminsConfigured, s.body.activeForNewUploads], ["not_connected", false, true, true]);
+    assert.equal((await ctx.jarcAdmin.request("GET", "/api/v1/integrations/google-drive")).body.canManage, false, "JARC.Admin alone sees the employee view");
+    assert.equal((await ctx.driveAdmin.request("GET", "/api/v1/integrations/google-drive")).body.canManage, true);
+    await connect(ctx);
+    const { record } = await workspace(ctx);
+    const up = await upload(ctx, record.id);
+    const key = docs(ctx).find((d) => d._id.toHexString() === up.body.attachment.id).storage.key;
+    s = await ctx.member.request("GET", "/api/v1/integrations/google-drive");
+    assert.equal(s.body.state, "connected"); assert.deepEqual(Object.keys(s.body).sort(), EMPLOYEE_FIELDS);
+    const rec = await stored(ctx);
+    for (const hidden of [ACCOUNT, rec.folderId, key, "drive.google.com", "Ada Admin", ...ctx.google.refreshTokens, ...ctx.google.accessTokens, CLIENT.secret, CLIENT.id]) assert.equal(s.text.includes(hidden), false, hidden);
+    const full = await ctx.driveAdmin.request("GET", "/api/v1/integrations/google-drive");
+    assert.equal(full.body.account.email, ACCOUNT); assert.match(full.body.folder.url, /drive\.google\.com/);
+    for (const hidden of [key, ...ctx.google.refreshTokens, ...ctx.google.accessTokens, CLIENT.secret]) assert.equal(full.text.includes(hidden), false, hidden);
+    await ctx.app.close();
+  });
+
+  test("states: Unavailable when Drive is connected but its folder is missing or files can't be reached; Reconnect required after a refused token", async () => {
+    const ctx = await start();
+    await connect(ctx);
+    for (const [lastError, state] of [["GDRIVE_FOLDER_MISSING", "unavailable"], ["GDRIVE_FILES_UNREACHABLE", "unavailable"], ["GDRIVE_REFRESH_INVALID_CLIENT", "unavailable"], ["GDRIVE_FOLDER_REPLACED", "connected"], [null, "connected"]]) {
+      await ctx.app.db.collection("integrations").updateOne({ _id: "google-drive" }, { $set: { lastError } });
+      for (const who of [ctx.member, ctx.admin]) assert.equal((await who.request("GET", "/api/v1/integrations/google-drive")).body.state, state, `${lastError} → ${state}`);
+    }
+    await ctx.app.db.collection("integrations").updateOne({ _id: "google-drive" }, { $set: { status: "needs_reconnect" } });
+    assert.equal((await ctx.member.request("GET", "/api/v1/integrations/google-drive")).body.state, "needs_reconnect");
+    await ctx.app.close();
+  });
+
+  test("a Drive administrator without JARC.Admin can connect, test and disconnect, and gains nothing else", async () => {
+    const ctx = await start();
+    assert.match((await connect(ctx, ctx.driveAdmin)).location, /result=connected/);
+    assert.equal((await stored(ctx)).connectedByName, "Dee Drive");
+    assert.equal((await ctx.driveAdmin.request("POST", "/api/v1/integrations/google-drive/test")).status, 200);
+    assert.equal((await ctx.driveAdmin.request("POST", "/api/v1/workspaces", { name: "Not allowed" })).status, 403, "can't create workspaces");
+    assert.equal((await ctx.driveAdmin.request("GET", "/api/v1/integrations/monday")).body.canManage, false, "isn't a monday.com administrator");
+    assert.equal((await ctx.driveAdmin.request("GET", "/api/v1/me")).body.isSystemAdmin, false);
+    assert.equal((await ctx.driveAdmin.request("POST", "/api/v1/integrations/google-drive/disconnect", { confirm: true })).status, 200);
+    await ctx.app.close();
+  });
+
+  test("JARC.Admin keeps every other administrator right (workspaces, monday.com) but can't manage Drive", async () => {
+    const ctx = await start({ monday: loadMondayConfig({}) });
+    assert.equal((await ctx.jarcAdmin.request("POST", "/api/v1/workspaces", { name: "Allowed" })).status, 201);
+    assert.equal((await ctx.jarcAdmin.request("GET", "/api/v1/me")).body.isSystemAdmin, true);
+    const monday = await ctx.jarcAdmin.request("POST", "/api/v1/integrations/monday/connect");
+    assert.equal(monday.body.error.code, "SETUP_REQUIRED", "allowed through, then stopped only because monday.com isn't set up");
+    assert.equal((await ctx.member.request("POST", "/api/v1/integrations/monday/connect")).status, 403, "an employee still isn't");
+    assert.equal((await ctx.jarcAdmin.request("POST", "/api/v1/integrations/google-drive/connect")).status, 403);
+    await ctx.app.close();
+  });
+
+  test("an empty allowlist: nobody can manage Drive, not even someone holding JARC.Admin; everyone still sees the status", async () => {
+    const ctx = await start({ admins: () => [] });
+    for (const who of [ctx.admin, ctx.jarcAdmin, ctx.driveAdmin, ctx.member]) {
+      assert.equal((await who.request("POST", "/api/v1/integrations/google-drive/connect")).status, 403);
+      const s = (await who.request("GET", "/api/v1/integrations/google-drive")).body;
+      assert.deepEqual([s.canManage, s.adminsConfigured], [false, false]);
+    }
+    assert.equal(ctx.google.calls.length, 0);
+    await ctx.app.close();
+  });
+
+  test("an ordinary employee's Google return is refused even with a genuine state and browser cookie", async () => {
+    const ctx = await start();
+    const me = (await ctx.member.request("GET", "/api/v1/me")).body;
+    const memberSession = (await ctx.app.db.collection("sessions").find({}).toArray()).find((s) => String(s.userId) === String(me.user.id));
+    const { authorizeUrl, browserSecret } = await ctx.drive.startConnect({ userId: memberSession.userId, sessionId: memberSession._id });
+    const { code, state } = ctx.google.approve(authorizeUrl);
+    const res = await fetch(`${ctx.app.url}/api/v1/integrations/google-drive/callback?${new URLSearchParams({ code, state })}`, { redirect: "manual", headers: { Cookie: `__Host-jarc_gdrive_oauth=${browserSecret}` } });
+    assert.match(res.headers.get("location"), /code=GDRIVE_ADMIN_REQUIRED/);
+    assert.equal(await stored(ctx), null);
+    await ctx.app.close();
+  });
+
+  test("a session from another tenant is refused outright", async () => {
+    const ctx = await start();
+    await ctx.app.db.collection("sessions").updateMany({ _id: { $exists: true } }, { $set: { tenantId: OTHER } });
+    assert.equal((await ctx.admin.request("GET", "/api/v1/integrations/google-drive")).status, 401);
+    assert.equal((await ctx.admin.request("POST", "/api/v1/integrations/google-drive/connect")).status, 401);
+    await ctx.app.close();
   });
 });
 

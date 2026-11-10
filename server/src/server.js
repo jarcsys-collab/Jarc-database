@@ -36,6 +36,7 @@ async function main() {
     const { port } = server.address();
     console.log(`JARC Database server (${config.nodeEnv}) on http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${port}/`);
     console.log(`Optional features: native forms ${config.features.nativeForms ? "on" : "off"}, Excel and CSV imports ${config.features.spreadsheetImports ? "on" : "off"}, API tokens ${config.apiTokens.enabled ? "on" : "off"}, Google Drive ${config.googleDrive.enabled ? "on" : "off"}. New attachments go to ${config.attachments.defaultProvider}.`);
+    if (config.googleDrive.enabled) console.log(`Google Drive administrators configured: ${config.googleDrive.adminObjectIds.length}${config.googleDrive.adminObjectIds.length ? "" : " (nobody can connect or disconnect Google Drive until GOOGLE_DRIVE_ADMIN_OIDS is set)"}.`);
     if (config.enableDevStateApi) console.log("Development state API enabled: data is kept in memory only and is cleared when the server restarts.");
     else console.log("Development state API disabled (production). Only health endpoints and the frontend are served.");
     if (config.enableDevResourceApi) console.log("Resource API enabled for DEVELOPMENT / PRE-AUTH use: no authentication; every change is attributed to the local development actor.");

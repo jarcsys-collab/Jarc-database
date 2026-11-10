@@ -105,26 +105,42 @@ function sessionAuthentication({ sessions, users, entra, accountMode = "off" }) 
     }
     const isSystemAdmin = accountMode === "enforced" ? isActiveSuperAdmin(account) : Boolean(session.isSystemAdmin);
     // account: null while ACCOUNT_MANAGEMENT=off. hasAdminAppRole: the JARC.Admin app role was in the sign-in token.
-    req.actor = Object.freeze({ userId: user._id, kind: "entra", isSystemAdmin, hasAdminAppRole: Boolean(session.isSystemAdmin), account, sessionId: session._id, displayName: user.displayName || user.email || null });
+    // tenantId / entraObjectId: the identity verified at sign-in, checked against the stored user just above.
+    req.actor = Object.freeze({ userId: user._id, kind: "entra", isSystemAdmin, hasAdminAppRole: Boolean(session.isSystemAdmin), account, sessionId: session._id, tenantId: session.tenantId, entraObjectId: session.objectId, displayName: user.displayName || user.email || null });
     req.sessionSecret = secret;
     return next();
   };
 }
 
-// For a return from another site, where the Strict session cookie doesn't arrive: is the session that started an
-// administrator's action still valid, for a still-active person who is still a JARC administrator?
+// For a return from another site, where the Strict session cookie doesn't arrive: the session that started an action,
+// if it is still valid, belongs to the same still-active person (same verified tenant and object ID) and isn't blocked.
+async function liveSession({ sessions, users, accountMode, now }, { sessionId, userId }) {
+  if (!sessionId) return null;
+  const session = await sessions.findById(sessionId), time = now();
+  if (!session || session.expiresAt <= time || session.idleExpiresAt <= time || String(session.userId) !== String(userId)) return null;
+  const user = await users.findById(session.userId);
+  if (!user || user.status !== "active") return null;
+  if (user.tenantId !== session.tenantId || user.entraObjectId !== session.objectId) return null;
+  const account = accountMode === "off" ? null : accountOf(user);
+  if (blocked(account)) return null;
+  return { session, user, account };
+}
+
+// … and that person is still a JARC administrator.
 function stillSystemAdmin({ sessions, users, accountMode = "off", now = () => new Date() }) {
-  return async ({ sessionId, userId }) => {
-    if (!sessionId) return false;
-    const session = await sessions.findById(sessionId), time = now();
-    if (!session || session.expiresAt <= time || session.idleExpiresAt <= time || String(session.userId) !== String(userId)) return false;
-    const user = await users.findById(session.userId);
-    if (!user || user.status !== "active") return false;
-    if (accountMode === "off") return Boolean(session.isSystemAdmin);
-    const account = accountOf(user);
-    if (blocked(account)) return false;
-    return accountMode === "enforced" ? isActiveSuperAdmin(account) : Boolean(session.isSystemAdmin);
+  return async (saved) => {
+    const live = await liveSession({ sessions, users, accountMode, now }, saved);
+    if (!live) return false;
+    return accountMode === "enforced" ? isActiveSuperAdmin(live.account) : Boolean(live.session.isSystemAdmin);
   };
 }
 
-module.exports = { stillSystemAdmin, PENDING_ALLOWED, sessionAuthentication, readCookie, cookieHeader, clearCookie, csrfTokenFor, originAllowed, randomSecret, SESSION_COOKIE, SIGN_IN_COOKIE, UNSAFE_METHODS };
+// … and `allow({ tenantId, objectId })` still says yes for that person's verified identity (e.g. the Google Drive allowlist).
+function stillAllowed({ sessions, users, accountMode = "off", now = () => new Date(), allow }) {
+  return async (saved) => {
+    const live = await liveSession({ sessions, users, accountMode, now }, saved);
+    return Boolean(live && allow({ tenantId: live.session.tenantId, objectId: live.session.objectId }));
+  };
+}
+
+module.exports = { stillSystemAdmin, stillAllowed, PENDING_ALLOWED, sessionAuthentication, readCookie, cookieHeader, clearCookie, csrfTokenFor, originAllowed, randomSecret, SESSION_COOKIE, SIGN_IN_COOKIE, UNSAFE_METHODS };

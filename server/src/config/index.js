@@ -235,7 +235,12 @@ function loadAttachmentConfig(env, nodeEnv) {
 //   GOOGLE_DRIVE_TOKEN_KEY            32 random bytes, base64-encoded: encrypts the refresh token
 //   GOOGLE_DRIVE_ACCOUNT_EMAIL        the only Google account allowed to connect
 //   ATTACHMENTS_GDRIVE_MAX_TOTAL_MB   the most JARC may store there
+// Optional when on:
+//   GOOGLE_DRIVE_ADMIN_OIDS           who may connect, reconnect, test and disconnect the company Drive: Microsoft Entra object
+//                                     IDs (GUIDs) of ENTRA_TENANT_ID, separated by commas or spaces, at most 20. Unset or empty:
+//                                     nobody (fails closed). A malformed entry stops startup. Employees always see the status.
 const GOOGLE_DRIVE_CALLBACK_PATH = "/api/v1/integrations/google-drive/callback";
+const MAX_DRIVE_ADMINS = 20;
 function loadGoogleDriveConfig(env, nodeEnv, authMode) {
   const value = env.GOOGLE_DRIVE_ENABLED;
   if (value !== undefined && value !== "" && value !== "true" && value !== "false") throw new ConfigError("GOOGLE_DRIVE_ENABLED must be true or false.");
@@ -254,7 +259,11 @@ function loadGoogleDriveConfig(env, nodeEnv, authMode) {
   const email = env.GOOGLE_DRIVE_ACCOUNT_EMAIL.trim().toLowerCase();
   if (email.length > 320 || !/^[^\s@]+@[^\s@]+$/.test(email)) throw new ConfigError("GOOGLE_DRIVE_ACCOUNT_EMAIL must be an email address.");
   if (!/^\d{1,8}$/.test(env.ATTACHMENTS_GDRIVE_MAX_TOTAL_MB) || Number(env.ATTACHMENTS_GDRIVE_MAX_TOTAL_MB) < 1) throw new ConfigError("ATTACHMENTS_GDRIVE_MAX_TOTAL_MB must be a whole number of megabytes (1 or more).");
-  return hide({ enabled: true, clientId: env.GOOGLE_DRIVE_CLIENT_ID, redirectUri: redirect.href, accountEmail: email, maxTotalBytes: Number(env.ATTACHMENTS_GDRIVE_MAX_TOTAL_MB) * 1024 * 1024 }, env.GOOGLE_DRIVE_CLIENT_SECRET, tokenKey);
+  const admins = String(env.GOOGLE_DRIVE_ADMIN_OIDS || "").split(/[\s,;]+/).filter(Boolean).map((id) => id.toLowerCase());
+  if (admins.some((id) => !GUID.test(id))) throw new ConfigError("GOOGLE_DRIVE_ADMIN_OIDS must list Microsoft Entra object IDs (GUIDs), separated by commas.");
+  const adminObjectIds = Object.freeze([...new Set(admins)]);
+  if (adminObjectIds.length > MAX_DRIVE_ADMINS) throw new ConfigError(`GOOGLE_DRIVE_ADMIN_OIDS can list at most ${MAX_DRIVE_ADMINS} people.`);
+  return hide({ enabled: true, clientId: env.GOOGLE_DRIVE_CLIENT_ID, redirectUri: redirect.href, accountEmail: email, maxTotalBytes: Number(env.ATTACHMENTS_GDRIVE_MAX_TOTAL_MB) * 1024 * 1024, adminObjectIds }, env.GOOGLE_DRIVE_CLIENT_SECRET, tokenKey);
 }
 
 // monday.com integration (one-way into JARC). Off unless MONDAY_INTEGRATION_ENABLED=true; usable only when the OAuth
