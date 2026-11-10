@@ -92,7 +92,7 @@ class MondayIntegration {
   async completeConnect({ code, state }) {
     this.requireSetup();
     if (typeof state !== "string" || !/^[A-Za-z0-9_-]{20,100}$/.test(state)) throw fail(400, "OAUTH_STATE_INVALID", "This sign-in link is invalid. Start again from JARC.");
-    const saved = await this.repos.integrations.takeState(state, this.now());
+    const saved = await this.repos.integrations.takeState(state, this.now(), PROVIDER);
     if (!saved) throw fail(400, "OAUTH_STATE_INVALID", "This sign-in link has expired or was already used. Start again from JARC.");
     const user = await this.repos.users.findById(saved.userId);
     if (!user || user.status !== "active") throw fail(403, "FORBIDDEN", "The administrator who started this connection can't complete it.");

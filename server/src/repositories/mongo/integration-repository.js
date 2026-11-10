@@ -24,7 +24,8 @@ class IntegrationRepository {
   async claimSchedule(provider, now, nextAt) { return Boolean(await this.integrations.findOneAndUpdate({ _id: provider, $or: [{ nextReconcileAt: { $lte: now } }, { nextReconcileAt: { $exists: false } }] }, { $set: { nextReconcileAt: nextAt } })); }
 
   saveState(doc) { return this.states.insertOne(doc); }
-  takeState(id, now) { return this.states.findOneAndDelete({ _id: id, expiresAt: { $gt: now } }); }
+  // A state only works for the provider that issued it.
+  takeState(id, now, provider) { return this.states.findOneAndDelete({ _id: id, provider, expiresAt: { $gt: now } }); }
 
   findMapping(provider, kind, sourceId, { session } = {}) { return this.mappings.findOne({ provider, kind, sourceId: String(sourceId) }, { session }); }
   listMappings(filter, { limit = 100000 } = {}) { return this.mappings.find(filter, { limit }).toArray(); }

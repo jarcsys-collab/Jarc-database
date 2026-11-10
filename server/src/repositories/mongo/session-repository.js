@@ -33,6 +33,7 @@ class SessionRepository {
   }
 
   findBySecret(sessionSecret) { return this.sessions.findOne({ _id: hash(sessionSecret) }); }
+  findById(id) { return this.sessions.findOne({ _id: id }); }
 
   async touch(id, now, idleMs) { await this.sessions.updateOne({ _id: id }, { $set: { lastSeenAt: now, idleExpiresAt: new Date(now.getTime() + idleMs) } }); }
 

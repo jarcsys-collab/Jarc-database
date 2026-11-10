@@ -16,6 +16,13 @@ class AttachmentRepository {
   // Object-storage files are found by where their bytes are (GridFS bytes share the document's _id).
   findByStorageKey(provider, key) { return this.collection.findOne({ "storage.provider": provider, "storage.key": String(key) }); }
   findReady(id) { return this.collection.findOne({ _id: id, status: "ready" }); }
+  countInProvider(provider) { return this.collection.countDocuments({ "storage.provider": provider }); }
+  // The oldest and newest ready files of a provider: a cheap sample for checking that they can still be reached.
+  async sampleInProvider(provider, each = 3) {
+    const filter = { "storage.provider": provider, status: "ready" };
+    const [oldest, newest] = await Promise.all([1, -1].map((order) => this.collection.find(filter, { sort: { _id: order }, limit: each }).toArray()));
+    return [...new Map([...oldest, ...newest].map((doc) => [String(doc._id), doc])).values()];
+  }
   findByUploadKey(recordId, uploadKey) { return this.collection.findOne({ recordId, uploadKey, status: "ready" }); }
   listByBoard(boardId) { return this.collection.find({ boardId, status: "ready" }, { sort: { createdAt: 1, _id: 1 }, limit: 20000 }).toArray(); }
   listByRecord(recordId) { return this.collection.find({ recordId, status: "ready" }, { sort: { createdAt: 1, _id: 1 }, limit: 1000 }).toArray(); }

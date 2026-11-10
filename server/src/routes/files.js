@@ -11,7 +11,7 @@
 // There are no public links: files are only served to a signed-in person who can see the record, from this origin.
 const express = require("express");
 const { parseId, allowOnly, queryString, fail, isSafeKey } = require("../validation/common");
-const { sendError } = require("../middleware/errors");
+const { ApiError, sendError } = require("../middleware/errors");
 const { attachmentToApi } = require("../api/serialize");
 const { MAX_FILE_BYTES, TYPES } = require("../files/file-types");
 
@@ -38,6 +38,15 @@ function uploadLimiter({ perWindow = UPLOADS_PER_WINDOW, windowMs = WINDOW_MS, p
       return () => { if (released) return; released = true; running -= 1; const n = (active.get(userKey) || 1) - 1; if (n) active.set(userKey, n); else active.delete(userKey); };
     }
   };
+}
+
+// A download that can't start. Storage that is temporarily unreachable says so (503), so nobody takes it for a lost file;
+// the headers meant for the file are dropped, so the error can't be saved or shown as if it were the file.
+function failDownload(res, error) {
+  for (const header of ["Content-Type", "Content-Disposition", "ETag", "Content-Length"]) res.removeHeader(header);
+  if (error instanceof ApiError) return sendError(res, error.status, error.code, error.message);
+  if (error?.code === "STORAGE_UNAVAILABLE") return sendError(res, 503, "STORAGE_UNAVAILABLE", "This file's storage isn't available right now. Try again later.");
+  return sendError(res, 404, "NOT_FOUND", "This file's contents are missing.");
 }
 
 // Content-Disposition with a plain-ASCII fallback and the exact name (RFC 6266 / 5987).
@@ -101,8 +110,9 @@ function fileRoutes({ services, access, limiter = uploadLimiter() }) {
       "Content-Security-Policy": attachment.type === "application/pdf" ? "default-src 'none'; object-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; frame-ancestors 'self'" : "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'self'; sandbox"
     });
     if (req.get("if-none-match") === etag) return res.status(304).end();
-    const stream = services.files.openDownload(attachment);
-    stream.on("error", () => { if (!res.headersSent) sendError(res, 404, "NOT_FOUND", "This file's contents are missing."); else res.destroy(); });
+    let stream;
+    try { stream = services.files.openDownload(attachment); } catch (error) { return failDownload(res, error); }
+    stream.on("error", (error) => { if (!res.headersSent) failDownload(res, error); else res.destroy(); });
     res.status(200).set("Content-Length", String(attachment.size));
     stream.pipe(res);
     res.on("close", () => stream.destroy());

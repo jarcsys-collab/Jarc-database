@@ -187,6 +187,28 @@ Local mode (`/`) and `?storage=api` keep the temporary sign-in.
   longer needs it; it stays until resource mode replaces API mode everywhere. It is disabled when `NODE_ENV=production`.
 - `AUTH_MODE=dev` is for local development only (no Microsoft sign-in; the temporary browser sign-in is used).
 
+## Google Drive attachment storage
+
+Off unless `GOOGLE_DRIVE_ENABLED=true`: while off, no Google code runs and its routes don't exist. Code: `integrations/google-drive/` and `routes/google-drive.js`.
+
+- **People:** employees sign in with Microsoft, and JARC checks their workspace role on every request as it does for any attachment. They never need a Google account, and no Google token or Drive ID reaches a browser.
+- **Bytes and metadata:** new files go to Drive. The `attachments` document keeps the original name, type, size, SHA-256, uploader, record and `storage: { provider: "gdrive", key: <Drive file ID> }`. In Drive a file is named `<attachment ID>.<ext>`.
+- **Existing files:** read from wherever their document says. Nothing is moved.
+- **Scope:** only `drive.file`. It can't reach folders or files JARC didn't create, so JARC creates and uses its own folder, "JARC Attachments". Service accounts can't own files, so this is a normal Google account connected by OAuth.
+- **Connecting:** a JARC administrator, on the Integrations page, with the account in `GOOGLE_DRIVE_ACCOUNT_EMAIL`. The OAuth state is single use, valid for 10 minutes, and bound to the provider, the session and the browser. Nothing is saved until a test file has been written, read back and removed.
+- **Tokens:** the refresh token is encrypted (AES-256-GCM, `GOOGLE_DRIVE_TOKEN_KEY`) in `integrations`. Replacing that key means reconnecting; files aren't affected. If Google refuses the token, the connection shows "Reconnect needed" and Drive attachments answer 503 until it's reconnected.
+- **Removing:** moves the file to Google Drive Trash, marked `jarcKind: removed`, so a file restored there is never removed again by the sweep. It doesn't return to the record by itself: find it by the attachment ID in the activity log. Google empties Trash on its own schedule.
+- **Disconnecting:** JARC forgets the token, and only revokes it at Google while no attachment is stored in Drive. Google says revoking removes everything granted to the project, and doesn't say `drive.file` access to existing files returns afterwards. So don't remove JARC's access in the Google account, or delete the Cloud project, while Drive holds attachments. Connecting and **Test connection** check a sample of existing files and warn if any can't be reached.
+- **Publishing status:** the OAuth client must be **In production** in Google Cloud. In Testing, refresh tokens with this scope expire after 7 days. Reconnect once after changing it.
+- **Migration:** the monday.com migration refuses `gdrive` as a target.
+
+To turn it on:
+
+1. Add `https://<JARC address>/api/v1/integrations/google-drive/callback` to the OAuth client's Authorized redirect URIs.
+2. Set `GOOGLE_DRIVE_CLIENT_ID`, `GOOGLE_DRIVE_CLIENT_SECRET`, `GOOGLE_DRIVE_REDIRECT_URI`, `GOOGLE_DRIVE_TOKEN_KEY`, `GOOGLE_DRIVE_ACCOUNT_EMAIL` and `ATTACHMENTS_GDRIVE_MAX_TOTAL_MB`, then `GOOGLE_DRIVE_ENABLED=true`.
+3. Choose **Connect Google Drive** on the Integrations page. New attachments still go to the current store.
+4. When it has been checked, set `ATTACHMENTS_STORE=gdrive`. Setting it back only affects new uploads; files already in Drive stay readable as long as Google Drive stays enabled.
+
 ## Search index, forms and imports
 
 **Search index** (`RECORD_SEARCH_INDEX`, `services/record-search-index.js`). With `on`, global and board search, including status, priority and assignee filters, answer from the `recordSearch` collection, once a catch up has verified it complete. A failed update takes it out of use until it has been repaired and verified again; until then search answers from the records. `node scripts/search-index.js verify|rebuild --target local --db <db>` checks or repairs it (production verify is read-only; a production rebuild needs `--confirm-production`).

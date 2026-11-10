@@ -6,8 +6,8 @@ class IntegrationsPanel {
     this.c = controller; this.status = null; this.error = ""; this.loading = false; this.timer = null;
     this.wizard = null; // { step, workspaces, boards, selected:Set, preview, sourceWorkspace }
     const params = new URLSearchParams(window.location.search);
-    if (params.get("integration") === "monday") {
-      this.returned = { result: params.get("result"), code: params.get("code") };
+    if (["monday", "google-drive"].includes(params.get("integration"))) {
+      this.returned = { provider: params.get("integration"), result: params.get("result"), code: params.get("code") };
       params.delete("integration"); params.delete("result"); params.delete("code");
       const query = params.toString();
       window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
@@ -22,8 +22,9 @@ class IntegrationsPanel {
   // Called after sign-in: an OAuth return opens the page and says how it went.
   afterStart() {
     if (!this.returned) return;
-    const { result, code } = this.returned; this.returned = null;
+    const { provider, result, code } = this.returned; this.returned = null;
     this.c.model.openScreen("integrations"); this.c.update();
+    if (provider === "google-drive") { this.view.toast({ connected: "Google Drive connected", cancelled: "Google Drive connection cancelled" }[result] || this.driveProblem(code)); return; }
     const messages = { connected: "monday.com connected", cancelled: "monday.com connection cancelled" };
     this.view.toast(messages[result] || `monday.com wasn't connected${code ? ` (${code})` : ""}`);
   }
@@ -37,10 +38,16 @@ class IntegrationsPanel {
   async load() {
     if (!this.available) return;
     this.loading = true;
-    try { this.status = await this.api("GET", ""); this.error = ""; }
+    try { this.status = await this.api("GET", ""); this.error = ""; if (this.status?.canManage) await this.loadDrive(); }
     catch (error) { this.error = error?.message || "Integrations couldn't be loaded."; }
     finally { this.loading = false; }
     this.redraw(); this.schedule();
+  }
+  // Google Drive attachment storage: administrators only. While the server has it switched off the route doesn't exist and
+  // no card is shown. Its own problems never hide the rest of the page.
+  async loadDrive() {
+    try { this.drive = await this.adapter.request("GET", "/integrations/google-drive"); this.driveError = ""; }
+    catch (error) { this.drive = null; this.driveError = error?.code === StorageError.CODES.NOT_FOUND ? "" : error?.message || "Google Drive's status couldn't be loaded."; }
   }
   // While imports or syncs are running, the dashboard refreshes itself (only while this page is open).
   schedule() {
@@ -53,7 +60,37 @@ class IntegrationsPanel {
     if (!this.available) return this.view.blank("work", "Integrations need the JARC server", "Sign in to the shared JARC server to connect other tools. This copy is running on its own.");
     if (this.error && !this.status) return `<div class="integration-alert" role="alert">${this.esc(this.error)} <button class="link-button" data-action="integration-refresh">Try again</button></div>`;
     if (!this.status) return `<div class="integration-card is-loading" aria-busy="true"><p>Loading integrations…</p></div>`;
-    return `${this.card(this.status)}${this.status.connected ? this.dashboard(this.status) : ""}`;
+    return `${this.card(this.status)}${this.status.connected ? this.dashboard(this.status) : ""}${this.driveCard()}`;
+  }
+
+  driveProblem(code) {
+    const known = { GDRIVE_WRONG_ACCOUNT: "That isn't the Google account configured for JARC's attachments", GDRIVE_ACCOUNT_CHANGED: "JARC's files belong to a different Google account", GDRIVE_SCOPE_DENIED: "Google Drive access wasn't allowed", GDRIVE_CHECK_FAILED: "Google Drive didn't pass the connection check, so nothing was saved", OAUTH_BROWSER_MISMATCH: "Finish connecting in the browser that started it", OAUTH_STATE_INVALID: "That connection link expired or was already used" };
+    return known[code] || `Google Drive wasn't connected${code ? ` (${code})` : ""}`;
+  }
+  driveCard() {
+    if (this.driveError) return `<div class="integration-alert" role="alert">${this.esc(this.driveError)}</div>`;
+    const s = this.drive;
+    if (!s) return "";
+    const actions = !s.connected ? `<button class="button primary" data-action="integration-gdrive-connect">Connect Google Drive</button>`
+      : `<button class="button secondary" data-action="integration-gdrive-test">Test connection</button>${s.state === "needs_reconnect" ? `<button class="button primary" data-action="integration-gdrive-connect">Reconnect</button>` : ""}<button class="button secondary" data-action="integration-gdrive-disconnect">Disconnect</button>`;
+    const fact = (label, value) => `<div><dt>${label}</dt><dd>${value}</dd></div>`;
+    const facts = [fact("Google account", this.esc(s.account?.email || s.configuredAccount || "—")), ...(s.connected ? [fact("Connected by", this.esc(s.account?.connectedByName || "—")), fact("Since", this.date(s.account?.connectedAt)), fact("Last checked", this.date(s.lastCheckedAt))] : []), ...(s.folder ? [fact("Folder", `<a href="${this.esc(s.folder.url)}" target="_blank" rel="noopener noreferrer">${this.esc(s.folder.name)}</a>`)] : []), fact("New attachments", s.activeForNewUploads ? "Go to Google Drive" : "Not going to Google Drive yet")].join("");
+    const warning = s.state === "needs_reconnect" ? `<div class="integration-alert" role="alert">Google no longer accepts JARC's access${s.activeForNewUploads ? ", so attachments stored in Google Drive can't be uploaded or opened" : ""}. Reconnect with ${this.esc(s.configuredAccount)}.</div>`
+      : s.lastError ? `<div class="integration-alert" role="status">${this.esc({ GDRIVE_FILES_UNREACHABLE: "Google Drive is connected, but some of JARC's existing files can't be reached.", GDRIVE_FOLDER_REPLACED: "JARC's earlier Google Drive folder couldn't be reached, so new files go to a new one.", GDRIVE_FOLDER_MISSING: "JARC's Google Drive folder is missing or in Trash." }[s.lastError] || `Last problem: ${s.lastError}`)}</div>` : "";
+    return `<article class="integration-card" aria-labelledby="int-gdrive-title"><header class="integration-head"><span class="integration-logo" aria-hidden="true">D</span><div><h2 id="int-gdrive-title">Google Drive attachments</h2><p>Keeps attachment files in one Google Drive account that only this server uses. Employees keep signing in with Microsoft and don't need a Google account.</p></div>${this.badge(s)}</header>
+      <ul class="integration-features"><li>JARC creates its own private folder and can only reach files it created</li><li>Files are stored under internal IDs; people see the original names in JARC</li><li>Removing an attachment moves its file to Google Drive Trash</li><li>Attachments already stored elsewhere stay where they are</li></ul>
+      <dl class="integration-facts">${facts}</dl>${warning}<div class="integration-actions">${actions}</div></article>`;
+  }
+  async onDriveAction(action) {
+    const api = (method, path, body) => this.adapter.request(method, `/integrations/google-drive${path}`, body);
+    try {
+      if (action === "integration-gdrive-connect") return this.view.showConfirm("Connect Google Drive?", `You'll go to Google to sign in with ${this.drive?.configuredAccount || "the configured account"} and allow JARC to create and manage its own files. New attachments only go there once that is separately switched on.`, "integration-gdrive-connect-go", "", "Continue to Google");
+      if (action === "integration-gdrive-connect-go") { this.view.closeOverlay(); const { authorizeUrl } = await api("POST", "/connect"); if (/^https:\/\/accounts\.google\.com\//.test(authorizeUrl)) window.location.assign(authorizeUrl); return undefined; }
+      if (action === "integration-gdrive-disconnect") return this.view.showConfirm("Disconnect Google Drive?", "JARC forgets its access to the Google account. Files stay in Google Drive, but attachments stored there can't be uploaded or opened in JARC until it's connected again. To keep those files reachable, don't remove JARC's access in the Google account.", "integration-gdrive-disconnect-go", "", "Disconnect");
+      if (action === "integration-gdrive-disconnect-go") { this.view.closeOverlay(); await api("POST", "/disconnect", { confirm: true }); this.view.toast("Google Drive disconnected"); return this.load(); }
+      if (action === "integration-gdrive-test") { const r = await api("POST", "/test"); this.view.toast(`Connection works${r.account ? ` · ${r.account}` : ""}`); return this.load(); }
+    } catch (error) { this.view.closeOverlay(); this.view.showMessage("Google Drive", error?.message || "That didn't work."); await this.load(); }
+    return undefined;
   }
 
   badge(s) {
@@ -101,6 +138,7 @@ class IntegrationsPanel {
 
   // ---- Actions (data-action="integration-…")
   async onAction(action, target) {
+    if (action.startsWith("integration-gdrive-")) return this.onDriveAction(action);
     try {
       if (action === "integration-refresh") return this.load();
       if (action === "integration-open-board") { const id = target.dataset.board, ws = this.c.model.workspaces.find((w) => w.boards.some((b) => String(b.id) === id)); if (ws) { this.c.model.openBoard(id, ws.id); this.c.update(); } return; }

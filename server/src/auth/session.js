@@ -111,4 +111,20 @@ function sessionAuthentication({ sessions, users, entra, accountMode = "off" }) 
   };
 }
 
-module.exports = { PENDING_ALLOWED, sessionAuthentication, readCookie, cookieHeader, clearCookie, csrfTokenFor, originAllowed, randomSecret, SESSION_COOKIE, SIGN_IN_COOKIE, UNSAFE_METHODS };
+// For a return from another site, where the Strict session cookie doesn't arrive: is the session that started an
+// administrator's action still valid, for a still-active person who is still a JARC administrator?
+function stillSystemAdmin({ sessions, users, accountMode = "off", now = () => new Date() }) {
+  return async ({ sessionId, userId }) => {
+    if (!sessionId) return false;
+    const session = await sessions.findById(sessionId), time = now();
+    if (!session || session.expiresAt <= time || session.idleExpiresAt <= time || String(session.userId) !== String(userId)) return false;
+    const user = await users.findById(session.userId);
+    if (!user || user.status !== "active") return false;
+    if (accountMode === "off") return Boolean(session.isSystemAdmin);
+    const account = accountOf(user);
+    if (blocked(account)) return false;
+    return accountMode === "enforced" ? isActiveSuperAdmin(account) : Boolean(session.isSystemAdmin);
+  };
+}
+
+module.exports = { stillSystemAdmin, PENDING_ALLOWED, sessionAuthentication, readCookie, cookieHeader, clearCookie, csrfTokenFor, originAllowed, randomSecret, SESSION_COOKIE, SIGN_IN_COOKIE, UNSAFE_METHODS };

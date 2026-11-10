@@ -19,6 +19,7 @@ const { CommentService } = require("./services/comment-service");
 const { FormService } = require("./services/form-service");
 const { ImportJobService } = require("./services/import-job-service");
 const { MondayIntegration } = require("./integrations/monday/service");
+const { GoogleDriveService } = require("./integrations/google-drive/service");
 const { WorkspaceService } = require("./services/workspace-service");
 const { BoardService } = require("./services/board-service");
 const { RecordService } = require("./services/record-service");
@@ -36,11 +37,10 @@ const { ApiTokenService } = require("./services/api-token-service");
 // pass a mock — tests never reach monday.com).
 // attachments: config.attachments (where new uploads go; the S3 bucket when configured). s3Store: tests pass a store
 // pointed at a local mock instead of real settings. GridFS is always available, so existing files stay readable.
-function createDataLayer({ connection, logger = console, fileStore = new GridFsFileStore(connection.db), maxFileStorageBytes, attachments = null, s3Store = null, monday = null, recordSearch = "off", fetch = globalThis.fetch } = {}) {
+// googleDrive: config.googleDrive. Absent or not enabled: no Google Drive code runs, no store exists and its routes don't.
+function createDataLayer({ connection, logger = console, fileStore = new GridFsFileStore(connection.db), maxFileStorageBytes, attachments = null, s3Store = null, monday = null, googleDrive = null, googleDriveOptions = {}, recordSearch = "off", fetch = globalThis.fetch } = {}) {
   const db = connection.db;
   const s3 = s3Store || (attachments?.s3 ? createS3FileStore(attachments.s3) : null);
-  const storage = new AttachmentStorage({ stores: { gridfs: fileStore, s3 }, defaultProvider: attachments?.defaultProvider || "gridfs" });
-  const limits = { gridfs: maxFileStorageBytes || undefined, ...(s3 ? { s3: attachments?.s3?.maxTotalBytes ?? s3Store?.maxTotalBytes } : {}) };
   const repos = {
     users: new UserRepository(db),
     workspaces: new WorkspaceRepository(db),
@@ -57,6 +57,10 @@ function createDataLayer({ connection, logger = console, fileStore = new GridFsF
     accountAudit: new AccountAuditRepository(db),
     apiTokens: new ApiTokenRepository(db)
   };
+  const defaultProvider = attachments?.defaultProvider || "gridfs";
+  const drive = googleDrive?.enabled ? new GoogleDriveService({ repos, config: googleDrive, fetch, logger, activeForUploads: defaultProvider === "gdrive", ...googleDriveOptions }) : null;
+  const storage = new AttachmentStorage({ stores: { gridfs: fileStore, s3, gdrive: drive?.store || null }, defaultProvider });
+  const limits = { gridfs: maxFileStorageBytes || undefined, ...(s3 ? { s3: attachments?.s3?.maxTotalBytes ?? s3Store?.maxTotalBytes } : {}), ...(drive ? { gdrive: googleDrive.maxTotalBytes } : {}) };
   const searchIndex = new RecordSearchIndex({ repos, logger, mode: recordSearch });
   const deps = { repos, connection, logger, searchIndex };
   const records = new RecordService(deps), boards = new BoardService(deps);
@@ -75,6 +79,7 @@ function createDataLayer({ connection, logger = console, fileStore = new GridFsF
       forms: new FormService({ repos, connection, logger, records }),
       importJobs: new ImportJobService({ boards, repos, connection, logger, searchIndex }),
       integration: new MondayIntegration({ repos, connection, config: monday, fetch, logger, searchIndex }),
+      ...(drive ? { googleDrive: drive } : {}),
       files: new FileService({ repos, storage, logger, ...(maxFileStorageBytes ? { maxTotalBytes: maxFileStorageBytes } : {}), limits: Object.fromEntries(Object.entries(limits).filter(([, v]) => v)) }),
       // Read-only views used by the notification feed and People columns.
       activity: { recent: (options) => repos.activities.listRecent(options) },

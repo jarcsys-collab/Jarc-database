@@ -63,6 +63,8 @@ function loadConfig(env = process.env) {
     maxFileStorageBytes: maxFileStorageMb * 1024 * 1024,
     attachments: loadAttachmentConfig(env, nodeEnv),
     monday: loadMondayConfig(env),
+    // Google Drive attachment storage: off unless GOOGLE_DRIVE_ENABLED=true (integrations/google-drive/service.js).
+    googleDrive: loadGoogleDriveConfig(env, nodeEnv, authMode),
     // Search index (services/record-search-index.js): off, shadow or on. Unset: off, which writes nothing.
     recordSearch: loadRecordSearchMode(env),
     // Optional features, each with its own switch: { nativeForms, spreadsheetImports }. Off in production unless turned on.
@@ -183,8 +185,9 @@ function loadAuthConfig(env, nodeEnv, dataStore) {
 const ACCESS_POLICIES = ["role_based", "development_shared"];
 
 // Attachment storage (Phase M4.1).
-//   ATTACHMENTS_STORE                gridfs (default; unchanged behaviour) | s3 — where NEW uploads go. Existing files
-//                                    are always read from where they are (GridFS files stay in GridFS).
+//   ATTACHMENTS_STORE                gridfs (default; unchanged behaviour) | s3 | gdrive — where NEW uploads go. Existing
+//                                    files are always read from where they are (GridFS files stay in GridFS). gdrive also
+//                                    needs GOOGLE_DRIVE_ENABLED=true (see loadGoogleDriveConfig).
 //   ATTACHMENTS_S3_ENDPOINT / _REGION / _BUCKET / _ACCESS_KEY_ID / _SECRET_ACCESS_KEY / _FORCE_PATH_STYLE
 //                                    a private S3-compatible bucket (Railway Buckets: map its variables onto these).
 //                                    All or none: a partial set stops startup. HTTPS required except a loopback
@@ -195,7 +198,8 @@ const ACCESS_POLICIES = ["role_based", "development_shared"];
 const S3_VARS = ["ATTACHMENTS_S3_ENDPOINT", "ATTACHMENTS_S3_BUCKET", "ATTACHMENTS_S3_ACCESS_KEY_ID", "ATTACHMENTS_S3_SECRET_ACCESS_KEY", "ATTACHMENTS_S3_MAX_TOTAL_MB"];
 function loadAttachmentConfig(env, nodeEnv) {
   const defaultProvider = env.ATTACHMENTS_STORE ? env.ATTACHMENTS_STORE : "gridfs";
-  if (!["gridfs", "s3"].includes(defaultProvider)) throw new ConfigError('ATTACHMENTS_STORE must be "gridfs" or "s3".');
+  if (!["gridfs", "s3", "gdrive"].includes(defaultProvider)) throw new ConfigError('ATTACHMENTS_STORE must be "gridfs", "s3" or "gdrive".');
+  if (defaultProvider === "gdrive" && env.GOOGLE_DRIVE_ENABLED !== "true") throw new ConfigError("ATTACHMENTS_STORE=gdrive needs GOOGLE_DRIVE_ENABLED=true.");
   const set = S3_VARS.filter((name) => env[name] !== undefined && env[name] !== "");
   let s3 = null;
   if (set.length && set.length !== S3_VARS.length) throw new ConfigError(`Object storage is partly configured; also set ${S3_VARS.filter((n) => !set.includes(n)).join(", ")} (or remove the others).`);
@@ -219,6 +223,38 @@ function loadAttachmentConfig(env, nodeEnv) {
     migrationMaxFileMb = Number(env.ATTACHMENTS_MIGRATION_MAX_FILE_MB);
   }
   return Object.freeze({ defaultProvider, s3, migrationMaxFileBytes: migrationMaxFileMb * 1024 * 1024 });
+}
+
+// Google Drive attachment storage. Two separate switches, so that it can be connected and checked before any file goes there:
+//   GOOGLE_DRIVE_ENABLED              true: its routes exist and an administrator can connect it. Anything but true/false stops
+//                                     startup; unset or false means off, and the variables below aren't even looked at.
+//   ATTACHMENTS_STORE=gdrive          new uploads go to Drive (see loadAttachmentConfig).
+// Required when on (a missing or wrong value stops startup; secrets are non-enumerable, never in JSON or logs):
+//   GOOGLE_DRIVE_CLIENT_ID, GOOGLE_DRIVE_CLIENT_SECRET   the OAuth web client
+//   GOOGLE_DRIVE_REDIRECT_URI         the callback's full URL, also entered in Google Cloud Console
+//   GOOGLE_DRIVE_TOKEN_KEY            32 random bytes, base64-encoded: encrypts the refresh token
+//   GOOGLE_DRIVE_ACCOUNT_EMAIL        the only Google account allowed to connect
+//   ATTACHMENTS_GDRIVE_MAX_TOTAL_MB   the most JARC may store there
+const GOOGLE_DRIVE_CALLBACK_PATH = "/api/v1/integrations/google-drive/callback";
+function loadGoogleDriveConfig(env, nodeEnv, authMode) {
+  const value = env.GOOGLE_DRIVE_ENABLED;
+  if (value !== undefined && value !== "" && value !== "true" && value !== "false") throw new ConfigError("GOOGLE_DRIVE_ENABLED must be true or false.");
+  const hide = (config, clientSecret, tokenKey) => { Object.defineProperties(config, { clientSecret: { value: clientSecret, enumerable: false }, tokenKey: { value: tokenKey, enumerable: false } }); return Object.freeze(config); };
+  if (value !== "true") return hide({ enabled: false, clientId: null, redirectUri: null, accountEmail: null, maxTotalBytes: null }, null, null);
+  if (authMode !== "entra") throw new ConfigError("GOOGLE_DRIVE_ENABLED=true needs AUTH_MODE=entra.");
+  const missing = ["GOOGLE_DRIVE_CLIENT_ID", "GOOGLE_DRIVE_CLIENT_SECRET", "GOOGLE_DRIVE_REDIRECT_URI", "GOOGLE_DRIVE_TOKEN_KEY", "GOOGLE_DRIVE_ACCOUNT_EMAIL", "ATTACHMENTS_GDRIVE_MAX_TOTAL_MB"].filter((name) => !env[name]);
+  if (missing.length) throw new ConfigError(`GOOGLE_DRIVE_ENABLED=true needs ${missing.join(", ")}.`);
+  const tokenKey = Buffer.from(env.GOOGLE_DRIVE_TOKEN_KEY, "base64");
+  if (tokenKey.length !== 32) throw new ConfigError("GOOGLE_DRIVE_TOKEN_KEY must be 32 random bytes, base64-encoded (for example: openssl rand -base64 32).");
+  let redirect;
+  try { redirect = new URL(env.GOOGLE_DRIVE_REDIRECT_URI); } catch { throw new ConfigError("GOOGLE_DRIVE_REDIRECT_URI must be a full URL."); }
+  const local = redirect.protocol === "http:" && redirect.hostname === "localhost" && nodeEnv !== "production";
+  if (redirect.protocol !== "https:" && !local) throw new ConfigError("GOOGLE_DRIVE_REDIRECT_URI must use https.");
+  if (redirect.pathname !== GOOGLE_DRIVE_CALLBACK_PATH || redirect.search || redirect.hash || redirect.username || redirect.password) throw new ConfigError(`GOOGLE_DRIVE_REDIRECT_URI must end in ${GOOGLE_DRIVE_CALLBACK_PATH}, with nothing after it.`);
+  const email = env.GOOGLE_DRIVE_ACCOUNT_EMAIL.trim().toLowerCase();
+  if (email.length > 320 || !/^[^\s@]+@[^\s@]+$/.test(email)) throw new ConfigError("GOOGLE_DRIVE_ACCOUNT_EMAIL must be an email address.");
+  if (!/^\d{1,8}$/.test(env.ATTACHMENTS_GDRIVE_MAX_TOTAL_MB) || Number(env.ATTACHMENTS_GDRIVE_MAX_TOTAL_MB) < 1) throw new ConfigError("ATTACHMENTS_GDRIVE_MAX_TOTAL_MB must be a whole number of megabytes (1 or more).");
+  return hide({ enabled: true, clientId: env.GOOGLE_DRIVE_CLIENT_ID, redirectUri: redirect.href, accountEmail: email, maxTotalBytes: Number(env.ATTACHMENTS_GDRIVE_MAX_TOTAL_MB) * 1024 * 1024 }, env.GOOGLE_DRIVE_CLIENT_SECRET, tokenKey);
 }
 
 // monday.com integration (one-way into JARC). Off unless MONDAY_INTEGRATION_ENABLED=true; usable only when the OAuth
@@ -293,4 +329,4 @@ function assertMongoUri(uri) {
   if (pathDb && pathDb !== JARC_DB_NAME) throw new ConfigError(`MONGODB_URI names a different database in its path. Remove it (or use "${JARC_DB_NAME}"); the database always comes from MONGODB_DB_NAME.`);
 }
 
-module.exports = { FEATURE_SWITCHES, loadConfig, loadAccountConfig, loadMondayConfig, loadAttachmentConfig, assertJarcDatabaseName, ConfigError, JARC_DB_NAME, ACCESS_POLICIES };
+module.exports = { FEATURE_SWITCHES, loadConfig, loadAccountConfig, loadMondayConfig, loadGoogleDriveConfig, loadAttachmentConfig, assertJarcDatabaseName, ConfigError, JARC_DB_NAME, ACCESS_POLICIES };

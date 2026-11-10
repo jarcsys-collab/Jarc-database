@@ -13,7 +13,7 @@ const { resourceRoutes } = require("./routes/resources");
 const { memberRoutes } = require("./routes/members");
 const { authConfigRoutes, signInRoutes, sessionRoutes, meRoutes } = require("./routes/auth");
 const { devActorMiddleware } = require("./context/dev-actor");
-const { sessionAuthentication } = require("./auth/session");
+const { sessionAuthentication, stillSystemAdmin } = require("./auth/session");
 const { Access } = require("./auth/access");
 const { apiNotFound, errorHandler, sendError } = require("./middleware/errors");
 const { ActivityStream } = require("./realtime/activity-stream");
@@ -21,6 +21,7 @@ const { eventRoutes, entraSessionCheck } = require("./routes/events");
 const { fileRoutes } = require("./routes/files");
 const { searchRoutes, searchLimiter: createSearchLimiter } = require("./routes/search");
 const { integrationRoutes, integrationPublicRoutes } = require("./routes/integrations");
+const { googleDriveRoutes, googleDrivePublicRoutes } = require("./routes/google-drive");
 const { commentRoutes } = require("./routes/comments");
 const { formRoutes } = require("./routes/forms");
 const { importRoutes } = require("./routes/imports");
@@ -96,6 +97,9 @@ function createApp({ apiTokens = null, features = {}, repository, environment = 
     const accountService = accountMode !== "off" ? dataLayer.services.accounts.configure({ mode: accountMode, superAdmin: accounts.superAdmin || null, entra: auth.entra, environment }) : null;
     // monday.com OAuth return and webhooks: no JARC session (each has its own protection).
     if (dataLayer.services?.integration) api.use(integrationPublicRoutes({ integration: dataLayer.services.integration }));
+    // Google Drive's OAuth return, only with Microsoft sign-in and only while the feature is on.
+    const googleDrive = auth ? dataLayer.services?.googleDrive : null;
+    if (googleDrive) api.use(googleDrivePublicRoutes({ drive: googleDrive, logger, stillAdmin: stillSystemAdmin({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users, accountMode }) }));
     if (auth) api.use(signInRoutes({ entra: auth.entra, verify: auth.verify, repos: dataLayer.repos, access, accounts: accountService }));
     const authenticate = auth ? sessionAuthentication({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users, entra: auth.entra, accountMode }) : devActorMiddleware(devActor, { environment });
     // Each router below is mounted with `identify`, and a request passes through every mount until one answers: the
@@ -123,6 +127,7 @@ function createApp({ apiTokens = null, features = {}, repository, environment = 
     api.get("/features", identify, (req, res) => res.status(200).set("Cache-Control", "no-store").json({ features: tokenService ? { ...enabled, apiTokens: true } : enabled }));
     api.use(identify, preferenceRoutes({ repos: dataLayer.repos }));
     if (dataLayer.services?.integration) api.use(identify, integrationRoutes({ integration: dataLayer.services.integration, access }));
+    if (googleDrive) api.use(identify, googleDriveRoutes({ drive: googleDrive, access }));
     // Live updates (Server-Sent Events) from the activity log; live: { pollMs, overlapMs, timings } for tests.
     const stream = new ActivityStream({ activities: dataLayer.repos.activities, logger, ...(live.pollMs ? { pollMs: live.pollMs } : {}), ...(live.overlapMs ? { overlapMs: live.overlapMs } : {}) });
     app.locals.realtime = stream;

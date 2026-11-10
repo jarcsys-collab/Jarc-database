@@ -86,6 +86,8 @@ class FileService {
       if (existing) return { existing };
     }
     if (await this.repos.attachments.countForCell(record._id, columnKey) >= MAX_FILES_PER_CELL) throw new ApiError(409, "TOO_MANY_FILES", `A cell can hold at most ${MAX_FILES_PER_CELL} files. Remove one first.`);
+    // Storage that depends on a connection (Google Drive) refuses before anything is read.
+    await this.storage.store(this.storage.defaultProvider).ready?.();
     // A quick check before reading anything; the binding reservation happens in upload().
     if (await this.usedTotal(this.storage.defaultProvider) + length > this.limitOf(this.storage.defaultProvider)) throw storageFull();
     return { fileName, type, length, uploadKey };
@@ -95,7 +97,7 @@ class FileService {
   async upload({ record, board, columnKey, plan, source, actor }) {
     const id = new ObjectId();
     const now = this.now();
-    const target = this.storage.forNew(id);
+    const target = await this.storage.forNewUpload(id);
     if (!await this.reserve(target.provider, plan.length)) throw storageFull();
     try {
       await this.repos.attachments.insertPending({
@@ -109,7 +111,7 @@ class FileService {
     }
     let sha256;
     try {
-      ({ sha256 } = await this.receive({ store: this.storage.store(target.provider), key: target.key }, plan, source));
+      ({ sha256 } = await this.receive({ store: this.storage.store(target.provider), key: target.key, attachmentId: id.toHexString() }, plan, source));
       // The record, or its column, may have gone while the file was arriving.
       const current = await this.repos.records.findById(record._id);
       const currentBoard = current && await this.repos.boards.findById(current.boardId);
@@ -133,7 +135,7 @@ class FileService {
     return new Promise((resolve, reject) => {
       const hash = crypto.createHash("sha256");
       let bytes = 0, head = Buffer.alloc(0), checked = false, settled = false;
-      const target = to.store.openUpload(to.key, { filename: plan.fileName, contentType: plan.type, length: plan.length, sha256: expectedSha });
+      const target = to.store.openUpload(to.key, { filename: plan.fileName, contentType: plan.type, length: plan.length, sha256: expectedSha, attachmentId: to.attachmentId });
       const check = () => { checked = true; return types[plan.type].matches(head); };
       const guard = new Transform({
         transform(chunk, _encoding, callback) {
@@ -172,6 +174,9 @@ class FileService {
 
   // Removes one attachment (metadata first, so it stops being served, then its bytes).
   async remove(attachment, actor) {
+    // Its storage must exist on this server; a file is never unlinked while its provider is switched off.
+    try { this.storage.forAttachment(attachment); }
+    catch (error) { if (error?.code === "STORAGE_UNAVAILABLE") throw new ApiError(503, "STORAGE_UNAVAILABLE", "This file's storage isn't available right now. Try again later."); throw error; }
     if (!await this.repos.attachments.delete(attachment._id)) throw new ApiError(404, "NOT_FOUND", "This file doesn't exist or was removed.");
     await this.deleteBytes(attachment);
     await this.settle(this.storage.providerOf(attachment), Number(attachment.size) || 0, attachment.status === "ready" ? "free" : "release");
@@ -238,11 +243,14 @@ class FileService {
         }
         after = page.at(-1)._id;
       }
+      // Each provider on its own: one that's unreachable doesn't stop the others being cleaned.
       for (const [provider, store] of this.storage.stores) {
-        for (const key of await store.listIds({ before: cutoff })) {
-          const owner = provider === "gridfs" ? await this.repos.attachments.findById(key) : await this.repos.attachments.findByStorageKey(provider, key);
-          if (!owner) { await this.deleteBytes(key, provider); removed += 1; }
-        }
+        try {
+          for (const key of await store.listIds({ before: cutoff })) {
+            const owner = provider === "gridfs" ? await this.repos.attachments.findById(key) : await this.repos.attachments.findByStorageKey(provider, key);
+            if (!owner) { await this.deleteBytes(key, provider); removed += 1; }
+          }
+        } catch (error) { this.logger.error(`[files] sweep of ${provider} failed: ${error?.code || error?.name || "Error"} ${redact(error?.message || "")}`); }
       }
     } catch (error) {
       this.logger.error(`[files] sweep failed: ${error?.name || "Error"} ${redact(error?.message || "")}`);

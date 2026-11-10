@@ -33,6 +33,8 @@ const SHA256 = /^[0-9a-f]{64}$/;
 class AttachmentImporter {
   // storage: an AttachmentStorage; provider: where migrated files go (production: "s3", Railway Buckets).
   constructor({ client, target, plan, planDigest, approval, storage, provider, maxBytes, limitBytes, operator, now = () => new Date(), faults = null }) {
+    // Migrated files use keys chosen by the migration (see keyFor); Google Drive assigns its own, so this path doesn't support it.
+    if (provider === "gdrive") throw new MigrationError("MIGRATION_PROVIDER_UNSUPPORTED", "The monday.com migration can't store files in Google Drive.");
     if (isVerifiedProductionTarget(target) && !PRODUCTION_EXECUTION_ENABLED) throw new MigrationLockedError();
     if (!isVerifiedTarget(target)) throw new MigrationError("MIGRATION_TARGET_UNVERIFIED", "The target was not verified as a permitted database.");
     if (target.scope !== "local-test" && !PRODUCTION_EXECUTION_ENABLED) throw new MigrationLockedError();

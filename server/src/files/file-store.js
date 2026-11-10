@@ -8,6 +8,7 @@
 //                    never public: JARC checks access, then streams the bytes. Keys are opaque ("att/<attachment ID>",
 //                    or "mig/<run>/<ID>" for migrated files) and never contain file names. Size (and SHA-256 when known
 //                    in advance) is verified by reading the object's metadata back after the upload.
+//   GoogleDriveFileStore  (integrations/google-drive/file-store.js) one Google Drive account that only this server uses.
 //   MemoryFileStore  tests: the same interface in memory (never touches a real database or storage).
 //
 // Interface: openUpload(key, { filename, contentType, length, sha256? }) → writable stream with abort(), "finish" only
@@ -146,6 +147,13 @@ class AttachmentStorage {
   forNew(id, { prefix = "att/" } = {}) {
     const provider = this.defaultProvider;
     return provider === "gridfs" ? { provider, key: id, record: undefined } : { provider, key: `${prefix}${id.toHexString()}`, record: { provider, key: `${prefix}${id.toHexString()}` } };
+  }
+  // The same for an upload through the app. A store that names its own files (Google Drive) is asked for the key.
+  async forNewUpload(id) {
+    const store = this.store(this.defaultProvider);
+    if (!store.newKey) return this.forNew(id);
+    const key = await store.newKey(id);
+    return { provider: this.defaultProvider, key, record: { provider: this.defaultProvider, key } };
   }
 }
 

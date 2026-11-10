@@ -83,4 +83,4 @@ function integrationRoutes({ integration, access }) {
   return router;
 }
 
-module.exports = { integrationRoutes, integrationPublicRoutes };
+module.exports = { integrationRoutes, integrationPublicRoutes, rateLimit };

@@ -10,6 +10,8 @@
 //   JARC_TEST_ACCOUNTS=staged|enforced: Account Management; JARC_TEST_SUPER_ADMIN_OID: the configured Super Admin
 //   JARC_TEST_MONDAY=1: the monday.com integration is configured against the MOCK monday.com (tests/support/mock-monday)
 //   POST /__test/monday { connect, run }  → store a (mock) connection directly / run due integration jobs once
+//   JARC_TEST_GDRIVE=1: Google Drive storage is on, against the MOCK Google (tests/support/mock-google-drive)
+//   POST /__test/google-drive { connect, revoke }  → store a (mock) connection directly / make Google refuse it
 const express = require("express");
 const { ObjectId } = require("mongodb");
 const { MongoConnection } = require("../../src/db/connection");
@@ -35,7 +37,10 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
   const monday = process.env.JARC_TEST_MONDAY === "1" ? require("./mock-monday") : null;
   const mock = monday?.mockMonday();
   const mondayConfig = monday ? require("../../src/config").loadMondayConfig(monday.ENV) : null;
-  const dataLayer = createDataLayer({ connection, logger: { error() {} }, fileStore: new MemoryFileStore(), monday: mondayConfig, recordSearch: process.env.JARC_TEST_RECORD_SEARCH || "off", ...(mock ? { fetch: mock.fetch } : {}) });
+  const googleMock = process.env.JARC_TEST_GDRIVE === "1" ? require("./mock-google-drive") : null;
+  const google = googleMock?.mockGoogle();
+  const googleConfig = googleMock ? require("../../src/config").loadGoogleDriveConfig(googleMock.ENV, "test", "entra") : null;
+  const dataLayer = createDataLayer({ connection, logger: { error() {} }, fileStore: new MemoryFileStore(), monday: mondayConfig, googleDrive: googleConfig, recordSearch: process.env.JARC_TEST_RECORD_SEARCH || "off", ...(mock ? { fetch: mock.fetch } : google ? { fetch: google.fetch } : {}) });
   await dataLayer.searchIndex.catchUp();
   const verify = createEntraVerifier({ ...entra, keySet: issuer.keySet });
   // Optional 2nd argument "shared": ACCESS_POLICY=development_shared (as on Railway); default role_based.
@@ -60,6 +65,17 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
     res.json({ ok: true });
   });
   outer.get("/__test/stats", (req, res) => res.json(sim));
+  outer.post("/__test/google-drive", express.json(), async (req, res) => {
+    if (!google) return res.status(404).json({ error: "Google mock not enabled" });
+    if (req.body.connect) {
+      const { encrypt } = require("../../src/integrations/monday/secrets");
+      google.refreshTokens.add("refresh-ui-test");
+      google.add({ id: "folder-ui-test", name: "JARC Attachments", mimeType: "application/vnd.google-apps.folder", appProperties: { jarcKind: "folder" } });
+      await connection.db.collection("integrations").updateOne({ _id: "google-drive" }, { $set: { refreshToken: encrypt("refresh-ui-test", googleConfig.tokenKey), status: "connected", accountEmail: googleMock.ACCOUNT, accountPermissionId: google.permissionId, folderId: "folder-ui-test", folderName: "JARC Attachments", connectedByName: "Ada Admin", connectedAt: new Date(), lastCheckedAt: new Date(), lastError: null } }, { upsert: true });
+    }
+    if (req.body.revoke) { google.refreshTokens.clear(); google.accessTokens.clear(); dataLayer.services.googleDrive.cached = null; }
+    res.json({ ok: true });
+  });
   outer.post("/__test/monday", express.json(), async (req, res) => {
     if (!monday) return res.status(404).json({ error: "monday mock not enabled" });
     const { encrypt } = require("../../src/integrations/monday/secrets");
