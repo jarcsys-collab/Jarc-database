@@ -2,6 +2,7 @@
 // Entra sign-in on the fake MongoDB, with synthetic data only: it never connects to a real database.
 const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
+const TOKEN_SECRET_PART = /^jarc_[0-9a-f]{24}_(.{43})$/;
 const crypto = require("crypto");
 const fs = require("fs"), path = require("path");
 const { ObjectId } = require("mongodb");
@@ -79,7 +80,11 @@ describe("Token generation and storage", () => {
     assert.equal(res.headers.get("cache-control"), "no-store");
     const stored = await app.db.collection(COLLECTIONS.apiTokens).findOne({ _id: new ObjectId(token.id) });
     assert.equal(stored.digest, digestOf(KEY, secret));
-    assert.ok(!JSON.stringify(stored).includes(secret.split("_")[2]), "the secret isn't stored");
+    // The whole secret part: it may itself contain "_", so splitting and taking one piece could test a stray character.
+    const secretPart = TOKEN_SECRET_PART.exec(secret)[1];
+    assert.equal(secretPart.length, 43);
+    assert.ok(!JSON.stringify(stored).includes(secretPart), "the secret isn't stored");
+    for (let i = 0; i + 16 <= secretPart.length; i += 8) assert.ok(!JSON.stringify(stored).includes(secretPart.slice(i, i + 16)), "no part of the secret is stored");
     assert.equal(stored.publicId, publicIdOf(secret));
     assert.equal(token.digest, undefined);
 
