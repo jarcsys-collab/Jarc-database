@@ -1,6 +1,6 @@
 // The Machine Installation Database files card on the Integrations page, in the REAL app in a headless browser. Mock Google,
 // monday.com refused, a synthetic run. Visible only to Google Drive administrators while the import is switched on; the run's
-// controls; starting asks for the backup; a rollback needs the typed confirmation. Skipped without Chrome or Edge.
+// controls; starting asks for a confirmation (no backup); the pilot comes first; a rollback needs the typed confirmation. Skipped without Chrome or Edge.
 const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("path");
@@ -40,7 +40,7 @@ describe("Machine Installation Database files card (real app)", { skip: BROWSER 
     assert.equal(await b.evaluate(`fetch("/api/v1/migrations/mid-attachments").then((r) => r.status)`), 403);
   });
 
-  test("a Drive administrator sees the card, a prepared run and its controls; starting asks for the backup; rollback needs the typed confirmation", async () => {
+  test("a Drive administrator sees the card, a prepared run and its controls; starting asks for a confirmation, not a backup; rollback needs the typed confirmation", async () => {
     await b.open(`${base}/api/v1/health`, { width: 1440 });
     assert.equal(await signIn("ada", "Ada Admin", false), 201);
     assert.equal(await b.evaluate(`fetch("/__test/mid", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then((r) => r.status)`), 200);
@@ -51,8 +51,12 @@ describe("Machine Installation Database files card (real app)", { skip: BROWSER 
     assert.match(await text(CARD), /0 of 2/);
     assert.equal(await has(`${CARD} [data-action="integration-mid-start-pilot"]`), true);
     assert.equal(await has(`${CARD} [data-action="integration-mid-pause"]`), false, "no pause before it runs");
+    assert.equal(await has(`${CARD} [data-action="integration-mid-start-full"]`), false, "no full import before the pilot");
+    assert.match(await text(CARD), /required before the full import/);
+    assert.equal(await b.evaluate(`document.querySelector('${CARD} [data-action="integration-mid-prepare"]').disabled`), true, "Prepare needs a completed dry run");
     await click(`${CARD} [data-action="integration-mid-start-pilot"]`);
-    assert.ok(await b.waitFor("!!document.querySelector('#overlay-root form[data-action=\"integration-mid-start-form\"] input[name=\"reference\"]')", 5000), "backup form");
+    assert.ok(await b.waitFor("!!document.querySelector('#overlay-root form[data-action=\"integration-mid-start-form\"] input[name=\"confirm\"]')", 5000), "confirmation form");
+    assert.equal(await has('#overlay-root input[name="reference"]'), false, "no backup is asked for");
     assert.match(await text("#overlay-root"), /20-file pilot/);
     await click('#overlay-root [data-action="close-overlay"]');
     await click(`${CARD} [data-action="integration-mid-rollback"]`);

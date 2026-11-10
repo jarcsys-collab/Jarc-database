@@ -41,7 +41,7 @@ class IntegrationsPanel {
     try { this.status = await this.api("GET", ""); this.error = ""; await this.loadDrive(); }
     catch (error) { this.error = error?.message || "Integrations couldn't be loaded."; }
     finally { this.loading = false; }
-    this.redraw(); this.schedule();
+    this.redraw(); this.schedule(); this.midSchedule();
   }
   // Google Drive attachment storage: every signed-in employee sees its state; the server says whether this person may manage
   // it (canManage) and only then sends the details. While the server has it switched off the route doesn't exist and no card
@@ -76,32 +76,73 @@ class IntegrationsPanel {
     if (!m) return "";
     if (m.error) return `<div class="integration-alert" role="alert">${this.esc(m.error)}</div>`;
     const mb = (b) => `${(Number(b || 0) / 1048576).toFixed(1)} MB`;
-    const dry = this.midDry ? (() => {
-      const s = this.midDry.summary, cap = s.capacity || {};
-      const capText = cap.error ? `couldn't be checked (${this.esc(cap.error)})` : `${cap.enough ? "enough" : `NOT enough (${this.esc((cap.problems || []).join(", "))})`} · Google Drive free ${cap.drive?.freeBytes === null ? "unlimited" : mb(cap.drive?.freeBytes)} · JARC limit free ${mb(cap.jarc?.freeBytes)}`;
-      const src = s.sources ? `<div><dt>On monday.com</dt><dd>${s.sources.available} of ${s.sources.checked} available${s.sources.missing ? `, ${s.sources.missing} missing` : ""}${s.sources.sizeChanged ? `, ${s.sources.sizeChanged} changed` : ""}</dd></div>` : "";
-      return `<h3>Dry run (nothing was written)</h3><dl class="integration-facts"><div><dt>Run</dt><dd><code>${this.esc(s.runId)}</code></dd></div><div><dt>Files</dt><dd>${s.entries}</dd></div><div><dt>Ready to import</dt><dd>${s.eligible + s.resumable}</dd></div><div><dt>Already imported</dt><dd>${s.alreadyImported}</dd></div><div><dt>Blocked</dt><dd>${s.blocked}${s.blocked ? ` (${this.esc(Object.entries(s.problems).map(([k, v]) => `${k}: ${v}`).join(", "))})` : ""}</dd></div><div><dt>Size</dt><dd>${mb(s.bytesToImport)} for ${s.recordsReceivingFiles} records</dd></div><div><dt>Storage</dt><dd>${capText}</dd></div>${src}</dl>`;
-    })() : "";
+    const chk = this.midCheck, checking = chk?.status === "running", busy = checking || this.midBusy;
+    const stageText = { starting: "starting", database: "checking records and mappings", capacity: "checking storage", "monday.com": "checking monday.com" };
+    const dry = !chk ? "" : checking
+      ? `<p class="integration-note" role="status" aria-live="polite">Dry run in progress (nothing is written): ${this.esc(stageText[chk.stage] || chk.stage)}${chk.progress ? ` — batch ${chk.progress.done} of ${chk.progress.total}` : ""}…</p>`
+      : chk.status === "failed"
+        ? `<div class="integration-alert" role="alert">The dry run didn't finish: ${this.esc(chk.error?.code || "error")}${chk.error?.message ? ` — ${this.esc(chk.error.message)}` : ""}. Nothing was written. Run it again.</div>`
+        : (() => {
+          const s = chk.result.summary, cap = s.capacity || {};
+          const capText = cap.error ? `couldn't be checked (${this.esc(cap.error)})` : `${cap.enough ? "enough" : `NOT enough (${this.esc((cap.problems || []).join(", "))})`} · Google Drive free ${cap.drive?.freeBytes === null ? "unlimited" : mb(cap.drive?.freeBytes)} · JARC limit free ${mb(cap.jarc?.freeBytes)}`;
+          const src = s.sources ? `<div><dt>On monday.com</dt><dd>${s.sources.available} of ${s.sources.checked} available${s.sources.missing ? `, ${s.sources.missing} missing` : ""}${s.sources.sizeChanged ? `, ${s.sources.sizeChanged} changed` : ""}</dd></div>` : `<div><dt>On monday.com</dt><dd>not checked</dd></div>`;
+          const rows = (chk.result.problemRows || []).slice(0, 20).map((x) => `<li><code>${this.esc(x.assetId)}</code> ${this.esc(x.name || "")} — ${this.esc(x.problems.join(", "))}</li>`).join("");
+          return `<h3>Dry run (nothing was written)</h3><dl class="integration-facts"><div><dt>Run</dt><dd><code>${this.esc(s.runId)}</code></dd></div><div><dt>Files</dt><dd>${s.entries}</dd></div><div><dt>Ready to import</dt><dd>${s.eligible + s.resumable}</dd></div><div><dt>Already imported</dt><dd>${s.alreadyImported}</dd></div><div><dt>Blocked</dt><dd>${s.blocked}${s.blocked ? ` (${this.esc(Object.entries(s.problems).map(([k, v]) => `${k}: ${v}`).join(", "))})` : ""}</dd></div><div><dt>Size</dt><dd>${mb(s.bytesToImport)} for ${s.recordsReceivingFiles} records</dd></div><div><dt>Storage</dt><dd>${capText}</dd></div>${src}<div><dt>Checked</dt><dd>${this.esc(new Date(chk.finishedAt).toLocaleString())}</dd></div></dl>${rows ? `<ul class="integration-features">${rows}</ul>` : ""}`;
+        })();
+    const canPrepare = chk?.status === "completed" && !chk.result.summary.blocked && !busy;
     const runs = (m.runs || []).map((r) => {
       const c = (k) => r.counts?.[k]?.files || 0;
-      const id = this.esc(r.runId), btn = (action, label, primary = false) => `<button class="button ${primary ? "primary" : "secondary"} small" data-action="integration-mid-${action}" data-run="${id}">${label}</button>`;
+      const id = this.esc(r.runId), btn = (action, label, primary = false) => `<button class="button ${primary ? "primary" : "secondary"} small" data-action="integration-mid-${action}" data-run="${id}"${busy ? " disabled" : ""}>${label}</button>`;
+      const startable = ["prepared", "paused", "stopped"].includes(r.status);
       const actions = [
-        ...(["prepared", "paused", "stopped"].includes(r.status) ? [btn("start-pilot", "Start 20-file pilot", true), btn("start-full", "Start full import")] : []),
+        ...(startable ? [btn("start-pilot", r.pilotFinishedAt ? "Run another pilot" : "Start 20-file pilot", !r.pilotFinishedAt), ...(r.pilotFinishedAt ? [btn("start-full", "Start full import", true)] : [])] : []),
         ...(r.status === "running" ? [btn("pause", "Pause"), btn("stop", "Stop")] : []),
         ...(r.status === "paused" && r.remaining > 0 ? [btn("resume", "Resume")] : []),
         ...(r.status === "paused" ? [btn("stop", "Stop")] : []),
-        btn("verify", "Verify"), btn("refresh", "Refresh"),
-        ...(["prepared", "paused", "stopped", "completed"].includes(r.status) ? [btn("rollback", "Roll back this run")] : [])
+        ...(r.status === "preparing" ? [] : [btn("verify", "Verify")]), btn("refresh", "Refresh"),
+        ...(["prepared", "prepare-failed", "paused", "stopped", "completed"].includes(r.status) ? [btn("rollback", "Roll back this run")] : [])
       ].join("");
       const failures = (r.failures || []).slice(0, 10).map((f) => `<li><code>${this.esc(f.assetId)}</code> ${this.esc(f.name || "")} — ${this.esc(f.status)} ${this.esc(f.error?.code || "")} (${this.esc(f.attempts)} attempt${f.attempts === 1 ? "" : "s"})</li>`).join("");
-      return `<div class="integration-dashboard"><dl class="integration-facts"><div><dt>Run</dt><dd><code>${id}</code></dd></div><div><dt>Status</dt><dd>${this.esc(r.status)}${r.pausedReason ? ` (${this.esc(r.pausedReason)})` : ""}</dd></div><div><dt>Imported</dt><dd>${c("done")} of ${r.totals?.files || 0}</dd></div><div><dt>Waiting</dt><dd>${c("queued") + c("retry") + c("running")}</dd></div><div><dt>Failed</dt><dd>${c("failed")}</dd></div><div><dt>Backup</dt><dd>${r.backups?.length ? this.esc(r.backups[r.backups.length - 1].reference) : "none recorded"}</dd></div></dl>
-        ${failures ? `<ul class="integration-features">${failures}</ul>` : ""}${this.midVerify?.runId === r.runId ? `<p class="integration-note" role="status">Verification: ${this.midVerify.ok ? "everything matches" : `${this.midVerify.problemCount} problem(s), ${this.midVerify.strayDriveFiles} stray Drive file(s)`} · ${this.midVerify.readyAttachments} attachments, ${this.midVerify.assetMappings} mappings, ${this.midVerify.driveFiles} Drive files.</p>` : ""}
+      const snap = (r.snapshots || []).at(-1);
+      const pre = snap ? `<div><dt>Checked before ${this.esc(snap.mode)}</dt><dd>${this.esc(new Date(snap.at).toLocaleString())}: ${snap.recordsOnBoard} records, ${snap.itemMappings} mappings, ${snap.attachmentsTotal} attachments</dd></div>` : "";
+      const statusText = r.status === "preparing" ? (r.prepareInterrupted ? "preparing was interrupted (run the dry run and Prepare again to finish it)" : `preparing — listing ${c("queued")} of ${r.totals?.files || 0} files`) : r.status;
+      const pilot = `<div><dt>Pilot</dt><dd>${r.pilotFinishedAt ? `finished ${this.esc(new Date(r.pilotFinishedAt).toLocaleString())}` : "not yet run (required before the full import)"}</dd></div>`;
+      return `<div class="integration-dashboard"><dl class="integration-facts"><div><dt>Run</dt><dd><code>${id}</code></dd></div><div><dt>Status</dt><dd>${this.esc(statusText)}${r.pausedReason ? ` (${this.esc(r.pausedReason)})` : ""}${r.lastError?.code ? ` — ${this.esc(r.lastError.code)}` : ""}</dd></div><div><dt>Imported</dt><dd>${c("done")} of ${r.totals?.files || 0}</dd></div><div><dt>Waiting</dt><dd>${c("queued") + c("retry") + c("running")}</dd></div><div><dt>Failed</dt><dd>${c("failed")}</dd></div>${pilot}${pre}</dl>
+        ${failures ? `<ul class="integration-features">${failures}</ul>` : ""}${this.midVerify?.runId === r.runId ? this.midVerifyText(this.midVerify) : ""}
         <div class="integration-actions">${actions}</div></div>`;
     }).join("");
+    const dis = busy ? " disabled" : "";
     return `<article class="integration-card" aria-labelledby="int-mid-title"><header class="integration-head"><span class="integration-logo" aria-hidden="true">M</span><div><h2 id="int-mid-title">Machine Installation Database files</h2><p>Imports the files left on monday.com into Google Drive, on the records they belong to. Every step is started here by a Google Drive administrator; nothing happens on its own.</p></div></header>
-      <div class="integration-actions"><label class="field"><span>Plan file (from the local migration folder)</span><input type="file" id="mid-plan-file" accept="application/json,.json"></label></div>
-      <div class="integration-actions"><button class="button secondary" data-action="integration-mid-dryrun">Dry run</button><button class="button secondary" data-action="integration-mid-dryrun-sources">Dry run + check monday.com</button><button class="button primary" data-action="integration-mid-prepare">Prepare run</button></div>
+      <div class="integration-actions"><label class="field"><span>Plan file (from the local migration folder)</span><input type="file" id="mid-plan-file" accept="application/json,.json"${dis}></label></div>
+      <div class="integration-actions"><button class="button secondary" data-action="integration-mid-dryrun"${dis}>Dry run</button><button class="button secondary" data-action="integration-mid-dryrun-sources"${dis}>Dry run + check monday.com</button><button class="button primary" data-action="integration-mid-prepare"${canPrepare ? "" : " disabled"} title="Prepare uses the latest completed dry run">Prepare run</button></div>
       ${dry}${runs ? `<h3>Runs</h3>${runs}` : ""}</article>`;
+  }
+  midVerifyText(v) {
+    const s = v.sinceSnapshot;
+    const since = s ? ` Since the check before the ${this.esc(s.mode)}: records ${s.recordsOnBoard.then} → ${s.recordsOnBoard.now}${s.recordIdsUnchanged ? " (same IDs)" : " (changed by people meanwhile)"}, mappings ${s.itemMappingsUnchanged ? "unchanged" : "CHANGED"}, other attachments ${s.otherAttachments.then} → ${s.otherAttachments.now}, this run's attachments ${s.importedByThisRun.then} → ${s.importedByThisRun.now}.` : "";
+    return `<p class="integration-note" role="status">Verification: ${v.ok ? "everything matches" : `${v.problemCount} problem(s), ${v.strayDriveFiles} stray Drive file(s)`} · ${v.readyAttachments} attachments, ${v.assetMappings} mappings, ${v.driveFiles} Drive files.${since}</p>`;
+  }
+  // Server error codes this card explains itself (the generic messages don't say what to do next).
+  midError(error) {
+    if (/took too long/.test(error?.message || "")) return "The JARC server didn't answer in time. It may still be finishing this — press Refresh in a moment and check the card before trying again.";
+    const known = { CHECK_IN_PROGRESS: "Another dry run is still running. Wait for it to finish.", CHECK_NOT_FOUND: "That dry run isn't available any more (it's over 2 hours old, or the server restarted). Run it again.", CHECK_NOT_COMPLETED: "Wait for the dry run to finish.", CHECK_TOO_OLD: "The dry run is more than an hour old. Run it again, then Prepare.", PLAN_HAS_BLOCKED_FILES: "Some files can't be imported. Fix the plan first (see the dry run).", PLAN_INVALID: "That isn't a valid plan file.", RUN_CONFLICT: "A different plan already uses this run ID.", RUN_NOT_PREPARABLE: "This run is already prepared and in use.", RUN_NOT_STARTABLE: "This run can't be started in its current state. Refresh the card.", PILOT_REQUIRED: "Run the 20-file pilot (and check it) before the full import.", NOT_ENOUGH_STORAGE: "There isn't enough storage for this import.", PRE_START_CHECK_FAILED: "The read-only check before starting found a problem. Press Verify and look at the run.", NOTHING_TO_IMPORT: "Every file of this run has been handled.", RUN_CHANGED: "The run changed in the meantime. Refresh and try again.", GDRIVE_ADMIN_REQUIRED: "Only JARC's Google Drive administrators can manage this import." };
+    return known[error?.cause?.serverCode] || error?.message || "That didn't work.";
+  }
+  // While a dry run, a prepare, an import or a rollback is in progress, the card refreshes itself (only while visible).
+  midSchedule() {
+    clearTimeout(this.midTimer);
+    const active = this.midCheck?.status === "running" || (this.mid?.runs || []).some((r) => ["preparing", "running", "rolling-back"].includes(r.status) && !r.prepareInterrupted);
+    if (!active) return;
+    this.midTimer = setTimeout(async () => {
+      if (this.c.model.screen !== "integrations" || document.visibilityState !== "visible") return this.midSchedule();
+      try {
+        if (this.midCheck?.status === "running") this.midCheck = await this.adapter.request("GET", `/migrations/mid-attachments/dry-run/${encodeURIComponent(this.midCheck.checkId)}`);
+        this.mid = await this.adapter.request("GET", "/migrations/mid-attachments");
+      } catch (error) {
+        if (error?.cause?.serverCode === "CHECK_NOT_FOUND") this.midCheck = { ...this.midCheck, status: "failed", error: { code: "CHECK_NOT_FOUND", message: "The server restarted; nothing was written" } };
+      }
+      this.redraw(); this.midSchedule();
+    }, this.midCheck?.status === "running" ? 2000 : 5000);
   }
   async midPlan() {
     const file = document.querySelector("#mid-plan-file")?.files?.[0];
@@ -111,42 +152,61 @@ class IntegrationsPanel {
   async onMidAction(action, target) {
     const api = (method, path, body) => this.adapter.request(method, `/migrations/mid-attachments${path}`, body);
     const run = target?.dataset?.run;
+    if (this.midBusy) return undefined; // one action at a time: a second click never sends a second request
     try {
-      if (action === "integration-mid-dryrun" || action === "integration-mid-dryrun-sources") { this.midDry = await api("POST", "/dry-run", { plan: await this.midPlan(), checkSources: action === "integration-mid-dryrun-sources" }); return this.redraw(); }
-      if (action === "integration-mid-prepare") return this.view.showConfirm("Prepare the import run?", "JARC records the run and its list of files. No file is downloaded or uploaded until you start a pilot.", "integration-mid-prepare-go", "", "Prepare run");
-      if (action === "integration-mid-prepare-go") { this.view.closeOverlay(); await api("POST", "/prepare", { plan: await this.midPlan(), confirm: true }); this.view.toast("Run prepared"); return this.load(); }
+      if (action === "integration-mid-dryrun" || action === "integration-mid-dryrun-sources") {
+        const plan = await this.midPlan();
+        this.midBusy = true; this.redraw();
+        try { this.midCheck = await api("POST", "/dry-run", { plan, checkSources: action === "integration-mid-dryrun-sources" }); }
+        finally { this.midBusy = false; }
+        this.redraw(); return this.midSchedule();
+      }
+      if (action === "integration-mid-prepare") {
+        const s = this.midCheck?.result?.summary;
+        if (this.midCheck?.status !== "completed" || !s) throw new Error("Run the dry run first; Prepare uses its result.");
+        return this.view.showConfirm("Prepare the import run?", `JARC records run ${s.runId} and its list of ${s.entries} files, using the dry run from ${new Date(this.midCheck.finishedAt).toLocaleString()}. No file is downloaded or uploaded until you start the pilot.`, "integration-mid-prepare-go", "", "Prepare run");
+      }
+      if (action === "integration-mid-prepare-go") {
+        this.view.closeOverlay(); this.midBusy = true; this.redraw();
+        try { await api("POST", "/prepare", { checkId: this.midCheck?.checkId, confirm: true }); } finally { this.midBusy = false; }
+        this.view.toast("Preparing the run"); return this.load();
+      }
       if (action === "integration-mid-start-pilot" || action === "integration-mid-start-full") {
         const pilot = action.endsWith("pilot");
         return this.view.overlay(`<form class="modal" data-action="integration-mid-start-form" data-run="${this.esc(run)}" data-mode="${pilot ? "pilot" : "full"}"><div class="modal-head"><div><div class="eyebrow">Machine Installation Database files</div><h2>${pilot ? "Start the 20-file pilot" : "Start the full import"}</h2></div>${this.view.closeButton()}</div>
-          <p>Record the verified backup of <code>jarc_database</code> taken for this import (at most 24 hours old).</p>
-          <label class="field"><span>Backup reference</span><input name="reference" required maxlength="200"></label>
-          <label class="field"><span>Taken at</span><input name="takenAt" type="datetime-local" required></label>
-          <label class="field"><span>Backup SHA-256 (optional)</span><input name="sha256" pattern="[0-9a-f]{64}"></label>
+          <p>${pilot ? "Imports 20 files into Google Drive, on their records. Check them, and press Verify, before the full import." : "Imports every remaining file of this run into Google Drive. You can pause or stop it at any time."}</p>
+          <p>Before starting, JARC checks storage and records a read-only snapshot of the board's records, mappings, attachments and storage use, which Verify compares against later. Records are never changed.</p>
           <label class="integration-confirm"><input type="checkbox" name="confirm" value="yes" required> I approve this ${pilot ? "pilot" : "import"}.</label>
           <div class="integration-actions"><button class="button primary" type="submit">${pilot ? "Start pilot" : "Start import"}</button></div></form>`);
       }
       if (["integration-mid-pause", "integration-mid-resume", "integration-mid-stop"].includes(action)) { await api("POST", `/runs/${encodeURIComponent(run)}/${action.split("-").pop()}`); return this.load(); }
       if (action === "integration-mid-refresh") return this.load();
-      if (action === "integration-mid-verify") { this.midVerify = await api("GET", `/runs/${encodeURIComponent(run)}/verify?sample=5`); return this.redraw(); }
+      if (action === "integration-mid-verify") {
+        this.midBusy = true; this.redraw();
+        try { this.midVerify = await api("GET", `/runs/${encodeURIComponent(run)}/verify?sample=5`); } finally { this.midBusy = false; }
+        return this.redraw();
+      }
       if (action === "integration-mid-rollback") {
         return this.view.overlay(`<form class="modal" data-action="integration-mid-rollback-form" data-run="${this.esc(run)}"><div class="modal-head"><div><div class="eyebrow">Machine Installation Database files</div><h2>Roll back this run</h2></div>${this.view.closeButton()}</div>
           <p>Moves this run's files to Google Drive Trash and removes only the attachments and mappings this run created. Records and every other attachment stay as they are.</p>
           <label class="field"><span>Type <code>ROLLBACK ${this.esc(run)}</code></span><input name="confirm" required autocomplete="off"></label>
           <div class="integration-actions"><button class="button primary" type="submit">Roll back</button></div></form>`);
       }
-    } catch (error) { this.view.closeOverlay(); this.view.showMessage("Machine Installation Database files", error?.message || "That didn't work."); }
+    } catch (error) { this.redraw(); this.view.closeOverlay(); this.view.showMessage("Machine Installation Database files", this.midError(error)); }
     return undefined;
   }
   async onMidSubmit(action, data, form) {
     const run = form.dataset.run, api = (path, body) => this.adapter.request("POST", `/migrations/mid-attachments/runs/${encodeURIComponent(run)}${path}`, body);
+    if (this.midBusy) return undefined;
+    this.midBusy = true;
     try {
       if (action === "integration-mid-start-form") {
-        const takenAt = data.takenAt ? new Date(data.takenAt).toISOString() : "";
-        await api("/start", { mode: form.dataset.mode, confirm: data.confirm === "yes", backup: { reference: data.reference, takenAt, ...(data.sha256 ? { sha256: data.sha256 } : {}) } });
+        await api("/start", { mode: form.dataset.mode, confirm: data.confirm === "yes" });
         this.view.closeOverlay(); this.view.toast(form.dataset.mode === "pilot" ? "Pilot started" : "Import started");
       }
       if (action === "integration-mid-rollback-form") { await api("/rollback", { confirm: data.confirm }); this.view.closeOverlay(); this.view.toast("Rollback started"); }
-    } catch (error) { this.view.showMessage("Machine Installation Database files", error?.message || "That didn't work."); }
+    } catch (error) { this.view.showMessage("Machine Installation Database files", this.midError(error)); }
+    finally { this.midBusy = false; }
     return this.load();
   }
 

@@ -6,12 +6,18 @@
 //   plan      uploaded by an administrator from the Git-ignored local inventory (scripts/mid-attachments-plan.js): one
 //             entry per file with the monday.com asset and item IDs and the planned JARC attachment and record IDs.
 //             Nothing about the plan is stored in the repository. Its SHA-256 identifies the run (runId mid-<16 hex>).
-//   dry run   READ-ONLY: the plan against production (record exists on the board, the item mapping points at it, the
-//             Files column exists, nothing conflicting already exists), Drive and JARC capacity, and optionally whether
-//             monday.com still serves every file with the expected size. Writes nothing anywhere.
-//   prepare   writes the run and one item per file to integrationJobs (deterministic _ids, so repeating it adds nothing).
-//   start     a 20-file pilot or the full run, only with a recorded backup (reference + time, at most 24 h old) and
-//             enough capacity. pause / resume / stop at any time; files already started finish.
+//   dry run   READ-ONLY, in the background: the plan against production (record exists on the board, the item mapping
+//             points at it, the Files column exists, nothing conflicting already exists), Drive and JARC capacity, and
+//             optionally whether monday.com still serves every file with the expected size (about 80 s for 6,031 files).
+//             The request returns a check ID at once; the page polls its progress. Results are kept in server memory only
+//             (2 hours, one check at a time) and nothing is written anywhere.
+//   prepare   from a completed check (less than an hour old, nothing blocked), in the background: the run (status
+//             "preparing", then "prepared") and one item per file in integrationJobs. Deterministic _ids, so repeating it,
+//             or resuming after a restart, adds nothing.
+//   start     the 20-file pilot first (mandatory), then the full run, each with an explicit confirmation and enough
+//             capacity. Before each start a read-only verification of the board's records, item mappings, attachments
+//             and storage is recorded on the run as a snapshot; verify compares against it. pause / resume / stop at any
+//             time; files already started finish.
 //   worker    claims one item at a time with a lease (a crash or restart lets another pass take it over); per file:
 //             fresh monday.com download URL → bytes (size-checked, SHA-256) → AttachmentWriter (the migration's own
 //             duplicate-proof sequence) into Google Drive, tagged jarcKind "mig" + jarcRun. Temporary failures retry with
@@ -33,7 +39,8 @@ const PROVIDER = "mid-attachments";
 const RUN_TYPE = "mid-attachments-run", ITEM_TYPE = "mid-attachment";
 const PLAN_KIND = "jarc-mid-attachments-plan";
 const PILOT_MAX = 20, MAX_ATTEMPTS = 5, MAX_ENTRIES = 20000;
-const LEASE_MS = 10 * 60 * 1000, BACKUP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const LEASE_MS = 10 * 60 * 1000;
+const CHECK_KEEP_MS = 2 * 60 * 60 * 1000, CHECK_FRESH_MS = 60 * 60 * 1000, PROBLEM_ROWS_SHOWN = 500;
 const PER_PASS = 25; // files one worker handles before it looks at the run's state again
 // JFIF files keep their names (the bytes are JPEG; image/jpeg is served).
 const TYPES = Object.freeze({ ...MIGRATION_TYPES, "image/jpeg": { ...MIGRATION_TYPES["image/jpeg"], extensions: [...MIGRATION_TYPES["image/jpeg"].extensions, "jfif"] } });
@@ -84,16 +91,55 @@ class MidAttachmentRun {
   // perPass: files one worker handles before it re-reads the run (tests use 1 to stop a run part-way).
   constructor({ connection, repos, drive, files, config, maxFileBytes, logger = console, fetch = globalThis.fetch, now = () => new Date(), sleep, faults = null, perPass = PER_PASS, workerId = `mid-${crypto.randomBytes(4).toString("hex")}`, environment = "development" }) {
     if (faults && environment === "production") throw new Error("Fault injection is for tests only.");
-    Object.assign(this, { connection, repos, drive, files, config, maxFileBytes, logger, fetchImpl: fetch, now, faults, perPass, workerId, timer: null, ticking: null });
+    // checks: background dry runs (server memory only). preparing: runs whose item list is being written by this process.
+    Object.assign(this, { connection, repos, drive, files, config, maxFileBytes, logger, fetchImpl: fetch, now, faults, perPass, workerId, timer: null, ticking: null, checks: new Map(), preparing: new Map() });
     this.monday = new MondayClient({ token: config.mondayToken, apiVersion: config.apiVersion, fetch, ...(sleep ? { sleep } : {}) });
   }
   get db() { return this.connection.db; }
   col(name) { return this.db.collection(COLLECTIONS[name]); }
   get jobs() { return this.col("integrationJobs"); }
 
+  // ---- Background dry runs (read-only; results in server memory only)
+  // Validates the plan's shape at once, then checks it in the background. One check at a time: asking again for the same
+  // plan and option while it runs returns that check; a different one is refused until it finishes.
+  startCheck(raw, { checkSources = false } = {}, actor = null) {
+    const { digest, runId } = normalizePlan(raw, { maxBytes: this.maxFileBytes });
+    this.pruneChecks();
+    const running = [...this.checks.values()].find((c) => c.status === "running");
+    if (running) {
+      if (running.planDigest === digest && running.checkSources === checkSources) return this.checkView(running);
+      throw fail(409, "CHECK_IN_PROGRESS", "Another dry run is still running. Wait for it to finish.");
+    }
+    const c = { checkId: `chk-${crypto.randomBytes(8).toString("hex")}`, planDigest: digest, runId, checkSources, status: "running", stage: "starting", progress: null, startedAt: this.now(), finishedAt: null, startedByName: actor?.displayName || null, result: null, error: null, plan: raw };
+    this.checks.set(c.checkId, c);
+    c.done = (async () => {
+      try {
+        const r = await this.check(raw, { checkSources, onProgress: (stage, done = null, total = null) => { c.stage = stage; c.progress = total ? { done, total } : null; } });
+        c.result = { summary: r.summary, problemRows: r.rows.filter((x) => x.problems.length).slice(0, PROBLEM_ROWS_SHOWN), rowsTotal: r.rows.length };
+        c.status = "completed"; c.stage = "done";
+      } catch (error) {
+        c.status = "failed"; c.stage = "failed"; c.plan = null;
+        const code = error?.name === "MondayApiError" ? `MONDAY_${error.code || "ERROR"}` : error?.code || error?.name || "ERROR";
+        c.error = { code: String(code).slice(0, 60), message: String(error?.message || "").replace(/https?:\/\/\S+/g, "<url>").slice(0, 300) };
+        this.logger.error(`[mid-attachments] dry run failed: ${c.error.code}`);
+      } finally { c.finishedAt = this.now(); }
+    })();
+    return this.checkView(c);
+  }
+  getCheck(checkId) {
+    this.pruneChecks();
+    const c = typeof checkId === "string" ? this.checks.get(checkId) : null;
+    if (!c) throw fail(404, "CHECK_NOT_FOUND", "This dry run isn't available any more (finished more than 2 hours ago, or the server restarted). Run it again.");
+    return this.checkView(c);
+  }
+  checkView(c) { const { checkId, planDigest, runId, checkSources, status, stage, progress, startedAt, finishedAt, startedByName, result, error } = c; return { checkId, planDigest, runId, checkSources, status, stage, progress, startedAt, finishedAt, startedByName, result, error }; }
+  pruneChecks() { const now = this.now().getTime(); for (const [id, c] of this.checks) if (c.finishedAt && now - c.finishedAt.getTime() > CHECK_KEEP_MS) this.checks.delete(id); }
+
   // ---- Read-only checks
-  async check(raw, { checkSources = false } = {}) {
+  // onProgress(stage, done?, total?): "database", "capacity", "monday.com" (batches of 100).
+  async check(raw, { checkSources = false, onProgress = () => {} } = {}) {
     const { plan, digest, runId, issues } = normalizePlan(raw, { maxBytes: this.maxFileBytes });
+    onProgress("database");
     const boardId = new ObjectId(plan.boardId);
     const board = await this.col("boards").findOne({ _id: boardId }, { projection: { workspaceId: 1, archived: 1, columns: 1, legacyId: 1 } });
     if (!board) throw fail(404, "PLAN_BOARD_MISSING", "The plan's board doesn't exist in JARC.");
@@ -125,6 +171,9 @@ class MidAttachmentRun {
       return { assetId: e.assetId, sourceItemId: e.sourceItemId, recordId: e.recordId, attachmentId: e.attachmentId, columnKey: e.columnKey, name: e.name, sizeBytes: e.sizeBytes, type: e.type, action: e.action, status, problems };
     });
     const todo = rows.filter((r) => ["eligible", "resumable"].includes(r.status));
+    onProgress("capacity");
+    const capacity = await this.capacity(todo.reduce((s, r) => s + r.sizeBytes, 0)).catch((error) => ({ error: error.code || "UNAVAILABLE" }));
+    const sources = checkSources ? await this.checkSources(todo, (done, total) => onProgress("monday.com", done, total)) : null;
     const summary = {
       runId, planDigest: digest, sourceRunId: plan.sourceRunId, boardId: plan.boardId, boardLegacyId: board.legacyId || null, entries: rows.length,
       eligible: rows.filter((r) => r.status === "eligible").length, resumable: rows.filter((r) => r.status === "resumable").length, alreadyImported: rows.filter((r) => r.status === "already-imported").length, blocked: rows.filter((r) => r.status === "blocked").length,
@@ -132,8 +181,7 @@ class MidAttachmentRun {
       bytesToImport: todo.reduce((s, r) => s + r.sizeBytes, 0), recordsReceivingFiles: new Set(todo.map((r) => r.recordId)).size,
       byType: todo.reduce((acc, r) => ((acc[r.type] = (acc[r.type] || 0) + 1), acc), {}), over10MB: todo.filter((r) => r.sizeBytes > MAX_FILE_BYTES).length,
       cellsOver20Files: [...perCell.values()].filter((n) => n > 20).length,
-      capacity: await this.capacity(todo.reduce((s, r) => s + r.sizeBytes, 0)).catch((error) => ({ error: error.code || "UNAVAILABLE" })),
-      ...(checkSources ? { sources: await this.checkSources(todo) } : {})
+      capacity, ...(sources ? { sources } : {})
     };
     return { summary, rows, plan, board };
   }
@@ -151,47 +199,110 @@ class MidAttachmentRun {
   }
 
   // Does monday.com still have every file, with the inventoried size? Metadata only; no file is downloaded.
-  async checkSources(rows) {
-    const found = new Map();
+  async checkSources(rows, onBatch = () => {}) {
+    const found = new Map(), batches = Math.ceil(rows.length / 100);
     for (let i = 0; i < rows.length; i += 100) {
+      onBatch(i / 100, batches);
       const data = await this.monday.query("query ($ids: [ID!]!) { assets(ids: $ids) { id file_size } }", { ids: rows.slice(i, i + 100).map((r) => r.assetId) });
       for (const a of data.assets || []) if (a) found.set(String(a.id), Number(a.file_size));
     }
+    onBatch(batches, batches);
     const missing = rows.filter((r) => !found.has(r.assetId)).map((r) => r.assetId), changed = rows.filter((r) => found.has(r.assetId) && found.get(r.assetId) !== r.sizeBytes).map((r) => r.assetId);
     return { checked: rows.length, available: rows.length - missing.length, missing: missing.length, sizeChanged: changed.length, missingAssetIds: missing.slice(0, 50), sizeChangedAssetIds: changed.slice(0, 50) };
   }
 
   // ---- Writes, each started explicitly by an administrator
-  async prepare(raw, actor) {
-    const { summary, plan, board } = await this.check(raw);
-    if (summary.blocked) throw fail(409, "PLAN_HAS_BLOCKED_FILES", `${summary.blocked} file(s) can't be imported. Fix the plan first (see the dry run).`, { problems: summary.problems });
-    const now = this.now(), runId = summary.runId;
-    const run = await this.jobs.findOne({ _id: runId });
-    if (!run) {
-      await this.jobs.insertOne({ _id: runId, provider: PROVIDER, type: RUN_TYPE, status: "prepared", planDigest: summary.planDigest, sourceRunId: plan.sourceRunId, boardId: board._id, workspaceId: board.workspaceId, totals: { files: plan.entries.length, bytes: plan.entries.reduce((s, e) => s + e.sizeBytes, 0) }, remaining: 0, mode: null, backups: [], createdBy: actor.userId, createdByName: actor.displayName || null, createdAt: now, updatedAt: now, runAfter: now });
-    } else if (run.planDigest !== summary.planDigest) throw fail(409, "RUN_CONFLICT", "A different plan already uses this run ID.");
-    // Only the items not there yet: preparing twice (or after an interruption) never duplicates or resets one.
-    const items = plan.entries.map((e) => ({ _id: `${runId}:${e.assetId}`, provider: PROVIDER, type: ITEM_TYPE, runId, status: "queued", attempts: 0, runAfter: now, createdAt: now, params: e }));
-    for (let i = 0; i < items.length; i += 500) {
-      const batch = items.slice(i, i + 500);
-      const have = new Set((await this.jobs.find({ _id: { $in: batch.map((x) => x._id) } }, { projection: { _id: 1 } }).toArray()).map((x) => x._id));
-      const missing = batch.filter((x) => !have.has(x._id));
-      if (missing.length) await this.jobs.insertMany(missing, { ordered: true });
-    }
-    this.logger.log?.(`[mid-attachments] ${runId} prepared: ${items.length} files`);
+  // Prepare from a completed dry run (no second upload of the plan): the run is created as "preparing" at once, and its
+  // item list is written in the background, re-checked against production first. Repeating it, or resuming after a restart
+  // (a run left "preparing"), adds only what is missing; an existing prepared run is kept as it is.
+  async prepareFromCheck(checkId, actor) {
+    this.pruneChecks();
+    const c = typeof checkId === "string" ? this.checks.get(checkId) : null;
+    if (!c) throw fail(404, "CHECK_NOT_FOUND", "This dry run isn't available any more. Run it again.");
+    if (c.status !== "completed") throw fail(409, "CHECK_NOT_COMPLETED", c.status === "running" ? "Wait for the dry run to finish." : "The dry run didn't complete. Run it again.");
+    if (this.now() - c.finishedAt > CHECK_FRESH_MS) throw fail(409, "CHECK_TOO_OLD", "This dry run is more than an hour old. Run it again.");
+    const s = c.result.summary;
+    if (s.blocked) throw fail(409, "PLAN_HAS_BLOCKED_FILES", `${s.blocked} file(s) can't be imported. Fix the plan first (see the dry run).`, { problems: s.problems });
+    const runId = s.runId, existing = await this.jobs.findOne({ _id: runId });
+    if (existing && existing.planDigest !== s.planDigest) throw fail(409, "RUN_CONFLICT", "A different plan already uses this run ID.");
+    if (existing && !["prepared", "preparing"].includes(existing.status)) throw fail(409, "RUN_NOT_PREPARABLE", `The run is ${existing.status}; it is already prepared.`);
+    if (this.preparing.has(runId)) return this.status(runId);
+    const now = this.now();
+    if (!existing) {
+      const { plan } = normalizePlan(c.plan, { maxBytes: this.maxFileBytes });
+      const board = await this.col("boards").findOne({ _id: new ObjectId(plan.boardId) }, { projection: { workspaceId: 1 } });
+      if (!board) throw fail(404, "PLAN_BOARD_MISSING", "The plan's board doesn't exist in JARC.");
+      try { await this.jobs.insertOne({ _id: runId, provider: PROVIDER, type: RUN_TYPE, status: "preparing", planDigest: s.planDigest, sourceRunId: plan.sourceRunId, boardId: board._id, workspaceId: board.workspaceId, totals: { files: plan.entries.length, bytes: plan.entries.reduce((n, e) => n + e.sizeBytes, 0) }, remaining: 0, mode: null, snapshots: [], createdBy: actor.userId, createdByName: actor.displayName || null, createdAt: now, updatedAt: now, runAfter: now }); }
+      catch (error) { if (error?.code !== 11000) throw error; }
+    } else await this.jobs.updateOne({ _id: runId, status: { $in: ["prepared", "preparing"] } }, { $set: { status: "preparing", lastError: null, updatedAt: now } });
+    const raw = c.plan;
+    this.preparing.set(runId, (async () => {
+      try {
+        const { summary, plan } = await this.check(raw);
+        if (summary.blocked) throw Object.assign(new Error(`${summary.blocked} file(s) became impossible to import since the dry run.`), { code: "PLAN_HAS_BLOCKED_FILES" });
+        const at = this.now();
+        const items = plan.entries.map((e) => ({ _id: `${runId}:${e.assetId}`, provider: PROVIDER, type: ITEM_TYPE, runId, status: "queued", attempts: 0, runAfter: at, createdAt: at, params: e }));
+        for (let i = 0; i < items.length; i += 500) {
+          const batch = items.slice(i, i + 500);
+          const have = new Set((await this.jobs.find({ _id: { $in: batch.map((x) => x._id) } }, { projection: { _id: 1 } }).toArray()).map((x) => x._id));
+          const missing = batch.filter((x) => !have.has(x._id));
+          if (missing.length) await this.jobs.insertMany(missing, { ordered: true });
+        }
+        await this.jobs.updateOne({ _id: runId, status: "preparing" }, { $set: { status: "prepared", preparedAt: this.now(), updatedAt: this.now() } });
+        this.logger.log?.(`[mid-attachments] ${runId} prepared: ${items.length} files`);
+      } catch (error) {
+        const info = { code: String(error?.code || error?.name || "ERROR").slice(0, 60), message: String(error?.message || "").slice(0, 300), at: this.now() };
+        await this.jobs.updateOne({ _id: runId, status: "preparing" }, { $set: { status: "prepare-failed", lastError: info, updatedAt: this.now() } }).catch(() => {});
+        this.logger.error(`[mid-attachments] ${runId} prepare failed: ${info.code}`);
+      } finally { this.preparing.delete(runId); }
+    })());
     return this.status(runId);
   }
 
-  async start(runId, { mode, count, backup, confirm }) {
+  // A read-only picture of what the import could affect, recorded on the run before each start (and compared by verify):
+  // the board's records and their IDs, the records migration's item mappings, attachments (all, on the board, of this run),
+  // asset mappings of this run and the Drive storage counter. It refuses to start if this run's own records disagree.
+  async preStartSnapshot(run) {
+    const boardId = run.boardId, runId = run._id, idHash = crypto.createHash("sha256"), mapHash = crypto.createHash("sha256");
+    const board = await this.col("boards").findOne({ _id: boardId }, { projection: { archived: 1, columns: 1 } });
+    // IDs only (a few thousand), sorted here so the digests don't depend on index order.
+    const recordIds = (await this.col("records").find({ boardId }, { projection: { _id: 1 } }).toArray()).map((r) => r._id.toHexString()).sort();
+    for (const id of recordIds) idHash.update(`${id}\n`);
+    const records = recordIds.length;
+    const pairs = (await this.col("integrationMappings").find({ provider: MAPPING_PROVIDER, kind: "item", runId: run.sourceRunId }, { projection: { sourceId: 1, targetId: 1 } }).toArray()).map((m) => `${m.sourceId}:${m.targetId.toHexString()}`).sort();
+    for (const p of pairs) mapHash.update(`${p}\n`);
+    const itemMappings = pairs.length;
+    const imported = {};
+    for (const a of await this.col("attachments").find({ "imported.runId": runId }, { projection: { status: 1 } }).toArray()) imported[a.status] = (imported[a.status] || 0) + 1;
+    const items = {};
+    for (const i of await this.jobs.find({ type: ITEM_TYPE, runId }, { projection: { status: 1 } }).toArray()) items[i.status] = (items[i.status] || 0) + 1;
+    const usage = await this.col("storageUsage").findOne({ _id: "gdrive" });
+    const snapshot = {
+      at: this.now(), boardExists: Boolean(board), boardArchived: Boolean(board?.archived), filesColumns: (board?.columns || []).filter((c) => c.type === "files").map((c) => c.key),
+      recordsOnBoard: records, recordIdsDigest: idHash.digest("hex"), itemMappings, itemMappingsDigest: mapHash.digest("hex"),
+      attachmentsTotal: await this.col("attachments").countDocuments({}), attachmentsOnBoard: await this.col("attachments").countDocuments({ boardId }), importedByThisRun: imported,
+      assetMappingsOfThisRun: await this.col("integrationMappings").countDocuments({ provider: MAPPING_PROVIDER, kind: "asset", runId }), items,
+      storageUsage: usage ? { usedBytes: usage.usedBytes || 0, reservedBytes: usage.reservedBytes || 0 } : null
+    };
+    const problems = [];
+    if (!snapshot.boardExists) problems.push("board-missing");
+    if (snapshot.boardArchived) problems.push("board-archived");
+    if ((imported.ready || 0) !== (items.done || 0)) problems.push("imported-attachments-differ-from-done-files");
+    if (snapshot.assetMappingsOfThisRun !== (imported.ready || 0)) problems.push("asset-mappings-differ-from-imported-attachments");
+    snapshot.problems = problems;
+    return snapshot;
+  }
+
+  async start(runId, { mode, count, confirm }) {
     if (confirm !== true) throw fail(400, "CONFIRMATION_REQUIRED", "Confirm starting the import.");
     if (!["pilot", "full"].includes(mode)) throw fail(400, "VALIDATION_ERROR", "mode must be pilot or full.");
     const run = await this.run(runId);
     if (!["prepared", "paused", "stopped"].includes(run.status)) throw fail(409, "RUN_NOT_STARTABLE", `The run is ${run.status}.`);
-    const reference = typeof backup?.reference === "string" ? backup.reference.trim() : "", takenAt = new Date(backup?.takenAt);
+    if (mode === "full") {
+      if (!run.pilotFinishedAt) throw fail(409, "PILOT_REQUIRED", "Run the 20-file pilot and check it before starting the full import.");
+      if (!(await this.jobs.countDocuments({ type: ITEM_TYPE, runId, status: "done" }))) throw fail(409, "PILOT_REQUIRED", "No file of the pilot was imported. Look at its failures and run the pilot again.");
+    }
     const now = this.now();
-    if (!reference || reference.length > 200) throw fail(400, "BACKUP_REQUIRED", "Record the backup of jarc_database (its reference) before importing.");
-    if (Number.isNaN(takenAt.getTime()) || takenAt > now || now - takenAt > BACKUP_MAX_AGE_MS) throw fail(400, "BACKUP_TOO_OLD", "The backup must have been taken within the last 24 hours.");
-    if (backup.sha256 !== undefined && !/^[0-9a-f]{64}$/.test(String(backup.sha256))) throw fail(400, "VALIDATION_ERROR", "backup.sha256 must be 64 hexadecimal characters.");
     const pending = await this.jobs.countDocuments({ type: ITEM_TYPE, runId, status: { $in: ["queued", "retry", "running"] } });
     if (!pending) throw fail(409, "NOTHING_TO_IMPORT", "Every file of this run has been handled.");
     let allowance = pending;
@@ -202,8 +313,10 @@ class MidAttachmentRun {
     const queuedBytes = (await this.jobs.find({ type: ITEM_TYPE, runId, status: { $in: ["queued", "retry", "running"] } }, { projection: { "params.sizeBytes": 1 } }).toArray()).map((i) => i.params.sizeBytes).sort((a, b) => b - a).slice(0, allowance).reduce((s, n) => s + n, 0);
     const capacity = await this.capacity(queuedBytes);
     if (!capacity.enough) throw fail(409, "NOT_ENOUGH_STORAGE", "There isn't enough storage for this import.", { capacity });
+    const snapshot = await this.preStartSnapshot(run);
+    if (snapshot.problems.length) throw fail(409, "PRE_START_CHECK_FAILED", "The read-only check before starting found a problem. Verify the run first.", { problems: snapshot.problems });
     const set = { status: "running", mode, remaining: allowance, startedAt: now, updatedAt: now, pausedReason: null, lastError: null, capacityAtStart: capacity };
-    const r = await this.jobs.updateOne({ _id: runId, status: run.status }, { $set: set, $push: { backups: { reference, takenAt, sha256: backup.sha256 || null, recordedAt: now, mode } } });
+    const r = await this.jobs.updateOne({ _id: runId, status: run.status }, { $set: set, $push: { snapshots: { ...snapshot, mode, capacity } } });
     if (r.matchedCount !== 1) throw fail(409, "RUN_CHANGED", "The run changed in the meantime. Reload and try again.");
     this.logger.log?.(`[mid-attachments] ${runId} started (${mode}, up to ${allowance} files)`);
     this.kick();
@@ -225,7 +338,7 @@ class MidAttachmentRun {
   }
   async rollback(runId, { confirm }) {
     if (confirm !== `ROLLBACK ${runId}`) throw fail(400, "CONFIRMATION_REQUIRED", `Type "ROLLBACK ${runId}" to confirm.`);
-    const out = await this.transition(runId, ["prepared", "paused", "stopped", "completed"], { status: "rolling-back", remaining: 0 });
+    const out = await this.transition(runId, ["prepared", "prepare-failed", "paused", "stopped", "completed"], { status: "rolling-back", remaining: 0 });
     this.logger.log?.(`[mid-attachments] ${runId} rollback started`);
     this.kick();
     return out;
@@ -244,7 +357,8 @@ class MidAttachmentRun {
     for (const i of await this.jobs.find({ type: ITEM_TYPE, runId }, { projection: { status: 1, "params.sizeBytes": 1 } }).toArray()) { const c = (counts[i.status] ||= { files: 0, bytes: 0 }); c.files += 1; c.bytes += i.params?.sizeBytes || 0; }
     const failures = (await this.jobs.find({ type: ITEM_TYPE, runId, status: { $in: ["failed", "retry"] } }, { sort: { updatedAt: -1 }, limit: 50, projection: { status: 1, attempts: 1, error: 1, updatedAt: 1, "params.assetId": 1, "params.attachmentId": 1, "params.recordId": 1, "params.name": 1 } }).toArray())
       .map((i) => ({ assetId: i.params.assetId, attachmentId: i.params.attachmentId, recordId: i.params.recordId, name: i.params.name, status: i.status, attempts: i.attempts, error: i.error || null, at: i.updatedAt || null }));
-    return { runId, status: run.status, mode: run.mode, remaining: run.remaining, pausedReason: run.pausedReason || null, lastError: run.lastError || null, sourceRunId: run.sourceRunId, boardId: String(run.boardId), totals: run.totals, counts, createdAt: run.createdAt, createdByName: run.createdByName, startedAt: run.startedAt || null, finishedAt: run.finishedAt || null, rolledBackAt: run.rolledBackAt || null, backups: (run.backups || []).map(({ reference, takenAt, sha256: s, recordedAt, mode }) => ({ reference, takenAt, sha256: s, recordedAt, mode })), failures };
+    const snapshots = (run.snapshots || []).map(({ at, mode, recordsOnBoard, itemMappings, attachmentsTotal, attachmentsOnBoard, importedByThisRun, assetMappingsOfThisRun, storageUsage }) => ({ at, mode, recordsOnBoard, itemMappings, attachmentsTotal, attachmentsOnBoard, importedByThisRun, assetMappingsOfThisRun, storageUsage }));
+    return { runId, status: run.status, mode: run.mode, remaining: run.remaining, pausedReason: run.pausedReason || null, lastError: run.lastError || null, sourceRunId: run.sourceRunId, boardId: String(run.boardId), totals: run.totals, counts, createdAt: run.createdAt, createdByName: run.createdByName, preparing: run.status === "preparing", prepareInterrupted: run.status === "preparing" && !this.preparing.has(runId), preparedAt: run.preparedAt || null, pilotFinishedAt: run.pilotFinishedAt || null, startedAt: run.startedAt || null, finishedAt: run.finishedAt || null, rolledBackAt: run.rolledBackAt || null, snapshots, failures };
   }
   async list() { return Promise.all((await this.jobs.find({ type: RUN_TYPE }, { sort: { createdAt: -1 }, limit: 10, projection: { _id: 1 } }).toArray()).map((r) => this.status(r._id))); }
 
@@ -274,9 +388,24 @@ class MidAttachmentRun {
       try { for await (const chunk of this.files.openDownload(d)) { h.update(chunk); size += chunk.length; } samples.push({ attachmentId: d._id.toHexString(), ok: size === d.size && h.digest("hex") === d.sha256 }); }
       catch (error) { samples.push({ attachmentId: d._id.toHexString(), ok: false, error: error.code || "DOWNLOAD_FAILED" }); }
     }
+    // Against the snapshot recorded before the last start. The import never writes records or item mappings, so their IDs
+    // must be unchanged unless people edited the board meanwhile (reported, not a failure of the import). Attachments that
+    // aren't this run's are compared the same way.
+    let sinceSnapshot = null;
+    const last = (run.snapshots || []).at(-1);
+    if (last) {
+      const now = await this.preStartSnapshot(run), ownThen = Object.values(last.importedByThisRun || {}).reduce((a, b) => a + b, 0), ownNow = Object.values(now.importedByThisRun).reduce((a, b) => a + b, 0);
+      sinceSnapshot = {
+        snapshotAt: last.at, mode: last.mode,
+        recordsOnBoard: { then: last.recordsOnBoard, now: now.recordsOnBoard }, recordIdsUnchanged: last.recordIdsDigest === now.recordIdsDigest,
+        itemMappings: { then: last.itemMappings, now: now.itemMappings }, itemMappingsUnchanged: last.itemMappingsDigest === now.itemMappingsDigest,
+        otherAttachments: { then: last.attachmentsTotal - ownThen, now: now.attachmentsTotal - ownNow },
+        importedByThisRun: { then: ownThen, now: ownNow }, assetMappingsOfThisRun: { then: last.assetMappingsOfThisRun, now: now.assetMappingsOfThisRun }
+      };
+    }
     return {
       runId, status: run.status, items: items.reduce((acc, i) => ((acc[i.status] = (acc[i.status] || 0) + 1), acc), {}), attachments: docs.size, readyAttachments: [...docs.values()].filter((d) => d.status === "ready").length,
-      assetMappings: maps.size, driveFiles: [...driveFiles.values()].filter((f) => f.kind === "mig").length, strayDriveFiles, problems: problems.slice(0, 200), problemCount: problems.length, samples, ok: problems.length === 0 && strayDriveFiles === 0 && samples.every((s) => s.ok)
+      assetMappings: maps.size, driveFiles: [...driveFiles.values()].filter((f) => f.kind === "mig").length, strayDriveFiles, problems: problems.slice(0, 200), problemCount: problems.length, samples, sinceSnapshot, ok: problems.length === 0 && strayDriveFiles === 0 && samples.every((s) => s.ok)
     };
   }
 
@@ -356,7 +485,7 @@ class MidAttachmentRun {
     const open = await this.jobs.countDocuments({ type: ITEM_TYPE, runId, status: { $in: ["queued", "retry", "running"] } });
     if (!open) { await this.jobs.updateOne({ _id: runId, status: "running" }, { $set: { status: "completed", remaining: 0, finishedAt: this.now(), updatedAt: this.now() } }); this.logger.log?.(`[mid-attachments] ${runId} completed`); return; }
     const busy = await this.jobs.countDocuments({ type: ITEM_TYPE, runId, status: { $in: ["retry", "running"] } });
-    if (run.remaining <= 0 && !busy) { await this.jobs.updateOne({ _id: runId, status: "running" }, { $set: { status: "paused", pausedReason: run.mode === "pilot" ? "pilot-finished" : "allowance-used", updatedAt: this.now() } }); this.logger.log?.(`[mid-attachments] ${runId} paused: ${run.mode === "pilot" ? "pilot finished" : "allowance used"}`); }
+    if (run.remaining <= 0 && !busy) { await this.jobs.updateOne({ _id: runId, status: "running" }, { $set: { status: "paused", pausedReason: run.mode === "pilot" ? "pilot-finished" : "allowance-used", ...(run.mode === "pilot" ? { pilotFinishedAt: this.now() } : {}), updatedAt: this.now() } }); this.logger.log?.(`[mid-attachments] ${runId} paused: ${run.mode === "pilot" ? "pilot finished" : "allowance used"}`); }
   }
 
   // One file: checks that need no download, then the bytes, then the migration's own writer.

@@ -206,7 +206,7 @@ class ApiAdapter {
           // The signed-in session ended (expired, signed out elsewhere, or no longer valid): nothing is retried.
           error = fail(StorageError.CODES.UNAUTHENTICATED, null, { status: response.status });
           window.dispatchEvent?.(new CustomEvent("jarc-session-expired"));
-        } else error = fail(ApiAdapter.codeForStatus(response.status), null, { status: response.status });
+        } else error = fail(ApiAdapter.codeForStatus(response.status), null, { status: response.status, serverCode });
         throw error;
       }
       let parsed;

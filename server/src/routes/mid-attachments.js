@@ -3,11 +3,14 @@
 // checked on the server for each request; JARC.Admin alone isn't enough). Changes also need the session's CSRF token.
 //
 //   GET  /migrations/mid-attachments                       recent runs
-//   POST /migrations/mid-attachments/dry-run               { plan, checkSources? }      read-only report
-//   POST /migrations/mid-attachments/prepare               { plan, confirm: true }      creates the run (no files)
+//   POST /migrations/mid-attachments/dry-run               { plan, checkSources? }      starts a read-only check (202)
+//   GET  /migrations/mid-attachments/dry-run/:checkId      its progress, then its report
+//   POST /migrations/mid-attachments/prepare               { checkId, confirm: true }   creates the run from a completed
+//                                                                                       check; its files are listed in
+//                                                                                       the background (202)
 //   GET  /migrations/mid-attachments/runs/:runId           status, counts, recent failures
 //   GET  /migrations/mid-attachments/runs/:runId/verify    read-only reconciliation (?sample=N re-downloads N files)
-//   POST /migrations/mid-attachments/runs/:runId/start     { mode: "pilot" | "full", count?, confirm: true, backup }
+//   POST /migrations/mid-attachments/runs/:runId/start     { mode: "pilot" | "full", count?, confirm: true }
 //   POST /migrations/mid-attachments/runs/:runId/pause | /resume | /stop
 //   POST /migrations/mid-attachments/runs/:runId/rollback  { confirm: "ROLLBACK <runId>" }
 // No response carries a token, a download link or a Google Drive file ID.
@@ -30,14 +33,15 @@ function midAttachmentRoutes({ migration, canManage }) {
     admin(req);
     const b = body(req, ["plan", "checkSources"]);
     if (b.checkSources !== undefined && typeof b.checkSources !== "boolean") fail("checkSources must be true or false.");
-    const { summary, rows } = await migration.check(b.plan, { checkSources: b.checkSources === true });
-    send(res, { summary, rows });
+    send(res, migration.startCheck(b.plan, { checkSources: b.checkSources === true }, req.actor), 202);
   });
+  router.get(`${base}/dry-run/:checkId`, async (req, res) => { admin(req); send(res, migration.getCheck(req.params.checkId)); });
   router.post(`${base}/prepare`, async (req, res) => {
     admin(req);
-    const b = body(req, ["plan", "confirm"]);
+    const b = body(req, ["checkId", "confirm"]);
     if (b.confirm !== true) throw new ApiError(400, "CONFIRMATION_REQUIRED", "Confirm preparing the run.");
-    send(res, await migration.prepare(b.plan, req.actor), 201);
+    if (typeof b.checkId !== "string") fail("checkId is required: run the dry run first.");
+    send(res, await migration.prepareFromCheck(b.checkId, req.actor), 202);
   });
   router.get(`${base}/runs/:runId`, async (req, res) => { admin(req); send(res, await migration.status(req.params.runId)); });
   router.get(`${base}/runs/:runId/verify`, async (req, res) => {
@@ -48,9 +52,7 @@ function midAttachmentRoutes({ migration, canManage }) {
   });
   router.post(`${base}/runs/:runId/start`, async (req, res) => {
     admin(req);
-    const b = body(req, ["mode", "count", "confirm", "backup"]);
-    if (b.backup !== undefined && (typeof b.backup !== "object" || b.backup === null || Array.isArray(b.backup))) fail("backup must be an object.");
-    if (b.backup) allowOnly(b.backup, ["reference", "takenAt", "sha256"], "the backup");
+    const b = body(req, ["mode", "count", "confirm"]);
     send(res, await migration.start(req.params.runId, b));
   });
   for (const action of ["pause", "resume", "stop"]) router.post(`${base}/runs/:runId/${action}`, async (req, res) => { admin(req); send(res, await migration[action](req.params.runId)); });

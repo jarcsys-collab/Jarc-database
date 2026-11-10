@@ -81,9 +81,23 @@ async function start({ files = 6, quota = { limit: 2048 * MB, usage: 1 * MB }, g
   }
   ctx.plan = () => ({ kind: "jarc-mid-attachments-plan", version: 1, sourceRunId: SOURCE_RUN, boardId: ctx.board.id, entries: ctx.entries });
   ctx.api = (method, path, body, who = ctx.admin) => who.request(method, `/api/v1/migrations/mid-attachments${path}`, body);
-  ctx.backup = () => ({ reference: "jarc_database-20261110T030000Z.archive.gz", takenAt: new Date(Date.now() - 3600 * 1000).toISOString(), sha256: "a".repeat(64) });
-  ctx.prepare = async () => (await ctx.api("POST", "/prepare", { plan: ctx.plan(), confirm: true })).body;
-  ctx.startRun = async (mode, extra = {}) => ctx.api("POST", `/runs/${ctx.runId}/start`, { mode, confirm: true, backup: ctx.backup(), ...extra });
+  // The dry run runs in the background: start it, then wait for it the way the page does (by its check ID).
+  ctx.dryRun = async (body = { plan: ctx.plan() }) => {
+    const res = await ctx.api("POST", "/dry-run", body);
+    if (res.status !== 202) return res;
+    await ctx.mid.checks.get(res.body.checkId)?.done;
+    return ctx.api("GET", `/dry-run/${res.body.checkId}`);
+  };
+  // Prepare from a completed dry run; its item list is written in the background.
+  ctx.prepare = async () => {
+    const check = await ctx.dryRun();
+    const res = await ctx.api("POST", "/prepare", { checkId: check.body.checkId, confirm: true });
+    await ctx.mid.preparing.get(ctx.runId);
+    return res.status === 202 ? (await ctx.api("GET", `/runs/${ctx.runId}`)).body : res.body;
+  };
+  ctx.startRun = async (mode, extra = {}) => ctx.api("POST", `/runs/${ctx.runId}/start`, { mode, confirm: true, ...extra });
+  // The mandatory pilot, for tests about the full run: a real pilot of `count` files, run to its end.
+  ctx.pilot = async (count = 2) => { const r = await ctx.startRun("pilot", { count }); assert.equal(r.status, 200, JSON.stringify(r.body)); return ctx.drain(); };
   ctx.drain = async (passes = 30) => { for (let i = 0; i < passes; i += 1) { await ctx.mid.tick(); const s = (await ctx.api("GET", `/runs/${ctx.runId}`)).body; if (!["running", "rolling-back"].includes(s.status)) return s; } return (await ctx.api("GET", `/runs/${ctx.runId}`)).body; };
   ctx.migrated = () => ctx.app.db.collection("attachments").docs.filter((d) => d.imported);
   ctx.driveMig = () => ctx.google.active().filter((f) => f.appProperties?.jarcKind === "mig");
@@ -135,13 +149,17 @@ describe("configuration and the plan", () => {
 describe("who may use it", () => {
   test("signed-out 401; employees and JARC.Admin alone 403 on every endpoint; switched off, the routes don't exist", async () => {
     const ctx = await start({ files: 2 });
-    const endpoints = [["GET", ""], ["POST", "/dry-run", { plan: ctx.plan() }], ["POST", "/prepare", { plan: ctx.plan(), confirm: true }], ["GET", `/runs/${ctx.runId}`], ["GET", `/runs/${ctx.runId}/verify`], ["POST", `/runs/${ctx.runId}/start`, { mode: "pilot", confirm: true, backup: ctx.backup() }], ["POST", `/runs/${ctx.runId}/pause`], ["POST", `/runs/${ctx.runId}/resume`], ["POST", `/runs/${ctx.runId}/stop`], ["POST", `/runs/${ctx.runId}/rollback`, { confirm: `ROLLBACK ${ctx.runId}` }]];
-    assert.equal((await fetch(`${ctx.app.url}/api/v1/migrations/mid-attachments`)).status, 401);
+    const check = (await ctx.dryRun()).body;
+    const endpoints = [["GET", ""], ["POST", "/dry-run", { plan: ctx.plan() }], ["GET", `/dry-run/${check.checkId}`], ["POST", "/prepare", { checkId: check.checkId, confirm: true }], ["GET", `/runs/${ctx.runId}`], ["GET", `/runs/${ctx.runId}/verify`], ["POST", `/runs/${ctx.runId}/start`, { mode: "pilot", confirm: true }], ["POST", `/runs/${ctx.runId}/pause`], ["POST", `/runs/${ctx.runId}/resume`], ["POST", `/runs/${ctx.runId}/stop`], ["POST", `/runs/${ctx.runId}/rollback`, { confirm: `ROLLBACK ${ctx.runId}` }]];
+    for (const [method, path] of endpoints) assert.equal((await fetch(`${ctx.app.url}/api/v1/migrations/mid-attachments${path}`, { method })).status, 401, `signed out ${method} ${path}`);
     for (const who of [ctx.member, ctx.jarcAdmin]) for (const [method, path, body] of endpoints) {
       const res = await ctx.api(method, path, body, who);
       assert.equal(res.status, 403, `${method} ${path}`); assert.equal(res.body.error.code, "GDRIVE_ADMIN_REQUIRED");
     }
-    assert.equal((await ctx.api("POST", "/prepare", { plan: ctx.plan(), confirm: true }, ctx.admin)).status, 201);
+    assert.equal(ctx.mid.checks.size, 1, "refused requests started no dry run");
+    assert.equal(ctx.app.db.collection("integrationJobs").docs.length, 0, "refused requests created nothing");
+    assert.equal((await ctx.api("POST", "/prepare", { checkId: check.checkId, confirm: true }, ctx.admin)).status, 202);
+    await ctx.mid.preparing.get(ctx.runId);
     assert.equal(ctx.monday.downloads, 0); assert.equal(ctx.driveMig().length, 0);
     await ctx.app.close();
     const issuer = await createTokenIssuer(), p = await people(issuer);
@@ -157,9 +175,9 @@ describe("dry run (read-only)", () => {
     const ctx = await start();
     const before = ["attachments", "integrationJobs", "integrationMappings", "records", "storageUsage"].map((c) => snapshot(ctx, c));
     const driveCalls = ctx.google.calls.filter((c) => c.method !== "GET").length;
-    const res = await ctx.api("POST", "/dry-run", { plan: ctx.plan(), checkSources: true });
-    assert.equal(res.status, 200);
-    const s = res.body.summary;
+    const res = await ctx.dryRun({ plan: ctx.plan(), checkSources: true });
+    assert.equal(res.status, 200); assert.equal(res.body.status, "completed");
+    const s = res.body.result.summary;
     assert.deepEqual([s.entries, s.eligible, s.blocked, s.alreadyImported, s.recordsReceivingFiles], [6, 6, 0, 0, 3]);
     assert.equal(s.bytesToImport, ctx.entries.reduce((n, e) => n + e.sizeBytes, 0));
     assert.equal(s.capacity.enough, true); assert.equal(s.capacity.drive.freeBytes, 2047 * MB); assert.equal(s.capacity.marginBytes, 256 * MB); assert.equal(s.capacity.jarc.limitBytes, 100 * MB);
@@ -181,7 +199,7 @@ describe("dry run (read-only)", () => {
     ctx.entries[4].recordId = elsewhere.id; ctx.entries[4].sourceItemId = "1999";
     await ctx.app.db.collection("integrationMappings").insertOne({ provider: "monday-migration", kind: "item", sourceId: "1999", targetId: new ObjectId(elsewhere.id), runId: SOURCE_RUN });
     await ctx.app.db.collection("attachments").insertOne({ _id: new ObjectId(ctx.entries[5].attachmentId), recordId: new ObjectId(ctx.records[2].id), status: "ready" });
-    const { summary, rows } = (await ctx.api("POST", "/dry-run", { plan: ctx.plan() })).body;
+    const check = (await ctx.dryRun()).body, { summary, problemRows: rows } = check.result;
     const problems = Object.fromEntries(rows.map((r) => [r.assetId, r.problems]));
     assert.ok(problems[9000].includes("no-record-mapping"));
     assert.ok(problems[9001].includes("mapping-differs-from-plan"));
@@ -190,35 +208,190 @@ describe("dry run (read-only)", () => {
     assert.ok(problems[9004].includes("record-on-another-board"));
     assert.ok(problems[9005].includes("conflicting-attachment-exists"));
     assert.equal(summary.blocked, 6);
-    const prep = await ctx.api("POST", "/prepare", { plan: ctx.plan(), confirm: true });
+    const prep = await ctx.api("POST", "/prepare", { checkId: check.checkId, confirm: true });
     assert.equal(prep.status, 409); assert.equal(prep.body.error.code, "PLAN_HAS_BLOCKED_FILES");
     assert.equal(ctx.app.db.collection("integrationJobs").docs.length, 0);
     await ctx.app.close();
   });
 });
 
+const COLLECTIONS_TOUCHED = ["attachments", "integrationJobs", "integrationMappings", "records", "storageUsage", "boards"];
+const tick = () => new Promise((r) => setImmediate(r));
+
+describe("dry run and prepare in the background (no request waits for them)", () => {
+  test("the dry run answers at once, reports its progress, never runs twice, expires, and writes nothing anywhere", async () => {
+    const ctx = await start();
+    const real = ctx.monday.fetch; let release; const gate = new Promise((r) => { release = r; });
+    ctx.monday.fetch = async (url, init) => { if (String(url).startsWith("https://api.monday.com")) await gate; return real(url, init); };
+    const before = COLLECTIONS_TOUCHED.map((c) => snapshot(ctx, c)), driveCalls = ctx.google.calls.filter((c) => c.method !== "GET").length;
+    const first = await ctx.api("POST", "/dry-run", { plan: ctx.plan(), checkSources: true });
+    assert.equal(first.status, 202); assert.equal(first.body.status, "running"); assert.match(first.body.checkId, /^chk-[0-9a-f]{16}$/); assert.equal(first.body.runId, ctx.runId);
+    const id = first.body.checkId;
+    for (let i = 0; i < 200 && ctx.mid.checks.get(id).stage !== "monday.com"; i += 1) await tick();
+    const progress = (await ctx.api("GET", `/dry-run/${id}`)).body;
+    assert.deepEqual([progress.status, progress.stage, progress.progress, progress.result], ["running", "monday.com", { done: 0, total: 1 }, null]);
+    assert.equal((await ctx.api("POST", "/dry-run", { plan: ctx.plan(), checkSources: true })).body.checkId, id, "asking again joins the running dry run");
+    const other = await ctx.api("POST", "/dry-run", { plan: ctx.plan() });
+    assert.equal(other.status, 409); assert.equal(other.body.error.code, "CHECK_IN_PROGRESS");
+    assert.equal((await ctx.api("POST", "/prepare", { checkId: id, confirm: true })).body.error.code, "CHECK_NOT_COMPLETED");
+    assert.equal(ctx.mid.checks.size, 1, "one dry run, however often it was asked for");
+    release(); await ctx.mid.checks.get(id).done;
+    const done = (await ctx.api("GET", `/dry-run/${id}`)).body;
+    assert.equal(done.status, "completed"); assert.equal(done.result.summary.eligible, 6); assert.equal(done.result.summary.sources.available, 6); assert.deepEqual(done.result.problemRows, []);
+    assert.equal(ctx.monday.apiCalls, 1, "monday.com asked once");
+    assert.deepEqual(COLLECTIONS_TOUCHED.map((c) => snapshot(ctx, c)), before, "nothing written to the database");
+    assert.equal(ctx.google.calls.filter((c) => c.method !== "GET").length, driveCalls, "nothing written to Drive"); assert.equal(ctx.monday.downloads, 0);
+    assert.doesNotMatch(JSON.stringify([first.body, progress, done]), /SECRET-SIGNATURE|test-monday-token|files\.monday\.invalid|"entries":\[|"plan"/, "no token, link or plan in any answer");
+    // A completed dry run is good for Prepare for an hour, and is kept (in memory only) for two.
+    const realNow = ctx.mid.now;
+    ctx.mid.now = () => new Date(Date.now() + 61 * 60 * 1000);
+    assert.equal((await ctx.api("POST", "/prepare", { checkId: id, confirm: true })).body.error.code, "CHECK_TOO_OLD");
+    ctx.mid.now = () => new Date(Date.now() + 121 * 60 * 1000);
+    const gone = await ctx.api("GET", `/dry-run/${id}`);
+    assert.equal(gone.status, 404); assert.equal(gone.body.error.code, "CHECK_NOT_FOUND"); assert.equal(ctx.mid.checks.size, 0);
+    ctx.mid.now = realNow;
+    assert.equal((await ctx.api("GET", "/dry-run/chk-0000000000000000")).status, 404);
+    assert.equal((await ctx.api("POST", "/prepare", { confirm: true })).status, 400, "Prepare needs a dry run");
+    assert.equal((await ctx.api("POST", "/dry-run", { plan: { kind: "nope" } })).body.error.code, "PLAN_INVALID", "a malformed plan is refused at once");
+    assert.equal(ctx.app.db.collection("integrationJobs").docs.length, 0);
+    await ctx.app.close();
+  });
+
+  test("a monday.com failure ends the dry run as failed, with a clear code and no token; nothing is written; another can start", async () => {
+    const ctx = await start({ files: 2 });
+    const { MondayClient } = require("../src/integrations/monday/client");
+    const good = ctx.mid.monday;
+    ctx.mid.monday = new MondayClient({ token: "wrong-token", fetch: ctx.mid.fetchImpl, sleep: async () => {} });
+    const res = await ctx.dryRun({ plan: ctx.plan(), checkSources: true });
+    assert.equal(res.body.status, "failed"); assert.equal(res.body.error.code, "MONDAY_UNAUTHORIZED"); assert.equal(res.body.result, null);
+    assert.doesNotMatch(JSON.stringify(res.body), /wrong-token|test-monday-token/);
+    assert.equal((await ctx.api("POST", "/prepare", { checkId: res.body.checkId, confirm: true })).body.error.code, "CHECK_NOT_COMPLETED");
+    assert.equal(ctx.app.db.collection("integrationJobs").docs.length, 0);
+    ctx.mid.monday = good;
+    assert.equal((await ctx.dryRun({ plan: ctx.plan(), checkSources: true })).body.status, "completed", "a failed dry run doesn't block the next");
+    await ctx.app.close();
+  });
+
+  test("prepare runs in the background; start waits for it; asking twice adds nothing; an interrupted prepare is finished without duplicates", async () => {
+    const ctx = await start();
+    const check = (await ctx.dryRun()).body;
+    const jobs = ctx.app.db.collection("integrationJobs"), insertMany = jobs.insertMany.bind(jobs);
+    let release; const gate = new Promise((r) => { release = r; });
+    jobs.insertMany = async (...a) => { await gate; return insertMany(...a); };
+    const res = await ctx.api("POST", "/prepare", { checkId: check.checkId, confirm: true });
+    assert.equal(res.status, 202); assert.equal(res.body.status, "preparing"); assert.equal(res.body.prepareInterrupted, false);
+    assert.equal((await ctx.startRun("pilot")).body.error.code, "RUN_NOT_STARTABLE", "no start while preparing");
+    assert.equal((await ctx.api("POST", "/prepare", { checkId: check.checkId, confirm: true })).body.status, "preparing", "asking again joins it");
+    release(); await ctx.mid.preparing.get(ctx.runId);
+    jobs.insertMany = insertMany;
+    let s = (await ctx.api("GET", `/runs/${ctx.runId}`)).body;
+    assert.equal(s.status, "prepared"); assert.equal(s.counts.queued.files, 6); assert.ok(s.preparedAt);
+    // A restart in the middle: the run is left "preparing" with only part of its list.
+    const kept = jobs.docs.filter((j) => j.type === "mid-attachment").slice(0, 3).map((j) => JSON.stringify(j));
+    await jobs.deleteMany({ type: "mid-attachment", "params.assetId": { $in: ["9003", "9004", "9005"] } });
+    await jobs.updateOne({ _id: ctx.runId }, { $set: { status: "preparing" } });
+    s = (await ctx.api("GET", `/runs/${ctx.runId}`)).body;
+    assert.equal(s.prepareInterrupted, true);
+    assert.equal((await ctx.startRun("pilot")).body.error.code, "RUN_NOT_STARTABLE");
+    s = await ctx.prepare();
+    assert.equal(s.status, "prepared"); assert.equal(s.counts.queued.files, 6);
+    const items = jobs.docs.filter((j) => j.type === "mid-attachment");
+    assert.equal(new Set(items.map((j) => j._id)).size, 6, "no duplicates");
+    assert.deepEqual(items.filter((j) => kept.some((k) => JSON.parse(k)._id === j._id)).map((j) => JSON.stringify(j)), kept, "files already listed are left as they were");
+    assert.equal(ctx.monday.downloads, 0); assert.equal(ctx.driveMig().length, 0);
+    await ctx.app.close();
+  });
+
+  test("a file that became impossible between the dry run and prepare: the prepare fails clearly and lists nothing", async () => {
+    const ctx = await start({ files: 3 });
+    const check = (await ctx.dryRun()).body;
+    await ctx.admin.request("DELETE", `/api/v1/records/${ctx.records[0].id}?expectedVersion=${ctx.records[0].version}`);
+    assert.equal((await ctx.api("POST", "/prepare", { checkId: check.checkId, confirm: true })).status, 202);
+    await ctx.mid.preparing.get(ctx.runId);
+    const s = (await ctx.api("GET", `/runs/${ctx.runId}`)).body;
+    assert.equal(s.status, "prepare-failed"); assert.equal(s.lastError.code, "PLAN_HAS_BLOCKED_FILES");
+    assert.equal(ctx.app.db.collection("integrationJobs").docs.filter((j) => j.type === "mid-attachment").length, 0);
+    assert.equal((await ctx.startRun("pilot")).body.error.code, "RUN_NOT_STARTABLE");
+    await ctx.app.close();
+  });
+
+  test("a run prepared by the earlier version (backups: [], no snapshots) carries on unchanged: re-preparing adds nothing, the pilot is still required", async () => {
+    const ctx = await start();
+    await ctx.prepare();
+    const jobs = ctx.app.db.collection("integrationJobs");
+    await jobs.updateOne({ _id: ctx.runId }, { $set: { backups: [] }, $unset: { snapshots: "", preparedAt: "" } });
+    const items = JSON.stringify(jobs.docs.filter((j) => j.type === "mid-attachment"));
+    const again = await ctx.prepare();
+    assert.equal(again.status, "prepared");
+    assert.equal(JSON.stringify(jobs.docs.filter((j) => j.type === "mid-attachment")), items, "its files are left exactly as they were");
+    assert.equal((await ctx.startRun("full")).body.error.code, "PILOT_REQUIRED");
+    const pilot = await ctx.startRun("pilot", { count: 1 });
+    assert.equal(pilot.status, 200); assert.equal(pilot.body.snapshots.length, 1);
+    assert.equal((await ctx.drain()).counts.done.files, 1);
+    await ctx.app.close();
+  });
+
+  test("the read-only check before starting refuses a run whose own records disagree, and starts nothing", async () => {
+    const ctx = await start({ files: 2 });
+    await ctx.prepare();
+    await ctx.app.db.collection("integrationMappings").insertOne({ provider: "monday-migration", kind: "asset", sourceId: "9000", targetId: new ObjectId(), runId: ctx.runId, createdAt: new Date() });
+    const r = await ctx.startRun("pilot");
+    assert.equal(r.status, 409); assert.equal(r.body.error.code, "PRE_START_CHECK_FAILED"); assert.ok(r.body.error.details.problems.includes("asset-mappings-differ-from-imported-attachments"));
+    const s = (await ctx.api("GET", `/runs/${ctx.runId}`)).body;
+    assert.equal(s.status, "prepared"); assert.equal(s.snapshots.length, 0);
+    await ctx.mid.tick();
+    assert.equal(ctx.monday.downloads, 0); assert.equal(ctx.driveMig().length, 0);
+    await ctx.app.close();
+  });
+});
+
 describe("prepare, pilot and full run", () => {
-  test("prepare is idempotent; start needs a recent backup and enough storage; a pilot imports exactly its number of files and pauses", async () => {
+  test("prepare is idempotent; no backup is asked for; the pilot is mandatory, records a read-only snapshot, imports exactly its number of files and pauses", async () => {
     const ctx = await start();
     await ctx.prepare(); await ctx.prepare();
     const jobs = ctx.app.db.collection("integrationJobs").docs;
     assert.equal(jobs.filter((j) => j.type === "mid-attachment").length, 6, "preparing twice adds nothing"); assert.equal(jobs.filter((j) => j.type === "mid-attachments-run").length, 1);
-    assert.equal((await ctx.api("POST", `/runs/${ctx.runId}/start`, { mode: "pilot", confirm: true })).body.error.code, "BACKUP_REQUIRED");
-    assert.equal((await ctx.api("POST", `/runs/${ctx.runId}/start`, { mode: "pilot", confirm: true, backup: { ...ctx.backup(), takenAt: new Date(Date.now() - 30 * 3600 * 1000).toISOString() } })).body.error.code, "BACKUP_TOO_OLD");
-    assert.equal((await ctx.api("POST", `/runs/${ctx.runId}/start`, { mode: "pilot", confirm: false, backup: ctx.backup() })).body.error.code, "CONFIRMATION_REQUIRED");
+    assert.equal(jobs.find((j) => j.type === "mid-attachments-run").status, "prepared");
+    assert.equal((await ctx.startRun("pilot", { confirm: false })).body.error.code, "CONFIRMATION_REQUIRED");
+    assert.equal((await ctx.startRun("pilot", { backup: { reference: "x" } })).status, 400, "the old backup field isn't accepted any more");
+    assert.equal((await ctx.startRun("full")).body.error.code, "PILOT_REQUIRED", "no full import before the pilot");
     assert.equal((await ctx.startRun("pilot", { count: 21 })).status, 400);
-    assert.equal((await ctx.startRun("pilot", { count: 2 })).status, 200);
+    const records = snapshot(ctx, "records"), itemMappings = JSON.stringify(ctx.app.db.collection("integrationMappings").docs);
+    const started = await ctx.startRun("pilot", { count: 2 });
+    assert.equal(started.status, 200);
+    const snap = started.body.snapshots[0];
+    assert.deepEqual([snap.mode, snap.recordsOnBoard, snap.itemMappings, snap.attachmentsTotal, snap.attachmentsOnBoard, snap.assetMappingsOfThisRun], ["pilot", 3, 3, 0, 0, 0], "read-only snapshot before starting");
+    assert.equal(JSON.stringify(ctx.app.db.collection("integrationMappings").docs), itemMappings, "the snapshot wrote nothing");
     const s = await ctx.drain();
-    assert.equal(s.status, "paused"); assert.equal(s.pausedReason, "pilot-finished");
+    assert.equal(s.status, "paused"); assert.equal(s.pausedReason, "pilot-finished"); assert.ok(s.pilotFinishedAt);
     assert.equal(s.counts.done.files, 2); assert.equal(s.counts.queued.files, 4);
     assert.equal(ctx.migrated().length, 2); assert.equal(ctx.driveMig().length, 2);
-    assert.equal(s.backups[0].reference, ctx.backup().reference);
+    const v = (await ctx.api("GET", `/runs/${ctx.runId}/verify`)).body;
+    assert.equal(v.ok, true);
+    assert.deepEqual([v.sinceSnapshot.recordIdsUnchanged, v.sinceSnapshot.itemMappingsUnchanged, v.sinceSnapshot.importedByThisRun.then, v.sinceSnapshot.importedByThisRun.now, v.sinceSnapshot.otherAttachments.now], [true, true, 0, 2, 0]);
+    assert.equal(snapshot(ctx, "records"), records, "records untouched");
+    assert.equal((await ctx.startRun("full")).status, 200, "after the pilot, the full import may start");
+    const done = await ctx.drain();
+    assert.equal(done.status, "completed"); assert.equal(done.snapshots.length, 2); assert.equal(done.snapshots[1].importedByThisRun.ready, 2);
+    await ctx.app.close();
+  });
+
+  test("a pilot in which no file was imported doesn't open the full import", async () => {
+    const ctx = await start({ files: 3 });
+    await ctx.prepare();
+    ctx.monday.assets.delete("9000");
+    await ctx.pilot(1);
+    assert.equal((await ctx.startRun("full")).body.error.code, "PILOT_REQUIRED");
+    const again = await ctx.pilot(1);
+    assert.equal(again.counts.done.files, 1);
+    assert.equal((await ctx.startRun("full")).status, 200);
     await ctx.app.close();
   });
 
   test("the full run: every file on the planned record and Files column, original names and types, provenance, checksums, Drive tags; downloads through JARC; repeating adds nothing", async () => {
     const ctx = await start();
     await ctx.prepare();
+    await ctx.pilot(2);
     await ctx.startRun("full");
     const s = await ctx.drain();
     assert.equal(s.status, "completed"); assert.equal(s.counts.done.files, 6);
@@ -247,8 +420,10 @@ describe("prepare, pilot and full run", () => {
     }
     const listed = await ctx.admin.request("GET", `/api/v1/records/${ctx.records[0].id}/attachments`);
     assert.equal(listed.body.items.length, ctx.entries.filter((e) => e.recordId === ctx.records[0].id).length);
-    // Repeating: preparing and starting again finds nothing to do; no second file anywhere.
-    await ctx.prepare();
+    // Repeating: preparing again is refused for a completed run, and starting finds nothing to do; no second file anywhere.
+    const check = (await ctx.dryRun()).body;
+    assert.equal(check.result.summary.alreadyImported, 6);
+    assert.equal((await ctx.api("POST", "/prepare", { checkId: check.checkId, confirm: true })).body.error.code, "RUN_NOT_PREPARABLE");
     assert.equal((await ctx.startRun("full")).body.error.code, "RUN_NOT_STARTABLE", "a completed run can not be started again");
     assert.equal(ctx.migrated().length, 6); assert.equal(ctx.driveMig().length, 6);
     // Reconciliation, including re-downloading and re-hashing.
@@ -263,7 +438,7 @@ describe("prepare, pilot and full run", () => {
   test("pause stops new files; resume continues; stop ends the allowance; records are never changed", async () => {
     const ctx = await start({ perPass: 1 });
     const records = snapshot(ctx, "records");
-    await ctx.prepare(); await ctx.startRun("full");
+    await ctx.prepare(); await ctx.startRun("pilot");
     assert.equal((await ctx.api("POST", `/runs/${ctx.runId}/pause`)).body.status, "paused");
     await ctx.mid.tick();
     assert.equal(ctx.migrated().length, 0, "nothing while paused");
@@ -275,7 +450,7 @@ describe("prepare, pilot and full run", () => {
     await ctx.mid.tick();
     assert.equal(ctx.migrated().length, partial, "nothing after stopping");
     assert.equal((await ctx.api("POST", `/runs/${ctx.runId}/resume`)).body.error.code, "RUN_NOT_RESUMABLE", "a stopped run is started again, not resumed");
-    await ctx.startRun("full");
+    await ctx.startRun("pilot");
     assert.equal((await ctx.drain()).status, "completed");
     assert.equal(snapshot(ctx, "records"), records, "no record was modified");
     await ctx.app.close();
@@ -285,7 +460,7 @@ describe("prepare, pilot and full run", () => {
 describe("failures, retries and recovery", () => {
   test("a crash after the file reached Drive: the lease expires, recovery removes the half-finished file and completes it once", async () => {
     const ctx = await start({ files: 3, faults: { crashAfterStore: "9001" } });
-    await ctx.prepare(); await ctx.startRun("full");
+    await ctx.prepare(); await ctx.startRun("pilot");
     await assert.rejects(ctx.mid.tick(), (e) => e.simulatedCrash);
     ctx.mid.faults = null;
     const stuck = ctx.app.db.collection("integrationJobs").docs.find((j) => j._id === `${ctx.runId}:9001`);
@@ -301,7 +476,7 @@ describe("failures, retries and recovery", () => {
 
   test("an interrupted Drive upload and a corrupted one are retried until stored intact", async () => {
     const ctx = await start({ files: 2 });
-    await ctx.prepare(); await ctx.startRun("full");
+    await ctx.prepare(); await ctx.startRun("pilot");
     ctx.google.fail.push(...Array.from({ length: 8 }, () => ({ match: /upload_id/, status: 503 })));
     await ctx.mid.tick();
     let s = (await ctx.api("GET", `/runs/${ctx.runId}`)).body;
@@ -318,7 +493,7 @@ describe("failures, retries and recovery", () => {
 
   test("a MongoDB write failure while finishing a file: retried, no duplicate attachment, mapping or Drive file", async () => {
     const ctx = await start({ files: 2 });
-    await ctx.prepare(); await ctx.startRun("full");
+    await ctx.prepare(); await ctx.startRun("pilot");
     const mappings = ctx.app.db.collection("integrationMappings"), original = mappings.insertOne.bind(mappings);
     let failOnce = true;
     mappings.insertOne = async (...a) => { if (failOnce && a[0]?.kind === "asset") { failOnce = false; throw Object.assign(new Error("simulated write failure"), { name: "MongoServerError", code: 91 }); } return original(...a); };
@@ -334,7 +509,7 @@ describe("failures, retries and recovery", () => {
 
   test("Google Drive failing every time: the file fails after its attempts and leaves nothing behind", async () => {
     const ctx = await start({ files: 1 });
-    await ctx.prepare(); await ctx.startRun("full");
+    await ctx.prepare(); await ctx.startRun("pilot");
     ctx.google.fail.push(...Array.from({ length: 200 }, () => ({ match: /upload\/drive/, status: 503 })));
     for (let i = 0; i < 8; i += 1) { await ctx.app.db.collection("integrationJobs").updateMany({ type: "mid-attachment", status: "retry" }, { $set: { runAfter: new Date(0) } }); await ctx.mid.tick(); }
     const s = (await ctx.api("GET", `/runs/${ctx.runId}`)).body;
@@ -350,7 +525,7 @@ describe("failures, retries and recovery", () => {
     ctx.monday.assets.delete("9000");
     ctx.monday.sizeOverride.set("9001", 1);
     ctx.monday.fail.push({ download: true, id: "9002", truncate: 10 });
-    await ctx.prepare(); await ctx.startRun("full");
+    await ctx.prepare(); await ctx.startRun("pilot");
     await ctx.mid.tick();
     const items = Object.fromEntries(ctx.app.db.collection("integrationJobs").docs.filter((j) => j.type === "mid-attachment").map((j) => [j.params.assetId, j]));
     assert.deepEqual([items[9000].status, items[9000].error.code], ["failed", "MIGRATION_SOURCE_MISSING"]);
@@ -372,7 +547,7 @@ describe("failures, retries and recovery", () => {
     const ctx = await start({ files: 3 });
     await ctx.prepare();
     await ctx.admin.request("DELETE", `/api/v1/records/${ctx.records[0].id}?expectedVersion=${ctx.records[0].version}`);
-    await ctx.startRun("full");
+    await ctx.startRun("pilot");
     const s = await ctx.drain();
     const item = ctx.app.db.collection("integrationJobs").docs.find((j) => j._id === `${ctx.runId}:9000`);
     assert.deepEqual([item.status, item.error.code], ["failed", "MIGRATION_ATTACHMENT_RECORD_MISSING"]);
@@ -387,20 +562,20 @@ describe("storage capacity", () => {
   test("not enough room in Google Drive, or under JARC's own limit: the run won't start", async () => {
     const tight = await start({ quota: { limit: 10 * MB, usage: 9.9 * MB } });
     await tight.prepare();
-    const r = await tight.startRun("full");
+    const r = await tight.startRun("pilot");
     assert.equal(r.status, 409); assert.equal(r.body.error.code, "NOT_ENOUGH_STORAGE"); assert.ok(r.body.error.details.capacity.problems.includes("google-drive-too-full"));
     assert.equal(tight.monday.downloads, 0);
     await tight.app.close();
     const capped = await start({ files: 2, gdriveMaxMb: "1" });
     await capped.prepare();
     await capped.app.db.collection("storageUsage").updateOne({ _id: "gdrive" }, { $set: { usedBytes: 1024 * 1024 - 10, reservedBytes: 0 } }, { upsert: true });
-    const c = await capped.startRun("full");
+    const c = await capped.startRun("pilot");
     assert.equal(c.body.error.code, "NOT_ENOUGH_STORAGE"); assert.ok(c.body.error.details.capacity.problems.includes("jarc-drive-limit-too-low"));
     await capped.app.close();
   });
   test("storage running out during the run pauses it and puts the file back in line", async () => {
     const ctx = await start({ files: 3 });
-    await ctx.prepare(); await ctx.startRun("full");
+    await ctx.prepare(); await ctx.startRun("pilot");
     ctx.google.fail.push({ match: /upload\/drive/, status: 403, reason: "storageQuotaExceeded" });
     await ctx.mid.tick();
     const s = (await ctx.api("GET", `/runs/${ctx.runId}`)).body;
@@ -420,7 +595,7 @@ describe("rollback and existing attachments", () => {
     assert.equal(own.status, 201);
     const employeeFile = (await own.json()).attachment.id;
     const records = snapshot(ctx, "records"), recordMappings = JSON.stringify(ctx.app.db.collection("integrationMappings").docs.filter((m) => m.kind !== "asset"));
-    await ctx.prepare(); await ctx.startRun("full"); await ctx.drain();
+    await ctx.prepare(); await ctx.startRun("pilot"); await ctx.drain();
     assert.equal(ctx.driveMig().length, 6);
     assert.equal((await ctx.api("POST", `/runs/${ctx.runId}/rollback`, { confirm: "ROLLBACK" })).body.error.code, "CONFIRMATION_REQUIRED");
     assert.equal((await ctx.api("POST", `/runs/${ctx.runId}/rollback`, { confirm: `ROLLBACK ${ctx.runId}` })).body.status, "rolling-back");
@@ -441,7 +616,7 @@ describe("rollback and existing attachments", () => {
 
   test("normal uploads, downloads and the sweep are unaffected; the sweep never touches migrated files", async () => {
     const ctx = await start({ files: 2 });
-    await ctx.prepare(); await ctx.startRun("full"); await ctx.drain();
+    await ctx.prepare(); await ctx.startRun("pilot"); await ctx.drain();
     for (const f of ctx.driveMig()) f.createdTime = new Date(Date.now() - 3 * 3600 * 1000).toISOString();
     await ctx.app.dataLayer.services.files.sweep();
     assert.equal(ctx.driveMig().length, 2, "migrated files kept");
