@@ -65,6 +65,8 @@ function loadConfig(env = process.env) {
     monday: loadMondayConfig(env),
     // Google Drive attachment storage: off unless GOOGLE_DRIVE_ENABLED=true (integrations/google-drive/service.js).
     googleDrive: loadGoogleDriveConfig(env, nodeEnv, authMode),
+    // Machine Installation Database attachment import: a temporary, off-by-default server-side migration run.
+    midAttachments: loadMidAttachmentsConfig(env),
     // Search index (services/record-search-index.js): off, shadow or on. Unset: off, which writes nothing.
     recordSearch: loadRecordSearchMode(env),
     // Optional features, each with its own switch: { nativeForms, spreadsheetImports }. Off in production unless turned on.
@@ -266,6 +268,26 @@ function loadGoogleDriveConfig(env, nodeEnv, authMode) {
   return hide({ enabled: true, clientId: env.GOOGLE_DRIVE_CLIENT_ID, redirectUri: redirect.href, accountEmail: email, maxTotalBytes: Number(env.ATTACHMENTS_GDRIVE_MAX_TOTAL_MB) * 1024 * 1024, adminObjectIds }, env.GOOGLE_DRIVE_CLIENT_SECRET, tokenKey);
 }
 
+// Machine Installation Database attachment import (services/mid-attachment-run.js). TEMPORARY: set for the import,
+// remove afterwards. While off, its routes don't exist and its worker doesn't run.
+//   MID_ATTACHMENTS_MIGRATION   true or false (anything else stops startup). true also needs GOOGLE_DRIVE_ENABLED=true.
+//   MID_MIGRATION_MONDAY_TOKEN  required when on: a monday.com API token that can read the board's files. A secret:
+//                               non-enumerable, never in JSON, logs or responses.
+//   MID_MIGRATION_CONCURRENCY   optional: files processed at once, 1-3 (default 2).
+// MONDAY_API_VERSION (optional) pins the monday.com API version, as for the integration.
+function loadMidAttachmentsConfig(env) {
+  const value = env.MID_ATTACHMENTS_MIGRATION;
+  if (value !== undefined && value !== "" && value !== "true" && value !== "false") throw new ConfigError("MID_ATTACHMENTS_MIGRATION must be true or false.");
+  const config = { enabled: value === "true", concurrency: 2, apiVersion: env.MONDAY_API_VERSION || null };
+  if (config.enabled) {
+    if (env.GOOGLE_DRIVE_ENABLED !== "true") throw new ConfigError("MID_ATTACHMENTS_MIGRATION=true needs GOOGLE_DRIVE_ENABLED=true.");
+    if (!env.MID_MIGRATION_MONDAY_TOKEN) throw new ConfigError("MID_ATTACHMENTS_MIGRATION=true needs MID_MIGRATION_MONDAY_TOKEN.");
+    config.concurrency = wholeNumberSetting(env, "MID_MIGRATION_CONCURRENCY", 2, 1, 3);
+  }
+  Object.defineProperty(config, "mondayToken", { value: config.enabled ? env.MID_MIGRATION_MONDAY_TOKEN : null, enumerable: false });
+  return Object.freeze(config);
+}
+
 // monday.com integration (one-way into JARC). Off unless MONDAY_INTEGRATION_ENABLED=true; usable only when the OAuth
 // app credentials, redirect URI and token-encryption key are all set. Secrets are non-enumerable (never in JSON or logs).
 function loadMondayConfig(env) {
@@ -338,4 +360,4 @@ function assertMongoUri(uri) {
   if (pathDb && pathDb !== JARC_DB_NAME) throw new ConfigError(`MONGODB_URI names a different database in its path. Remove it (or use "${JARC_DB_NAME}"); the database always comes from MONGODB_DB_NAME.`);
 }
 
-module.exports = { FEATURE_SWITCHES, loadConfig, loadAccountConfig, loadMondayConfig, loadGoogleDriveConfig, loadAttachmentConfig, assertJarcDatabaseName, ConfigError, JARC_DB_NAME, ACCESS_POLICIES };
+module.exports = { FEATURE_SWITCHES, loadConfig, loadAccountConfig, loadMondayConfig, loadGoogleDriveConfig, loadMidAttachmentsConfig, loadAttachmentConfig, assertJarcDatabaseName, ConfigError, JARC_DB_NAME, ACCESS_POLICIES };

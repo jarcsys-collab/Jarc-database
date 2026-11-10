@@ -79,13 +79,13 @@ const entraEnv = (overrides = {}) => ({ ...TEST_ENTRA, ...overrides });
 // server sessions in the fake MongoDB. No development user exists in this mode.
 // accounts: Account Management settings ({ mode, superAdmin }; off by default). environment: e.g. "production" (no
 // development APIs) to test production behaviour on the fake database.
-async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient(), accessPolicy, live, fileStore = new MemoryFileStore(), monday = null, fetch = undefined, betaOpenEditing = false, searchLimiter = null, accounts = null, environment = null, apiTokens = null, googleDrive = null, googleDriveOptions = {}, attachments = null } = {}) {
+async function startEntraApp({ issuer, entra = {}, fake = new FakeMongoClient(), accessPolicy, live, fileStore = new MemoryFileStore(), monday = null, fetch = undefined, betaOpenEditing = false, searchLimiter = null, accounts = null, environment = null, apiTokens = null, googleDrive = null, googleDriveOptions = {}, attachments = null, midAttachments = null, midAttachmentsOptions = {} } = {}) {
   const { createEntraVerifier } = require("../src/auth/entra-token");
   const connection = new MongoConnection({ uri: "mongodb://fake.invalid", dbName: "jarc_database", createClient: () => fake });
   await connection.connect();
   await ensureDatabase(connection.db);
   const logger = { errors: [], error(...args) { this.errors.push(args.map(String).join(" ")); } };
-  const dataLayer = createDataLayer({ connection, logger, fileStore, monday, googleDrive, googleDriveOptions, ...(attachments ? { attachments } : {}), ...(fetch ? { fetch } : {}) });
+  const dataLayer = createDataLayer({ connection, logger, fileStore, monday, googleDrive, googleDriveOptions, midAttachments, midAttachmentsOptions, environment: "test", ...(attachments ? { attachments } : {}), ...(fetch ? { fetch } : {}) });
   const config = { ...issuer.config, ...entra };
   const verify = createEntraVerifier({ ...config, keySet: issuer.keySet });
   const started = await startApp({ dataLayer, auth: { mode: "entra", entra: config, verify }, logger, ...(accessPolicy ? { accessPolicy } : {}), ...(betaOpenEditing ? { betaOpenEditing } : {}), ...(searchLimiter ? { searchLimiter } : {}), ...(live ? { live } : {}), ...(accounts ? { accounts } : {}), ...(apiTokens ? { apiTokens } : {}), ...(environment ? { environment, enableDevStateApi: environment !== "production" } : {}) });

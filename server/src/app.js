@@ -23,6 +23,7 @@ const { fileRoutes } = require("./routes/files");
 const { searchRoutes, searchLimiter: createSearchLimiter } = require("./routes/search");
 const { integrationRoutes, integrationPublicRoutes } = require("./routes/integrations");
 const { googleDriveRoutes, googleDrivePublicRoutes } = require("./routes/google-drive");
+const { midAttachmentRoutes } = require("./routes/mid-attachments");
 const { commentRoutes } = require("./routes/comments");
 const { formRoutes } = require("./routes/forms");
 const { importRoutes } = require("./routes/imports");
@@ -131,6 +132,8 @@ function createApp({ apiTokens = null, features = {}, repository, environment = 
     api.use(identify, preferenceRoutes({ repos: dataLayer.repos }));
     if (dataLayer.services?.integration) api.use(identify, integrationRoutes({ integration: dataLayer.services.integration, access }));
     if (googleDrive) api.use(identify, googleDriveRoutes({ drive: googleDrive, canManage: (actor) => actorCanManageDrive(actor, googleDrive.config, auth.entra.tenantId) }));
+    // The Machine Installation Database attachment import: only while switched on, only for Google Drive administrators.
+    if (googleDrive && dataLayer.services?.midAttachments) api.use(identify, midAttachmentRoutes({ migration: dataLayer.services.midAttachments, canManage: (actor) => actorCanManageDrive(actor, googleDrive.config, auth.entra.tenantId) }));
     // Live updates (Server-Sent Events) from the activity log; live: { pollMs, overlapMs, timings } for tests.
     const stream = new ActivityStream({ activities: dataLayer.repos.activities, logger, ...(live.pollMs ? { pollMs: live.pollMs } : {}), ...(live.overlapMs ? { overlapMs: live.overlapMs } : {}) });
     app.locals.realtime = stream;

@@ -36,4 +36,24 @@ function cleanFileName(raw, type, types = TYPES) {
   return name;
 }
 
-module.exports = { TYPES, MIGRATION_TYPES, MAX_FILE_BYTES, MAX_FILES_PER_CELL, SNIFF_BYTES, cleanFileName };
+// What the monday.com migration does with each file, from its inventory entry (see migration/monday/compat.js for the
+// actions). Used by the migration tool and by the server's Machine Installation Database import.
+const DIRECT = { pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp" };
+
+function classifyAsset({ name, extension, sizeBytes }, { migrationMaxBytes = 20 * 1024 * 1024 } = {}) {
+  const ext = String(extension || (String(name || "").includes(".") ? String(name).split(".").pop() : "")).replace(/^\./, "").toLowerCase();
+  const size = Number(sizeBytes) || 0;
+  const base = String(name || "file").replace(/\.[^.]*$/, "") || "file";
+  let r;
+  if (DIRECT[ext]) r = { action: size > MAX_FILE_BYTES ? "store-oversized" : "store", type: DIRECT[ext], plannedName: name };
+  else if (ext === "jfif") r = { action: "rename-jfif", type: "image/jpeg", plannedName: `${base}.jpg` };
+  else if (ext === "heic" || ext === "heif") r = { action: "preserve-heic", type: "image/heic", plannedName: name };
+  else if (ext === "csv") r = { action: "download-only", type: "text/csv", plannedName: name };
+  else return { action: "quarantine", type: null, plannedName: name, reason: `unsupported type "${ext || "none"}"` };
+  if (size > migrationMaxBytes) return { action: "hold-too-large", type: r.type, plannedName: r.plannedName, reason: `larger than the migration limit (${Math.round(migrationMaxBytes / 1048576)} MB)` };
+  if (size > MAX_FILE_BYTES && r.action !== "store-oversized") r.oversized = true;
+  if (r.action === "store-oversized") r.oversized = true;
+  return r;
+}
+
+module.exports = { TYPES, MIGRATION_TYPES, MAX_FILE_BYTES, MAX_FILES_PER_CELL, SNIFF_BYTES, cleanFileName, classifyAsset };

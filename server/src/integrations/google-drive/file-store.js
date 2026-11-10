@@ -3,18 +3,22 @@
 //   keys      the Drive file ID, generated before the upload, so the pending attachment document always knows its file.
 //   names     in Drive a file is "<attachment ID>.<ext>", never its original name; people see the original name in JARC,
 //             where it is kept on the attachment document.
-//   kinds     appProperties.jarcKind says what a file is: att (a normal upload), probe (the connection check), removed
-//             (moved to Trash by JARC). The orphan sweep only ever considers "att", so a file an administrator restores
-//             from Trash is never removed again.
+//   kinds     appProperties.jarcKind says what a file is: att (a normal upload), mig (a migrated file, also tagged with its
+//             run in jarcRun), probe (the connection check), removed (moved to Trash by JARC). The orphan sweep only ever
+//             considers "att", so a file an administrator restores from Trash is never removed again, and migrated files
+//             belong to their run's recovery and rollback alone.
 //   delete    moves to Google Drive Trash, so it can be recovered there. Never a permanent delete.
 //   checks    the size always, and the SHA-256 whenever Google reports one, are compared after the upload.
 const crypto = require("crypto");
 const { Writable, Readable, PassThrough } = require("stream");
-const { TYPES } = require("../../files/file-types");
+const { MIGRATION_TYPES } = require("../../files/file-types");
 const { unavailable } = require("./client");
 
 const CHUNK_BYTES = 2 * 1024 * 1024; // Google requires multiples of 256 KB for every chunk but the last
-const KIND = Object.freeze({ attachment: "att", probe: "probe" });
+const KIND = Object.freeze({ attachment: "att", migration: "mig", probe: "probe" });
+// Extra appProperties a caller may add (e.g. jarcRun): JARC's own names and short plain values only.
+const TAG_NAME = /^jarc[A-Z][A-Za-z]{1,20}$/, TAG_VALUE = /^[A-Za-z0-9._:-]{1,100}$/;
+const safeTags = (tags) => Object.fromEntries(Object.entries(tags || {}).filter(([k, v]) => TAG_NAME.test(k) && !["jarcKind", "jarcAttachmentId"].includes(k) && TAG_VALUE.test(String(v))).map(([k, v]) => [k, String(v)]));
 const verifyFailed = (message) => Object.assign(new Error(message), { code: "STORE_VERIFY_FAILED" });
 
 class GoogleDriveFileStore {
@@ -28,15 +32,16 @@ class GoogleDriveFileStore {
   async ready() { await this.open(); }
   async newKey() { const { client } = await this.open(); return client.generateId(); }
 
-  openUpload(key, { contentType, length, sha256 = null, attachmentId = null, kind = KIND.attachment }) {
+  openUpload(key, { contentType, length, sha256 = null, attachmentId = null, kind = KIND.attachment, tags = null }) {
+    if (!Object.values(KIND).includes(kind)) throw new Error("Unknown Google Drive file kind.");
     const store = this, hash = crypto.createHash("sha256");
     let pending = [], pendingBytes = 0, sent = 0, session = null, client = null, finished = null;
     const begin = async () => {
       if (session) return;
       const drive = await store.open();
       client = drive.client;
-      const extension = TYPES[contentType]?.extensions[0];
-      const metadata = { id: String(key), name: `${attachmentId ? String(attachmentId) : key}${extension ? `.${extension}` : ""}`, parents: [drive.folderId], mimeType: contentType, appProperties: { jarcKind: kind, ...(attachmentId ? { jarcAttachmentId: String(attachmentId) } : {}) } };
+      const extension = MIGRATION_TYPES[contentType]?.extensions[0];
+      const metadata = { id: String(key), name: `${attachmentId ? String(attachmentId) : key}${extension ? `.${extension}` : ""}`, parents: [drive.folderId], mimeType: contentType, appProperties: { ...safeTags(tags), jarcKind: kind, ...(attachmentId ? { jarcAttachmentId: String(attachmentId) } : {}) } };
       session = await client.startUpload({ metadata, contentType, length });
     };
     const flush = async (last) => {
@@ -101,6 +106,9 @@ class GoogleDriveFileStore {
       return keys;
     } catch (error) { this.sweepCycle = null; throw error; }
   }
+  // For migration runs: the account's free space, and the files one run created (by their jarcRun tag).
+  async quota() { const { client } = await this.open(); return client.quota(); }
+  async runFiles(runId) { const { client } = await this.open(); return client.listTagged("jarcRun", runId); }
 }
 
 module.exports = { GoogleDriveFileStore, KIND, CHUNK_BYTES };

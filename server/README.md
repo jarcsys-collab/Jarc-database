@@ -210,6 +210,26 @@ To turn it on:
 3. As a Google Drive administrator, choose **Connect Google Drive** on the Integrations page. New attachments still go to the current store.
 4. When it has been checked, set `ATTACHMENTS_STORE=gdrive`. Setting it back only affects new uploads; files already in Drive stay readable as long as Google Drive stays enabled.
 
+## Machine Installation Database attachment import (temporary)
+
+The monday.com records migration (M5) left the board's files on monday.com. This one-off import moves them into Google Drive, onto the records they belong to (`services/mid-attachment-run.js`, `routes/mid-attachments.js`; the file writer it shares with the migration tool is `files/migration-writer.js`). It runs **inside the server**, because only the server holds the Google Drive connection.
+
+- **Switched on only for the import:** while `MID_ATTACHMENTS_MIGRATION` is unset, its routes don't exist and its worker does nothing. When it's set, it also needs `MID_MIGRATION_MONDAY_TOKEN`, a monday.com token that can read the board (a secret), plus `GOOGLE_DRIVE_ENABLED=true`. `MID_MIGRATION_CONCURRENCY` (1–3, default 2) sets how many files run at once. Remove all three when the import is done.
+- **Who:** only Google Drive administrators (`GOOGLE_DRIVE_ADMIN_OIDS`), from the Integrations page. `JARC.Admin` alone isn't enough. Every endpoint is checked on the server.
+- **The plan:** `node server/scripts/mid-attachments-plan.js` builds it from the Git-ignored local migration files, into `monday-migration/mid-attachments-plan.json`. It contains real file names, so it never belongs in Git. The administrator uploads it on the Integrations page, and the server checks every entry against production. Its SHA-256 names the run (`mid-…`).
+- **Steps, each started by hand:**
+  1. **Dry run:** read-only. It checks the record, the item mapping, the Files column and any existing attachment, plus Google Drive and JARC capacity, and optionally that monday.com still has every file at the expected size.
+  2. **Prepare:** records the run and one entry per file. Repeating it adds nothing.
+  3. **Start a pilot** (at most 20 files) or the **full run**: only with a recorded `jarc_database` backup, no more than 24 hours old, and enough storage. You can pause, resume or stop at any time.
+  - **What "enough storage" means:** Google Drive's free space comes from the account's actual quota as Google reports it at that moment (`about.storageQuota`), whatever plan the account has, never from an assumed size. It must cover what's still to import plus a margin (256 MB, or 5% if larger). Separately, JARC's own `ATTACHMENTS_GDRIVE_MAX_TOTAL_MB` must leave room for what's still to import, counting everything already stored in Drive. Each file also reserves its size against that limit before it's stored.
+  4. **Verify:** a read-only reconciliation of the attachments, mappings and the run's Drive files, comparing size and SHA-256, plus re-downloading a sample.
+  5. **Roll back**, typing `ROLLBACK <run>` to confirm: this run's Drive files go to Trash, and its attachments, asset mappings and storage counters are removed. Nothing else changes.
+- **Each file:** the server gets a fresh download link from monday.com and reads the file to exactly the inventoried size, computing its SHA-256. The migration's own writer then stores it with a pre-generated Drive ID, so it can't be duplicated, and verifies it. The file is tagged `jarcKind: mig` and `jarcRun` in Drive, so the sweep never touches it.
+  - **Temporary problems** retry with backoff, up to 5 attempts.
+  - **A full or disconnected Drive, or a refused monday.com token,** pauses the run.
+  - **Permanent problems,** such as a missing record or a file gone from monday.com, fail that file only.
+- **What's kept:** original names (JFIF names too, served as JPEG), HEIC as download-only, and CSV as download-only. Records are never written.
+
 ## Search index, forms and imports
 
 **Search index** (`RECORD_SEARCH_INDEX`, `services/record-search-index.js`). With `on`, global and board search, including status, priority and assignee filters, answer from the `recordSearch` collection, once a catch up has verified it complete. A failed update takes it out of use until it has been repaired and verified again; until then search answers from the records. `node scripts/search-index.js verify|rebuild --target local --db <db>` checks or repairs it (production verify is read-only; a production rebuild needs `--confirm-production`).

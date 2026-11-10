@@ -49,14 +49,13 @@ function mockGoogle({ email = ACCOUNT } = {}) {
   const list = (q, url) => {
     let found = [...m.files.values()];
     if (/trashed=false/.test(q)) found = found.filter((f) => !f.trashed);
-    const kind = /key='jarcKind' and value='([a-z]+)'/.exec(q)?.[1];
-    if (kind) found = found.filter((f) => f.appProperties?.jarcKind === kind);
+    for (const [, key, value] of q.matchAll(/key='([A-Za-z]+)' and value='([^']+)'/g)) found = found.filter((f) => f.appProperties?.[key] === value);
     const mime = /mimeType='([^']+)'/.exec(q)?.[1];
     if (mime) found = found.filter((f) => f.mimeType === mime);
     const before = /createdTime < '([^']+)'/.exec(q)?.[1];
     if (before) found = found.filter((f) => new Date(f.createdTime) < new Date(before));
     const size = Number(url.searchParams.get("pageSize") || 100), start = Number(url.searchParams.get("pageToken") || 0), page = found.slice(start, start + size);
-    return json({ files: page.map((f) => ({ id: f.id, name: f.name })), ...(start + size < found.length ? { nextPageToken: String(start + size) } : {}) });
+    return json({ files: page.map((f) => ({ id: f.id, name: f.name, ...(f.size !== undefined ? { size: f.size } : {}), ...(f.sha256Checksum ? { sha256Checksum: f.sha256Checksum } : {}), appProperties: f.appProperties || {} })), ...(start + size < found.length ? { nextPageToken: String(start + size) } : {}) });
   };
   const putRange = async (session, init) => {
     if (init.method === "DELETE") { m.sessions.delete(session.id); return new Response(null, { status: 499 }); }
@@ -93,7 +92,7 @@ function mockGoogle({ email = ACCOUNT } = {}) {
       return new Response(null, { status: 200, headers: { Location: `https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=${id}` } });
     }
     const path = url.pathname.slice("/drive/v3".length), fields = url.searchParams.get("fields");
-    if (path === "/about") return json({ user: { emailAddress: m.email, permissionId: m.permissionId } });
+    if (path === "/about") return json({ user: { emailAddress: m.email, permissionId: m.permissionId }, ...(m.quota ? { storageQuota: { limit: String(m.quota.limit), usage: String(m.quota.usage) } } : {}) });
     if (path === "/files/generateIds") return json({ ids: [`gen-${crypto.randomBytes(8).toString("hex")}`] });
     if (path === "/files" && init.method === "POST") {
       const body = JSON.parse(init.body);

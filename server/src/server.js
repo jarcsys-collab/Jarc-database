@@ -23,7 +23,7 @@ async function main() {
     connection = new MongoConnection({ uri: config.mongo.uri, dbName: config.mongo.dbName });
     await connection.connect();
     const { createdCollections } = await ensureDatabase(connection.db, { features: { ...config.features, apiTokens: config.apiTokens.enabled } });
-    dataLayer = createDataLayer({ connection, maxFileStorageBytes: config.maxFileStorageBytes, attachments: config.attachments, monday: config.monday, googleDrive: config.googleDrive, recordSearch: config.recordSearch });
+    dataLayer = createDataLayer({ connection, maxFileStorageBytes: config.maxFileStorageBytes, attachments: config.attachments, monday: config.monday, googleDrive: config.googleDrive, midAttachments: config.midAttachments, environment: config.nodeEnv, recordSearch: config.recordSearch });
     if (config.enableDevResourceApi) devActor = await ensureDevelopmentActor(dataLayer.repos.users, { environment: config.nodeEnv });
     console.log(`MongoDB connected (database ${config.mongo.dbName}).${createdCollections.length ? ` Created collections: ${createdCollections.join(", ")}.` : ""}`);
   }
@@ -37,6 +37,7 @@ async function main() {
     console.log(`JARC Database server (${config.nodeEnv}) on http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${port}/`);
     console.log(`Optional features: native forms ${config.features.nativeForms ? "on" : "off"}, Excel and CSV imports ${config.features.spreadsheetImports ? "on" : "off"}, API tokens ${config.apiTokens.enabled ? "on" : "off"}, Google Drive ${config.googleDrive.enabled ? "on" : "off"}. New attachments go to ${config.attachments.defaultProvider}.`);
     if (config.googleDrive.enabled) console.log(`Google Drive administrators configured: ${config.googleDrive.adminObjectIds.length}${config.googleDrive.adminObjectIds.length ? "" : " (nobody can connect or disconnect Google Drive until GOOGLE_DRIVE_ADMIN_OIDS is set)"}.`);
+    if (config.midAttachments.enabled) console.warn(`MID_ATTACHMENTS_MIGRATION=true: the Machine Installation Database attachment import can be managed by Google Drive administrators (${config.midAttachments.concurrency} file(s) at a time). Remove this setting when the import is finished.`);
     if (config.enableDevStateApi) console.log("Development state API enabled: data is kept in memory only and is cleared when the server restarts.");
     else console.log("Development state API disabled (production). Only health endpoints and the frontend are served.");
     if (config.enableDevResourceApi) console.log("Resource API enabled for DEVELOPMENT / PRE-AUTH use: no authentication; every change is attributed to the local development actor.");
@@ -66,9 +67,13 @@ async function main() {
   // unfinished import waits, for as long as its uploaded rows are kept (7 days).
   if (config.features.spreadsheetImports) dataLayer?.services.importJobs.startWorker();
 
+  // Machine Installation Database attachment import: the worker only does something while a run is started (or rolling back).
+  const midAttachments = dataLayer?.services.midAttachments || null;
+  midAttachments?.startWorker();
+
   let stopping = false;
   const shutdown = () => {
-    clearInterval(sweep); clearTimeout(firstSweep); integrationWorker?.stop(); dataLayer?.services.importJobs.stopWorker();
+    clearInterval(sweep); clearTimeout(firstSweep); integrationWorker?.stop(); dataLayer?.services.importJobs.stopWorker(); midAttachments?.stopWorker();
     app.locals.realtime?.closeAll(); // open live-update streams would otherwise keep the server from closing
     if (stopping) return;
     stopping = true;

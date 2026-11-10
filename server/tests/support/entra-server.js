@@ -12,6 +12,8 @@
 //   POST /__test/monday { connect, run }  → store a (mock) connection directly / run due integration jobs once
 //   JARC_TEST_GDRIVE=1: Google Drive storage is on, against the MOCK Google (tests/support/mock-google-drive);
 //   JARC_TEST_GDRIVE_ADMINS: the Drive administrators' object IDs (GOOGLE_DRIVE_ADMIN_OIDS)
+//   JARC_TEST_MID=1 (with JARC_TEST_GDRIVE=1): the Machine Installation Database attachment import is on (monday.com refused)
+//   POST /__test/mid { run: true }  → store a synthetic prepared run with two files, to show its controls
 //   POST /__test/google-drive { connect, revoke }  → store a (mock) connection directly / make Google refuse it
 const express = require("express");
 const { ObjectId } = require("mongodb");
@@ -42,7 +44,8 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
   const google = googleMock?.mockGoogle();
   // JARC_TEST_GDRIVE_ADMINS: GOOGLE_DRIVE_ADMIN_OIDS for this run (comma-separated test object IDs).
   const googleConfig = googleMock ? require("../../src/config").loadGoogleDriveConfig({ ...googleMock.ENV, GOOGLE_DRIVE_ADMIN_OIDS: process.env.JARC_TEST_GDRIVE_ADMINS || "" }, "test", "entra") : null;
-  const dataLayer = createDataLayer({ connection, logger: { error() {} }, fileStore: new MemoryFileStore(), monday: mondayConfig, googleDrive: googleConfig, recordSearch: process.env.JARC_TEST_RECORD_SEARCH || "off", ...(mock ? { fetch: mock.fetch } : google ? { fetch: google.fetch } : {}) });
+  const midConfig = googleMock && process.env.JARC_TEST_MID === "1" ? require("../../src/config").loadMidAttachmentsConfig({ MID_ATTACHMENTS_MIGRATION: "true", GOOGLE_DRIVE_ENABLED: "true", MID_MIGRATION_MONDAY_TOKEN: "test-only" }) : null;
+  const dataLayer = createDataLayer({ connection, logger: { error() {} }, fileStore: new MemoryFileStore(), monday: mondayConfig, googleDrive: googleConfig, midAttachments: midConfig, midAttachmentsOptions: { mondayFetch: async (u) => { throw new Error(`refused ${u}`); } }, recordSearch: process.env.JARC_TEST_RECORD_SEARCH || "off", ...(mock ? { fetch: mock.fetch } : google ? { fetch: google.fetch } : {}) });
   await dataLayer.searchIndex.catchUp();
   const verify = createEntraVerifier({ ...entra, keySet: issuer.keySet });
   // Optional 2nd argument "shared": ACCESS_POLICY=development_shared (as on Railway); default role_based.
@@ -67,6 +70,13 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
     res.json({ ok: true });
   });
   outer.get("/__test/stats", (req, res) => res.json(sim));
+  outer.post("/__test/mid", express.json(), async (req, res) => {
+    if (!midConfig) return res.status(404).json({ error: "import not enabled" });
+    const runId = "mid-0123456789abcdef", now = new Date(), board = new ObjectId();
+    await connection.db.collection("integrationJobs").insertOne({ _id: runId, provider: "mid-attachments", type: "mid-attachments-run", status: "prepared", planDigest: "0".repeat(64), sourceRunId: "monday-1-000000000000", boardId: board, workspaceId: new ObjectId(), totals: { files: 2, bytes: 2048 }, remaining: 0, backups: [], createdAt: now, updatedAt: now, runAfter: now });
+    for (const assetId of ["1", "2"]) await connection.db.collection("integrationJobs").insertOne({ _id: `${runId}:${assetId}`, provider: "mid-attachments", type: "mid-attachment", runId, status: "queued", attempts: 0, runAfter: now, createdAt: now, params: { assetId, attachmentId: new ObjectId().toHexString(), recordId: new ObjectId().toHexString(), name: `file-${assetId}.pdf`, sizeBytes: 1024 } });
+    res.json({ ok: true, runId });
+  });
   outer.post("/__test/google-drive", express.json(), async (req, res) => {
     if (!google) return res.status(404).json({ error: "Google mock not enabled" });
     if (req.body.connect) {

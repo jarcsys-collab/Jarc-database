@@ -68,6 +68,23 @@ class DriveClient {
   jsonBody(method, body) { return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }; }
 
   about() { return this.json(`${API}/about?fields=${encodeURIComponent("user(emailAddress,permissionId)")}`); }
+  // The account's storage: { limitBytes (null when unlimited), usageBytes }.
+  async quota() {
+    const { storageQuota: q } = await this.json(`${API}/about?fields=${encodeURIComponent("storageQuota(limit,usage)")}`);
+    return { limitBytes: q?.limit ? Number(q.limit) : null, usageBytes: Number(q?.usage || 0) };
+  }
+  // Every file (not in Trash) carrying one JARC tag, e.g. jarcRun = a migration run: [{ id, kind, size, sha256 }].
+  async listTagged(name, value) {
+    if (!/^jarc[A-Z][A-Za-z]{1,20}$/.test(name) || !/^[A-Za-z0-9._:-]{1,100}$/.test(String(value))) throw new Error("Invalid tag.");
+    const q = `trashed=false and appProperties has { key='${name}' and value='${value}' }`, out = [];
+    let pageToken = null;
+    do {
+      const page = await this.json(`${API}/files?q=${encodeURIComponent(q)}&pageSize=1000&fields=${encodeURIComponent("nextPageToken,files(id,size,sha256Checksum,appProperties)")}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""}`);
+      for (const f of page.files || []) out.push({ id: f.id, kind: f.appProperties?.jarcKind || null, size: Number(f.size), sha256: f.sha256Checksum || null });
+      pageToken = page.nextPageToken || null;
+    } while (pageToken);
+    return out;
+  }
   async generateId() { const { ids } = await this.json(`${API}/files/generateIds?count=1&fields=ids`); if (!ids?.[0]) throw unavailable(); return ids[0]; }
   getFile(id, fields) { return this.json(`${API}/files/${encodeURIComponent(id)}?fields=${encodeURIComponent(fields)}`); }
 

@@ -135,7 +135,7 @@ class FileService {
     return new Promise((resolve, reject) => {
       const hash = crypto.createHash("sha256");
       let bytes = 0, head = Buffer.alloc(0), checked = false, settled = false;
-      const target = to.store.openUpload(to.key, { filename: plan.fileName, contentType: plan.type, length: plan.length, sha256: expectedSha, attachmentId: to.attachmentId });
+      const target = to.store.openUpload(to.key, { filename: plan.fileName, contentType: plan.type, length: plan.length, sha256: expectedSha, attachmentId: to.attachmentId, ...(to.kind ? { kind: to.kind } : {}), ...(to.tags ? { tags: to.tags } : {}) });
       const check = () => { checked = true; return types[plan.type].matches(head); };
       const guard = new Transform({
         transform(chunk, _encoding, callback) {
