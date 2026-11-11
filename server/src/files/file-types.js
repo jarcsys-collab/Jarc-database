@@ -56,4 +56,27 @@ function classifyAsset({ name, extension, sizeBytes }, { migrationMaxBytes = 20 
   return r;
 }
 
-module.exports = { TYPES, MIGRATION_TYPES, MAX_FILE_BYTES, MAX_FILES_PER_CELL, SNIFF_BYTES, cleanFileName, classifyAsset };
+// Migration only: a file whose bytes don't match the type its name implied (monday.com infers the type from the name, so a
+// JPEG saved as "photo.png" was planned as image/png). Uses the same signature checks as the upload guard, so validation
+// is not loosened: the bytes must still match one of the accepted types, and they are checked again against it as they
+// are stored (files/file-service.js receive).
+//   → { declared, detected, matchesDeclared, corrected }   corrected: the type to store under, or null to keep the
+//     declared one (it matches) or to refuse the file (nothing matches, or the declared type isn't an image).
+// Only image-to-image corrections are made: a file planned as an image whose content is another accepted image type.
+// A "PDF" that is really an image, or an image that is really a PDF, CSV or anything else, stays refused.
+const IMAGE_ORDER = Object.freeze(["image/jpeg", "image/png", "image/webp", "image/heic"]);
+function detectContentType(bytes, declared, types = MIGRATION_TYPES) {
+  const head = Buffer.from(bytes.subarray ? bytes.subarray(0, SNIFF_BYTES) : bytes).subarray(0, SNIFF_BYTES);
+  const matchesDeclared = Boolean(types[declared]?.matches(head));
+  const detected = matchesDeclared ? declared : (IMAGE_ORDER.find((t) => types[t]?.matches(head)) || (types["application/pdf"]?.matches(head) ? "application/pdf" : null));
+  const corrected = !matchesDeclared && String(declared).startsWith("image/") && detected && detected.startsWith("image/") ? detected : null;
+  return { declared, detected, matchesDeclared, corrected };
+}
+// The stored name for a corrected type: the original name with the extension of what the file really is ("photo.png" holding
+// a JPEG → "photo.jpg"), as JFIF files are renamed to .jpg. The original name stays in the attachment's imported.originalName.
+function correctedName(name, type, types = MIGRATION_TYPES) {
+  const raw = String(name || "file"), base = raw.includes(".") ? raw.slice(0, raw.lastIndexOf(".")) || "file" : raw;
+  return `${base}.${types[type].extensions[0]}`;
+}
+
+module.exports = { TYPES, MIGRATION_TYPES, MAX_FILE_BYTES, MAX_FILES_PER_CELL, SNIFF_BYTES, cleanFileName, classifyAsset, detectContentType, correctedName };

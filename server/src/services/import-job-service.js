@@ -17,6 +17,7 @@
 // job can only ever write to the board it created. That board can be removed again, as long as nobody has changed it since.
 const crypto = require("crypto");
 const { ObjectId } = require("mongodb");
+const { monitor } = require("../monitoring/monitor");
 const { ApiError } = require("../middleware/errors");
 const { COLLECTIONS } = require("../db/bootstrap");
 const { fail, isObject, requireBody, allowOnly } = require("../validation/common");
@@ -517,6 +518,7 @@ class ImportJobService {
   }
   halt(job, reason) { return this.jobs.updateOne({ _id: job._id, leaseOwner: this.workerId }, { $set: { status: "paused", lastError: reason, leaseOwner: null, leaseUntil: null, updatedAt: new Date() } }); }
   async finish(job, status, reason = null) {
+    if (status === "failed") monitor.recordJobFailure({ kind: "spreadsheet-import", code: null }); // System Health (the reason stays in the job)
     const updated = await this.jobs.findOneAndUpdate({ _id: job._id, leaseOwner: this.workerId }, { $set: { status, lastError: reason, finishedAt: new Date(), leaseOwner: null, leaseUntil: null, updatedAt: new Date() }, $unset: { expiresAt: "", "validation.preview": "" } }, { returnDocument: "after" });
     this.logger.log?.(`[imports] ${job._id.toHexString()} ${status}: ${updated?.imported ?? 0} imported, ${updated?.skippedDuplicates ?? 0} skipped, ${updated?.rejected ?? 0} rejected.`);
     await this.batches.deleteMany({ jobId: job._id });

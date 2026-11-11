@@ -8,6 +8,10 @@
 //   paging    items: boards(ids){ items_page(limit){ cursor items } } then next_items_page(cursor) — items_page is
 //             queried at the top level of the board (nesting it in groups multiplies complexity).
 const API_URL = "https://api.monday.com/v2";
+const { monitor } = require("../../monitoring/monitor");
+// Every attempt is reported to the System Health page (outcome, HTTP status, monday's error code, wait): never the query,
+// its variables, the token or the reply.
+const reportToMonitor = (event) => monitor.recordIntegration("monday", event);
 
 class MondayApiError extends Error {
   constructor(message, { status = 0, code = "MONDAY_ERROR", retryable = false } = {}) { super(message); this.name = "MondayApiError"; this.status = status; this.code = code; this.retryable = retryable; }
@@ -16,23 +20,26 @@ class MondayApiError extends Error {
 const ITEM_FIELDS = "id name updated_at state group { id title } column_values { id type text value }";
 
 class MondayClient {
-  constructor({ token, apiVersion = null, fetch: fetchImpl = globalThis.fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), maxRetries = 4, timeoutMs = 30000 }) {
+  constructor({ token, apiVersion = null, fetch: fetchImpl = globalThis.fetch, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), maxRetries = 4, timeoutMs = 30000, observe = reportToMonitor }) {
     if (!token) throw new MondayApiError("No monday.com access token.", { code: "NOT_CONNECTED" });
     Object.defineProperty(this, "token", { value: token, enumerable: false });
-    Object.assign(this, { apiVersion, fetchImpl, sleep, maxRetries, timeoutMs });
+    Object.assign(this, { apiVersion, fetchImpl, sleep, maxRetries, timeoutMs, observe });
   }
+  note(event) { try { this.observe?.({ op: "query", ...event }); } catch { /* monitoring never breaks a call */ } }
 
   async query(query, variables = {}) {
     if (/^\s*mutation\b/i.test(query)) throw new MondayApiError("JARC never sends changes to monday.com.", { code: "MUTATION_BLOCKED" });
     for (let attempt = 0; ; attempt += 1) {
       let res, body;
-      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), this.timeoutMs), started = Date.now();
       try {
         res = await this.fetchImpl(API_URL, { method: "POST", signal: controller.signal, headers: { "Content-Type": "application/json", Authorization: this.token, ...(this.apiVersion ? { "API-Version": this.apiVersion } : {}) }, body: JSON.stringify({ query, variables }) });
         body = await res.json().catch(() => null);
       } catch (error) {
         clearTimeout(timer);
-        if (attempt < this.maxRetries) { await this.sleep(this.backoff(attempt)); continue; }
+        const timedOut = controller.signal.aborted;
+        if (attempt < this.maxRetries) { this.note({ outcome: "retry", code: timedOut ? "TIMEOUT" : "NETWORK_ERROR", ms: Date.now() - started }); await this.sleep(this.backoff(attempt)); continue; }
+        this.note({ outcome: timedOut ? "timeout" : "failed", code: timedOut ? "TIMEOUT" : "NETWORK_ERROR", ms: Date.now() - started });
         throw new MondayApiError("monday.com could not be reached.", { code: "NETWORK_ERROR", retryable: true });
       }
       clearTimeout(timer);
@@ -41,12 +48,15 @@ class MondayClient {
       const limited = res.status === 429 || /complexity|rate.?limit|budget/i.test(String(code || "")) || errors.some((e) => /complexity|rate limit/i.test(e.message || ""));
       if ((limited || res.status >= 500) && attempt < this.maxRetries) {
         const wait = Number(res.headers?.get?.("retry-after")) * 1000 || Number(errors[0]?.extensions?.retry_in_seconds) * 1000 || this.backoff(attempt);
+        this.note({ outcome: "retry", status: res.status, code: limited ? "RATE_LIMITED" : code || `HTTP_${res.status}`, retryAfterMs: Math.min(wait, 60000), ms: Date.now() - started });
         await this.sleep(Math.min(wait, 60000));
         continue;
       }
-      if (res.status === 401 || res.status === 403 || /unauthori[sz]ed|USER_UNAUTHORIZED|not authenticated/i.test(String(code || "") + (errors[0]?.message || ""))) throw new MondayApiError("monday.com refused the access token. Reconnect the integration.", { status: res.status, code: "UNAUTHORIZED" });
-      if (limited) throw new MondayApiError("monday.com's rate limit was reached. Try again in a minute.", { status: res.status, code: "RATE_LIMITED", retryable: true });
-      if (!res.ok || errors.length || !body?.data) throw new MondayApiError(`monday.com returned an error${code ? ` (${code})` : ""}.`, { status: res.status, code: code || "MONDAY_ERROR", retryable: res.status >= 500 });
+      const failed = (c) => this.note({ outcome: "failed", status: res.status, code: c, ms: Date.now() - started });
+      if (res.status === 401 || res.status === 403 || /unauthori[sz]ed|USER_UNAUTHORIZED|not authenticated/i.test(String(code || "") + (errors[0]?.message || ""))) { failed("UNAUTHORIZED"); throw new MondayApiError("monday.com refused the access token. Reconnect the integration.", { status: res.status, code: "UNAUTHORIZED" }); }
+      if (limited) { failed("RATE_LIMITED"); throw new MondayApiError("monday.com's rate limit was reached. Try again in a minute.", { status: res.status, code: "RATE_LIMITED", retryable: true }); }
+      if (!res.ok || errors.length || !body?.data) { failed(code || `HTTP_${res.status}`); throw new MondayApiError(`monday.com returned an error${code ? ` (${code})` : ""}.`, { status: res.status, code: code || "MONDAY_ERROR", retryable: res.status >= 500 }); }
+      this.note({ outcome: "ok", status: res.status, ms: Date.now() - started });
       return body.data;
     }
   }

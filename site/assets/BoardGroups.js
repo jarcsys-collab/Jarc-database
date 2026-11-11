@@ -10,15 +10,17 @@ Object.assign(AppView.prototype, {
   boardGroupsView(rows, model) {
     const filtering = Boolean(model.query || model.status !== "All" || model.quickFilter !== "all" || model.columnFilter || model.personFilter);
     const known = new Set(model.board.groups), archived = new Set(model.archivedGroupNames), editable = !model.board.source?.readOnly;
-    const sections = model.activeGroups.map((name) => ({ name, rows: rows.filter((r) => model.groupOf(r) === name) }))
+    // One pass over the rows (not one per group): each row goes to its group's list, keeping the rows' order.
+    const byGroup = new Map(model.board.groups.map((name) => [name, []])), loose = [];
+    for (const r of rows) { const list = byGroup.get(model.groupOf(r)); if (list) list.push(r); else loose.push(r); }
+    const sections = model.activeGroups.map((name) => ({ name, rows: byGroup.get(name) }))
       .filter((s) => !filtering || s.rows.length || model.groupDisplayCount?.(s.name, 0) > 0);
-    const loose = rows.filter((r) => !known.has(model.groupOf(r)));
     const shown = [...sections.flatMap((s) => (model.isGroupCollapsed(s.name) ? [] : s.rows)), ...loose];
     // Large board: only the rows near the viewport are in the page; the rest are spacers (see groupRowsHtml).
     const large = rows.length > AppView.LARGE_BOARD_ROWS || Boolean(model.serverView);
     this.virtual = large ? new Map() : null;
     const bodies = sections.map((s) => this.groupSection(model, s.name, s.rows, { editable, large })).join("") + (loose.length ? this.groupSection(model, "", loose, { editable, loose: true, large }) : "");
-    const hiddenCount = rows.filter((r) => archived.has(model.groupOf(r))).length;
+    const hiddenCount = [...archived].reduce((n, name) => n + (byGroup.get(name)?.length || 0), 0);
     const footer = `<div class="group-footer">${editable ? `<button type="button" class="add-group-button" data-action="group-new">${icon("plus")}<span>Add new group</span></button>` : ""}${archived.size ? `<button type="button" class="link-button archived-groups-button" data-action="group-archived" aria-haspopup="menu">${archived.size} archived group${archived.size === 1 ? "" : "s"}${hiddenCount ? ` · ${hiddenCount} record${hiddenCount === 1 ? "" : "s"}` : ""}</button>` : ""}</div>`;
     const table = bodies ? this.table(shown, model, "", bodies) : `<div class="quiet-empty">${icon("records")}<span><strong>No records match</strong></span></div>`;
     return `<section class="data-region board-groups">${table}${footer}</section>`;
@@ -85,13 +87,14 @@ Object.assign(AppView.prototype, {
   },
 
   // ---- Group menus and dialogs
+  collapseShortcutLabel() { return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "") ? "⌘ D" : "Ctrl D"; },
   showGroupMenu(model, name) {
     const editable = !model.board.source?.readOnly, collapsed = model.isGroupCollapsed(name), list = model.board.groups, i = list.indexOf(name);
     const item = (action, ic, label, extra = "") => `<button role="menuitem" data-action="${action}" data-group="${this.attr(name)}" ${extra}>${icon(ic)} ${label}</button>`;
     const swatch = (c) => `<button type="button" role="menuitemradio" aria-checked="${model.groupColor(name) === c.value}" class="color-swatch" data-action="group-color" data-group="${this.attr(name)}" data-color="${c.value}" style="--swatch:${c.value}" aria-label="${c.name}" title="${c.name}"></button>`;
     const swatches = BoardModel.GROUP_COLORS.map(swatch).join("") + `</div><div class="swatch-row is-soft" role="group" aria-label="Muted colours">` + BoardModel.GROUP_SOFT.map(swatch).join("") + `</div><div class="swatch-row swatch-actions"><button type="button" class="link-button" data-action="group-rename" data-group="${this.attr(name)}">Custom…</button><button type="button" class="link-button" data-action="group-color-reset" data-group="${this.attr(name)}" ${model.board.groupMeta?.[name]?.color ? "" : "disabled"}>Reset to default</button>`;
     document.querySelector("#overlay-root").innerHTML = `<div class="popover group-menu-popover" role="menu" aria-label="Group ${this.attr(name)}"><div class="popover-title"><strong style="color:${this.cssColor(model.groupColor(name))}">${this.escape(name)}</strong><small>${(n=>`${n} record${n===1?"":"s"}`)(model.groupRows(name).length)}</small></div>
-      ${item("group-toggle", "chevron", collapsed ? "Expand this group" : "Collapse this group")}${item("group-collapse-all", "layout", "Collapse all groups")}${item("group-expand-all", "layout", "Expand all groups")}
+      ${item("group-toggle", "chevron", collapsed ? "Expand this group" : "Collapse this group")}${item("group-collapse-all", "layout", `Collapse all groups <kbd class="menu-kbd">${this.collapseShortcutLabel()}</kbd>`, 'aria-keyshortcuts="Control+D Meta+D"')}${item("group-expand-all", "layout", "Expand all groups")}
       ${editable ? `<div class="menu-divider" role="separator"></div>${item("group-add-record", "plus", "Add record")}${item("group-new-below", "plus", "Add group below")}${item("group-rename", "edit", "Rename group")}<div class="menu-section-label" role="presentation">Group colour · shared</div><div class="swatch-row" role="group" aria-label="Official JARC colours">${swatches}</div>
       <div class="menu-divider" role="separator"></div>${item("group-duplicate", "copy", "Duplicate group")}${item("group-duplicate-records", "copy", "Duplicate with records")}${item("group-move-up", "arrowUp", "Move group up", i <= 0 ? "disabled" : "")}${item("group-move-down", "arrowDown", "Move group down", i >= list.length - 1 ? "disabled" : "")}
       <div class="menu-divider" role="separator"></div>${item("group-archive", "archive", "Archive group", model.activeGroups.length <= 1 ? 'disabled title="A board keeps at least one visible group"' : "")}${item("group-delete", "trash", "Delete group", `class="danger" ${list.length <= 1 ? 'disabled title="A board keeps at least one group"' : ""}`)}` : `<p class="menu-note">This board is synced from monday.com and is read-only.</p>`}
@@ -175,7 +178,7 @@ class BoardGroupActions {
     switch (action) {
       case "group-menu": return this.c.togglePanel(`group-menu-${name}`, () => this.view.showGroupMenu(model, name));
       case "group-toggle": { const collapsed = model.toggleGroupCollapsed(name); this.done(); if (!collapsed) this.revealGroup(name); return; }
-      case "group-collapse-all": model.collapseAllGroups(true); return this.done();
+      case "group-collapse-all": this.view.closeOverlay(); this.c.collapseAllBoardGroups({ via: "menu" }); return;
       case "group-expand-all": model.collapseAllGroups(false); return this.done();
       case "group-archived": return this.c.togglePanel("group-archived", () => this.view.showArchivedGroups(model));
       case "group-new": return this.view.showGroupForm(model, { mode: "new" });

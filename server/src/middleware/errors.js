@@ -17,6 +17,7 @@ const SAFE_MESSAGES = Object.freeze({
 function sendError(res, status, code, message, details) {
   const error = { code, message: message || SAFE_MESSAGES[code] || SAFE_MESSAGES.INTERNAL_ERROR };
   if (details !== undefined) error.details = details;
+  if (res.locals) res.locals.errorCode = code; // for the System Health page's recent errors (code only)
   res.status(status).set("Cache-Control", "no-store").json({ error });
 }
 
@@ -30,6 +31,9 @@ const loggedUrl = (req) => {
   return (url.startsWith("/api/v1/search") || url.startsWith("/api/v1/external")) && url.includes("?") ? `${url.split("?")[0]}?[redacted]` : url;
 };
 
+// " [req <id>]" for log lines written while handling a request (see monitoring/request-context.js).
+const requestTag = (req) => (req.requestId ? ` [req ${req.requestId}]` : "");
+
 // Final error middleware. Known errors keep their code; everything else becomes a generic INTERNAL_ERROR.
 function errorHandler(logger) {
   // eslint-disable-next-line no-unused-vars -- Express identifies error middleware by its four arguments.
@@ -42,11 +46,11 @@ function errorHandler(logger) {
     if (isMongoError(error)) {
       const mapped = translateMongoError(error);
       // Server-side only, and redacted: driver messages can name hosts or contain connection strings.
-      if (mapped.status >= 500) logger.error(`[api] ${req.method} ${loggedUrl(req)} database error: ${error.name}${error.code ? ` ${error.code}` : ""} ${redact(error.message)}`);
+      if (mapped.status >= 500) logger.error(`[api]${requestTag(req)} ${req.method} ${loggedUrl(req)} database error: ${error.name}${error.code ? ` ${error.code}` : ""} ${redact(error.message)}`);
       return sendError(res, mapped.status, mapped.code, mapped.message);
     }
     if (error?.status >= 400 && error?.status < 500) return sendError(res, error.status, "VALIDATION_ERROR");
-    logger.error(`[api] ${req.method} ${loggedUrl(req)} failed:`, error); // server-side only
+    logger.error(`[api]${requestTag(req)} ${req.method} ${loggedUrl(req)} failed:`, error); // server-side only
     return sendError(res, 500, "INTERNAL_ERROR");
   };
 }

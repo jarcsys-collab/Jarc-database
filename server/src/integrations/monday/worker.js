@@ -5,6 +5,7 @@
 // stop as "failed" (shown on the dashboard, retryable by an administrator).
 const crypto = require("crypto");
 const { redact } = require("../../db/connection");
+const { monitor } = require("../../monitoring/monitor");
 const { PROVIDER, SYNC_TYPES } = require("./service");
 
 const LEASE_MS = 120000;
@@ -53,6 +54,7 @@ class IntegrationWorker {
       const final = (job.attempts || 1) >= MAX_ATTEMPTS || ["UNAUTHORIZED", "MONDAY_UNAUTHORIZED", "NOT_CONNECTED"].includes(error?.code);
       const delay = Math.min(30 * 60000, 30000 * 2 ** ((job.attempts || 1) - 1));
       await this.repos.integrations.updateJob(job._id, final ? { status: "failed", finishedAt: this.now(), lockedUntil: null, error: message } : { status: "retry", runAfter: new Date(this.now().getTime() + delay), lockedUntil: null, error: message }, { workerId: this.workerId });
+      if (final) monitor.recordJobFailure({ kind: `monday.${job.type}`, code: error?.code || null }); // System Health
       const unauthorized = ["UNAUTHORIZED", "MONDAY_UNAUTHORIZED"].includes(error?.code);
       await this.repos.integrations.set(PROVIDER, { lastError: message, lastErrorAt: this.now(), ...(unauthorized ? { status: "needs_reconnect" } : {}) });
       this.logger.error(`[monday] ${job.type} job ${job._id} ${final ? "failed" : "will retry"}: ${redact(message)}`);

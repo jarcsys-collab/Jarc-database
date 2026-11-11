@@ -8,6 +8,9 @@ const path = require("path");
 const express = require("express");
 const { healthRoutes } = require("./routes/health");
 const { slowRequestLog } = require("./middleware/slow-requests");
+const { requestContext } = require("./monitoring/request-context");
+const { monitor: defaultMonitor } = require("./monitoring/monitor");
+const { systemHealthRoutes } = require("./routes/system-health");
 const { stateRoutes } = require("./routes/state");
 const { resourceRoutes } = require("./routes/resources");
 const { memberRoutes } = require("./routes/members");
@@ -62,7 +65,7 @@ const resolveFeatures = (features = {}, environment = "development") => { const 
 // auth/accounts.js) { mode: off | staged | enforced, superAdmin }; Entra sign-in only. features: the optional features switched
 // on, { nativeForms, spreadsheetImports } (config/index.js); anything not stated is off in production and on elsewhere.
 // apiTokens: { key, perMinute? } turns on API tokens for other systems (config/index.js); Entra sign-in only. Without it their paths don't exist.
-function createApp({ apiTokens = null, features = {}, repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console, slowRequestMs = 0 } = {}) {
+function createApp({ apiTokens = null, features = {}, repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console, slowRequestMs = 0, monitor = defaultMonitor } = {}) {
   if (environment === "production" && (enableDevStateApi || enableDevResourceApi)) {
     throw new Error("Development (pre-auth) APIs can't be enabled in production.");
   }
@@ -79,6 +82,8 @@ function createApp({ apiTokens = null, features = {}, repository, environment = 
 
   const api = express.Router();
   api.use(slowRequestLog({ logger, thresholdMs: slowRequestMs }));
+  // First, so every API response (errors included) carries X-Request-Id and is timed for System Health.
+  api.use(requestContext({ monitor }));
   // The token API takes no request bodies, so it comes before the body parser. Filled in below when API tokens are on.
   const external = express.Router();
   api.use("/external", external);
@@ -135,6 +140,8 @@ function createApp({ apiTokens = null, features = {}, repository, environment = 
     // The Machine Installation Database attachment import: only while switched on, only for Google Drive administrators.
     if (googleDrive && dataLayer.services?.midAttachments) api.use(identify, midAttachmentRoutes({ migration: dataLayer.services.midAttachments, canManage: (actor) => actorCanManageDrive(actor, googleDrive.config, auth.entra.tenantId) }));
     // Live updates (Server-Sent Events) from the activity log; live: { pollMs, overlapMs, timings } for tests.
+    // System Health, Integration Reliability and Activity History: JARC administrators only (checked in each route).
+    api.use(identify, systemHealthRoutes({ dataLayer, access, environment, version, monitor, enabled, canManageDrive: googleDrive ? (actor) => actorCanManageDrive(actor, googleDrive.config, auth.entra.tenantId) : () => false }));
     const stream = new ActivityStream({ activities: dataLayer.repos.activities, logger, ...(live.pollMs ? { pollMs: live.pollMs } : {}), ...(live.overlapMs ? { overlapMs: live.overlapMs } : {}) });
     app.locals.realtime = stream;
     api.use(identify, eventRoutes({ stream, access, repos: dataLayer.repos, sessionCheck: auth ? entraSessionCheck({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users }) : null, timings: live.timings }));

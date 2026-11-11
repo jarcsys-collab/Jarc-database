@@ -1,6 +1,7 @@
 // Small helpers shared by the resource services.
 const { ApiError } = require("../middleware/errors");
 const { redact } = require("../db/connection");
+const { currentRequestId } = require("../monitoring/request-context");
 
 const notFound = (what) => new ApiError(404, "NOT_FOUND", `This ${what} doesn't exist or was deleted.`);
 const conflict = (what, current) => new ApiError(409, "CONFLICT", `This ${what} was changed by someone else. Reload it and try again.`, { currentVersion: current.version });
@@ -13,8 +14,13 @@ async function missingOrStale(repository, id, what) {
 
 // actorName is a snapshot of the actor's display name when the change was made (from the signed-in session, never
 // from the request), so history stays readable if the person is renamed later. Older entries have none.
+// requestId: the API request that made the change (monitoring/request-context.js), so an entry can be matched to the server
+// log and to System Health's recent errors. Left out when the change didn't come from a request (workers, scripts).
 function activityEntry({ workspaceId, boardId = null, recordId = null, actorUserId, actorName = null, action, entityType, entityId, changes = [], summary = "", now }) {
-  return { workspaceId, boardId, recordId, actorUserId, actorName: typeof actorName === "string" && actorName ? actorName.slice(0, 200) : null, action, entityType, entityId, changes, summary, createdAt: now };
+  const entry = { workspaceId, boardId, recordId, actorUserId, actorName: typeof actorName === "string" && actorName ? actorName.slice(0, 200) : null, action, entityType, entityId, changes, summary, createdAt: now };
+  const requestId = currentRequestId();
+  if (requestId) entry.requestId = requestId;
+  return entry;
 }
 
 // Activity is history, not the source of truth: outside a transaction, a failure to append it is logged and the

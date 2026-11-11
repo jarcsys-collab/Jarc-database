@@ -630,3 +630,138 @@ describe("rollback and existing attachments", () => {
     await ctx.app.close();
   });
 });
+
+// ---- A file whose content isn't the type its name says (a JPEG saved as ".png"): detected by its signature, stored as what it
+// really is; anything that matches no accepted type stays refused. Inspect is read-only; a retry is exactly one failed file.
+const { detectContentType, correctedName, MIGRATION_TYPES } = require("../src/files/file-types");
+const sameSize = (head, n) => Buffer.concat([head, crypto.randomBytes(Math.max(0, n - head.length))]).subarray(0, n);
+const SIGS = { jpg: Buffer.from([0xff, 0xd8, 0xff, 0xe0]), png: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), webp: Buffer.concat([Buffer.from("RIFF"), Buffer.from([1, 2, 3, 4]), Buffer.from("WEBP")]), heic: Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypheic")]), pdf: Buffer.from("%PDF-1.4\n"), html: Buffer.from("<!doctype html><script>") };
+const migDocs = (ctx, asset) => ctx.migrated().filter((x) => x.imported.sourceAssetId === asset);
+const assetMaps = (ctx, asset) => ctx.app.db.collection("integrationMappings").docs.filter((m) => m.kind === "asset" && m.sourceId === asset);
+const itemsOf = (ctx) => ctx.app.db.collection("integrationJobs").docs.filter((i) => i.type === "mid-attachment");
+
+describe("content type detection (mismatched extensions)", () => {
+  const d = (kind, declared) => detectContentType(sameSize(SIGS[kind], 64), declared, MIGRATION_TYPES);
+  test("a matching file is kept as declared", () => {
+    for (const [kind, type] of [["png", "image/png"], ["jpg", "image/jpeg"], ["webp", "image/webp"], ["heic", "image/heic"], ["pdf", "application/pdf"]]) assert.deepEqual(d(kind, type), { declared: type, detected: type, matchesDeclared: true, corrected: null }, kind);
+  });
+  test("an image named as another image type is corrected to what its bytes are", () => {
+    assert.equal(d("jpg", "image/png").corrected, "image/jpeg");
+    assert.equal(d("webp", "image/png").corrected, "image/webp");
+    assert.equal(d("png", "image/jpeg").corrected, "image/png");
+    assert.equal(d("heic", "image/jpeg").corrected, "image/heic");
+  });
+  test("never across kinds, and never for content that matches no accepted type: those stay refused", () => {
+    assert.deepEqual([d("pdf", "image/png").detected, d("pdf", "image/png").corrected], ["application/pdf", null], "a PDF named .png");
+    assert.equal(d("jpg", "application/pdf").corrected, null, "an image named .pdf");
+    assert.equal(d("jpg", "text/csv").corrected, null, "an image named .csv");
+    assert.deepEqual([d("html", "image/png").detected, d("html", "image/png").corrected], [null, null], "HTML named .png");
+    assert.equal(detectContentType(Buffer.alloc(0), "image/png").corrected, null, "an empty file");
+    assert.equal(detectContentType(Buffer.from([0xff, 0xd8]), "image/png").corrected, null, "too short to be a JPEG");
+  });
+  test("the stored name takes the real extension; the original name is kept separately", () => {
+    assert.equal(correctedName("Screen shot.png", "image/jpeg"), "Screen shot.jpg");
+    assert.equal(correctedName("a.b.png", "image/webp"), "a.b.webp");
+    assert.equal(correctedName("noext", "image/jpeg"), "noext.jpg");
+    assert.equal(correctedName(".png", "image/jpeg"), "file.jpg");
+  });
+});
+
+describe("mismatched files in a run: stored correctly, invalid ones refused, one failed file inspected and retried", () => {
+  const PNG_ASSET = "9002"; // "Screen.png" in the harness
+  const retry = (ctx, asset, who) => ctx.api("POST", `/runs/${ctx.runId}/items/${asset}/retry`, { confirm: `RETRY ${asset}` }, who);
+  const inspect = (ctx, asset, who) => ctx.api("GET", `/runs/${ctx.runId}/items/${asset}/inspect`, undefined, who);
+  test("a JPEG named .png is stored as image/jpeg named .jpg, with its original name and the correction recorded; the rest are unchanged", async () => {
+    const ctx = await start();
+    const a = ctx.monday.assets.get(PNG_ASSET); a.bytes = sameSize(SIGS.jpg, a.bytes.length);
+    await ctx.prepare(); await ctx.pilot(2); await ctx.startRun("full");
+    const s = await ctx.drain();
+    assert.equal(s.status, "completed"); assert.equal(s.counts.done.files, 6); assert.equal(s.counts.failed, undefined);
+    const e = ctx.entries.find((x) => x.assetId === PNG_ASSET), doc = migDocs(ctx, PNG_ASSET)[0];
+    assert.deepEqual([doc._id.toHexString(), doc.status, doc.type, doc.name, doc.imported.originalName], [e.attachmentId, "ready", "image/jpeg", "Screen.jpg", "Screen.png"]);
+    assert.deepEqual(doc.imported.typeCorrection, { declaredType: "image/png", detectedType: "image/jpeg", originalName: "Screen.png" });
+    const got = await download(ctx, e.attachmentId);
+    assert.equal(got.status, 200); assert.equal(got.headers.get("content-type"), "image/jpeg"); assert.equal(sha(got.bytes), sha(a.bytes));
+    assert.equal(ctx.migrated().filter((x) => x.imported.typeCorrection).length, 1, "only that file was corrected");
+    await ctx.app.close();
+  });
+  test("an invalid file (HTML named .png) is refused with no Drive file or mapping; Inspect is read-only; a corrected source retries alone, once, without duplicates", async () => {
+    const ctx = await start();
+    const a = ctx.monday.assets.get(PNG_ASSET), size = a.bytes.length; a.bytes = sameSize(SIGS.html, size);
+    await ctx.prepare(); await ctx.pilot(2); await ctx.startRun("full");
+    let s = await ctx.drain();
+    assert.equal(s.status, "completed"); assert.equal(s.counts.done.files, 5); assert.equal(s.counts.failed.files, 1);
+    assert.equal(s.failures[0].error.code, "UNSUPPORTED_FILE_TYPE");
+    const e = ctx.entries.find((x) => x.assetId === PNG_ASSET);
+    assert.equal(migDocs(ctx, PNG_ASSET)[0].status, "failed");
+    assert.equal(ctx.driveMig().length, 5, "no Drive object for the refused file");
+    assert.equal(assetMaps(ctx, PNG_ASSET).length, 0);
+    // Only Google Drive administrators may inspect or retry.
+    for (const who of [ctx.member, ctx.jarcAdmin]) { assert.equal((await inspect(ctx, PNG_ASSET, who)).status, 403); assert.equal((await retry(ctx, PNG_ASSET, who)).status, 403); }
+    // Inspect: reports what the bytes are and writes nothing.
+    const state = () => ["integrationJobs", "attachments", "integrationMappings", "storageUsage", "records"].map((c) => snapshot(ctx, c)).join("|");
+    const before = state(), driveBefore = JSON.stringify(ctx.google.active());
+    const bad = await inspect(ctx, PNG_ASSET);
+    assert.equal(bad.status, 200);
+    assert.deepEqual([bad.body.declaredType, bad.body.detectedType, bad.body.retryWouldSucceedTypeCheck, bad.body.sizeBytes], ["image/png", null, false, size]);
+    assert.ok(!JSON.stringify(bad.body).includes(MONDAY_TOKEN) && !/https?:\/\//.test(JSON.stringify(bad.body)), "no token or link");
+    assert.equal(state(), before, "inspect wrote nothing");
+    assert.equal(JSON.stringify(ctx.google.active()), driveBefore);
+    assert.equal((await inspect(ctx, "1")).status, 404);
+    assert.equal((await inspect(ctx, "not-an-id")).status, 404);
+    // The source is really a JPEG (same size): Inspect says a retry would store it as image/jpeg.
+    a.bytes = sameSize(SIGS.jpg, size);
+    const good = (await inspect(ctx, PNG_ASSET)).body;
+    assert.deepEqual([good.detectedType, good.wouldStoreAs, good.storedName, good.retryWouldSucceedTypeCheck], ["image/jpeg", "image/jpeg", "Screen.jpg", true]);
+    // Retry: typed confirmation; only a failed file; then exactly that one file is imported.
+    const others = () => JSON.stringify(ctx.migrated().filter((x) => x.imported.sourceAssetId !== PNG_ASSET).map((x) => [x._id, x.status, x.sha256, x.storage, x.name]));
+    const otherItems = () => JSON.stringify(itemsOf(ctx).filter((i) => i.params.assetId !== PNG_ASSET).map((i) => [i._id, i.status, i.attempts, i.result?.sha256]));
+    const othersBefore = others(), otherItemsBefore = otherItems();
+    assert.equal((await ctx.api("POST", `/runs/${ctx.runId}/items/${PNG_ASSET}/retry`, { confirm: "yes" })).status, 400);
+    const doneAsset = ctx.entries.find((x) => x.assetId !== PNG_ASSET).assetId;
+    assert.equal((await retry(ctx, doneAsset)).body.error.code, "ITEM_NOT_FAILED");
+    const r = await retry(ctx, PNG_ASSET);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.status, "running");
+    assert.equal((await retry(ctx, PNG_ASSET)).status, 409, "no second retry while it runs");
+    s = await ctx.drain();
+    assert.equal(s.status, "completed"); assert.equal(s.counts.done.files, 6); assert.equal(s.counts.failed, undefined);
+    const docs = migDocs(ctx, PNG_ASSET);
+    assert.equal(docs.length, 1, "one attachment for the asset (the failed attempt's document was replaced)");
+    assert.deepEqual([docs[0]._id.toHexString(), docs[0].status, docs[0].type, docs[0].name, docs[0].imported.originalName], [e.attachmentId, "ready", "image/jpeg", "Screen.jpg", "Screen.png"]);
+    assert.equal(assetMaps(ctx, PNG_ASSET).length, 1, "one mapping");
+    assert.equal(ctx.driveMig().length, 6, "one Drive file per imported file, no duplicate");
+    assert.equal(others(), othersBefore, "the other attachments are untouched");
+    assert.equal(otherItems(), otherItemsBefore, "no other file was attempted again");
+    assert.equal(itemsOf(ctx).find((i) => i.params.assetId === PNG_ASSET).previousError.code, "UNSUPPORTED_FILE_TYPE", "the first failure is kept for the record");
+    // Done now: another retry is refused, and Verify finds nothing wrong.
+    assert.equal((await retry(ctx, PNG_ASSET)).body.error.code, "ITEM_NOT_FAILED");
+    const v = (await ctx.api("GET", `/runs/${ctx.runId}/verify`)).body;
+    assert.equal(v.ok, true, JSON.stringify(v.problems)); assert.equal(v.attachments, 6); assert.equal(v.assetMappings, 6); assert.equal(v.driveFiles, 6); assert.equal(v.strayDriveFiles, 0);
+    await ctx.app.close();
+  });
+  test("a retry of a file that is still invalid fails again cleanly: one document, no Drive file, no mapping", async () => {
+    const ctx = await start();
+    const a = ctx.monday.assets.get(PNG_ASSET); a.bytes = sameSize(SIGS.pdf, a.bytes.length);
+    await ctx.prepare(); await ctx.pilot(2); await ctx.startRun("full"); await ctx.drain();
+    assert.equal((await inspect(ctx, PNG_ASSET)).body.detectedType, "application/pdf");
+    assert.equal((await retry(ctx, PNG_ASSET)).status, 200);
+    const s = await ctx.drain();
+    assert.equal(s.status, "completed"); assert.equal(s.counts.failed.files, 1); assert.equal(s.counts.done.files, 5);
+    assert.equal(migDocs(ctx, PNG_ASSET).length, 1);
+    assert.equal(ctx.driveMig().length, 5);
+    assert.equal(assetMaps(ctx, PNG_ASSET).length, 0);
+    await ctx.app.close();
+  });
+  test("retry is refused for a run that isn't finished, and while other files of the run are still waiting", async () => {
+    const ctx = await start();
+    const a = ctx.monday.assets.get(PNG_ASSET); a.bytes = sameSize(SIGS.html, a.bytes.length);
+    await ctx.prepare();
+    assert.equal((await retry(ctx, PNG_ASSET)).body.error.code, "RUN_NOT_RETRYABLE", "prepared, not started");
+    await ctx.pilot(3); // the pilot takes files in asset order: 9000, 9001, then 9002 fails; the rest are left waiting
+    const s = (await ctx.api("GET", `/runs/${ctx.runId}`)).body;
+    assert.equal(s.status, "paused"); assert.equal(s.counts.failed.files, 1);
+    assert.equal((await retry(ctx, PNG_ASSET)).body.error.code, "RUN_HAS_WORK");
+    await ctx.app.close();
+  });
+});

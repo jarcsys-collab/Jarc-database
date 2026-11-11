@@ -207,6 +207,9 @@ class ApiAdapter {
           error = fail(StorageError.CODES.UNAUTHENTICATED, null, { status: response.status });
           window.dispatchEvent?.(new CustomEvent("jarc-session-expired"));
         } else error = fail(ApiAdapter.codeForStatus(response.status), null, { status: response.status, serverCode });
+        // The server's X-Request-Id for this failure: a reference an administrator can find on System Health and in the log.
+        const requestId = response.headers?.get?.("x-request-id");
+        if (requestId && /^[A-Za-z0-9._-]{8,64}$/.test(requestId)) error.requestId = requestId;
         throw error;
       }
       let parsed;

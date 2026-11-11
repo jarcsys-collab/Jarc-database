@@ -2,6 +2,8 @@
 // or records, and the API offers no way to update or delete entries.
 const { COLLECTIONS } = require("../../db/bootstrap");
 
+const escapeRegex = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 class ActivityRepository {
   constructor(db) { this.collection = db.collection(COLLECTIONS.activities); }
 
@@ -28,6 +30,25 @@ class ActivityRepository {
     if (workspaceIds) filter.workspaceId = { $in: workspaceIds };
     if (before) filter.createdAt = { $lt: before };
     return this.collection.find(filter, { sort: { createdAt: -1, _id: -1 }, limit: Math.min(limit, 100) }).toArray();
+  }
+
+  // Activity History (administrators; Q1.4): newest first, filtered. Every value arrives validated (routes/system-health.js):
+  // action and text filters are plain strings matched literally (escaped), dates are Dates, IDs are ObjectIds.
+  //   before = { at: Date, id: ObjectId } continues after the last entry of the previous page.
+  // Reads the "created" index backwards; maxTimeMS keeps a broad text filter on a large history from running long.
+  search({ from = null, to = null, before = null, action = null, actionPrefix = null, actor = null, text = null, boardId = null, limit = 50 } = {}) {
+    const and = [];
+    const createdAt = {};
+    if (from) createdAt.$gte = from;
+    if (to) createdAt.$lte = to;
+    if (Object.keys(createdAt).length) and.push({ createdAt });
+    if (before) and.push({ $or: [{ createdAt: { $lt: before.at } }, { createdAt: before.at, _id: { $lt: before.id } }] });
+    if (action) and.push({ action });
+    else if (actionPrefix) and.push({ action: { $regex: `^${escapeRegex(actionPrefix)}` } });
+    if (actor) and.push({ $or: [{ actorName: { $regex: escapeRegex(actor), $options: "i" } }, { legacyActor: { $regex: escapeRegex(actor), $options: "i" } }] });
+    if (text) and.push({ $or: [{ summary: { $regex: escapeRegex(text), $options: "i" } }, { "changes.field": { $regex: escapeRegex(text), $options: "i" } }] });
+    if (boardId) and.push({ boardId });
+    return this.collection.find(and.length ? { $and: and } : {}, { sort: { createdAt: -1, _id: -1 }, limit: Math.min(Math.max(limit, 1), 100), maxTimeMS: 5000 }).toArray();
   }
 
   listByWorkspace(workspaceId, { limit = 50 } = {}) { return this.collection.find({ workspaceId }, { sort: { createdAt: -1 }, limit: Math.min(limit, 200) }).toArray(); }

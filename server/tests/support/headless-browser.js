@@ -104,14 +104,36 @@ async function launch(executable = findBrowser(), { attempts = 2, startupMs = 60
   try { await new Promise((resolve, reject) => { ws.addEventListener("open", resolve, { once: true }); ws.addEventListener("error", reject, { once: true }); }); }
   catch (error) { await shutDown(proc, profile); throw error; }
   let id = 0; const pending = new Map();
-  ws.addEventListener("message", (event) => { const msg = JSON.parse(event.data); if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); } });
+  // The page's recent console messages and uncaught errors, kept for failure diagnostics (see keepFailureDiagnostics).
+  const events = [];
+  const remember = (line) => { events.push(`${new Date().toISOString()} ${line}`.slice(0, 2000)); if (events.length > 300) events.shift(); };
+  ws.addEventListener("message", (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); return; }
+    if (msg.method === "Runtime.consoleAPICalled") remember(`console.${msg.params.type}: ${(msg.params.args || []).map((a) => a.value ?? a.description ?? a.type).join(" ")}`);
+    else if (msg.method === "Runtime.exceptionThrown") remember(`uncaught: ${msg.params.exceptionDetails?.exception?.description || msg.params.exceptionDetails?.text || "error"}`);
+    else if (msg.method === "Log.entryAdded") remember(`${msg.params.entry.level} (${msg.params.entry.source}): ${msg.params.entry.text}${msg.params.entry.url ? ` ${msg.params.entry.url}` : ""}`);
+  });
   // A browser that died mustn't leave a test waiting forever for an answer.
   ws.addEventListener("close", () => { for (const answer of pending.values()) answer({}); pending.clear(); });
   const send = (method, params = {}) => new Promise((resolve) => { if (ws.readyState !== WebSocket.OPEN) { resolve({}); return; } const n = ++id; pending.set(n, resolve); ws.send(JSON.stringify({ id: n, method, params })); });
   await send("Page.enable");
+  await send("Runtime.enable");
+  await send("Log.enable");
   let closing = null;
-  return {
+  const browser = {
     send,
+    // Failure diagnostics: a screenshot, the page's HTML, its URL and size, and the recent console messages and errors.
+    async saveDiagnostics(dir, info = {}) {
+      fs.mkdirSync(dir, { recursive: true });
+      const shot = await send("Page.captureScreenshot", { format: "png" });
+      if (shot.result?.data) fs.writeFileSync(path.join(dir, "screenshot.png"), Buffer.from(shot.result.data, "base64"));
+      const page = await this.evaluate("({ url: location.href, width: innerWidth, height: innerHeight, focused: document.activeElement ? document.activeElement.tagName + (document.activeElement.dataset?.action ? '[' + document.activeElement.dataset.action + ']' : '') : null, overlay: document.querySelector('#overlay-root')?.children.length || 0, html: document.documentElement.outerHTML })").catch((e) => ({ error: String(e?.message || e) }));
+      if (page.html) fs.writeFileSync(path.join(dir, "page.html"), page.html);
+      fs.writeFileSync(path.join(dir, "console.log"), `${events.join("\n")}\n`);
+      fs.writeFileSync(path.join(dir, "info.json"), JSON.stringify({ ...info, url: page.url, viewport: { width: page.width, height: page.height }, focused: page.focused, overlayOpen: page.overlay, pageError: page.error || null, savedAt: new Date().toISOString() }, null, 2));
+      return dir;
+    },
     // The browser's own process, so a test can see that it really ended.
     get process() { return proc; }, get profile() { return profile; },
     // Sets an exact CSS viewport; phones (< 768 px) also get touch input, like a real phone.
@@ -167,7 +189,34 @@ async function launch(executable = findBrowser(), { attempts = 2, startupMs = 60
       return closing;
     }
   };
+  live.add(browser);
+  const forget = () => live.delete(browser);
+  const close = browser.close.bind(browser);
+  browser.close = () => { forget(); return close(); };
+  return browser;
 }
+
+// ---- Failure diagnostics. Under `node --test` (each test file is its own process, and every browser test loads this module),
+// a failed test leaves tests/.diagnostics/<time>-<file>-<test>/ for each browser that file has open: screenshot.png,
+// page.html, console.log and info.json (the error). The folder is ignored by Git; delete it whenever you like. Data in these
+// tests is synthetic. JARC_TEST_DIAGNOSTICS=0 switches it off.
+const live = new Set();
+const DIAGNOSTICS = path.resolve(__dirname, "..", ".diagnostics");
+const safePart = (text) => String(text || "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "test";
+async function saveFailure(t) {
+  if (t.passed !== false || !live.size) return;
+  const file = safePart(path.basename(process.argv[1] || "test", ".js")), stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  let n = 0;
+  for (const b of [...live]) {
+    n += 1;
+    const dir = path.join(DIAGNOSTICS, `${stamp}-${file}-${safePart(t.name)}${live.size > 1 ? `-browser${n}` : ""}`);
+    try {
+      await Promise.race([b.saveDiagnostics(dir, { test: t.name, file: process.argv[1] ? path.basename(process.argv[1]) : null, error: String(t.error?.cause?.stack || t.error?.stack || t.error || "").slice(0, 8000) }), sleep(15000)]);
+      process.stderr.write(`[diagnostics] ${t.name}: saved to ${dir}\n`);
+    } catch (error) { process.stderr.write(`[diagnostics] couldn't save for ${t.name}: ${error?.message || error}\n`); }
+  }
+}
+if (process.env.NODE_TEST_CONTEXT && process.env.JARC_TEST_DIAGNOSTICS !== "0") require("node:test").afterEach(saveFailure);
 
 // Waits until a test server started as a child process answers /api/v1/health, and FAILS if it never does. (An earlier
 // loop gave up silently after 10 s; under a full parallel run the server could still be starting, and the first request
@@ -184,4 +233,4 @@ async function waitForServer(base, { timeoutMs = 60000, child = null } = {}) {
   throw new Error(`The test server at ${base} did not become ready within ${timeoutMs / 1000} s.`);
 }
 
-module.exports = { findBrowser, launch, sleep, freePort, waitForServer, shutDown, sweepProfiles };
+module.exports = { findBrowser, launch, sleep, freePort, waitForServer, shutDown, sweepProfiles, DIAGNOSTICS };

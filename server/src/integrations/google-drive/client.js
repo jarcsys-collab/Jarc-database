@@ -7,6 +7,10 @@
 //   uploads   Google's resumable protocol in chunks. The current chunk stays in memory so an interrupted chunk can continue
 //             from what Google confirms it received.
 const { ApiError } = require("../../middleware/errors");
+const { monitor } = require("../../monitoring/monitor");
+// Attempts are reported to the System Health page: outcome, HTTP status and Google's reason code only — never a URL, a
+// file ID, a name, a token or any content.
+const reportToMonitor = (event) => monitor.recordIntegration("google-drive", event);
 
 const API = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
@@ -34,9 +38,10 @@ const appKindQuery = (kind) => `appProperties has { key='jarcKind' and value='${
 
 class DriveClient {
   // getToken: () => a current access token (the service refreshes it); invalidateToken: forget it after a 401.
-  constructor({ getToken, invalidateToken = () => {}, fetch = globalThis.fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), maxRetries = 3, timeoutMs = 30000, uploadTimeoutMs = 120000 }) {
-    Object.assign(this, { getToken, invalidateToken, fetchImpl: fetch, sleep, maxRetries, timeoutMs, uploadTimeoutMs });
+  constructor({ getToken, invalidateToken = () => {}, fetch = globalThis.fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), maxRetries = 3, timeoutMs = 30000, uploadTimeoutMs = 120000, observe = reportToMonitor }) {
+    Object.assign(this, { getToken, invalidateToken, fetchImpl: fetch, sleep, maxRetries, timeoutMs, uploadTimeoutMs, observe });
   }
+  note(event) { try { this.observe?.(event); } catch { /* monitoring never breaks a call */ } }
   backoff(attempt, hint) { return this.sleep(hint ?? Math.min(250 * 2 ** attempt + Math.floor(Math.random() * 100), MAX_RETRY_WAIT_MS)); }
   // The timeout covers the time until Google starts answering; a long download isn't cut off by it.
   async send(url, init, { signal = null, timeoutMs = this.timeoutMs } = {}) {
@@ -49,18 +54,24 @@ class DriveClient {
     let renewed = false;
     for (let attempt = 0; ; attempt += 1) {
       const token = await this.getToken(); // its own failure (not connected) is final
+      const op = (init.method || "GET").toLowerCase(), started = Date.now();
       let res;
       try { res = await this.send(url, { ...init, headers: { ...init.headers, Authorization: `Bearer ${token}` } }, { signal }); }
       catch {
-        if (signal?.aborted || attempt >= this.maxRetries) throw unavailable();
+        const ms = Date.now() - started;
+        if (signal?.aborted || attempt >= this.maxRetries) { this.note({ op, outcome: signal?.aborted ? "failed" : "timeout", code: signal?.aborted ? "CANCELLED" : "NETWORK_OR_TIMEOUT", ms }); throw unavailable(); }
+        this.note({ op, outcome: "retry", code: "NETWORK_OR_TIMEOUT", ms });
         await this.backoff(attempt);
         continue;
       }
-      if (res.ok) return res;
+      if (res.ok) { this.note({ op, outcome: "ok", status: res.status, ms: Date.now() - started }); return res; }
       if (res.status === 401 && !renewed) { renewed = true; this.invalidateToken(); await res.arrayBuffer().catch(() => {}); attempt -= 1; continue; }
       const reason = await reasonOf(res);
       const retry = RETRY_STATUS.has(res.status) || (res.status === 403 && RATE_REASONS.has(reason));
-      if (!retry || attempt >= this.maxRetries) throw failure(res.status, reason);
+      const rateLimited = res.status === 429 || RATE_REASONS.has(reason);
+      // A 404 is an answer (the file isn't there), not a failure of Google Drive.
+      if (!retry || attempt >= this.maxRetries) { this.note({ op, outcome: res.status === 404 ? "ok" : "failed", status: res.status, code: rateLimited ? "RATE_LIMITED" : reason, ms: Date.now() - started }); throw failure(res.status, reason); }
+      this.note({ op, outcome: "retry", status: res.status, code: rateLimited ? "RATE_LIMITED" : reason, retryAfterMs: retryAfterMs(res), ms: Date.now() - started });
       await this.backoff(attempt, retryAfterMs(res));
     }
   }
@@ -159,9 +170,10 @@ class DriveClient {
         else if (!wasProbing && (failures += 1) > this.maxRetries) throw unavailable(res.status);
         continue;
       }
-      if (res && !RETRY_STATUS.has(res.status)) throw failure(res.status === 404 ? 410 : res.status, await reasonOf(res));
+      if (res && !RETRY_STATUS.has(res.status)) { const reason = await reasonOf(res); this.note({ op: "upload", outcome: "failed", status: res.status, code: reason }); throw failure(res.status === 404 ? 410 : res.status, reason); }
       failures += 1;
-      if (failures > this.maxRetries) throw unavailable(res?.status ?? null);
+      if (failures > this.maxRetries) { this.note({ op: "upload", outcome: res ? "failed" : "timeout", status: res?.status ?? null, code: res ? null : "NETWORK_OR_TIMEOUT" }); throw unavailable(res?.status ?? null); }
+      this.note({ op: "upload", outcome: "retry", status: res?.status ?? null, code: res?.status === 429 ? "RATE_LIMITED" : res ? null : "NETWORK_OR_TIMEOUT", retryAfterMs: retryAfterMs(res) });
       await this.backoff(failures - 1, retryAfterMs(res));
       probing = true; // ask how much arrived before sending anything again
     }

@@ -13,6 +13,8 @@
 //   POST /migrations/mid-attachments/runs/:runId/start     { mode: "pilot" | "full", count?, confirm: true }
 //   POST /migrations/mid-attachments/runs/:runId/pause | /resume | /stop
 //   POST /migrations/mid-attachments/runs/:runId/rollback  { confirm: "ROLLBACK <runId>" }
+//   GET  /migrations/mid-attachments/runs/:runId/items/:assetId/inspect   read-only: the file's real type, size, checksum
+//   POST /migrations/mid-attachments/runs/:runId/items/:assetId/retry     { confirm: "RETRY <assetId>" }  one failed file
 // No response carries a token, a download link or a Google Drive file ID.
 const express = require("express");
 const { allowOnly, requireBody, queryString, fail } = require("../validation/common");
@@ -56,6 +58,10 @@ function midAttachmentRoutes({ migration, canManage }) {
     send(res, await migration.start(req.params.runId, b));
   });
   for (const action of ["pause", "resume", "stop"]) router.post(`${base}/runs/:runId/${action}`, async (req, res) => { admin(req); send(res, await migration[action](req.params.runId)); });
+  // One file: inspect it (read-only: downloads it from monday.com and reports what its content really is), or retry it
+  // alone when it failed ({ confirm: "RETRY <assetId>" }).
+  router.get(`${base}/runs/:runId/items/:assetId/inspect`, async (req, res) => { admin(req); send(res, await migration.inspect(req.params.runId, req.params.assetId)); });
+  router.post(`${base}/runs/:runId/items/:assetId/retry`, async (req, res) => { admin(req); const b = body(req, ["confirm"]); send(res, await migration.retryOne(req.params.runId, req.params.assetId, b)); });
   router.post(`${base}/runs/:runId/rollback`, async (req, res) => { admin(req); const b = body(req, ["confirm"]); send(res, await migration.rollback(req.params.runId, b)); });
   return router;
 }

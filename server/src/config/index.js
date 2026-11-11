@@ -75,6 +75,8 @@ function loadConfig(env = process.env) {
     apiTokens: loadApiTokenConfig(env, authMode),
     // Requests slower than this are logged by route pattern (middleware/slow-requests.js). 0 turns it off.
     slowRequestMs: loadSlowRequestMs(env),
+    // MongoDB commands at least this slow are listed on the System Health page (monitoring/monitor.js). Unset: 500.
+    slowCommandMs: loadSlowCommandMs(env),
     // TEMPORARY beta collaboration (see auth/access.js). Only the exact value "true" turns it on.
     betaOpenEditing: env.JARC_BETA_OPEN_EDITING === "true",
     // GET/PUT /api/v1/state is a transitional development endpoint with no authentication. Never in production.
@@ -89,6 +91,12 @@ function loadSlowRequestMs(env) {
   if (env.SLOW_REQUEST_MS === undefined || env.SLOW_REQUEST_MS === "") return 2000;
   if (!/^\d{1,6}$/.test(env.SLOW_REQUEST_MS)) throw new ConfigError("SLOW_REQUEST_MS must be a whole number of milliseconds (0 turns it off).");
   return Number(env.SLOW_REQUEST_MS);
+}
+
+function loadSlowCommandMs(env) {
+  if (env.MONGO_SLOW_COMMAND_MS === undefined || env.MONGO_SLOW_COMMAND_MS === "") return 500;
+  if (!/^\d{1,6}$/.test(env.MONGO_SLOW_COMMAND_MS) || Number(env.MONGO_SLOW_COMMAND_MS) < 1) throw new ConfigError("MONGO_SLOW_COMMAND_MS must be a whole number of milliseconds, at least 1.");
+  return Number(env.MONGO_SLOW_COMMAND_MS);
 }
 
 // JARC_FEATURE_FORMS, JARC_FEATURE_IMPORTS: true or false; anything else stops startup rather than being guessed. Unset means off

@@ -44,3 +44,6 @@ design-references/
 .env.monday
 monday-extraction/
 monday-migration/
+
+# Browser-test failure diagnostics and saved test output (server/tests/support/headless-browser.js, npm run test:keep)
+server/tests/.diagnostics/

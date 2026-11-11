@@ -65,4 +65,22 @@ describe("Machine Installation Database files card (real app)", { skip: BROWSER 
     await click(`${CARD} [data-action="integration-mid-dryrun"]`);
     assert.ok(await b.waitFor("/Choose the plan file first/.test(document.body.textContent)", 5000), "a dry run needs a plan file");
   });
+  test("a finished run's failed file offers Inspect (read-only) and Retry this file, which needs the typed confirmation; done files offer neither", async () => {
+    await b.evaluate("document.querySelector('#overlay-root [data-action=\"close-overlay\"]')?.click()");
+    assert.equal(await b.evaluate(`fetch("/__test/mid", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ finishedWithFailure: true }) }).then((r) => r.status)`), 200);
+    await openIntegrations();
+    assert.ok(await b.waitFor(`/UNSUPPORTED_FILE_TYPE/.test(document.querySelector(${JSON.stringify(CARD)})?.textContent || "")`, 8000), "the failed file is listed");
+    assert.equal(await has(`${CARD} [data-action="integration-mid-inspect"][data-asset="2"]`), true);
+    assert.equal(await has(`${CARD} [data-action="integration-mid-retry-one"][data-asset="2"]`), true);
+    assert.equal(await has(`${CARD} [data-action="integration-mid-retry-one"][data-asset="1"]`), false, "nothing to retry for a done file");
+    await click(`${CARD} [data-action="integration-mid-retry-one"][data-asset="2"]`);
+    assert.ok(await b.waitFor("!!document.querySelector('#overlay-root form[data-action=\"integration-mid-retry-one-form\"] input[name=\"confirm\"]')", 5000), "confirmation form");
+    assert.match(await text("#overlay-root"), /RETRY 2/);
+    assert.match(await text("#overlay-root"), /Only this file is retried/);
+    await click('#overlay-root [data-action="close-overlay"]');
+    // Inspect asks the server, which downloads from monday.com; the test server refuses monday.com, so the page explains the problem.
+    await click(`${CARD} [data-action="integration-mid-inspect"][data-asset="2"]`);
+    // (monday.com is retried with backoff before the server gives up, so this can take several seconds.)
+    assert.ok(await b.waitFor("/Machine Installation Database files/.test(document.querySelector('#overlay-root')?.textContent || '') && /couldn't be downloaded|monday/i.test(document.querySelector('#overlay-root').textContent)", 30000), "the failure is shown, not swallowed");
+  });
 });

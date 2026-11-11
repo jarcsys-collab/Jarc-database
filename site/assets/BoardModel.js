@@ -647,7 +647,10 @@ class BoardModel {
   groupRows(name,rows=this.rows){return rows.filter((r)=>this.groupOf(r)===name);}
   isGroupCollapsed(name){return (this.collapsedGroups[this.board?.id]||[]).includes(name);}
   toggleGroupCollapsed(name,force){const id=this.board.id,set=new Set(this.collapsedGroups[id]||[]);const on=force??!set.has(name);if(on)set.add(name);else set.delete(name);this.collapsedGroups[id]=[...set].filter((g)=>this.board.groups.includes(g));this.save({op:"updateUserState"});return on;}
-  collapseAllGroups(collapsed){this.collapsedGroups[this.board.id]=collapsed?[...this.board.groups]:[];this.save({op:"updateUserState"});}
+  // Saved as this person's preference (updateUserState): kept in this browser only, never sent to the server
+  // (ResourceApiAdapter.USER_ONLY_OPS), so it never touches a record. Nothing changed → nothing saved.
+  // → the number of groups whose state changed.
+  collapseAllGroups(collapsed){const id=this.board.id,before=new Set(this.collapsedGroups[id]||[]),next=collapsed?[...this.board.groups]:[];const changed=collapsed?next.filter((g)=>!before.has(g)).length:before.size;if(!changed)return 0;this.collapsedGroups[id]=next;this.save({op:"updateUserState"});return changed;}
   setGroupColor(name,color){if(!this.board.groups.includes(name)||!BoardModel.isGroupColor(color)||this.groupColor(name)===color)return false;this.snapshot("Group colour change undone");this.setGroupMeta(name,{color});this.log(`Changed the colour of group ${name}`);this.save({op:"updateGroups",boardId:this.board.id});return true;}
   // Back to the default colour (the palette colour for its position); stored as "" on the board.
   resetGroupColor(name){if(!this.board.groups.includes(name)||!this.board.groupMeta?.[name]?.color)return false;this.snapshot("Group colour change undone");this.setGroupMeta(name,{color:""});this.log(`Reset the colour of group ${name}`);this.save({op:"updateGroups",boardId:this.board.id});return true;}

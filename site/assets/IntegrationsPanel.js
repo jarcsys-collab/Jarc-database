@@ -102,7 +102,11 @@ class IntegrationsPanel {
         ...(r.status === "preparing" ? [] : [btn("verify", "Verify")]), btn("refresh", "Refresh"),
         ...(["prepared", "prepare-failed", "paused", "stopped", "completed"].includes(r.status) ? [btn("rollback", "Roll back this run")] : [])
       ].join("");
-      const failures = (r.failures || []).slice(0, 10).map((f) => `<li><code>${this.esc(f.assetId)}</code> ${this.esc(f.name || "")} — ${this.esc(f.status)} ${this.esc(f.error?.code || "")} (${this.esc(f.attempts)} attempt${f.attempts === 1 ? "" : "s"})</li>`).join("");
+      // A failed file of a finished run can be inspected (read-only) and then retried on its own.
+      const single = ["completed", "paused", "stopped"].includes(r.status);
+      const fileBtn = (f, action, label) => `<button class="button secondary small" data-action="integration-mid-${action}" data-run="${id}" data-asset="${this.esc(f.assetId)}"${busy ? " disabled" : ""}>${label}</button>`;
+      const inspected = (f) => { const x = this.midInspect?.runId === r.runId && this.midInspect.assetId === f.assetId ? this.midInspect : null; return x ? `<br><small class="mid-inspect" role="status">Content: <strong>${this.esc(x.detectedType || "not an accepted type")}</strong> (named as ${this.esc(x.declaredType)}) · ${this.esc(x.sizeBytes)} bytes · ${x.retryWouldSucceedTypeCheck ? `a retry would store it as ${this.esc(x.wouldStoreAs)}${x.storedName ? ` named ${this.esc(x.storedName)}` : ""}` : "a retry would be refused again"}</small>` : ""; };
+      const failures = (r.failures || []).slice(0, 10).map((f) => `<li><code>${this.esc(f.assetId)}</code> ${this.esc(f.name || "")} — ${this.esc(f.status)} ${this.esc(f.error?.code || "")} (${this.esc(f.attempts)} attempt${f.attempts === 1 ? "" : "s"})${single && f.status === "failed" ? ` ${fileBtn(f, "inspect", "Inspect")} ${fileBtn(f, "retry-one", "Retry this file")}` : ""}${inspected(f)}</li>`).join("");
       const snap = (r.snapshots || []).at(-1);
       const pre = snap ? `<div><dt>Checked before ${this.esc(snap.mode)}</dt><dd>${this.esc(new Date(snap.at).toLocaleString())}: ${snap.recordsOnBoard} records, ${snap.itemMappings} mappings, ${snap.attachmentsTotal} attachments</dd></div>` : "";
       const statusText = r.status === "preparing" ? (r.prepareInterrupted ? "preparing was interrupted (run the dry run and Prepare again to finish it)" : `preparing — listing ${c("queued")} of ${r.totals?.files || 0} files`) : r.status;
@@ -126,7 +130,11 @@ class IntegrationsPanel {
   midError(error) {
     if (/took too long/.test(error?.message || "")) return "The JARC server didn't answer in time. It may still be finishing this — press Refresh in a moment and check the card before trying again.";
     const known = { CHECK_IN_PROGRESS: "Another dry run is still running. Wait for it to finish.", CHECK_NOT_FOUND: "That dry run isn't available any more (it's over 2 hours old, or the server restarted). Run it again.", CHECK_NOT_COMPLETED: "Wait for the dry run to finish.", CHECK_TOO_OLD: "The dry run is more than an hour old. Run it again, then Prepare.", PLAN_HAS_BLOCKED_FILES: "Some files can't be imported. Fix the plan first (see the dry run).", PLAN_INVALID: "That isn't a valid plan file.", RUN_CONFLICT: "A different plan already uses this run ID.", RUN_NOT_PREPARABLE: "This run is already prepared and in use.", RUN_NOT_STARTABLE: "This run can't be started in its current state. Refresh the card.", PILOT_REQUIRED: "Run the 20-file pilot (and check it) before the full import.", NOT_ENOUGH_STORAGE: "There isn't enough storage for this import.", PRE_START_CHECK_FAILED: "The read-only check before starting found a problem. Press Verify and look at the run.", NOTHING_TO_IMPORT: "Every file of this run has been handled.", RUN_CHANGED: "The run changed in the meantime. Refresh and try again.", GDRIVE_ADMIN_REQUIRED: "Only JARC's Google Drive administrators can manage this import." };
-    return known[error?.cause?.serverCode] || error?.message || "That didn't work.";
+    const code = error?.cause?.serverCode || "";
+    const single = { ITEM_NOT_FAILED: "That file isn't failed any more, so there's nothing to retry. Press Refresh.", RUN_HAS_WORK: "Other files of this run are still waiting. Let the run finish (or stop it) before retrying a single file.", RUN_NOT_RETRYABLE: "A single file can be retried only when the run has finished, paused or stopped.", CONFIRMATION_REQUIRED: "Type the confirmation exactly as shown." };
+    if (single[code]) return single[code];
+    if (/^(MIGRATION_SOURCE_|MONDAY_)/.test(code)) return `monday.com couldn't provide the file (${code}), so it couldn't be downloaded. Nothing was changed.`;
+    return known[code] || error?.message || "That didn't work.";
   }
   // While a dry run, a prepare, an import or a rollback is in progress, the card refreshes itself (only while visible).
   midSchedule() {
@@ -186,6 +194,18 @@ class IntegrationsPanel {
         try { this.midVerify = await api("GET", `/runs/${encodeURIComponent(run)}/verify?sample=5`); } finally { this.midBusy = false; }
         return this.redraw();
       }
+      if (action === "integration-mid-inspect") {
+        this.midBusy = true; this.redraw();
+        try { this.midInspect = await api("GET", `/runs/${encodeURIComponent(run)}/items/${encodeURIComponent(target.dataset.asset)}/inspect`); } finally { this.midBusy = false; }
+        return this.redraw();
+      }
+      if (action === "integration-mid-retry-one") {
+        const asset = this.esc(target.dataset.asset);
+        return this.view.overlay(`<form class="modal" data-action="integration-mid-retry-one-form" data-run="${this.esc(run)}" data-asset="${asset}"><div class="modal-head"><div><div class="eyebrow">Machine Installation Database files</div><h2>Retry one file</h2></div>${this.view.closeButton()}</div>
+          <p>Downloads file <code>${asset}</code> from monday.com again and stores it in Google Drive. Only this file is retried; the files already imported aren't touched. Use Inspect first to see what the file really is.</p>
+          <label class="field"><span>Type <code>RETRY ${asset}</code></span><input name="confirm" required autocomplete="off"></label>
+          <div class="integration-actions"><button class="button primary" type="submit">Retry this file</button></div></form>`);
+      }
       if (action === "integration-mid-rollback") {
         return this.view.overlay(`<form class="modal" data-action="integration-mid-rollback-form" data-run="${this.esc(run)}"><div class="modal-head"><div><div class="eyebrow">Machine Installation Database files</div><h2>Roll back this run</h2></div>${this.view.closeButton()}</div>
           <p>Moves this run's files to Google Drive Trash and removes only the attachments and mappings this run created. Records and every other attachment stay as they are.</p>
@@ -205,6 +225,7 @@ class IntegrationsPanel {
         this.view.closeOverlay(); this.view.toast(form.dataset.mode === "pilot" ? "Pilot started" : "Import started");
       }
       if (action === "integration-mid-rollback-form") { await api("/rollback", { confirm: data.confirm }); this.view.closeOverlay(); this.view.toast("Rollback started"); }
+      if (action === "integration-mid-retry-one-form") { await api(`/items/${encodeURIComponent(form.dataset.asset)}/retry`, { confirm: data.confirm }); this.view.closeOverlay(); this.view.toast("Retrying that file"); }
     } catch (error) { this.view.showMessage("Machine Installation Database files", this.midError(error)); }
     finally { this.midBusy = false; }
     return this.load();

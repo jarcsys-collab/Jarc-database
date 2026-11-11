@@ -13,9 +13,11 @@ const { ensureDatabase } = require("./db/bootstrap");
 const { createDataLayer } = require("./data-layer");
 const { ensureDevelopmentActor } = require("./context/dev-actor");
 const { createEntraVerifier } = require("./auth/entra-token");
+const { monitor } = require("./monitoring/monitor");
 
 async function main() {
   const config = loadConfig();
+  monitor.slowCommandMs = config.slowCommandMs;
   const repository = config.enableDevStateApi ? new MemoryStateRepository() : null;
   let connection = null, dataLayer = null, devActor = null;
 

@@ -14,7 +14,11 @@ cd server
 npm install
 npm start          # http://127.0.0.1:3000/  (memory mode, no database)
 npm test           # all backend tests; no database or network needed
+npm run test:keep  # the same, also saving the full output to tests/.diagnostics/run-<time>.txt (last 10 kept)
 ```
+
+A browser test that fails leaves `tests/.diagnostics/<time>-<file>-<test>/` with a screenshot, the page's HTML, its recent
+console messages and uncaught errors, and the error (`JARC_TEST_DIAGNOSTICS=0` turns that off). The folder is ignored by Git.
 
 `npm run dev` restarts on file changes. Settings: copy `.env.example` to `.env` (never commit `.env`).
 
@@ -104,6 +108,32 @@ granted by the shared policy outlives it. The server logs a warning at startup w
 |---|---|---|
 | `RECORD_SEARCH_INDEX` | `off` (default), `shadow`, `on` | `off` writes nothing. `shadow` keeps the `recordSearch` collection current and compares it with the regular search, logging only counts. `on` answers plain searches from it once it has caught up (searches with status, priority or assignee filters stay on the records). The collection is derived from `records` and rebuilt by the catch up at start; `records` is never written. |
 | `SLOW_REQUEST_MS` | milliseconds, default `2000`, `0` turns it off | Logs slower API requests: method, route pattern, status and time only. |
+| `MONGO_SLOW_COMMAND_MS` | milliseconds, default `500` (at least 1) | MongoDB commands at least this slow are listed on System Health: command and collection name, time, result. Never a filter or a document. |
+
+## System Health, Integration Reliability and Activity History (JARC administrators)
+
+The **System Health** page (sidebar, shown only to people with the JARC.Admin role; the server checks the role on every
+request and answers 403 to anyone else) reads two read-only endpoints:
+
+| Endpoint | What it returns |
+|---|---|
+| `GET /api/v1/admin/system-health` | Backend and MongoDB status (ping time), API requests by **route pattern** (count, average, p50, p95, p99, server-error rate), slowest and failing endpoints, a per-minute trend for the last hour, recent errors (500s, 403s, 413s, 429s) with their request ID, slow MongoDB commands, monday.com and Google Drive health (last success, last failure and its code, retries, time-outs, rate limits, recent history), and background jobs (monday.com jobs, Excel/CSV imports, the search index, and — for Google Drive administrators only — the attachment import's runs). |
+| `GET /api/v1/admin/activity` | The audit trail (`activities`), newest first: `q` (summary or field name), `action` (`record.updated`, or a prefix such as `record.`), `actor` (name), `boardId`, `from`, `to` (ISO dates), `limit` (1–100, default 50) and `before` (the `next` cursor of the previous page). Values of fields whose names look like secrets are shown as `[redacted]`; long values are cut to 200 characters. |
+
+How it works and what it keeps:
+
+- Every API response carries **`X-Request-Id`** (the caller's own when it is 8–64 letters, digits, `.`, `_` or `-`; otherwise a new
+  one). It is written into server log lines for errors, into new activity entries (`requestId`), and listed with recent errors, so
+  one failure can be followed from the browser to the log and the audit trail. Browser errors carry it as `error.requestId`.
+- Figures are kept **in memory with fixed limits** (200 route patterns × 200 recent timings, 2,000 overall timings, 50 recent
+  errors, 50 slow commands, 60 one-minute buckets, 50 history entries per integration) and reset when the server restarts.
+  Nothing new is written to MongoDB: there is no new collection and no new index.
+- Recorded: route patterns, status and error codes, durations, MongoDB command and collection names, integration status and
+  reason codes. Never: URLs as sent, query strings, request or response bodies, cookies, tokens, names or record values.
+- The monday.com and Google Drive clients already retried with backoff (only where safe: reads, resumable upload chunks) and
+  time out; they now also report each attempt. Their behaviour is unchanged.
+- Activity History is a view of the existing append-only `activities` collection; there is still no API to change or delete
+  entries, and the identity in each entry comes from the signed-in session, never from the request.
 
 ### Account Management (`ACCOUNT_MANAGEMENT`, Phases M4.3–M4.4A)
 
@@ -230,6 +260,10 @@ The monday.com records migration (M5) left the board's files on monday.com. This
   - **Permanent problems,** such as a missing record or a file gone from monday.com, fail that file only.
 - **What's kept:** original names (JFIF names too, served as JPEG), HEIC as download-only, and CSV as download-only. Records are never written.
 
+- **A file whose content isn't the type its name says** (monday.com infers the type from the name, so a JPEG saved as `photo.png` is planned as PNG): the bytes' signature decides. When they are another accepted *image* type, the file is stored as that type, named with its real extension (`photo.jpg`), with the original name in `imported.originalName` and `imported.typeCorrection: { declaredType, detectedType, originalName }`. Content that matches no accepted type, or a different kind (a "PNG" that is really a PDF, CSV or HTML), is still refused with `UNSUPPORTED_FILE_TYPE`. The upload guard checks the bytes against the type they are stored as, so validation is unchanged.
+- **One failed file** of a finished (completed, paused or stopped) run, from its row on the Integrations page:
+  - **Inspect** (`GET …/runs/<run>/items/<asset>/inspect`): read-only. It downloads the file from monday.com and reports its size, SHA-256, the type its name implied, the type its content shows, and whether a retry would pass the type check. It writes nothing.
+  - **Retry this file** (`POST …/runs/<run>/items/<asset>/retry`, typing `RETRY <asset>` to confirm): only a failed file, only when no other file of the run is waiting. That file goes back in line and the run runs with an allowance of exactly one, then ends completed again. Files already imported are not touched. The failed attempt's leftover document, and any Drive object under its old ID, are removed before the file is stored under a new one, and the unique indexes (one attachment per source asset, one mapping per asset) make a second copy impossible. The first failure stays on the item as `previousError`.
 ## Search index, forms and imports
 
 **Search index** (`RECORD_SEARCH_INDEX`, `services/record-search-index.js`). With `on`, global and board search, including status, priority and assignee filters, answer from the `recordSearch` collection, once a catch up has verified it complete. A failed update takes it out of use until it has been repaired and verified again; until then search answers from the records. `node scripts/search-index.js verify|rebuild --target local --db <db>` checks or repairs it (production verify is read-only; a production rebuild needs `--confirm-production`).

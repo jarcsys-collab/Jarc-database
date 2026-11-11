@@ -87,7 +87,7 @@ class AttachmentWriter {
       _id: entry._id, workspaceId: this.workspaceId, boardId: entry.boardId, recordId: entry.recordId, columnKey: entry.columnKey, name, type: entry.plannedType, size: source.size, sha256: source.sha256,
       storage: this.provider === "gridfs" ? { provider: "gridfs" } : { provider: this.provider, key },
       status: "pending", uploadedBy: null, uploadedByName: "monday.com migration", createdAt: at,
-      imported: { provider: SOURCE_PROVIDER, runId: this.runId, sourceAssetId: entry.sourceAssetId, action: entry.action, oversized: Boolean(entry.oversized), originalName: entry.originalName ?? null, linkedCommentIds: entry.linkedCommentIds, sourceUploadedBy: entry.sourceUploadedBy, sourceCreatedAt: entry.sourceCreatedAt, ...(type.downloadOnly ? { downloadOnly: true } : {}) }
+      imported: { provider: SOURCE_PROVIDER, runId: this.runId, sourceAssetId: entry.sourceAssetId, action: entry.action, oversized: Boolean(entry.oversized), originalName: entry.originalName ?? null, linkedCommentIds: entry.linkedCommentIds, sourceUploadedBy: entry.sourceUploadedBy, sourceCreatedAt: entry.sourceCreatedAt, ...(type.downloadOnly ? { downloadOnly: true } : {}), ...(entry.typeCorrection ? { typeCorrection: entry.typeCorrection } : {}) }
     };
     try { await this.col("attachments").insertOne(doc); }
     catch (e) { await this.usage.release(this.provider, source.size); if (e?.code === 11000) throw new Err("MIGRATION_DUPLICATE_REFUSED", `Asset ${entry.sourceAssetId} is already being stored.`); throw e; }

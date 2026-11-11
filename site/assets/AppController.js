@@ -2,6 +2,7 @@ class AppController {
   constructor(root) {
     this.root = root; this.auth = new AuthModel(); this.model = new BoardModel(); this.view = new AppView(root);this.view.onUndo=()=>{if(this.busy)return;const label=this.model.undo();this.update();this.view.toast(label);};
     this.integrations = typeof IntegrationsPanel === "function" ? new IntegrationsPanel(this) : null; this.view.integrations = this.integrations;
+    this.health = typeof SystemHealthPanel === "function" ? new SystemHealthPanel(this) : null; this.view.healthPanel = this.health;
     this.accounts = typeof AccountsPanel === "function" ? new AccountsPanel(this) : null; this.view.accountsPanel = this.accounts;
     this.apiTokens = typeof ApiTokensPanel === "function" ? new ApiTokensPanel(this) : null; this.view.apiTokensPanel = this.apiTokens;
     this.groupActions = typeof BoardGroupActions === "function" ? new BoardGroupActions(this) : null;
@@ -363,6 +364,7 @@ class AppController {
     if (action === "entra-sign-out" && this.entra) { this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true, signingOut: true }); this.entra.signOut(); return; }
     if (window.jarcStorage?.connection === "offline" && ["cell-open","set-cell-option","inline-add","open-form","new-item","new-board","add-column","create-workspace","import"].includes(action)) { this.view.toast(StorageError.describe(StorageError.CODES.OFFLINE).message); return; }
     if (action.startsWith("integration-") && this.integrations) { if (target.tagName !== "SELECT") this.integrations.onAction(action, target); return; }
+    if (action.startsWith("health-") && this.health) { if (target.tagName !== "FORM") this.health.onAction(action, target); return; }
     if (action.startsWith("apitok-") && this.apiTokens) { if (!["SELECT", "INPUT", "FORM"].includes(target.tagName)) this.apiTokens.onAction(action, target); return; }
     if (action.startsWith("acct-") && this.accounts) { if (!["SELECT", "INPUT", "FORM"].includes(target.tagName)) this.accounts.onAction(action, target); return; }
     if ((action.startsWith("appearance-") || (["icon-picker", "icon-tab", "icon-choose"].includes(action))) && this.appearance) { if (target.tagName !== "INPUT") this.appearance.onAction(action, target); return; }
@@ -472,6 +474,7 @@ class AppController {
     if (action === "preview-file") { const row=this.model.rows.find((r)=>r.id===this.model.idOf(target.dataset.id)), column=this.model.board.columns.find((c)=>c.key===target.dataset.field), file=this.model.attachments.get(target.dataset.file); if(row&&column&&file){this.view.showFilePreview(this.model,row,column,file);this.markPanel(`preview-${file.id}`);this.watchPreview();} return; }
     if (action === "download-file") { this.view.toast(`Downloading ${target.dataset.name||"file"}…`); return; } // the browser takes over (no preventDefault)
     if (action === "retry-attachments") { const id=String(this.model.serverId(this.model.board?.id)); this.model.attachmentErrors.delete(id); this.model.attachmentBoards.delete(id); this.ensureAttachments(); this.refreshFilesCells(); return; }
+    if (action === "preview-zoom") { const body=document.querySelector("#overlay-root .file-preview-body"); if(body){const on=body.classList.toggle("is-zoomed");target.setAttribute("aria-pressed",String(on));target.querySelector("span").textContent=on?"Fit to window":"Actual size";} return; }
     if (action === "back-to-files") { this.view.closeOverlay(); this.openFiles(target.dataset.id,target.dataset.field); return; }
     if (action === "request-remove-file") { this.filesConfirm={cell:this.filesCellKey(target.dataset.id,target.dataset.field),id:target.dataset.file}; this.refreshFiles(target.dataset.id,target.dataset.field); return; }
     if (action === "cancel-remove-file") { this.filesConfirm=null; this.refreshFiles(target.dataset.id,target.dataset.field); return; }
@@ -592,6 +595,7 @@ class AppController {
     if (event.target.dataset?.action === "comment-input") { this.comments?.onInput(event.target); return; }
     if (event.target.dataset?.action === "acct-search") { this.accounts?.onSearch(event.target); return; }
     if (event.target.dataset?.action?.startsWith("apitok-")) { this.apiTokens?.onInput(event.target); return; }
+    if (event.target.dataset.action === "files-filter") { const term=event.target.value.trim().toLowerCase(), panel=event.target.closest(".files-popover"); let shown=0; panel?.querySelectorAll(".file-list > li:not([data-upload])").forEach((li)=>{const hit=!term||li.textContent.toLowerCase().includes(term);li.hidden=!hit;if(hit)shown+=1;}); const empty=panel?.querySelector(".file-filter-empty"); if(empty)empty.hidden=shown>0; return; }
     if (event.target.dataset.action === "cell-option-search") { this.view.filterOptions(event.target.closest(".cell-options-popover"),event.target.value); return; }
     if (event.target.dataset.action === "workspace-search") { const term=event.target.value.toLowerCase(); document.querySelectorAll(".workspace-list > button").forEach((button)=>{button.hidden=!button.textContent.toLowerCase().includes(term);}); return; }
     if (event.target.dataset.action === "column-picker-search") { this.view.showColumnPicker(this.model,event.target.value); return; }
@@ -721,6 +725,7 @@ class AppController {
     if (action === "form-design-form") { if (this.model.features?.nativeForms) this.forms?.saveDesigner(); return; }
     if (action === "form-fill-form") { if (this.model.features?.nativeForms) this.forms?.submitFill(); return; }
     if (action?.startsWith("integration-")) { this.integrations?.onSubmit(action, data, event.target); return; }
+    if (action?.startsWith("health-")) { this.health?.onSubmit(action, data, event.target); return; }
     if (action?.startsWith("apitok-")) { this.apiTokens?.onSubmit(action, event.target); return; }
     if (action?.startsWith("acct-")) { this.accounts?.onSubmit(action, data, event.target); return; }
     if ((action === "group-form" || action === "group-delete-form") && this.groupActions) { this.groupActions.onSubmit(action, data, event.target); return; }
@@ -771,6 +776,31 @@ class AppController {
     if(action==="paste-import-form"){if(String(data.text||"").length>10*1024*1024){this.view.showMessage("Import not ready","Pasted text is larger than 10 MB. Split it into smaller imports.");return;}try{const rows=this.parseCsv(data.text);this.model.assertImportable(rows);this.pendingImport=rows;this.view.showImportPreview(this.model,rows);}catch(error){this.view.showMessage("Import not ready",error.message);}return;}
     if (action === "workspace-settings-form") { this.model.updateWorkspace(this.model.currentWorkspaceId,data); this.update();this.view.showSettings(this.model,"workspace"); this.view.toast("Workspace updated"); }
   }
+  isCollapseShortcut(event){return (event.ctrlKey||event.metaKey)&&!event.altKey&&!event.shiftKey&&String(event.key||"").toLowerCase()==="d";}
+  // The board's own groups are on screen (the table view; not Group by, not the archived list) and nothing else has the keyboard.
+  boardGroupsShown(){const m=this.model;return m.screen==="board"&&Boolean(m.board)&&m.currentView==="table"&&!m.groupByColumn&&!m.showArchived&&m.board.groups.length>0&&Boolean(this.root.querySelector(".board-groups tbody.board-group[data-group]:not(.view-group)"));}
+  collapseShortcutActive(event,editing){
+    const t=event.target;
+    if(editing||t?.isContentEditable||t?.closest?.('[contenteditable=""],[contenteditable="true"],[role="dialog"],[role="menu"],dialog,.modal,.popover'))return false;
+    if(document.querySelector("#overlay-root")?.children.length||document.querySelector("dialog[open]"))return false;
+    return this.boardGroupsShown();
+  }
+  // Collapse all groups (Ctrl + D and the group menu's "Collapse all groups"): presentation only. No record, count, colour,
+  // order, sort or filter changes. The collapsed state is saved like any group toggle, as a preference in this browser
+  // (BoardModel.collapseAllGroups): nothing is sent to the server.
+  // Focus that was inside a group's rows moves to that group's toggle, so the keyboard position isn't lost.
+  collapseAllBoardGroups({via="keyboard"}={}){
+    const m=this.model;if(!m.board||!m.board.groups.length)return 0;
+    const active=document.activeElement, inGroup=active&&active!==document.body?active.closest?.(".board-group[data-group]"):null, focusGroup=inGroup?inGroup.dataset.group:null;
+    const changed=m.collapseAllGroups(true);
+    if(!changed){this.view.toast("All groups are already collapsed");return 0;}
+    this.update();
+    const toggle=(name)=>this.root.querySelector(`.board-group[data-group="${CSS.escape(name)}"] [data-action="group-toggle"]`);
+    if(focusGroup!==null)toggle(focusGroup)?.focus();
+    else if(via==="menu"||!document.activeElement||document.activeElement===document.body)this.root.querySelector('.board-group[data-group] [data-action="group-toggle"]:not(:disabled)')?.focus();
+    this.view.toast(`Collapsed ${changed} group${changed===1?"":"s"}`);
+    return changed;
+  }
   onKeydown(event) {
     if (this.appearance?.onKeydown(event)) return;
     if (event.target.dataset?.action === "comment-input" && this.comments?.onKeydown(event)) return;
@@ -787,6 +817,9 @@ class AppController {
     if(event.target.classList?.contains("cell-display")&&!document.querySelector("#overlay-root")?.children.length&&this.cellKey(event))return;
     // Undo / redo for board changes — never inside text fields (their own undo stays native) or open dialogs.
     if((event.ctrlKey||event.metaKey)&&!event.altKey&&["z","y"].includes(event.key.toLowerCase())&&!editing&&!document.querySelector("#overlay-root")?.children.length&&this.model.screen==="board"){event.preventDefault();this.undoRedo(event.key.toLowerCase()==="y"||event.shiftKey);return;}
+    // Ctrl + D (⌘ D on a Mac): collapse every group on the board. Only on a board showing its groups, never while typing or
+    // with a dialog or menu open — there the key is left alone, so the browser keeps its own meaning for it.
+    if(this.isCollapseShortcut(event)){if(this.collapseShortcutActive(event,editing)){event.preventDefault();this.collapseAllBoardGroups({via:"keyboard"});}return;}
     if(this.isPaletteShortcut(event)){event.preventDefault();if(this.command)this.command.toggle();else this.view.showCommandPalette(this.model);return;}
     if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="b"&&!editing){event.preventDefault();this.toggleSidebar();return;}
     if(event.target.dataset?.action==="column-type-search"&&event.key==="Enter"){event.preventDefault();event.target.closest(".column-chooser")?.querySelector(".chooser-option:not([hidden]):not(:disabled)")?.click();return;}
@@ -1120,7 +1153,10 @@ class AppController {
       else if(!file.size)error="This file is empty.";
       else if(count>=20)error="A cell can hold at most 20 files.";
       const random=()=>Array.from(crypto.getRandomValues(new Uint8Array(12)),(b)=>b.toString(16).padStart(2,"0")).join("");
-      const u={id:`up_${random()}`,key:random(),file,type,name:file.name||"file",size:file.size,progress:0,state:error?"failed":"uploading",error,retryable:!error};
+      const same=(name,size)=>name===(file.name||"file")&&Number(size)===file.size;
+      const duplicate=!error&&(this.model.attachmentsFor(id,field).some((a)=>same(a.name,a.size))||list.some((x)=>x.state==="uploading"&&same(x.name,x.size))||[...files].slice(0,[...files].indexOf(file)).some((f)=>same(f.name||"file",f.size)));
+      if(duplicate)error="A file with this name and size is already in this cell, so it wasn't uploaded again.";
+      const u={id:`up_${random()}`,key:random(),file,type,name:file.name||"file",size:file.size,progress:0,state:error?"failed":"uploading",error,retryable:!error||duplicate,duplicate};
       list.unshift(u);
       if(!error){count+=1;this.startUpload(id,field,u);}
     }
@@ -1129,7 +1165,7 @@ class AppController {
   }
   startUpload(id,field,u){
     const cell=this.filesCellKey(id,field), adapter=this.model.storage.adapter;
-    u.state="uploading";u.progress=0;u.error="";
+    u.state="uploading";u.progress=0;u.error="";u.duplicate=false;
     const blob=u.file.type===u.type?u.file:new Blob([u.file],{type:u.type});
     adapter.uploadAttachment(id,field,blob,{name:u.name,key:u.key,onProgress:(p)=>{u.progress=p;this.view.updateUploadProgress(u);}}).then((attachment)=>{
       this.model.addAttachment(attachment);

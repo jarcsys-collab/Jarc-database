@@ -196,7 +196,9 @@ describe("Sidebar without the icon rail, and Record IDs (real app)", { skip: BRO
       await click('[data-action="record-id-menu"]');
       assert.ok(await wait(`!!document.querySelector('.record-id-menu [data-action="sort-column"][data-direction="${dir}"]')`, 3000));
       await click(`.record-id-menu [data-action="sort-column"][data-direction="${dir}"]`);
-      // The board is grouped: records are sorted within each group.
+      // The board is grouped: records are sorted within each group. Wait until the table shows that order (the header says
+      // so and every group's IDs are in order) instead of reading it straight after the click, before it has redrawn.
+      await wait(`(() => { if (document.querySelector("th.record-id-col")?.getAttribute("aria-sort") !== ${JSON.stringify(dir === "asc" ? "ascending" : "descending")}) return false; const groups = [...document.querySelectorAll(".editable-table tbody")].map((t) => [...t.querySelectorAll("tr[data-record-context] td.record-id-cell code")].map((c) => c.textContent)).filter((g) => g.length); return groups.length > 0 && groups.every((g) => g.every((id, i) => i === 0 || (${JSON.stringify(dir)} === "asc" ? g[i - 1] <= id : g[i - 1] >= id))); })()`, 8000);
       const groups = JSON.parse(await b.evaluate(`JSON.stringify([...document.querySelectorAll(".editable-table tbody")].map((t) => [...t.querySelectorAll("tr[data-record-context] td.record-id-cell code")].map((c) => c.textContent)).filter((g) => g.length))`));
       assert.ok(groups.flat().length >= 4, "every record shown");
       for (const shown of groups) { const sorted = [...shown].sort(); assert.deepEqual(shown, dir === "asc" ? sorted : sorted.reverse(), `sorted ${dir} within its group`); }

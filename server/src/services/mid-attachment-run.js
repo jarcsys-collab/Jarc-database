@@ -31,9 +31,10 @@ const { Readable } = require("stream");
 const { ObjectId } = require("mongodb");
 const { COLLECTIONS } = require("../db/bootstrap");
 const { ApiError } = require("../middleware/errors");
-const { MIGRATION_TYPES, MAX_FILE_BYTES, classifyAsset } = require("../files/file-types");
+const { MIGRATION_TYPES, MAX_FILE_BYTES, classifyAsset, detectContentType, correctedName } = require("../files/file-types");
 const { MondayClient } = require("../integrations/monday/client");
 const { AttachmentWriter, MAPPING_PROVIDER } = require("../files/migration-writer");
+const { monitor } = require("../monitoring/monitor");
 
 const PROVIDER = "mid-attachments";
 const RUN_TYPE = "mid-attachments-run", ITEM_TYPE = "mid-attachment";
@@ -330,6 +331,51 @@ class MidAttachmentRun {
     this.kick();
     return out;
   }
+  // READ-ONLY: what one file of the run really is. Downloads it from monday.com (as an import attempt would) and reports its
+  // size, checksum, the type its name implied and the type its content signature shows. Writes nothing anywhere.
+  async inspect(runId, assetId) {
+    await this.run(runId);
+    const item = await this.item(runId, assetId);
+    let bytes;
+    // A download problem is answered with its code (MIGRATION_SOURCE_MISSING, MONDAY_UNAUTHORIZED, …), not as a server error.
+    try { bytes = await this.download(item.params); }
+    catch (error) { if (error instanceof ApiError) throw error; throw fail(502, String(error?.code || "MIGRATION_SOURCE_UNAVAILABLE").slice(0, 60), "The file couldn't be downloaded from monday.com to inspect it. Nothing was changed."); }
+    const sniff = detectContentType(bytes, item.params.type, TYPES);
+    return { runId, assetId: item.params.assetId, status: item.status, attempts: item.attempts, lastError: item.error?.code || null, sizeBytes: bytes.length, sha256: sha256(bytes), declaredType: sniff.declared, detectedType: sniff.detected, matchesDeclared: sniff.matchesDeclared, wouldStoreAs: sniff.matchesDeclared ? sniff.declared : sniff.corrected, storedName: sniff.corrected ? correctedName(item.params.plannedName || item.params.name, sniff.corrected, TYPES) : null, retryWouldSucceedTypeCheck: Boolean(sniff.matchesDeclared || sniff.corrected) };
+  }
+  // Retries exactly one FAILED file of a finished run: the item goes back in line, the run runs with an allowance of one, and
+  // ends completed again. Every other file stays as it is (done files aren't touched; nothing else is queued). The writer's
+  // recovery removes the failed attempt's leftover document and any object under its old key before storing, and the unique
+  // indexes (attachment per source asset, mapping per asset) make a second copy impossible.
+  async retryOne(runId, assetId, { confirm } = {}) {
+    if (confirm !== `RETRY ${assetId}`) throw fail(400, "CONFIRMATION_REQUIRED", `Type "RETRY ${assetId}" to confirm.`);
+    const run = await this.run(runId);
+    if (!["completed", "paused", "stopped"].includes(run.status)) throw fail(409, "RUN_NOT_RETRYABLE", `The run is ${run.status}.`);
+    const item = await this.item(runId, assetId);
+    if (item.status !== "failed") throw fail(409, "ITEM_NOT_FAILED", `This file is ${item.status}; only a failed file can be retried.`);
+    if (await this.jobs.countDocuments({ type: ITEM_TYPE, runId, status: { $in: ["queued", "retry", "running"] } })) throw fail(409, "RUN_HAS_WORK", "Other files of this run are still waiting. Finish or stop them first.");
+    const capacity = await this.capacity(item.params.sizeBytes);
+    if (!capacity.enough) throw fail(409, "NOT_ENOUGH_STORAGE", "There isn't enough storage for this file.", { capacity });
+    const snapshot = await this.preStartSnapshot(run);
+    if (snapshot.problems.length) throw fail(409, "PRE_START_CHECK_FAILED", "The read-only check before starting found a problem. Verify the run first.", { problems: snapshot.problems });
+    const now = this.now();
+    const back = await this.jobs.updateOne({ _id: item._id, status: "failed" }, { $set: { status: "queued", attempts: 0, runAfter: now, previousError: item.error || null, updatedAt: now }, $unset: { error: "" } });
+    if (back.matchedCount !== 1) throw fail(409, "RUN_CHANGED", "The file changed in the meantime. Reload and try again.");
+    const r = await this.jobs.updateOne({ _id: runId, status: run.status }, { $set: { status: "running", remaining: 1, retryingAssetId: item.params.assetId, updatedAt: now, pausedReason: null, lastError: null }, $push: { snapshots: { ...snapshot, mode: "retry-one", capacity } } });
+    if (r.matchedCount !== 1) {
+      await this.jobs.updateOne({ _id: item._id, status: "queued" }, { $set: { status: "failed", error: item.error || null, updatedAt: this.now() } });
+      throw fail(409, "RUN_CHANGED", "The run changed in the meantime. Reload and try again.");
+    }
+    this.logger.log?.(`[mid-attachments] ${runId} retrying asset ${item.params.assetId} only`);
+    this.kick();
+    return this.status(runId);
+  }
+  async item(runId, assetId) {
+    if (typeof assetId !== "string" || !/^\d{1,20}$/.test(assetId)) throw fail(404, "NOT_FOUND", "No such file in this run.");
+    const item = await this.jobs.findOne({ type: ITEM_TYPE, runId, "params.assetId": assetId });
+    if (!item) throw fail(404, "NOT_FOUND", "No such file in this run.");
+    return item;
+  }
   async stop(runId) { return this.transition(runId, ["running", "paused"], { status: "stopped", remaining: 0, pausedReason: "stopped-by-administrator" }); }
   async transition(runId, from, set) {
     const r = await this.jobs.updateOne({ _id: runId, type: RUN_TYPE, status: { $in: from } }, { $set: { ...set, updatedAt: this.now() } });
@@ -464,9 +510,11 @@ class MidAttachmentRun {
         await this.jobs.updateOne({ _id: runId }, { $inc: { remaining: 1 } });
         await this.jobs.updateOne({ _id: runId, status: "running" }, { $set: { status: "paused", pausedReason: code, lastError: info, updatedAt: this.now() } });
         this.logger.error(`[mid-attachments] ${runId} paused: ${code}`);
+        monitor.recordJobFailure({ kind: "mid-attachments.paused", code });
       } else if (PERMANENT.has(code) || item.attempts >= MAX_ATTEMPTS || error?.retry === false) {
         await this.finish(item, { status: "failed", error: info });
         this.logger.error(`[mid-attachments] ${runId} asset ${p.assetId} failed: ${code}`);
+        monitor.recordJobFailure({ kind: "mid-attachments.file", code });
       } else {
         const delay = Math.min(15 * 60 * 1000, 30 * 1000 * 2 ** Math.max(0, item.attempts - 1));
         await this.finish(item, { status: "retry", runAfter: new Date(this.now().getTime() + delay), error: info });
@@ -500,8 +548,13 @@ class MidAttachmentRun {
     if (!board?.columns.some((c) => c.key === p.columnKey && c.type === "files")) throw Object.assign(new Error("The Files column no longer exists."), { code: "MIGRATION_ATTACHMENT_COLUMN_MISSING" });
     const bytes = await this.download(p);
     const hash = sha256(bytes);
+    // The planned type came from the file's name. When the bytes are a different accepted image type, store it as what it
+    // really is (the upload guard then checks the bytes against that type). Anything else is refused as before.
+    const sniff = detectContentType(bytes, p.type, TYPES);
+    const typed = sniff.corrected ? { type: sniff.corrected, plannedName: correctedName(p.plannedName || p.name, sniff.corrected, TYPES), typeCorrection: { declaredType: p.type, detectedType: sniff.corrected, originalName: p.name ?? null } } : null;
+    if (typed) this.logger.log?.(`[mid-attachments] ${run._id} asset ${p.assetId}: content is ${sniff.corrected}, not ${p.type}; stored as ${sniff.corrected}`);
     const writer = new AttachmentWriter({ client: this.connection.client, db: this.db, runId: run._id, storage: this.files.storage, provider: "gdrive", maxBytes: this.maxFileBytes, limitBytes: this.files.limitOf("gdrive"), workspaceId: run.workspaceId, now: this.now, faults: this.faults, types: TYPES });
-    const entry = { _id: attachmentId, sourceAssetId: p.assetId, recordId, boardId: run.boardId, columnKey: p.columnKey, action: p.action, plannedType: p.type, plannedName: p.plannedName, originalName: p.name, sizeBytes: p.sizeBytes, oversized: p.oversized, linkedCommentIds: p.linkedCommentIds || [], sourceUploadedBy: p.sourceUploadedBy, sourceCreatedAt: p.sourceCreatedAt };
+    const entry = { _id: attachmentId, sourceAssetId: p.assetId, recordId, boardId: run.boardId, columnKey: p.columnKey, action: p.action, plannedType: typed?.type || p.type, plannedName: typed?.plannedName || p.plannedName, ...(typed ? { typeCorrection: typed.typeCorrection } : {}), originalName: p.name, sizeBytes: p.sizeBytes, oversized: p.oversized, linkedCommentIds: p.linkedCommentIds || [], sourceUploadedBy: p.sourceUploadedBy, sourceCreatedAt: p.sourceCreatedAt };
     const r = await writer.importOne(entry, { sha256: hash, size: bytes.length, open: () => Readable.from([bytes]) });
     return { ...r, sha256: hash };
   }

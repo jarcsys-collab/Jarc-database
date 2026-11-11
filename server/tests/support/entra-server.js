@@ -51,7 +51,8 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
   // Optional 2nd argument "shared": ACCESS_POLICY=development_shared (as on Railway); default role_based.
   const accessPolicy = process.argv[3] === "shared" ? "development_shared" : "role_based";
   // JARC_TEST_API_TOKENS=1: API tokens on, with a key made up for this run.
-  const app = createApp({ ...(process.env.JARC_TEST_API_TOKENS === "1" ? { apiTokens: { key: require("crypto").randomBytes(32) } } : {}), ...(process.env.JARC_TEST_FEATURES === "off" ? { features: { nativeForms: false, spreadsheetImports: false } } : {}), repository: new MemoryStateRepository(), environment: "test", dataLayer, auth: { mode: "entra", entra, verify }, accessPolicy, betaOpenEditing: process.env.JARC_TEST_BETA === "1", ...(process.env.JARC_TEST_ACCOUNTS ? { accounts: { mode: process.env.JARC_TEST_ACCOUNTS, superAdmin: process.env.JARC_TEST_SUPER_ADMIN_OID ? { tenantId: entra.tenantId, objectId: process.env.JARC_TEST_SUPER_ADMIN_OID.toLowerCase(), email: null } : null } } : {}), logger: { error() {} } });
+  // JARC_TEST_SITE_DIR: serve another copy of site/ (benchmarks compare the committed frontend with the working copy).
+  const app = createApp({ ...(process.env.JARC_TEST_SITE_DIR ? { siteDir: process.env.JARC_TEST_SITE_DIR } : {}), ...(process.env.JARC_TEST_API_TOKENS === "1" ? { apiTokens: { key: require("crypto").randomBytes(32) } } : {}), ...(process.env.JARC_TEST_FEATURES === "off" ? { features: { nativeForms: false, spreadsheetImports: false } } : {}), repository: new MemoryStateRepository(), environment: "test", dataLayer, auth: { mode: "entra", entra, verify }, accessPolicy, betaOpenEditing: process.env.JARC_TEST_BETA === "1", ...(process.env.JARC_TEST_ACCOUNTS ? { accounts: { mode: process.env.JARC_TEST_ACCOUNTS, superAdmin: process.env.JARC_TEST_SUPER_ADMIN_OID ? { tenantId: entra.tenantId, objectId: process.env.JARC_TEST_SUPER_ADMIN_OID.toLowerCase(), email: null } : null } } : {}), logger: { error() {} } });
   const sim = { protected: 0, withSession: 0, withoutSession: [] };
 
   const outer = express();
@@ -73,8 +74,17 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
   outer.post("/__test/mid", express.json(), async (req, res) => {
     if (!midConfig) return res.status(404).json({ error: "import not enabled" });
     const runId = "mid-0123456789abcdef", now = new Date(), board = new ObjectId();
+    // Called again: the synthetic run is replaced, not duplicated.
+    await connection.db.collection("integrationJobs").deleteMany({ runId });
+    await connection.db.collection("integrationJobs").deleteMany({ _id: runId });
     await connection.db.collection("integrationJobs").insertOne({ _id: runId, provider: "mid-attachments", type: "mid-attachments-run", status: "prepared", planDigest: "0".repeat(64), sourceRunId: "monday-1-000000000000", boardId: board, workspaceId: new ObjectId(), totals: { files: 2, bytes: 2048 }, remaining: 0, backups: [], createdAt: now, updatedAt: now, runAfter: now });
     for (const assetId of ["1", "2"]) await connection.db.collection("integrationJobs").insertOne({ _id: `${runId}:${assetId}`, provider: "mid-attachments", type: "mid-attachment", runId, status: "queued", attempts: 0, runAfter: now, createdAt: now, params: { assetId, attachmentId: new ObjectId().toHexString(), recordId: new ObjectId().toHexString(), name: `file-${assetId}.pdf`, sizeBytes: 1024 } });
+    // { finishedWithFailure: true }: the run has completed with file 1 imported and file 2 refused (to show its Inspect and Retry).
+    if (req.body?.finishedWithFailure) {
+      await connection.db.collection("integrationJobs").updateOne({ _id: runId }, { $set: { status: "completed", mode: "full", pilotFinishedAt: now, finishedAt: now } });
+      await connection.db.collection("integrationJobs").updateOne({ _id: `${runId}:1` }, { $set: { status: "done", attempts: 1 } });
+      await connection.db.collection("integrationJobs").updateOne({ _id: `${runId}:2` }, { $set: { status: "failed", attempts: 1, error: { code: "UNSUPPORTED_FILE_TYPE", message: "refused", at: now }, updatedAt: now } });
+    }
     res.json({ ok: true, runId });
   });
   outer.post("/__test/google-drive", express.json(), async (req, res) => {
