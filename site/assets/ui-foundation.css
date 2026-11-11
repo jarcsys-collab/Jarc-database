@@ -1809,7 +1809,7 @@ tr:hover .record-id-copy, .record-id-copy:focus-visible { opacity: 1; }
   .health-filter-actions { width: 100%; }
   .health-filter-actions .button { flex: 1; }
 }
-/* A shortcut hint at the end of a menu item (Collapse all groups · Ctrl D). */
+/* A shortcut hint at the end of a menu item (Collapse all groups · Ctrl G). */
 .menu-kbd { margin-left: auto; padding: 1px 6px; border: 1px solid var(--line); border-radius: var(--radius-sm); font: inherit; font-size: 11px; color: var(--muted); background: var(--surface-2); white-space: nowrap; }
 /* Files panel: find a file in a cell with many; image previews at actual size (scrolls inside the preview). */
 .file-filter { display: flex; align-items: center; gap: 6px; margin: 8px 0 4px; padding: 0 10px; min-height: 32px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--muted); }

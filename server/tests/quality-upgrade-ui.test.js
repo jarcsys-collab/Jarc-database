@@ -1,4 +1,4 @@
-// Q1.2/Q1.3/Q1.4/Q1.5/Q1.6 and Ctrl + D in the REAL app (headless Chrome or Edge, TEST server on the fake MongoDB, local
+// Q1.2/Q1.3/Q1.4/Q1.5/Q1.6 and Ctrl + G in the REAL app (headless Chrome or Edge, TEST server on the fake MongoDB, local
 // Entra test keys): collapse all groups by keyboard and from the group menu, the System Health page for administrators
 // (and not for employees), Activity History filters, file type labels, download-only previews and the duplicate-upload
 // guard, and the new pages at phone width. Skipped when no browser is installed.
@@ -22,11 +22,24 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
   const counts = () => b.evaluate("[...document.querySelectorAll('tbody.board-group[data-group]')].map((g) => g.dataset.group + ':' + (g.querySelector('.group-count')?.textContent.trim() || ''))");
   const order = () => b.evaluate("[...document.querySelectorAll('tbody.board-group[data-group]')].map((g) => g.dataset.group + '|' + getComputedStyle(g).getPropertyValue('--group-color').trim())");
   const stats = async () => JSON.parse(await b.evaluate("fetch('/__test/stats').then((r) => r.text())")).protected;
+  // What reached the server after a point (its request log), leaving out the live-update stream: EventSource reconnects on its
+  // own schedule (GET /events, read-only) whatever the page is doing.
+  const serverLog = async () => JSON.parse(await b.evaluate("fetch('/__test/stats').then((r) => r.text())")).log;
+  const serverSince = async (from) => (await serverLog()).slice(from).filter((line) => line !== "GET /events" && !line.startsWith("GET /__test"));
   // A key press as the browser sends it; → whether the page called preventDefault (the bookmark dialog stays shut).
   const press = (target, init) => b.evaluate(`(() => { const el = ${target}; const e = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...${JSON.stringify(init)} }); el.dispatchEvent(e); return e.defaultPrevented; })()`);
+  const ctrlG = (target = "document.activeElement || document.body") => press(target, { key: "g", code: "KeyG", ctrlKey: true });
   const ctrlD = (target = "document.activeElement || document.body") => press(target, { key: "d", code: "KeyD", ctrlKey: true });
-  const expandAll = async () => { await b.evaluate("document.querySelectorAll('[data-action=\"group-toggle\"][aria-expanded=\"false\"]').forEach((t) => t.click())"); await sleep(150); };
+  // Each click redraws the board, so a fresh toggle is looked up every time (a saved list would point at replaced elements).
+  const expandAll = async () => { await b.evaluate("(() => { for (let i = 0; i < 50; i += 1) { const t = document.querySelector('[data-action=\"group-toggle\"][aria-expanded=\"false\"]'); if (!t) return; t.click(); } })()"); await sleep(150); };
   const toastText = () => b.evaluate("document.querySelector('#toast-region')?.textContent || ''");
+  // Every request the page itself makes (method, path, when). Opening groups starts loading their next records in the
+  // background, so a "no request" check first waits until the page has been quiet for a while, then records exactly what
+  // the key press sends.
+  const recordRequests = () => b.evaluate(`(() => { if (window.__jarcReq) return; window.__jarcReq = []; const log = (method, url) => window.__jarcReq.push({ method: String(method || "GET").toUpperCase(), path: String(url).replace(location.origin, "").split("?")[0], t: performance.now() }); const f = window.fetch; window.fetch = (input, init) => { log(init?.method || input?.method, input?.url || input); return f(input, init); }; const open = XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open = function (method, url, ...rest) { log(method, url); return open.call(this, method, url, ...rest); }; })()`);
+  const quiet = async (ms = 1500) => { await recordRequests(); assert.ok(await b.waitFor(`performance.now() - ((window.__jarcReq || []).at(-1)?.t ?? 0) > ${ms}`, 60000), "the page settles"); };
+  const requestsSince = (mark) => b.evaluate(`(window.__jarcReq || []).filter((r) => r.t >= ${mark}).map((r) => r.method + " " + r.path)`);
+  const mark = () => b.evaluate("performance.now()");
 
   before(async () => {
     const port = await freePort();
@@ -50,7 +63,7 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
   });
   after(async () => { await b?.close(); server?.kill(); });
 
-  describe("Ctrl + D collapses all groups", () => {
+  describe("Ctrl + G collapses all groups", () => {
     test("every expanded group collapses at once; order, colours and record counts are unchanged; nothing is sent to the server", async () => {
       await open("Big board");
       await expandAll();
@@ -60,14 +73,16 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
       await b.evaluate("document.body.focus()");
       const records = async () => JSON.stringify((await api("GET", `/boards/${big.id}/records?limit=200`)).body.items.map((r) => [r.id, r.version, r.updatedAt, r.groupId, r.position]));
       const recordsBefore = await records();
-      const requests = await stats();
-      assert.equal(await ctrlD("document.body"), true, "the browser's own Ctrl + D (bookmark) is prevented");
+      await quiet();
+      const requests = (await serverLog()).length, since = await mark();
+      assert.equal(await ctrlG("document.body"), true, "the browser's own Ctrl + G (find next) is prevented");
       await sleep(400);
       assert.deepEqual(await expanded(), []);
       assert.deepEqual(await counts(), beforeCounts, "counts unchanged");
       assert.deepEqual(await order(), beforeOrder, "order and colours unchanged");
       assert.equal(await b.evaluate("document.querySelectorAll('tr[data-record-context]').length"), 0, "collapsed groups render no rows");
-      assert.equal(await stats(), requests, "no API request at all (so no database write)");
+      assert.deepEqual(await requestsSince(since), [], "the page sent nothing");
+      assert.deepEqual(await serverSince(requests), [], "no API request at all (so no database write)");
       assert.match(await toastText(), /Collapsed \d+ groups?/);
       assert.equal(await records(), recordsBefore, "no record changed: versions, dates, groups and positions are identical");
     });
@@ -77,31 +92,47 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
       assert.deepEqual(await expanded(), [], "still collapsed after a reload");
       assert.ok(await b.evaluate("Object.keys(localStorage).some((k) => (localStorage.getItem(k) || '').includes('collapsedGroups'))"), "kept in this browser's storage");
     });
+    test("Ctrl + D (and ⌘ D) is no longer handled: groups stay open and the browser keeps the key", async () => {
+      await expandAll();
+      const open = (await expanded()).length;
+      assert.ok(open >= 8);
+      await b.evaluate("document.activeElement?.blur(); document.body.focus()");
+      assert.equal(await ctrlD("document.body"), false, "Ctrl + D not prevented");
+      assert.equal(await press("document.body", { key: "d", code: "KeyD", metaKey: true }), false, "⌘ D not prevented");
+      assert.equal(await press("document.body", { key: "G", code: "KeyG", ctrlKey: true, shiftKey: true }), false, "Ctrl + Shift + G (find previous) is left alone");
+      await sleep(200);
+      assert.equal((await expanded()).length, open, "nothing collapsed");
+      assert.equal(await ctrlG("document.body"), true);
+      await sleep(300);
+      assert.deepEqual(await expanded(), []);
+    });
     test("already collapsed: stays collapsed, says so, and still sends nothing", async () => {
-      const requests = await stats();
-      assert.equal(await ctrlD("document.body"), true);
+      await quiet();
+      const requests = (await serverLog()).length, since = await mark();
+      assert.equal(await ctrlG("document.body"), true);
       await sleep(200);
       assert.deepEqual(await expanded(), []);
       assert.match(await toastText(), /already collapsed/);
-      assert.equal(await stats(), requests);
+      assert.deepEqual(await requestsSince(since), [], "the page sent nothing");
+      assert.deepEqual(await serverSince(requests), [], "the server received nothing");
     });
     test("one expanded group (opened with the mouse) collapses; the mouse toggle keeps working afterwards", async () => {
       await b.evaluate("document.querySelector('.board-group[data-group=\"Charlie\"] [data-action=\"group-toggle\"]').click()"); await sleep(200);
       assert.deepEqual(await expanded(), ["Charlie"]);
       assert.ok(await b.evaluate("document.querySelectorAll('.board-group[data-group=\"Charlie\"] tr[data-record-context]').length") > 0);
       await b.evaluate("document.body.focus()");
-      await ctrlD("document.body"); await sleep(200);
+      await ctrlG("document.body"); await sleep(200);
       assert.deepEqual(await expanded(), []);
       await b.evaluate("document.querySelector('.board-group[data-group=\"Delta\"] [data-action=\"group-toggle\"]').click()"); await sleep(200);
       assert.deepEqual(await expanded(), ["Delta"], "mouse expand still works");
       await b.evaluate("document.querySelector('.board-group[data-group=\"Delta\"] [data-action=\"group-toggle\"]').click()"); await sleep(200);
       assert.deepEqual(await expanded(), [], "mouse collapse still works");
     });
-    test("focus inside a group's rows moves to that group's toggle; ⌘ D works too", async () => {
+    test("focus inside a group's rows moves to that group's toggle; ⌘ G works too", async () => {
       await expandAll();
       const focused = await b.evaluate("(() => { const c = document.querySelector('.board-group[data-group=\"Alpha\"] tr[data-record-context] .cell-display'); c?.focus(); return document.activeElement === c; })()");
       assert.ok(focused, "a cell has focus");
-      assert.equal(await press("document.activeElement", { key: "d", code: "KeyD", metaKey: true }), true);
+      assert.equal(await press("document.activeElement", { key: "g", code: "KeyG", metaKey: true }), true);
       await sleep(300);
       assert.deepEqual(await expanded(), []);
       assert.deepEqual(await b.evaluate("[document.activeElement?.dataset.action, document.activeElement?.closest('.board-group')?.dataset.group]"), ["group-toggle", "Alpha"]);
@@ -124,24 +155,27 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
       await b.evaluate("document.querySelector('[data-action=\"shortcuts\"]').click()"); await sleep(200);
       assert.ok(await b.evaluate("!!document.querySelector('#overlay-root .modal')"), "the shortcuts dialog is open");
       assert.ok(await b.evaluate("document.querySelector('#overlay-root').textContent.includes('Collapse all groups')"), "the shortcut is listed");
+      assert.equal(await b.evaluate("[...document.querySelectorAll('#overlay-root .shortcut-list > div')].find((d) => d.textContent.includes('Collapse all groups'))?.querySelector('kbd')?.textContent"), "Ctrl / ⌘ G", "listed as Ctrl / ⌘ G");
       const groups = (await expanded()).length;
-      assert.equal(await ctrlD("document.querySelector('#overlay-root .modal') || document.body"), false);
-      assert.equal(await ctrlD("document.body"), false);
+      assert.equal(await ctrlG("document.querySelector('#overlay-root .modal') || document.body"), false);
+      assert.equal(await ctrlG("document.body"), false);
       await sleep(150);
       assert.equal((await expanded()).length, groups, "nothing collapsed under a dialog");
       await press("document.activeElement || document.body", { key: "Escape" }); await sleep(150);
     });
     test("the group menu's Collapse all groups (the visible fallback) does the same, shows the shortcut, and keeps keyboard focus", async () => {
       await expandAll();
-      const requests = await stats();
+      await quiet();
+      const requests = (await serverLog()).length, since = await mark();
       await b.evaluate("document.querySelector('.board-group[data-group=\"Echo\"] [data-action=\"group-menu\"]').click()"); await sleep(200);
       const item = await b.evaluate("(() => { const el = document.querySelector('#overlay-root [data-action=\"group-collapse-all\"]'); return el ? { text: el.textContent.trim(), keys: el.getAttribute('aria-keyshortcuts') } : null; })()");
-      assert.ok(item && /Collapse all groups/.test(item.text) && /Ctrl D|⌘ D/.test(item.text) && /Control\+D/.test(item.keys), JSON.stringify(item));
+      assert.ok(item && /Collapse all groups/.test(item.text) && /Ctrl G|⌘ G/.test(item.text) && /Control\+G/.test(item.keys) && !/Ctrl D|⌘ D/.test(item.text), JSON.stringify(item));
       await b.evaluate("document.querySelector('#overlay-root [data-action=\"group-collapse-all\"]').click()"); await sleep(300);
       assert.deepEqual(await expanded(), []);
       assert.equal(await b.evaluate("document.querySelector('#overlay-root').children.length"), 0, "the menu closed");
       assert.equal(await b.evaluate("document.activeElement?.dataset.action"), "group-toggle", "focus lands on a group toggle, not lost");
-      assert.equal(await stats(), requests, "nothing sent to the server");
+      assert.deepEqual(await requestsSince(since), [], "the page sent nothing");
+      assert.deepEqual(await serverSince(requests), [], "nothing sent to the server");
       // "Expand all groups" (existing) still works.
       await b.evaluate("document.querySelector('.board-group[data-group=\"Echo\"] [data-action=\"group-menu\"]').click()"); await sleep(200);
       await b.evaluate("document.querySelector('#overlay-root [data-action=\"group-expand-all\"]').click()"); await sleep(300);
@@ -153,7 +187,7 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
       const filtered = await counts();
       assert.ok(filtered.length >= 1);
       await b.evaluate("document.activeElement?.blur(); document.body.focus()");
-      assert.equal(await ctrlD("document.body"), true);
+      assert.equal(await ctrlG("document.body"), true);
       await sleep(300);
       assert.deepEqual(await expanded(), []);
       assert.deepEqual(await counts(), filtered, "filtered counts unchanged");
@@ -170,7 +204,7 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
     });
     test("not on another screen (Home): the key is left to the browser", async () => {
       await b.evaluate("document.querySelector('[data-action=\"nav\"][data-screen=\"home\"]').click()"); await sleep(300);
-      assert.equal(await ctrlD("document.body"), false);
+      assert.equal(await ctrlG("document.body"), false);
       await open("Big board");
     });
   });
@@ -253,13 +287,13 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
   const fits = () => b.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1");
 
   describe("Tablet width (820 × 1180)", () => {
-    test("board groups, Ctrl + D, the group menu, the files panel and every System Health tab fit without sideways scrolling", async () => {
+    test("board groups, Ctrl + G, the group menu, the files panel and every System Health tab fit without sideways scrolling", async () => {
       await b.open(`${base}/`, { width: 820, height: 1180 }); await sleep(400);
       await open("Big board");
       await expandAll();
       assert.ok(await fits(), "board fits");
       await b.evaluate("document.activeElement?.blur(); document.body.focus()");
-      assert.equal(await ctrlD("document.body"), true);
+      assert.equal(await ctrlG("document.body"), true);
       await sleep(300);
       assert.deepEqual(await expanded(), []);
       assert.ok(await clickSel('.board-group[data-group="Alpha"] [data-action="group-menu"]')); await sleep(200);
@@ -311,7 +345,7 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
   });
 
   describe("Everything together", () => {
-    test("an edit and an upload appear in Activity History with references; System Health times their routes; Ctrl + D then changes no record", async () => {
+    test("an edit and an upload appear in Activity History with references; System Health times their routes; Ctrl + G then changes no record", async () => {
       const rec = (await api("GET", `/boards/${big.id}/records?limit=200`)).body.items[0];
       const edited = await b.evaluate(`(async () => { const { csrfToken } = await (await fetch("/api/v1/auth/session")).json(); const r = await fetch("/api/v1/records/${rec.id}", { method: "PATCH", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken, "X-Request-Id": "together-edit-01" }, body: JSON.stringify({ expectedVersion: ${rec.version}, values: { notes: "changed together" } }) }); return { status: r.status, id: r.headers.get("x-request-id") }; })()`);
       assert.deepEqual(edited, { status: 200, id: "together-edit-01" });
@@ -326,7 +360,7 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
       const before = (await api("GET", `/records/${rec.id}`)).body.record;
       assert.equal(before.values.notes, "changed together");
       await b.evaluate("document.activeElement?.blur(); document.body.focus()");
-      assert.equal(await ctrlD("document.body"), true); await sleep(300);
+      assert.equal(await ctrlG("document.body"), true); await sleep(300);
       assert.deepEqual(await expanded(), []);
       const after = (await api("GET", `/records/${rec.id}`)).body.record;
       assert.deepEqual([after.version, after.updatedAt, after.values.notes], [before.version, before.updatedAt, "changed together"]);

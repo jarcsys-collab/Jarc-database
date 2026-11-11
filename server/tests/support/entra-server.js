@@ -5,7 +5,7 @@
 //   GET  /__test/id-token?oid=&name=&email=&admin=0|1&nonce=   → a test ID token (what Microsoft would issue)
 //   POST /__test/config { expireSessions, disableEmail, enableEmail, legacyActivity } → end every session / disable or
 //        enable a user / add an old-style activity entry without an actor (legacyActivity: workspace ID)
-//   GET  /__test/stats  → protected API requests, and any that arrived without a session cookie
+//   GET  /__test/stats  → protected API requests (count and log: "METHOD /path"), and any that arrived without a session cookie
 //   JARC_TEST_BETA=1: JARC_BETA_OPEN_EDITING (beta open editing) on top of the access policy
 //   JARC_TEST_ACCOUNTS=staged|enforced: Account Management; JARC_TEST_SUPER_ADMIN_OID: the configured Super Admin
 //   JARC_TEST_MONDAY=1: the monday.com integration is configured against the MOCK monday.com (tests/support/mock-monday)
@@ -53,7 +53,7 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
   // JARC_TEST_API_TOKENS=1: API tokens on, with a key made up for this run.
   // JARC_TEST_SITE_DIR: serve another copy of site/ (benchmarks compare the committed frontend with the working copy).
   const app = createApp({ ...(process.env.JARC_TEST_SITE_DIR ? { siteDir: process.env.JARC_TEST_SITE_DIR } : {}), ...(process.env.JARC_TEST_API_TOKENS === "1" ? { apiTokens: { key: require("crypto").randomBytes(32) } } : {}), ...(process.env.JARC_TEST_FEATURES === "off" ? { features: { nativeForms: false, spreadsheetImports: false } } : {}), repository: new MemoryStateRepository(), environment: "test", dataLayer, auth: { mode: "entra", entra, verify }, accessPolicy, betaOpenEditing: process.env.JARC_TEST_BETA === "1", ...(process.env.JARC_TEST_ACCOUNTS ? { accounts: { mode: process.env.JARC_TEST_ACCOUNTS, superAdmin: process.env.JARC_TEST_SUPER_ADMIN_OID ? { tenantId: entra.tenantId, objectId: process.env.JARC_TEST_SUPER_ADMIN_OID.toLowerCase(), email: null } : null } } : {}), logger: { error() {} } });
-  const sim = { protected: 0, withSession: 0, withoutSession: [] };
+  const sim = { protected: 0, withSession: 0, withoutSession: [], log: [] };
 
   const outer = express();
   outer.get("/__test/id-token", async (req, res) => {
@@ -109,6 +109,7 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
   outer.use("/api/v1", (req, res, next) => {
     if (!PUBLIC.has(`${req.method} ${req.path}`)) {
       sim.protected += 1;
+      sim.log.push(`${req.method} ${req.path}`); // every protected request in order (method and route path only)
       if (/__Host-jarc_session=/.test(req.get("cookie") || "")) sim.withSession += 1; else sim.withoutSession.push(`${req.method} ${req.path}`);
     }
     next();

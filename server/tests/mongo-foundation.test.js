@@ -182,6 +182,7 @@ describe("Database bootstrap", () => {
     const activities = await db.collection("activities").listIndexes().toArray();
     assert.ok(activities.some((i) => JSON.stringify(i.key) === JSON.stringify({ workspaceId: 1, createdAt: -1 })));
     assert.ok(activities.some((i) => JSON.stringify(i.key) === JSON.stringify({ boardId: 1, createdAt: -1 })));
+    assert.deepEqual(activities.find((i) => i.name === "created_desc_id")?.key, { createdAt: -1, _id: -1 }, "newest-first index for the feed and Activity History");
     assert.ok((await db.collection("boards").listIndexes().toArray()).some((i) => i.key.workspaceId === 1));
     const users = (await db.collection("users").listIndexes().toArray()).find((i) => i.name === "uniq_entra_identity");
     assert.deepEqual(users.key, { tenantId: 1, entraObjectId: 1 });

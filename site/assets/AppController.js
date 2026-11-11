@@ -776,7 +776,7 @@ class AppController {
     if(action==="paste-import-form"){if(String(data.text||"").length>10*1024*1024){this.view.showMessage("Import not ready","Pasted text is larger than 10 MB. Split it into smaller imports.");return;}try{const rows=this.parseCsv(data.text);this.model.assertImportable(rows);this.pendingImport=rows;this.view.showImportPreview(this.model,rows);}catch(error){this.view.showMessage("Import not ready",error.message);}return;}
     if (action === "workspace-settings-form") { this.model.updateWorkspace(this.model.currentWorkspaceId,data); this.update();this.view.showSettings(this.model,"workspace"); this.view.toast("Workspace updated"); }
   }
-  isCollapseShortcut(event){return (event.ctrlKey||event.metaKey)&&!event.altKey&&!event.shiftKey&&String(event.key||"").toLowerCase()==="d";}
+  isCollapseShortcut(event){return (event.ctrlKey||event.metaKey)&&!event.altKey&&!event.shiftKey&&String(event.key||"").toLowerCase()==="g";}
   // The board's own groups are on screen (the table view; not Group by, not the archived list) and nothing else has the keyboard.
   boardGroupsShown(){const m=this.model;return m.screen==="board"&&Boolean(m.board)&&m.currentView==="table"&&!m.groupByColumn&&!m.showArchived&&m.board.groups.length>0&&Boolean(this.root.querySelector(".board-groups tbody.board-group[data-group]:not(.view-group)"));}
   collapseShortcutActive(event,editing){
@@ -785,7 +785,7 @@ class AppController {
     if(document.querySelector("#overlay-root")?.children.length||document.querySelector("dialog[open]"))return false;
     return this.boardGroupsShown();
   }
-  // Collapse all groups (Ctrl + D and the group menu's "Collapse all groups"): presentation only. No record, count, colour,
+  // Collapse all groups (Ctrl + G and the group menu's "Collapse all groups"): presentation only. No record, count, colour,
   // order, sort or filter changes. The collapsed state is saved like any group toggle, as a preference in this browser
   // (BoardModel.collapseAllGroups): nothing is sent to the server.
   // Focus that was inside a group's rows moves to that group's toggle, so the keyboard position isn't lost.
@@ -817,7 +817,7 @@ class AppController {
     if(event.target.classList?.contains("cell-display")&&!document.querySelector("#overlay-root")?.children.length&&this.cellKey(event))return;
     // Undo / redo for board changes — never inside text fields (their own undo stays native) or open dialogs.
     if((event.ctrlKey||event.metaKey)&&!event.altKey&&["z","y"].includes(event.key.toLowerCase())&&!editing&&!document.querySelector("#overlay-root")?.children.length&&this.model.screen==="board"){event.preventDefault();this.undoRedo(event.key.toLowerCase()==="y"||event.shiftKey);return;}
-    // Ctrl + D (⌘ D on a Mac): collapse every group on the board. Only on a board showing its groups, never while typing or
+    // Ctrl + G (⌘ G on a Mac): collapse every group on the board. Only on a board showing its groups, never while typing or
     // with a dialog or menu open — there the key is left alone, so the browser keeps its own meaning for it.
     if(this.isCollapseShortcut(event)){if(this.collapseShortcutActive(event,editing)){event.preventDefault();this.collapseAllBoardGroups({via:"keyboard"});}return;}
     if(this.isPaletteShortcut(event)){event.preventDefault();if(this.command)this.command.toggle();else this.view.showCommandPalette(this.model);return;}

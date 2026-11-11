@@ -114,7 +114,11 @@ const INDEXES = Object.freeze({
     { name: "record_created", key: { recordId: 1, createdAt: -1 } },
     // Live updates and the notification feed read the log by time across workspaces.
     { name: "created", key: { createdAt: 1 } },
-    { name: "logged", key: { loggedAt: 1 } }
+    { name: "logged", key: { loggedAt: 1 } },
+    // Newest first with a unique tiebreak: the notification feed and Activity History read their first page straight from
+    // it instead of sorting the whole log (createdAt alone can't order entries that share a time). Created in production on
+    // 2026-11-11 under this exact name and key, so this is a no-op there.
+    { name: "created_desc_id", key: { createdAt: -1, _id: -1 } }
   ],
   sessions: [
     { name: "expires", key: { expiresAt: 1 }, expireAfterSeconds: 0 },
