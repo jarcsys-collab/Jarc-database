@@ -592,6 +592,7 @@ class AppController {
 
   onInput(event) {
     if (this.appearance?.onInput(event.target)) return;
+    if (event.target.closest?.(".form-wizard")) { this.forms?.onInput?.(event.target); return; }
     if (event.target.dataset?.action === "comment-input") { this.comments?.onInput(event.target); return; }
     if (event.target.dataset?.action === "acct-search") { this.accounts?.onSearch(event.target); return; }
     if (event.target.dataset?.action?.startsWith("apitok-")) { this.apiTokens?.onInput(event.target); return; }

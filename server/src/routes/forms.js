@@ -4,7 +4,8 @@
 //
 //   GET    /boards/:boardId/forms            GET /forms/:formId
 //   POST   /boards/:boardId/forms            PATCH /forms/:formId     DELETE /forms/:formId?expectedVersion=
-//   POST   /forms/:formId/submit             { submissionKey, values, recordId?, expectedVersion? }
+//   POST   /forms/:formId/submit             { submissionKey, values, recordId?, expectedVersion?, files? }
+//   POST   /forms/:formId/submissions/:submissionKey/complete   the server verifies the uploaded documents
 const express = require("express");
 const { parseId, versionParam, allowOnly } = require("../validation/common");
 const { recordToApi } = require("../api/serialize");
@@ -19,7 +20,7 @@ function submitLimiter({ perWindow = PER_WINDOW, windowMs = WINDOW_MS } = {}) {
     list.push(now); hits.set(key, list); if (hits.size > 10000) hits.clear(); return true;
   };
 }
-const formToApi = (f) => ({ id: f._id.toHexString(), workspaceId: f.workspaceId.toHexString(), boardId: f.boardId.toHexString(), name: f.name, description: f.description, status: f.status, mode: f.mode, confirmation: f.confirmation, groupId: f.groupId, uniqueKey: f.uniqueKey, fields: f.fields, version: f.version, createdAt: f.createdAt.toISOString(), updatedAt: f.updatedAt.toISOString() });
+const formToApi = (f) => ({ id: f._id.toHexString(), workspaceId: f.workspaceId.toHexString(), boardId: f.boardId.toHexString(), name: f.name, description: f.description, status: f.status, mode: f.mode, confirmation: f.confirmation, groupId: f.groupId, uniqueKey: f.uniqueKey, fields: f.fields, ...(f.schemaVersion === 2 ? { schemaVersion: 2, layout: f.layout, sections: f.sections, review: f.review, calculations: f.calculations } : {}), version: f.version, createdAt: f.createdAt.toISOString(), updatedAt: f.updatedAt.toISOString() });
 
 function formRoutes({ services, access, limiter = submitLimiter() }) {
   const router = express.Router();
@@ -64,8 +65,17 @@ function formRoutes({ services, access, limiter = submitLimiter() }) {
     const { form, board } = await formFor(req, "MEMBER");
     allowOnly(req.query, [], "the query");
     if (!limiter(req.actor.userId.toHexString())) return sendError(res, 429, "RATE_LIMITED", "Too many submissions. Wait a moment and try again.");
-    const { record, confirmation, repeated } = await services.forms.submit(form, board, req.body, req.actor, peopleRule(req));
-    return send(res, repeated ? 200 : 201, { record: recordToApi(record), confirmation, repeated });
+    const { record, confirmation, repeated, submission } = await services.forms.submit(form, board, req.body, req.actor, peopleRule(req));
+    return send(res, repeated ? 200 : 201, { record: recordToApi(record), confirmation, repeated, submission });
+  });
+  // After a submission's documents were uploaded (through the usual file route): the server checks what is really
+  // attached and marks the submission done or incomplete. Same rights as submitting; only the submitter's own submission.
+  router.post("/forms/:formId/submissions/:submissionKey/complete", async (req, res) => {
+    const { form, board } = await formFor(req, "MEMBER");
+    allowOnly(req.query, [], "the query");
+    if (!limiter(req.actor.userId.toHexString())) return sendError(res, 429, "RATE_LIMITED", "Too many requests. Wait a moment and try again.");
+    const r = await services.forms.completeFiles(form, board, req.params.submissionKey, req.actor);
+    return send(res, 200, { status: r.status, files: r.files, missing: r.missing, recordId: r.recordId.toHexString() });
   });
   return router;
 }
