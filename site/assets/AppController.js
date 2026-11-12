@@ -370,7 +370,7 @@ class AppController {
     if ((action.startsWith("appearance-") || (["icon-picker", "icon-tab", "icon-choose"].includes(action))) && this.appearance) { if (target.tagName !== "INPUT") this.appearance.onAction(action, target); return; }
     if ((action.startsWith("group-") || action.startsWith("toolbar-")) && this.groupActions) { this.lastTrigger = target; this.groupActions.onAction(action, target); return; }
     if (action.startsWith("xl-import-")) { if (target.tagName === "INPUT" && target.type !== "checkbox") return; if (this.imports?.enabled) this.imports.onAction(action, target); return; }
-    if (action.startsWith("form-") && !["form-design-form", "form-fill-form"].includes(action)) { if (this.model.features?.nativeForms) this.forms?.onAction(action, target); return; }
+    if (action.startsWith("form-") && !["form-design-form", "form-fill-form"].includes(action)) { if (action === "form-menu") this.lastTrigger = target; if (this.model.features?.nativeForms) this.forms?.onAction(action, target); return; } // the menu is placed under its button (enhanceOverlay)
     if (action.startsWith("comment-") && this.comments && action !== "comment-input") { this.comments.onAction(action, target); return; }
     if (action.startsWith("cc-") && this.command) { if (target.tagName !== "SELECT" && target.tagName !== "INPUT") this.command.onAction(action, target); return; }
     if (action === "drawer-tab") { this.view.selectDrawerTab(target.dataset.tab); if (target.dataset.tab === "updates") document.querySelector('#overlay-root textarea[data-role="new"]')?.focus(); return; }

@@ -84,6 +84,22 @@ describe("guided forms in the app (real app, headless browser)", { skip: BROWSER
     assert.match(await stepTitle(b), /Supporting documents/);
   }
 
+  test("a real click or tap opens the Forms menu ON SCREEN under its button (desktop and phone); a load failure says why", async () => {
+    const b = browsers.admin;
+    for (const width of [1440, 390]) {
+      await openBoard(b, width);
+      const btn = await b.evaluate("(() => { const r = document.querySelector('[data-action=form-menu]').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, bottom: r.bottom }; })()");
+      if (width < 768) await b.tap(btn.x, btn.y, { settle: 800 });
+      else { for (const type of ["mousePressed", "mouseReleased"]) await b.send("Input.dispatchMouseEvent", { type, x: btn.x, y: btn.y, button: "left", clickCount: 1 }); await sleep(800); }
+      const m = await b.evaluate("(() => { const el = document.querySelector('.forms-menu'); if (!el) return null; const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, vw: innerWidth, vh: innerHeight }; })()");
+      assert.ok(m, `menu exists at ${width}px`);
+      assert.ok(m.top >= 0 && m.bottom <= m.vh && m.left >= 0 && m.right <= m.vw, `menu inside the window at ${width}px: ${JSON.stringify(m)}`);
+      assert.ok(m.top >= btn.bottom - 1 || m.bottom <= m.vh, "placed under its button (or kept inside the window)");
+      await b.evaluate("document.querySelector('#overlay-root').innerHTML = ''");
+    }
+    assert.equal(await b.evaluate("FormsPanel.loadFailure({ code: 'FORBIDDEN', requestId: 'req-12345678' })"), "Forms couldn't load: you don't have access to this board's forms. (reference req-12345678)");
+    assert.equal(await b.evaluate("FormsPanel.loadFailure({ code: 'INTERNAL_ERROR' })"), "Forms couldn't load: the JARC server didn't answer. Try again in a moment.");
+  });
   test("the draft guided form is invisible to members; the simple form is listed", async () => {
     const b = browsers.mia; await openBoard(b);
     assert.deepEqual(await menuNames(b), [NATIVE.name]);

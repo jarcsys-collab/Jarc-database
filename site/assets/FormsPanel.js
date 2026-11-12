@@ -24,6 +24,17 @@ class FormsPanel {
       return m.rows?.find((r) => String(m.serverId ? m.serverId(r.id) : r.id) === String(record.id)) || null;
     } catch { return null; } // the live update shows it a moment later instead
   }
+  // Why the Forms menu couldn't load, in words for loading (the shared save messages talk about unsaved changes).
+  // Codes only, never the server's text; the request reference helps an administrator find it on System Health.
+  static loadFailure(error) {
+    const why = {
+      UNAUTHENTICATED: "your session has expired. Sign in again.", ACCOUNT_DISABLED: "your JARC account doesn't have access.", ACCOUNT_PENDING: "your JARC account is waiting for approval.",
+      FORBIDDEN: "you don't have access to this board's forms.", NOT_FOUND: "this board no longer exists. Reload the page.", OFFLINE: "the JARC server can't be reached. Check your connection.",
+      RATE_LIMITED: "too many requests at once. Wait a moment, then try again."
+    }[error?.code] || "the JARC server didn't answer. Try again in a moment.";
+    const ref = /^[A-Za-z0-9._-]{8,64}$/.test(String(error?.requestId || "")) ? ` (reference ${error.requestId})` : "";
+    return `Forms couldn't load: ${why}${ref}`;
+  }
   // A condition the simple designer controls can't show (AND / OR groups, or comparisons beyond is / is not / has an answer).
   static advancedRule(w) { return Boolean(w) && (Array.isArray(w.all) || Array.isArray(w.any) || !["is", "isNot", "hasValue"].includes(w.cmp)); }
   get model() { return this.c.model; }
@@ -68,7 +79,7 @@ class FormsPanel {
 
   async load() { const { items } = await this.adapter.request("GET", `/boards/${this.boardId()}/forms`); this.forms = items; return items; }
   async showMenu() {
-    try { await this.load(); } catch { this.view.toast("Forms couldn't load."); return; }
+    try { await this.load(); } catch (error) { this.view.toast(FormsPanel.loadFailure(error)); return; }
     const design = this.canDesign(), row = (f) => `<div class="form-menu-row"><button role="menuitem" data-action="form-fill" data-id="${this.attr(f.id)}" ${f.status !== "published" ? "disabled" : ""}>${this.esc(f.name)}${f.status !== "published" ? " <small>Draft</small>" : ""}</button>${design ? `<button class="link-button" data-action="form-edit" data-id="${this.attr(f.id)}">Edit</button>` : ""}</div>`;
     document.querySelector("#overlay-root").innerHTML = `<div class="popover toolbar-menu-popover forms-menu" role="menu" aria-label="Forms"><div class="menu-section-label" role="presentation">Forms</div>${this.forms.map(row).join("") || '<p class="menu-note">No forms on this board yet.</p>'}${design ? `<div class="menu-divider" role="separator"></div><button role="menuitem" data-action="form-new">${icon("plus")} New form</button>` : ""}</div>`;
   }
