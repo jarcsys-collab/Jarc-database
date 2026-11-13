@@ -1,7 +1,18 @@
 // Native forms: the Forms menu on a board, the form designer (workspace admins) and filling in a form (members). Internal
 // only: every request is an ordinary signed-in API call, and the server decides who may do what.
 class FormsPanel {
-  constructor(controller) { this.c = controller; this.forms = []; this.draft = null; this.fillForm = null; this.attemptKey = null; }
+  constructor(controller) {
+    this.c = controller; this.forms = []; this.draft = null; this.fillForm = null; this.attemptKey = null;
+    // The forms list of each board, kept in memory for this page only (never in browser storage) and only for the same
+    // person and role, so the menu opens at once; it is refreshed every time the menu opens. Cleared after this person
+    // creates, saves or deletes a form, and when the session ends or access changes.
+    this.cache = new Map(); this.loading = null; this.generation = 0;
+    for (const name of ["jarc-session-expired", "jarc-access-denied", "jarc-account-pending"]) window.addEventListener?.(name, () => this.forget());
+  }
+  // A list request already on its way when the cache is forgotten (for example the menu's background refresh, then a
+  // save) belongs to the old generation: it can still answer the menu that asked for it, but never refills the cache.
+  forget() { this.cache.clear(); this.loading = null; this.generation += 1; }
+  cacheKey() { return `${this.boardId()}|${this.model.workspace?.role ?? ""}|${this.c.auth?.userId ?? ""}`; }
   // A record a form just created, shown on the board at once WITHOUT clearing anyone's undo history: it is cached in the
   // adapter (so the live echo of this tab's own change is recognised and skipped) and merged into the board and into
   // every undo snapshot (mergeLoadedRecords), so undoing an earlier change can never remove it. → the board's row, or null.
@@ -77,11 +88,47 @@ class FormsPanel {
   // Typing: a guided form's searches and live previews (other forms only react to changes).
   onInput(target) { if (this.wizard && target.closest?.(".form-wizard")) this.wizard.onInput(target); }
 
-  async load() { const { items } = await this.adapter.request("GET", `/boards/${this.boardId()}/forms`); this.forms = items; return items; }
+  // One request at a time per board, person and role: clicking Forms again while it loads reuses it.
+  load() {
+    const key = this.cacheKey(), generation = this.generation;
+    if (this.loading?.key === key) return this.loading.promise;
+    const promise = this.adapter.request("GET", `/boards/${this.boardId()}/forms`).then(({ items }) => { if (this.cacheKey() === key && this.generation === generation) this.cache.set(key, items); return items; })
+      .finally(() => { if (this.loading?.promise === promise) this.loading = null; });
+    this.loading = { key, promise };
+    return promise;
+  }
+  // The menu opens at once: with the list loaded earlier on this page, or with a loading line. The fresh list replaces
+  // it when it arrives (only if it differs, and only while this board's menu is still open).
   async showMenu() {
-    try { await this.load(); } catch (error) { this.view.toast(FormsPanel.loadFailure(error)); return; }
+    const key = this.cacheKey(), cached = this.cache.get(key), generation = this.generation;
+    this.renderMenu(cached || null, key);
+    let items;
+    try { items = await this.load(); }
+    catch (error) {
+      if (!this.menuOpen(key) || this.generation !== generation) return;
+      if (cached) { this.menuNote("Couldn't refresh this list. It may be out of date."); return; }
+      this.view.closeOverlay(); this.view.toast(FormsPanel.loadFailure(error)); return;
+    }
+    if (this.generation !== generation) return; // forgotten meanwhile (a save): the menu open now has its own request
+    if (this.menuOpen(key) && FormsPanel.listSignature(items) !== FormsPanel.listSignature(cached)) this.renderMenu(items, key);
+  }
+  static listSignature(items) { return items ? JSON.stringify(items.map((f) => [f.id, f.version, f.status, f.name])) : ""; }
+  menuOpen(key) { const m = document.querySelector("#overlay-root .forms-menu"); return Boolean(m) && m.dataset.key === key && this.cacheKey() === key; }
+  menuNote(text) { const m = document.querySelector("#overlay-root .forms-menu"); if (!m) return; m.querySelector(".forms-menu-loading")?.remove(); m.querySelector(".menu-section-label")?.insertAdjacentHTML("afterend", `<p class="menu-note" role="status">${this.esc(text)}</p>`); }
+  renderMenu(items, key) {
+    if (items) this.forms = items;
     const design = this.canDesign(), row = (f) => `<div class="form-menu-row"><button role="menuitem" data-action="form-fill" data-id="${this.attr(f.id)}" ${f.status !== "published" ? "disabled" : ""}>${this.esc(f.name)}${f.status !== "published" ? " <small>Draft</small>" : ""}</button>${design ? `<button class="link-button" data-action="form-edit" data-id="${this.attr(f.id)}">Edit</button>` : ""}</div>`;
-    document.querySelector("#overlay-root").innerHTML = `<div class="popover toolbar-menu-popover forms-menu" role="menu" aria-label="Forms"><div class="menu-section-label" role="presentation">Forms</div>${this.forms.map(row).join("") || '<p class="menu-note">No forms on this board yet.</p>'}${design ? `<div class="menu-divider" role="separator"></div><button role="menuitem" data-action="form-new">${icon("plus")} New form</button>` : ""}</div>`;
+    const list = !items ? '<p class="menu-note forms-menu-loading" role="status">Loading forms…</p>' : items.map(row).join("") || '<p class="menu-note">No forms on this board yet.</p>';
+    const body = `<div class="menu-section-label" role="presentation">Forms</div>${list}${design ? `<div class="menu-divider" role="separator"></div><button role="menuitem" data-action="form-new">${icon("plus")} New form</button>` : ""}`;
+    const open = document.querySelector("#overlay-root .forms-menu");
+    if (open && open.dataset.key === key) {
+      // Already open (the fresh list arrived): only its contents change, so it keeps its place; focus stays in the menu.
+      const hadFocus = open.contains(document.activeElement);
+      open.innerHTML = body;
+      if (hadFocus) open.querySelector("button:not(:disabled)")?.focus();
+      return;
+    }
+    document.querySelector("#overlay-root").innerHTML = `<div class="popover toolbar-menu-popover forms-menu" role="menu" aria-label="Forms" data-key="${this.attr(key)}">${body}</div>`;
   }
 
   // ---- Designer
@@ -145,12 +192,12 @@ class FormsPanel {
     if (this.draft.schemaVersion === 2) for (const k of ["layout", "sections", "review", "calculations"]) if (this.draft[k] !== undefined) body[k] = this.draft[k];
     try {
       if (id) await this.adapter.request("PATCH", `/forms/${id}`, { ...body, expectedVersion: version }); else await this.adapter.request("POST", `/boards/${this.boardId()}/forms`, body);
-      this.view.closeOverlay(); this.view.toast(id ? "Form saved" : "Form created"); this.draft = null;
+      this.forget(); this.view.closeOverlay(); this.view.toast(id ? "Form saved" : "Form created"); this.draft = null;
     } catch (error) { this.view.toast(error?.message || "The form couldn't be saved."); }
   }
   async remove(form) {
     if (!form) return;
-    try { await this.adapter.request("DELETE", `/forms/${form.id}?expectedVersion=${form.version}`); this.view.closeOverlay(); this.view.toast("Form deleted"); }
+    try { await this.adapter.request("DELETE", `/forms/${form.id}?expectedVersion=${form.version}`); this.forget(); this.view.closeOverlay(); this.view.toast("Form deleted"); }
     catch (error) { this.view.toast(error?.message || "The form couldn't be deleted."); }
   }
 

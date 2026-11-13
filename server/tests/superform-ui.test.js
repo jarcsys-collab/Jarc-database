@@ -54,7 +54,7 @@ describe("guided forms in the app (real app, headless browser)", { skip: BROWSER
     await b.evaluate(`[...document.querySelectorAll('#sidebar .tree-item')].find((el) => el.textContent.includes(${JSON.stringify(F.BOARD_NAME)}))?.click()`);
     assert.ok(await b.waitFor("!!document.querySelector('[data-action=form-menu]')", 10000), "Forms button shown");
   };
-  const menuNames = async (b) => { await b.evaluate("document.querySelector('[data-action=form-menu]').click()"); assert.ok(await b.waitFor("!!document.querySelector('.forms-menu')", 5000)); return b.evaluate("[...document.querySelectorAll('.forms-menu [data-action=form-fill]')].map((x) => x.textContent.trim())"); };
+  const menuNames = async (b) => { await b.evaluate("document.querySelector('[data-action=form-menu]').click()"); assert.ok(await b.waitFor("!!document.querySelector('.forms-menu') && !document.querySelector('.forms-menu .forms-menu-loading')", 5000), "the list has loaded"); return b.evaluate("[...document.querySelectorAll('.forms-menu [data-action=form-fill]')].map((x) => x.textContent.trim())"); };
   const openForm = async (b, name, selector = ".form-fill") => {
     await b.evaluate("document.querySelector('[data-action=form-menu]').click()");
     assert.ok(await b.waitFor(`[...document.querySelectorAll('.forms-menu [data-action=form-fill]')].some((x) => x.textContent.includes(${JSON.stringify(name)}))`, 5000), `menu has ${name}`);
@@ -100,6 +100,49 @@ describe("guided forms in the app (real app, headless browser)", { skip: BROWSER
     assert.equal(await b.evaluate("FormsPanel.loadFailure({ code: 'FORBIDDEN', requestId: 'req-12345678' })"), "Forms couldn't load: you don't have access to this board's forms. (reference req-12345678)");
     assert.equal(await b.evaluate("FormsPanel.loadFailure({ code: 'INTERNAL_ERROR' })"), "Forms couldn't load: the JARC server didn't answer. Try again in a moment.");
   });
+  test("the Forms menu opens at once while the list loads, reuses it on the next open, makes one request for repeated clicks, and forgets it after a save", async () => {
+    const b = browsers.admin; await openBoard(b);
+    // Every forms-list request takes 800 ms and is counted (the page's own adapter, in this browser only).
+    await b.evaluate(`(() => { window.__formLists = 0; const real = ResourceApiAdapter.prototype.request; ResourceApiAdapter.prototype.request = function (m, p, ...rest) { if (m === "GET" && String(p).endsWith("/forms")) { window.__formLists += 1; return new Promise((ok) => setTimeout(ok, 800)).then(() => real.call(this, m, p, ...rest)); } return real.call(this, m, p, ...rest); }; })()`);
+    const at = async (cond, max = 5000) => b.evaluate(`new Promise((res) => { const t0 = performance.now(); const tick = () => { if (${cond}) return res(performance.now() - t0); if (performance.now() - t0 > ${max}) return res(null); requestAnimationFrame(tick); }; tick(); })`);
+    await b.evaluate("document.querySelector('[data-action=form-menu]').click(); document.querySelector('[data-action=form-menu]').click(); document.querySelector('[data-action=form-menu]').click();");
+    const shown = await at("!!document.querySelector('.forms-menu .forms-menu-loading')", 300);
+    assert.ok(shown !== null, "the menu is on screen with a loading line before the list arrives");
+    assert.ok(await at(`[...document.querySelectorAll('.forms-menu [data-action=form-fill]')].some((x) => x.textContent.includes(${JSON.stringify(NATIVE.name)}))`, 5000) !== null, "the list replaces it");
+    assert.equal(await b.evaluate("window.__formLists"), 1, "three quick clicks: one request");
+    assert.equal(await b.evaluate("!!document.querySelector('.forms-menu .forms-menu-loading')"), false);
+    await b.evaluate("document.querySelector('#overlay-root').innerHTML = ''");
+    // Next open: the list from this page at once (no loading line), refreshed in the background.
+    await b.evaluate("document.querySelector('[data-action=form-menu]').click()");
+    assert.ok(await at("document.querySelectorAll('.forms-menu [data-action=form-fill]').length >= 1", 200) !== null, "the earlier list is shown at once");
+    assert.equal(await b.evaluate("!!document.querySelector('.forms-menu .forms-menu-loading')"), false);
+    await sleep(1000); assert.equal(await b.evaluate("window.__formLists"), 2, "refreshed once in the background");
+    // A save forgets the cached list: the next open loads again.
+    await b.evaluate("document.querySelector('#overlay-root').innerHTML = ''");
+    await b.evaluate("document.querySelector('[data-action=form-menu]').click()"); await at("!!document.querySelector('.forms-menu [data-action=form-edit]')", 3000);
+    await b.evaluate("document.querySelector('.forms-menu [data-action=form-edit]').click()"); assert.ok(await at("!!document.querySelector('.form-designer')", 3000) !== null);
+    await b.evaluate("document.querySelector('.form-designer').requestSubmit()");
+    assert.ok(await at("!document.querySelector('.form-designer')", 5000) !== null, "saved");
+    await b.evaluate("document.querySelector('[data-action=form-menu]').click()");
+    assert.ok(await at("!!document.querySelector('.forms-menu .forms-menu-loading')", 300) !== null, "after a save the list is loaded again, not taken from memory");
+    await at("document.querySelectorAll('.forms-menu [data-action=form-fill]').length >= 1", 5000);
+    await b.evaluate("document.querySelector('#overlay-root').innerHTML = ''");
+  });
+  test("a form window hides the page behind it from screen readers without making it inert, keeps focus inside, and restores it on close", async () => {
+    const b = browsers.mia; await openBoard(b);
+    await openForm(b, NATIVE.name);
+    assert.deepEqual(await b.evaluate("(() => { const s = document.querySelector('.app-shell'); return [s.getAttribute('aria-hidden'), s.hasAttribute('inert')]; })()"), ["true", false]);
+    assert.equal(await b.evaluate("document.querySelector('.form-fill').closest('[aria-modal=true], .overlay') !== null"), true);
+    // Focus outside the window (e.g. after clicking the backdrop): Tab brings it back inside.
+    await b.evaluate("document.activeElement?.blur(); document.body.focus();");
+    await b.key("Tab");
+    assert.equal(await b.evaluate("document.querySelector('#overlay-root').contains(document.activeElement)"), true, "Tab goes back into the window");
+    // A script (or a re-render) focusing a control behind the window: focus is sent back into the window.
+    assert.equal(await b.evaluate("(() => { document.querySelector('.app-shell [data-action=form-menu]').focus(); return document.querySelector('#overlay-root').contains(document.activeElement); })()"), true, "focus can't stay on the hidden page");
+    await b.evaluate("document.querySelector('.form-fill [data-action=close-overlay]').click()");
+    await sleep(200);
+    assert.deepEqual(await b.evaluate("(() => { const s = document.querySelector('.app-shell'); return [s.hasAttribute('aria-hidden'), s.hasAttribute('inert')]; })()"), [false, false]);
+  });
   test("the draft guided form is invisible to members; the simple form is listed", async () => {
     const b = browsers.mia; await openBoard(b);
     assert.deepEqual(await menuNames(b), [NATIVE.name]);
@@ -111,7 +154,7 @@ describe("guided forms in the app (real app, headless browser)", { skip: BROWSER
     const before = (await api("GET", `/forms/${guidedForm.id}`)).body.form;
     const b = browsers.admin; await openBoard(b);
     await b.evaluate("document.querySelector('[data-action=form-menu]').click()");
-    assert.ok(await b.waitFor("!!document.querySelector('.forms-menu')", 5000));
+    assert.ok(await b.waitFor("!!document.querySelector('.forms-menu') && !document.querySelector('.forms-menu .forms-menu-loading')", 5000));
     await b.evaluate(`document.querySelector('.forms-menu [data-action=form-edit][data-id="${guidedForm.id}"]').click()`);
     assert.ok(await b.waitFor("!!document.querySelector('.form-designer')", 5000));
     assert.ok(await b.evaluate("document.querySelectorAll('.form-designer [name=section]').length") > 0, "steps shown in the designer");

@@ -52,8 +52,11 @@ class AppController {
     });
     root.addEventListener("pointerout",()=>{clearTimeout(this.tooltipTimer);document.querySelector('.ui-tooltip')?.remove();});
     this.overlayObserver=new MutationObserver(()=>this.enhanceOverlay());this.overlayObserver.observe(root,{childList:true,subtree:true});
+    // While a window is open the page behind it is aria-hidden (see enhanceOverlay): focus that reaches the page anyway
+    // (a script, a re-render) goes straight back into the window, to the control used last there or its first control.
+    document.addEventListener("focusin",(event)=>{const shell=this.root.querySelector(".app-shell"),overlay=this.root.querySelector("#overlay-root");if(!overlay)return;if(overlay.contains(event.target)){this.windowFocus=event.target;return;}if(shell?.getAttribute("aria-hidden")!=="true"||!overlay.children.length||!shell.contains(event.target))return;const back=this.windowFocus?.isConnected&&overlay.contains(this.windowFocus)?this.windowFocus:overlay.querySelector('button:not(:disabled),input:not([type="hidden"]):not(:disabled),textarea,select,[tabindex="0"]');back?.focus();});
     // A refresh that waited for a dialog runs once it's closed, unless closing it opened another (a search result opens its record): drawing now would remove that one, so it waits for that one too.
-    const originalClose=this.view.closeOverlay.bind(this.view);this.view.closeOverlay=()=>{originalClose();if(this.pendingRefresh){this.pendingRefresh=false;Promise.resolve().then(()=>{if(document.querySelector("#overlay-root")?.children.length){this.pendingRefresh=true;return;}this.update();});}this.boardMenuWorkspace=null;this.root.querySelector(".app-shell")?.removeAttribute("inert");this.overlayReturnFocus?.focus?.();this.overlayReturnFocus=null;};
+    const originalClose=this.view.closeOverlay.bind(this.view);this.view.closeOverlay=()=>{originalClose();if(this.pendingRefresh){this.pendingRefresh=false;Promise.resolve().then(()=>{if(document.querySelector("#overlay-root")?.children.length){this.pendingRefresh=true;return;}this.update();});}this.boardMenuWorkspace=null;this.root.querySelector(".app-shell")?.removeAttribute("aria-hidden");this.overlayReturnFocus?.focus?.();this.overlayReturnFocus=null;};
     if (window.jarcStorage.getPreference("navCollapsed")==="1") document.body.classList.add("nav-collapsed");
     if (window.jarcStorage.getPreference("workspaceSectionCollapsed")==="1") document.body.classList.add("workspace-section-collapsed");
   }
@@ -846,7 +849,8 @@ class AppController {
       if(event.key==="Tab"){
         const focusable=[...root.querySelectorAll('button:not(:disabled),input:not([type="hidden"]):not(:disabled),textarea,select,[tabindex="0"]')].filter(e=>!e.hidden&&e.offsetParent!==null);
         const first=focusable[0],last=focusable.at(-1);
-        if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}
+        if(!root.contains(document.activeElement)){event.preventDefault();(event.shiftKey?last:first)?.focus();} // focus outside (the page behind is aria-hidden): back into the window
+        else if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}
         else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}
       }return;
     }
@@ -1038,7 +1042,7 @@ class AppController {
     document.addEventListener("pointermove",move);document.addEventListener("pointerup",up,{once:true});
   }
   enhanceOverlay(){
-    const root=this.root.querySelector('#overlay-root');if(!root?.children.length){this.root.querySelector(".app-shell")?.removeAttribute("inert");return;}
+    const root=this.root.querySelector('#overlay-root');if(!root?.children.length){this.root.querySelector(".app-shell")?.removeAttribute("aria-hidden");return;}
     if(this.navOpen)this.setNav(false,{restoreFocus:false});
     const panel=root.querySelector('.modal,.record-drawer,.settings-window,.settings-drawer,.popover,.profile-popover');if(!panel)return;
     if(panel.dataset.enhanced)return;panel.dataset.enhanced="1";
@@ -1046,7 +1050,10 @@ class AppController {
     if(!this.overlayReturnFocus?.isConnected)this.overlayReturnFocus=document.activeElement;
     panel.querySelectorAll('button.icon-button:not([aria-label])').forEach(b=>b.setAttribute('aria-label',b.title||'Close'));
     const pop=panel.matches('.popover,.profile-popover');
-    if(!pop)this.root.querySelector(".app-shell")?.setAttribute("inert","");else this.root.querySelector(".app-shell")?.removeAttribute("inert");
+    // The page behind a window is hidden from screen readers (aria-hidden) rather than made inert: on a large board inert
+    // costs 150-320 ms on every open and close (style recalculation of the whole page). Keyboard focus stays in the
+    // window (Tab trap in onKeydown), the window is aria-modal, and its full-screen backdrop takes every click and tap.
+    if(!pop)this.root.querySelector(".app-shell")?.setAttribute("aria-hidden","true");else this.root.querySelector(".app-shell")?.removeAttribute("aria-hidden");
     if(pop&&this.lastTrigger?.isConnected){const r=this.lastTrigger.getBoundingClientRect();panel.style.left=Math.max(8,Math.min(r.left,innerWidth-panel.offsetWidth-12))+"px";panel.style.top=Math.max(8,Math.min(r.bottom+6,innerHeight-panel.offsetHeight-12))+"px";panel.style.right="auto";}
     requestAnimationFrame(()=>{const focus=panel.querySelector('[autofocus]')||panel.querySelector('input:not([type="hidden"]),select,textarea')||panel.querySelector('button');focus?.focus();});
   }

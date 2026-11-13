@@ -208,7 +208,7 @@ describe("forms API and screens (real app, headless browser, role_based)", { ski
     });
   }
   test("a member and a viewer don't see the designer controls", async () => {
-    for (const who of ["mia", "vic"]) { const b = browsers[who]; await openBoard(b); await b.evaluate("document.querySelector('[data-action=form-menu]').click()"); assert.ok(await b.waitFor("!!document.querySelector('.forms-menu')", 5000)); assert.equal(await b.evaluate("document.querySelectorAll('.forms-menu [data-action=form-new], .forms-menu [data-action=form-edit]').length"), 0, who); }
+    for (const who of ["mia", "vic"]) { const b = browsers[who]; await openBoard(b); await b.evaluate("document.querySelector('[data-action=form-menu]').click()"); assert.ok(await b.waitFor("!!document.querySelector('.forms-menu [data-action=form-fill]') && !document.querySelector('.forms-menu .forms-menu-loading')", 5000), `${who}: the list has loaded`); assert.equal(await b.evaluate("document.querySelectorAll('.forms-menu [data-action=form-new], .forms-menu [data-action=form-edit]').length"), 0, who); }
   });
   test("the same form text can't inject markup", async () => {
     const f = (await api("POST", `/boards/${board.id}/forms`, definition({ name: "<img src=x onerror=window.__x=1>", description: "<script>window.__x=1</script>", fields: [{ key: "serial", label: "<b id=hax>x</b>", help: "<i id=hax2>y</i>" }] }), "admin")).body.form;
