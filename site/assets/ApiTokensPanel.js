@@ -9,7 +9,7 @@
 class ApiTokensPanel {
   static STATUS = { active: ["Active", "ok"], rotating: ["Being replaced", "warn"], expired: ["Expired", "muted"], revoked: ["Revoked", "muted"], no_access: ["No access", "danger"] };
   static GRACE = [[0, "End it immediately"], [1, "Keep working for 1 hour"], [24, "Keep working for 24 hours"], [168, "Keep working for 7 days"]];
-  static CODES = { FORBIDDEN: "You need your own membership of this workspace. Shared or beta access doesn't count.", TOKEN_LIMIT_REACHED: "You've reached the limit of 25 active tokens. Revoke one you no longer need.", TOKEN_ALREADY_ROTATED: "This token was already rotated. Rotate its replacement instead.", TOKEN_NOT_ACTIVE: "This token has ended. Create a new one instead.", TOKEN_NO_BOARDS: "None of this token's boards are available any more. Create a new token instead.", RATE_LIMITED: "Too many new tokens in the last hour. Try again later." };
+  static CODES = { FORBIDDEN: "You need access to this workspace to create its tokens. Ask a workspace admin to add you to its members.", TOKEN_LIMIT_REACHED: "You've reached the limit of 25 active tokens. Revoke one you no longer need.", TOKEN_ALREADY_ROTATED: "This token was already rotated. Rotate its replacement instead.", TOKEN_NOT_ACTIVE: "This token has ended. Create a new one instead.", TOKEN_NO_BOARDS: "None of this token's boards are available any more. Create a new token instead.", RATE_LIMITED: "Too many new tokens in the last hour. Try again later." };
   static SECTIONS = [["overview", "Overview", "home"], ["tokens", "API Tokens", "lock"], ["explorer", "API Explorer", "search"], ["directory", "Boards & Columns", "board"], ["docs", "Documentation", "records"], ["activity", "API Activity", "refresh"]];
   // [id, label, path after /boards/:boardId, which columns it takes, whether it is paged]
   static OPERATIONS = [["records", "List records", "/records", "many", true], ["values", "One column's values", "/columns/{column}/values", "one", true], ["column", "One column", "/columns/{column}", "one", false], ["columns", "All columns", "/columns", "none", false], ["groups", "Groups", "/groups", "none", false], ["board", "Board, with columns and groups", "", "none", false], ["record", "One record, by Record ID", "", "record", false]];
@@ -72,7 +72,7 @@ class ApiTokensPanel {
     return "";
   }
   canCreate() { return Boolean(this.options?.some((w) => w.boards.length)); }
-  blockedHtml() { return this.canCreate() ? "" : `<div class="account-alert is-warn" role="status"><strong>You can't create a token yet.</strong><span>You need your own membership of a workspace with at least one board. Shared or beta access doesn't count, even though it lets you see boards. Ask a workspace admin to add you to the workspace's members.</span></div>`; }
+  blockedHtml() { return this.canCreate() ? "" : `<div class="account-alert is-warn" role="status"><strong>You can't create a token yet.</strong><span>You need access to a workspace with at least one board: shared workspaces, or your own membership of a workspace. Ask a workspace admin to add you to its members.</span></div>`; }
 
   // ---- Overview
   overviewHtml() {
@@ -170,7 +170,7 @@ class ApiTokensPanel {
     const stale = failed ? `<p class="account-empty apitok-boards-state" role="status">Couldn't refresh the board list, so it may be out of date. ${retry}</p>` : "";
     if (!spaces.length) {
       select.innerHTML = `<option value="">No workspaces with boards</option>`; select.disabled = true; submit.disabled = true;
-      area.innerHTML = `${stale}<p class="account-empty apitok-boards-state" role="status">There are no boards you can issue a token for. A workspace admin's boards appear here.</p>`;
+      area.innerHTML = `${stale}<p class="account-empty apitok-boards-state" role="status">There are no boards you can issue a token for yet. Boards of the workspaces you can access appear here as soon as they're created or imported.</p>`;
       return;
     }
     const current = spaces.find((w) => w.id === workspaceId) || spaces[0];
@@ -553,7 +553,9 @@ class ApiTokensPanel {
     if (change === "apitok-dir-workspace") { this.dir.workspaceId = select.value; this.dir.boardId = ""; this.dir.boardQuery = ""; this.dir.columnQuery = ""; this.redraw(); return; }
     if (change === "apitok-all-boards") { select.closest("form")?.querySelectorAll('input[name="board"]').forEach((box) => { box.checked = select.checked; }); return; }
     // Another workspace: only the board list changes (from the list read when the window opened); name and expiry stay.
-    if (change === "apitok-workspace") { const form = select.closest("form"); if (form) this.fillCreate(form, { workspaceId: select.value }); return; }
+    // Switching workspace: its boards show at once from the list known so far, and the list is read again (a late answer fills the
+    // workspace chosen last, read from the form when it arrives, and only in this same opening of the window).
+    if (change === "apitok-workspace") { const form = select.closest("form"); if (form) { this.fillCreate(form, { workspaceId: select.value }); this.refreshCreate(Number(form.dataset.gen), select.value); } return; }
   }
   onSubmit(action, form) {
     if (action === "apitok-create-form") this.submitCreate(form);

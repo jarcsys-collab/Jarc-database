@@ -22,7 +22,7 @@ const ApiTokenDocs = {
       <p>A token is accepted only in the ${c("Authorization")} header. A token in the URL is refused, because URLs end up in logs and browser history.</p>
 
       <h3>Who can create a token</h3>
-      <p>Any employee with their own membership of a workspace, Viewer or above, can create read-only tokens for it under <strong>Developer → API Tokens</strong>. Shared or beta access and administrator roles don't count on their own: you need a real membership. A token is limited to one workspace and the boards you select, and it can never see more than you can.</p>
+      <p>Any signed-in employee with access to a workspace can create read-only tokens for it under <strong>Developer → API Tokens</strong>: every shared workspace, including boards other employees created or imported, or a workspace where they have their own membership (Viewer or above). Administrator roles don't count on their own. A token is limited to one workspace and the boards you select, and it can never see more than you can.</p>
       <p>One token reads every board you selected, and every column on those boards: you don't need a token per board or per column. Boards created later aren't added to an existing token; rotate it or create a new one to include them. Each token is personal: don't share it, create one per integration instead.</p>
       <p>JARC checks your access on every request. If your membership is removed or your account is disabled, your tokens stop working at once. You can always revoke your own tokens while you can sign in, even with no membership left.</p>
 

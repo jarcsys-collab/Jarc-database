@@ -181,28 +181,83 @@ describe("Who may issue a token", () => {
     assert.deepEqual(listed.boards.map((b) => b.name), ["Alpha", "Beta"]);
   });
 
-  for (const [label, options] of [["ACCESS_POLICY=development_shared", { accessPolicy: "development_shared" }], ["JARC_BETA_OPEN_EDITING", { betaOpenEditing: true }]]) {
-    test(`${label} grants nothing: open access can't issue or use a token`, async () => {
+  // Shared organizational access (production: ACCESS_POLICY=development_shared with JARC_BETA_OPEN_EDITING): every workspace is
+  // shared with every signed-in employee, so the New token window offers the same workspaces and boards as the app, including
+  // boards another employee created or imported, while every token still holds only the boards ticked when it was created.
+  for (const [label, options] of [["ACCESS_POLICY=development_shared", { accessPolicy: "development_shared" }], ["JARC_BETA_OPEN_EDITING", { betaOpenEditing: true }], ["both (as in production)", { accessPolicy: "development_shared", betaOpenEditing: true }]]) {
+    test(`${label}: shared workspaces and other employees' boards can be chosen for a token, which stays limited to its boards`, async () => {
       const shared = await startEntraApp({ issuer, apiTokens: { key: KEY }, ...options });
       try {
-        const owner = issuer.person("Open Owner"), other = issuer.person("Open Other");
-        const ws = (await as(owner, "POST", "/api/v1/workspaces", { name: "Open" }, shared)).body.workspace;
-        const board = (await as(owner, "POST", `/api/v1/workspaces/${ws.id}/boards`, { name: "B", columns: COLUMNS }, shared)).body.board;
-        // Under open access this person can read the board with their session…
-        assert.equal((await as(other, "GET", `/api/v1/boards/${board.id}`, undefined, shared)).status, 200);
-        // …but has no membership, so can't issue a token for it.
-        const refused = await issue(other, { ws, boards: [{ board }] }, shared);
-        assert.equal(refused.status, 403);
-        assert.deepEqual((await as(other, "GET", "/api/v1/me/api-tokens/options", undefined, shared)).body.workspaces, []);
-        // The creator holds a real membership, and removing it stops the token although open access still lets them in.
-        const issued = await issue(owner, { ws, boards: [{ board }] }, shared);
-        assert.equal(issued.status, 201);
-        assert.equal((await call(issued.body.secret, "/workspaces", { target: shared })).status, 200);
-        await shared.db.collection(COLLECTIONS.workspaceMembers).deleteMany({ workspaceId: new ObjectId(ws.id) });
-        assert.equal(code(await call(issued.body.secret, "/workspaces", { target: shared })), "TOKEN_ACCESS_REVOKED");
+        const a = issuer.person("Ana Creator"), b = issuer.person("Ben Colleague");
+        // User A creates a workspace and a board; user B holds no membership anywhere.
+        const ws = (await as(a, "POST", "/api/v1/workspaces", { name: "Sales Space" }, shared)).body.workspace;
+        const board = (await as(a, "POST", `/api/v1/workspaces/${ws.id}/boards`, { name: "Field Board", columns: COLUMNS }, shared)).body.board;
+        assert.equal((await as(a, "POST", `/api/v1/boards/${board.id}/records`, { values: { serial: "S1", amount: 1 } }, shared)).status, 201);
+        const other = (await as(a, "POST", "/api/v1/workspaces", { name: "Core Space" }, shared)).body.workspace;
+        const otherBoard = (await as(a, "POST", `/api/v1/workspaces/${other.id}/boards`, { name: "Core Board", columns: COLUMNS }, shared)).body.board;
+        // B discovers both workspaces and opens the board in the app...
+        assert.ok((await as(b, "GET", "/api/v1/workspaces", undefined, shared)).body.items.some((w) => w.id === ws.id));
+        assert.equal((await as(b, "GET", `/api/v1/boards/${board.id}`, undefined, shared)).status, 200);
+        // ...and the same workspaces and boards in New token.
+        const offered = async () => (await as(b, "GET", "/api/v1/me/api-tokens/options", undefined, shared)).body.workspaces;
+        assert.deepEqual((await offered()).map((w) => w.name).sort(), ["Core Space", "Sales Space"]);
+        assert.deepEqual((await offered()).find((w) => w.id === ws.id).boards.map((x) => x.id), [board.id]);
+        // A board created (or imported) afterwards is offered on the next read, with no redeployment or membership change.
+        const later = (await as(a, "POST", `/api/v1/workspaces/${ws.id}/boards`, { name: "Later Board", columns: COLUMNS }, shared)).body.board;
+        assert.deepEqual((await offered()).find((w) => w.id === ws.id).boards.map((x) => x.name), ["Field Board", "Later Board"]);
+        // Every board ID is checked: another workspace's board, a made-up ID or a malformed one is refused, and nothing is stored.
+        assert.equal((await issue(b, { ws, boards: [{ board: otherBoard }] }, shared)).status, 400);
+        assert.equal((await issue(b, { ws, boards: [{ board: { id: new ObjectId().toHexString() } }] }, shared)).status, 400);
+        assert.equal((await issue(b, { ws, boards: [{ board: { id: "not-an-id" } }] }, shared)).status, 400);
+        assert.equal((await issue(b, { ws: { id: new ObjectId().toHexString() }, boards: [{ board }] }, shared)).status, 404);
+        assert.equal((await issue(b, { ws, boards: [{ board }], scopes: ["write"] }, shared)).status, 400, "read-only stays the only scope");
+        assert.equal((await as(b, "GET", "/api/v1/me/api-tokens", undefined, shared)).body.items.length, 0);
+        // B issues a read-only token for the one board A created.
+        const issued = await issue(b, { ws, boards: [{ board }] }, shared);
+        assert.equal(issued.status, 201, JSON.stringify(issued.body));
+        assert.deepEqual(issued.body.token.boards.map((x) => x.id), [board.id]);
+        const secret = issued.body.secret;
+        // A Power BI-style read: the board's records; a record added and one changed afterwards appear on the next read.
+        const rows = async () => (await call(secret, `/boards/${board.id}/records`, { target: shared })).body.items.map((r) => r.values.serial).sort();
+        assert.deepEqual(await rows(), ["S1"]);
+        const added = (await as(a, "POST", `/api/v1/boards/${board.id}/records`, { values: { serial: "S2" } }, shared)).body.record;
+        assert.equal((await as(a, "PATCH", `/api/v1/records/${added.id}`, { expectedVersion: added.version, values: { serial: "S2 changed" } }, shared)).status, 200);
+        assert.deepEqual(await rows(), ["S1", "S2 changed"]);
+        // The token never reaches the board created later, the other workspace, or anything that changes data.
+        assert.equal((await call(secret, `/boards/${later.id}`, { target: shared })).status, 404);
+        assert.equal((await call(secret, `/boards/${otherBoard.id}/records`, { target: shared })).status, 404);
+        assert.equal((await call(secret, `/workspaces/${other.id}/boards`, { target: shared })).status, 404);
+        assert.deepEqual((await call(secret, `/workspaces/${ws.id}/boards`, { target: shared })).body.items.map((x) => x.name), ["Field Board"]);
+        assert.notEqual((await call(secret, `/boards/${board.id}/records`, { method: "POST", target: shared })).status, 200);
+        assert.equal((await call(null, `/boards/${board.id}/records`, { target: shared })).status, 401, "no anonymous access");
+        // Revocation still ends it at once.
+        assert.equal((await as(b, "POST", `/api/v1/me/api-tokens/${issued.body.token.id}/revoke`, {}, shared)).status, 200);
+        assert.equal(code(await call(secret, "/workspaces", { target: shared })), "TOKEN_REVOKED");
       } finally { await shared.close(); }
     });
   }
+
+  test("shared access is worked out on every use, and only while open access is in effect", async () => {
+    const { Access } = require("../src/auth/access");
+    const { ApiTokenService } = require("../src/services/api-token-service");
+    const wsId = new ObjectId(), employee = new ObjectId(), member = new ObjectId();
+    const repos = {
+      users: { findById: async (id) => ({ _id: id, status: "active", tenantId: "t" }) },
+      memberships: { findActive: async (w, u) => (w.equals(wsId) && u.equals(member) ? { role: "MEMBER" } : null), listForUser: async () => [] },
+      apiTokens: { appendAudit: async () => {} }
+    };
+    const service = (settings) => new ApiTokenService({ repos }).configure({ key: crypto.randomBytes(32), access: new Access(repos, settings), tenantId: "t" });
+    const roleOf = async (settings, who) => { const s = service(settings); return s.roleOf(await s.ownerActor(who), wsId); };
+    assert.equal(await roleOf({ policy: "development_shared" }, employee), "VIEWER", "shared: read access without a membership");
+    assert.equal(await roleOf({ policy: "role_based", betaOpenEditing: true }, employee), "VIEWER");
+    assert.equal(await roleOf({ policy: "role_based" }, employee), null, "role_based: memberships decide, restrictions stay");
+    assert.equal(await roleOf({ policy: "development_shared", betaOpenEditing: true, accountMode: "enforced" }, employee), null, "enforced accounts switch open access off");
+    assert.equal(await roleOf({ policy: "development_shared" }, member), "MEMBER", "a real membership keeps its own role");
+    // A token whose owner relied on shared access stops the moment open access is switched off.
+    const doc = { scopes: ["read"], ownerUserId: employee, workspaceId: wsId, publicId: "p" };
+    assert.equal((await service({ policy: "development_shared" }).authorize(doc)).role, "VIEWER");
+    await assert.rejects(service({ policy: "role_based" }).authorize(doc), (e) => e.code === "TOKEN_ACCESS_REVOKED");
+  });
 
   test("session authentication and CSRF protect every management route; a token can't manage tokens", async () => {
     const f = await workspace("Session");

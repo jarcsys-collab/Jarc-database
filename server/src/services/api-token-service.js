@@ -4,16 +4,22 @@
 // boards, read-only. Every request checks the token and then the owner, so disabling or blocking the person, or removing their
 // membership, stops the token on its very next use.
 //
-// Authority comes only from what is durable and stored: an active user, and a real workspace membership (Access with
-// membershipOnly), capped by the account role when ACCOUNT_MANAGEMENT=enforced. Nothing else grants anything here, not even to
-// administrators: open access (ACCESS_POLICY=development_shared and JARC_BETA_OPEN_EDITING) lets every employee in, and the JARC.Admin
-// app role and the Super Admin account role aren't memberships.
+// Authority comes from the stored person (an active user of the configured tenant, not blocked) and their access to the token's
+// workspace, worked out the same way as for the app's own workspace list (roleOf):
+//   - a real workspace membership (Access with membershipOnly), capped by the account role when ACCOUNT_MANAGEMENT=enforced; or
+//   - SHARED ORGANIZATIONAL ACCESS: while open access is in effect (ACCESS_POLICY=development_shared or JARC_BETA_OPEN_EDITING, and
+//     accounts not enforced), every workspace is shared with every signed-in employee, so each of them has read access (VIEWER)
+//     for tokens in every workspace, including boards other employees created or imported. This is exactly what their session
+//     already reads. It is evaluated on every use and never stored: switching open access off (role_based, or enforced accounts)
+//     leaves memberships deciding again, and a token whose owner has no membership stops on its next request.
+// The JARC.Admin app role and the Super Admin account role add nothing here (they exist only in a session, which a token outlives).
 //
-//   create or rotate  any real membership of the token's workspace (VIEWER or above), and only your own tokens. A read-only token
-//                     never reads more than its owner already can with their own membership, so admin rights aren't needed.
+//   create or rotate  read access to the token's workspace (VIEWER or above, as above), and only your own tokens. A read-only token
+//                     never reads more than its owner already can, so admin rights aren't needed.
 //   revoke            only your own tokens, whatever your role now: it only ever removes access
-//   use               any real membership of the token's workspace (a read-only token is never more than a VIEWER can do)
-// The boards are always chosen explicitly: a token never grows to cover a board created after it.
+//   use               read access to the token's workspace, right now (a read-only token is never more than a VIEWER can do)
+// The boards are always chosen explicitly and checked against the workspace: a token never grows to cover a board created after
+// it, and seeing a board in the app doesn't add it to an existing token.
 const { ObjectId } = require("mongodb");
 const { ApiError } = require("../middleware/errors");
 const { Access } = require("../auth/access");
@@ -57,7 +63,9 @@ class ApiTokenService {
     if (account && !account.legacy && account.status === "blocked") return null;
     return Object.freeze({ userId: user._id, kind: "api_token_owner", isSystemAdmin: false, account, displayName: user.displayName || user.email || null });
   }
-  roleOf(actor, workspaceId) { return this.access.roleIn(actor, workspaceId, { membershipOnly: true }); }
+  // A real membership role, or VIEWER through shared organizational access (open access in effect), or null.
+  async roleOf(actor, workspaceId) { return (await this.access.roleIn(actor, workspaceId, { membershipOnly: true })) || this.sharedRole(); }
+  sharedRole() { return this.access.shared ? ISSUER_ROLE : null; }
 
   // The right to create or rotate a token here. Someone who can't see the workspace at all can't tell whether it exists,
   // unless it's named by a token of their own (ownToken).
@@ -66,17 +74,18 @@ class ApiTokenService {
     if (!actor) throw new ApiError(403, "FORBIDDEN", "Your JARC account can't manage API tokens.");
     const role = await this.roleOf(actor, workspaceId);
     if (!role && !ownToken && !await this.access.roleIn(sessionActor, workspaceId)) throw new ApiError(404, "NOT_FOUND", "This workspace doesn't exist or you don't have access to it.");
-    if (!Access.atLeast(role, ISSUER_ROLE)) throw new ApiError(403, "FORBIDDEN", "Only a member of this workspace can create or rotate its API tokens. Open access doesn't count: you need your own workspace membership.");
+    if (!Access.atLeast(role, ISSUER_ROLE)) throw new ApiError(403, "FORBIDDEN", "Only someone with access to this workspace can create or rotate its API tokens: you need your own workspace membership.");
     return actor;
   }
 
   // ---- Managing tokens (a signed-in session; CSRF is checked by the session middleware)
-  // What this person could issue a token for: the workspaces they really belong to, and those workspaces' current boards.
+  // What this person could issue a token for: the workspaces they have read access to (their memberships, or every workspace
+  // while shared organizational access is in effect), and those workspaces' current boards, read afresh on every call.
   async options(sessionActor) {
     const actor = await this.ownerActor(sessionActor.userId);
     if (!actor) return { workspaces: [] };
     const roles = new Map((await this.repos.memberships.listForUser(actor.userId)).map((m) => [m.workspaceId.toHexString(), this.access.effective(actor, m.role)]));
-    const all = (await this.repos.workspaces.list()).filter((w) => Access.atLeast(roles.get(w._id.toHexString()), ISSUER_ROLE));
+    const all = (await this.repos.workspaces.list()).filter((w) => Access.atLeast(roles.get(w._id.toHexString()) || this.sharedRole(), ISSUER_ROLE));
     const workspaces = await Promise.all(all.map(async (w) => ({ id: hex(w._id), name: w.name, archived: Boolean(w.archived), boards: (await this.repos.boards.listByWorkspace(w._id)).map((b) => ({ id: hex(b._id), name: b.name, archived: Boolean(b.archived) })) })));
     return { workspaces };
   }
