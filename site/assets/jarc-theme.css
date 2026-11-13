@@ -277,7 +277,9 @@ body:not(.nav-collapsed) .sidebar .nav-tree, .sidebar.open .nav-tree { border-le
 .tool-count, .comment-count { background: var(--accent-fill, var(--accent)); }
 
 /* Table: rounded white header bar and rounded rows on the board panel; no grid lines. */
-.board-surface .table-wrap { background: transparent; border: 0; border-radius: 0; box-shadow: none; }
+/* The records table scrolls inside an OPAQUE box of the panel's own colour (looks the same as transparent): with a
+   transparent background the browser can't scroll it on the compositor and repaints the whole table on every frame. */
+.board-surface .table-wrap { background: var(--canvas); border: 0; border-radius: 0; box-shadow: none; }
 .editable-table { border-collapse: separate; border-spacing: 0 var(--row-gap); }
 .editable-table thead th, .editable-table thead th.check-col, .editable-table thead th.is-primary, .editable-table thead th.add-column-col, .editable-table thead th.actions-col { background: var(--surface); border: 0; }
 .editable-table thead th { color: var(--accent-text); font-weight: var(--weight-semibold); }

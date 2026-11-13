@@ -62,7 +62,7 @@ class ApiTokensPanel {
   async load() {
     if (this.loading) return;
     this.loading = true;
-    try { const [list, options] = await Promise.all([this.api("GET", ""), this.api("GET", "/options")]); this.items = list.items; this.options = options.workspaces; this.error = ""; }
+    try { const [list, options] = await Promise.all([this.api("GET", ""), this.api("GET", "/options")]); this.items = list.items; this.options = ApiTokensPanel.unique(options.workspaces); this.error = ""; }
     catch (error) { this.error = this.message(error); }
     finally { this.loading = false; this.redraw(); }
   }
@@ -118,18 +118,69 @@ class ApiTokensPanel {
 
   // ---- New token
   dateInput(days) { const d = new Date(Date.now() + days * 86400000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
+  // The workspaces and boards a new token can be issued for are read afresh every time New token opens (the server
+  // decides; boards created or imported since the page loaded are included). One request at a time: opening again while
+  // it runs shares it. The window opens at once, with the list known so far or a loading line, and the list is updated
+  // in place when the answer arrives. Nothing is ever added to an EXISTING token: it keeps the boards it was issued for.
+  static unique(workspaces) {
+    const spaces = new Set();
+    return (workspaces || []).filter((w) => w && !spaces.has(w.id) && spaces.add(w.id)).map((w) => { const ids = new Set(); return { ...w, boards: (w.boards || []).filter((b) => b && !ids.has(b.id) && ids.add(b.id)) }; });
+  }
+  refreshOptions() {
+    if (this.optionsLoading) return this.optionsLoading;
+    const request = this.api("GET", "/options").then((o) => { this.options = ApiTokensPanel.unique(o.workspaces); return this.options; })
+      .finally(() => { if (this.optionsLoading === request) this.optionsLoading = null; });
+    this.optionsLoading = request;
+    return request;
+  }
   showCreate(workspaceId = null, error = "") {
-    const spaces = this.options.filter((w) => w.boards.length);
-    const current = spaces.find((w) => w.id === workspaceId) || spaces[0];
-    const boards = current.boards.map((b) => `<label class="apitok-check"><input type="checkbox" name="board" value="${this.esc(b.id)}"><span>${this.esc(this.withArchived(b))}</span></label>`).join("");
-    this.view.overlay(`<form class="modal apitok-modal" data-action="apitok-create-form" novalidate><div class="modal-head"><div><div class="eyebrow">API Tokens</div><h2>New token</h2></div>${this.view.closeButton()}</div>
+    const gen = this.createGen = (this.createGen || 0) + 1;
+    this.view.overlay(`<form class="modal apitok-modal" data-action="apitok-create-form" data-gen="${gen}" novalidate><div class="modal-head"><div><div class="eyebrow">API Tokens</div><h2>New token</h2></div>${this.view.closeButton()}</div>
       <div class="form-grid"><label class="full">Name<input name="name" required maxlength="100" placeholder="Power BI Integration" autocomplete="off"></label>
-      <label class="full">Workspace<select name="workspaceId" data-action="apitok-workspace">${spaces.map((w) => `<option value="${this.esc(w.id)}" ${w.id === current.id ? "selected" : ""}>${this.esc(this.withArchived(w))}</option>`).join("")}</select></label>
-      <fieldset class="full apitok-boards"><legend>Boards this token can read</legend><label class="apitok-check apitok-all"><input type="checkbox" data-action="apitok-all-boards"><span>All ${current.boards.length} current boards</span></label><div class="apitok-board-list">${boards}</div><small class="muted">Boards created later aren't added. Rotate or create a token to include them.</small></fieldset>
+      <label class="full">Workspace<select name="workspaceId" data-action="apitok-workspace"></select></label>
+      <fieldset class="full apitok-boards"><legend>Boards this token can read</legend><div class="apitok-board-area"></div><small class="muted">The token reads only the boards you tick. Boards created later are never added to an existing token: create or rotate a token to include them.</small></fieldset>
       <label>Permissions<select name="scope" disabled><option>Read-only</option></select></label>
       <label>Expires on<input type="date" name="expires" required min="${this.dateInput(1)}" max="${this.dateInput(366)}" value="${this.dateInput(90)}"></label></div>
       <p class="account-empty apitok-error" role="alert">${this.esc(error)}</p>
       <div class="modal-actions"><button type="button" class="button secondary" data-action="apitok-cancel">Cancel</button><button class="button primary">Create token</button></div></form>`, "apitok-overlay");
+    const form = this.createForm(gen);
+    if (form) this.fillCreate(form, { workspaceId });
+    this.refreshCreate(gen, workspaceId);
+  }
+  // The New token form of this opening, or null once it was closed or opened again (a late answer then changes nothing).
+  createForm(gen) { const form = document.querySelector('#overlay-root form.apitok-modal[data-action="apitok-create-form"]'); return form && form.dataset.gen === String(gen) ? form : null; }
+  async refreshCreate(gen, wanted) {
+    let failed = "";
+    try { await this.refreshOptions(); } catch (error) { failed = this.message(error); }
+    const form = this.createForm(gen);
+    if (form) this.fillCreate(form, { workspaceId: form.elements.workspaceId.value || wanted, failed });
+  }
+  // Draws the workspace choice and the boards of the chosen workspace into the open form. Ticks are kept only for boards
+  // that are still listed in the chosen workspace; the name and expiry fields are never touched.
+  fillCreate(form, { workspaceId = null, failed = "" } = {}) {
+    const select = form.elements.workspaceId, area = form.querySelector(".apitok-board-area"), submit = form.querySelector("button.primary");
+    const retry = `<button type="button" class="button secondary small" data-action="apitok-boards-retry">Try again</button>`;
+    const focused = area.contains(document.activeElement) ? (document.activeElement.value || document.activeElement.dataset.action) : null;
+    if (!this.options) {
+      select.innerHTML = `<option value="">${failed ? "Not available" : "Loading…"}</option>`; select.disabled = true; submit.disabled = true;
+      area.innerHTML = failed ? `<p class="account-empty apitok-boards-state" role="alert">Couldn't load your workspaces and boards. ${this.esc(failed)}</p>${retry}` : `<p class="apitok-boards-state" role="status"><span class="loading-spinner" aria-hidden="true"></span> Loading boards…</p>`;
+      return;
+    }
+    const spaces = this.options.filter((w) => w.boards.length);
+    const stale = failed ? `<p class="account-empty apitok-boards-state" role="status">Couldn't refresh the board list, so it may be out of date. ${retry}</p>` : "";
+    if (!spaces.length) {
+      select.innerHTML = `<option value="">No workspaces with boards</option>`; select.disabled = true; submit.disabled = true;
+      area.innerHTML = `${stale}<p class="account-empty apitok-boards-state" role="status">There are no boards you can issue a token for. A workspace admin's boards appear here.</p>`;
+      return;
+    }
+    const current = spaces.find((w) => w.id === workspaceId) || spaces[0];
+    const keep = new Set([...form.querySelectorAll('input[name="board"]:checked')].map((i) => i.value));
+    select.innerHTML = spaces.map((w) => `<option value="${this.esc(w.id)}" ${w.id === current.id ? "selected" : ""}>${this.esc(this.withArchived(w))}</option>`).join("");
+    select.value = current.id; select.disabled = false; submit.disabled = false;
+    const boards = current.boards.map((b) => `<label class="apitok-check"><input type="checkbox" name="board" value="${this.esc(b.id)}" ${keep.has(b.id) ? "checked" : ""}><span>${this.esc(this.withArchived(b))}</span></label>`).join("");
+    const all = current.boards.length > 0 && current.boards.every((b) => keep.has(b.id));
+    area.innerHTML = `${stale}<label class="apitok-check apitok-all"><input type="checkbox" data-action="apitok-all-boards" ${all ? "checked" : ""}><span>All ${current.boards.length} current board${current.boards.length === 1 ? "" : "s"}</span></label><div class="apitok-board-list">${boards}</div>`;
+    if (focused) [...area.querySelectorAll("input, button")].find((el) => (el.value || el.dataset.action) === focused)?.focus();
   }
   // The end of the chosen day, where the person is.
   endOfDay(value) { const [y, m, d] = String(value || "").split("-").map(Number); const at = new Date(y, m - 1, d, 23, 59, 59); return Number.isNaN(at.getTime()) ? null : at.toISOString(); }
@@ -467,6 +518,7 @@ class ApiTokensPanel {
     if (action === "apitok-tab") { this.tab = target.dataset.tab; this.redraw(); const pane = document.querySelector(".developer-window .settings-content"); if (pane) pane.scrollTop = 0; if (target.closest(".settings-nav")) document.querySelector(`.developer-window .settings-nav [data-action="apitok-tab"][data-tab="${CSS.escape(this.tab)}"]`)?.focus(); return; }
     if (action === "apitok-refresh") { this.items = null; this.error = ""; this.redraw(); return; }
     if (action === "apitok-new") { this.showCreate(); return; }
+    if (action === "apitok-boards-retry") { const form = target.closest("form"); if (!form) return; const gen = Number(form.dataset.gen); if (!this.options) this.fillCreate(form, { workspaceId: form.elements.workspaceId.value }); this.refreshCreate(gen, form.elements.workspaceId.value); return; }
     if (action === "apitok-copy-value") { this.copyText(target.dataset.copy, target.dataset.label); return; }
     if (action === "apitok-copy-board") { this.view.closeOverlay(); this.copyText(target.dataset.id, "Board ID"); return; }
     if (action === "apitok-copy-column") { this.view.closeOverlay(); this.copyText(target.dataset.key, "Column ID"); return; }
@@ -500,7 +552,8 @@ class ApiTokensPanel {
     if (change === "apitok-ex-param") { const name = select.dataset.param; ex.params[name] = select.type === "checkbox" ? select.checked : select.value; ex.preview = null; this.redrawKeeping(`[data-action="apitok-ex-param"][data-param="${CSS.escape(name)}"]`); return; }
     if (change === "apitok-dir-workspace") { this.dir.workspaceId = select.value; this.dir.boardId = ""; this.dir.boardQuery = ""; this.dir.columnQuery = ""; this.redraw(); return; }
     if (change === "apitok-all-boards") { select.closest("form")?.querySelectorAll('input[name="board"]').forEach((box) => { box.checked = select.checked; }); return; }
-    if (change === "apitok-workspace") { const form = select.closest("form"), name = form.elements.name.value, expires = form.elements.expires.value; this.showCreate(select.value); const next = document.querySelector("form.apitok-modal"); next.elements.name.value = name; next.elements.expires.value = expires; }
+    // Another workspace: only the board list changes (from the list read when the window opened); name and expiry stay.
+    if (change === "apitok-workspace") { const form = select.closest("form"); if (form) this.fillCreate(form, { workspaceId: select.value }); return; }
   }
   onSubmit(action, form) {
     if (action === "apitok-create-form") this.submitCreate(form);

@@ -611,9 +611,25 @@ class AppController {
       modal.querySelector(".chooser-empty").hidden=options.some((b)=>!b.hidden); return;
     }
     if (event.target.dataset.action !== "search") return;
-    const cursor=event.target.selectionStart; this.model.query=event.target.value; this.update();
-    const input=document.querySelector('[data-action="search"]'); input?.focus(); input?.setSelectionRange(cursor,cursor);
+    // A fully loaded board is drawn once typing pauses (each drawing rebuilds the whole board): the box itself is never
+    // redrawn while typing, so it stays responsive. The query is stored at once, so any drawing in between uses it.
+    // A partly loaded board searches on the server, which already waits for a pause (BoardModel.syncServerQuery): it is
+    // drawn at once as before, so its rows and its record count always change together.
+    this.model.query=event.target.value;
+    clearTimeout(this.searchTimer);
+    if(this.model.board&&this.model.boardLoadState?.(this.model.board.id)?.state==="partial"){
+      this.searchTimer=null; const cursor=event.target.selectionStart; this.update();
+      const input=document.querySelector('[data-action="search"]'); input?.focus(); input?.setSelectionRange(cursor,cursor); return;
+    }
+    this.searchTimer=setTimeout(()=>{
+      this.searchTimer=null;
+      const before=document.querySelector('[data-action="search"]'), typing=before&&document.activeElement===before, cursor=typing?before.selectionStart:null;
+      this.update();
+      if(!typing)return;
+      const input=document.querySelector('[data-action="search"]'); input?.focus(); input?.setSelectionRange(cursor,cursor);
+    },AppController.SEARCH_PAUSE_MS);
   }
+  static SEARCH_PAUSE_MS = 150;
   // Select all and export act on the whole view, so a view with records still on the server loads them first. Past the limit
   // nothing is selected, and the person is told in a message that stays until it's closed.
   async withWholeView(fn){

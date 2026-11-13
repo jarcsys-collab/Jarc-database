@@ -1535,7 +1535,10 @@ select option, select optgroup { background-color: var(--surface); color: var(--
 .radio-row select { height: 30px; }
 
 /* Table refinements inside groups */
-.editable-table tbody.board-group > tr:not(.group-header-row):not(.quick-add-row):hover > td { background: var(--hover); }
+/* Row hover must be OPAQUE: the sticky first column (and the sticky actions column) take this background, and the cells
+   scrolled underneath them would show through a translucent one (var(--hover) is 5% ink over transparent). A selected
+   row keeps its selection colour while hovered. */
+.editable-table tbody.board-group > tr:not(.group-header-row):not(.quick-add-row):not(.is-selected):hover > td { background: var(--row-hover, var(--surface-2)); }
 .editable-table tbody.board-group > tr.is-selected > td { background: color-mix(in srgb, var(--group-accent) 12%, var(--surface)); }
 
 /* Comment indicator beside the record name */
