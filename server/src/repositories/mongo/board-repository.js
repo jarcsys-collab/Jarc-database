@@ -23,6 +23,17 @@ class BoardRepository extends VersionedRepository {
     return this.collection.find({ workspaceId, _id: { $in: ids } }, { sort: { position: 1, _id: 1 }, limit: ids.length }).toArray();
   }
 
+  // API tokens: boards by ID, wherever they are, with only what a token's scope needs (never the columns or views), in board
+  // order. Missing IDs are simply absent: the caller compares the counts.
+  findSummariesByIds(ids) {
+    if (!ids.length) return Promise.resolve([]);
+    return this.collection.find({ _id: { $in: ids } }, { sort: { workspaceId: 1, position: 1, _id: 1 }, limit: ids.length, projection: { _id: 1, workspaceId: 1, name: 1, archived: 1, position: 1 } }).toArray();
+  }
+  // API tokens: a workspace's boards as a list to choose from (ID, name, archived), without each board's configuration.
+  listSummariesByWorkspace(workspaceId) {
+    return this.collection.find({ workspaceId }, { sort: { position: 1, _id: 1 }, limit: MAX_BOARDS_PER_WORKSPACE, projection: { _id: 1, workspaceId: 1, name: 1, archived: 1, position: 1 } }).toArray();
+  }
+
   async nextPosition(workspaceId, { session } = {}) {
     const last = await this.collection.findOne({ workspaceId }, { sort: { position: -1 }, projection: { position: 1 }, session });
     return (last?.position ?? 0) + 1000;

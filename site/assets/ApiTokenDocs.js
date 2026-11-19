@@ -12,6 +12,8 @@ const ApiTokenDocs = {
     const m = `// In Power BI: Get data → Blank query → Advanced editor.\n// Store the token in a parameter named JarcToken, and when asked for credentials choose Anonymous.\nlet\n    BaseUrl = "${base}",\n    BoardId = "BOARD_ID",\n    Call = (path as text, query as record) =>\n        Json.Document(Web.Contents(BaseUrl, [\n            RelativePath = "api/v1/external/" & path,\n            Query = query,\n            Headers = [Authorization = "Bearer " & JarcToken, Accept = "application/json"]\n        ])),\n    Columns = Call("boards/" & BoardId & "/columns", [])[items],\n    GetPage = (cursor as nullable text) =>\n        Call("boards/" & BoardId & "/records", [limit = "500"] & (if cursor = null then [] else [cursor = cursor])),\n    Pages = List.Generate(\n        () => GetPage(null),\n        (page) => page <> null,\n        (page) => if page[pagination][nextCursor] = null then null else GetPage(page[pagination][nextCursor])\n    ),\n    Records = List.Combine(List.Transform(Pages, each _[items])),\n    AsTable = Table.FromRecords(Records, {"id", "groupId", "createdAt", "updatedAt", "values"}, MissingField.UseNull),\n    Keys = List.Transform(Columns, each _[id]),\n    Labels = List.Transform(Columns, each _[name]),\n    Expanded = Table.ExpandRecordColumn(AsTable, "values", Keys, Labels)\nin\n    Expanded`;
     const automate = `{\n  "type": "Http",\n  "inputs": {\n    "method": "GET",\n    "uri": "${api}/boards/BOARD_ID/records",\n    "queries": {\n      "limit": "500",\n      "cursor": "@{variables('cursor')}"\n    },\n    "headers": {\n      "Authorization": "Bearer @{parameters('JarcApiToken')}"\n    }\n  }\n}`;
     const n8n = `Method:  GET\nURL:     ${api}/boards/BOARD_ID/records\n\nAuthentication:  Generic Credential Type → Header Auth\n  Name:   Authorization\n  Value:  Bearer paste-your-token-here   (saved in n8n's encrypted credentials)\n\nSend Query Parameters:\n  limit = 500\n\nOptions → Pagination:\n  Pagination Mode:   Update a Parameter in Each Request\n  Type: Query   Name: cursor\n  Value:             {{ $response.body.pagination.nextCursor }}\n  Pagination Complete When:  Other\n  Complete Expression:       {{ $response.body.pagination.nextCursor === null }}`;
+    const apps = `function readJarcBoard() {\n  const token = PropertiesService.getScriptProperties().getProperty("JARC_API_TOKEN");\n  const records = [];\n  let cursor = null;\n  do {\n    const url = "${api}/boards/BOARD_ID/records?limit=500" + (cursor ? "&cursor=" + encodeURIComponent(cursor) : "");\n    const response = UrlFetchApp.fetch(url, { headers: { Authorization: "Bearer " + token }, muteHttpExceptions: true });\n    const body = JSON.parse(response.getContentText());\n    if (response.getResponseCode() !== 200) throw new Error(body.error.code + ": " + body.error.message);\n    records.push(...body.items);\n    cursor = body.pagination.nextCursor;\n  } while (cursor);\n  return records;\n}`;
+    const postman = `1. Environments → add a variable JARC_API_TOKEN, type "secret", holding the key.\n2. New request:  GET ${api}/boards/BOARD_ID/records\n3. Authorization tab → Type: Bearer Token → Token: {{JARC_API_TOKEN}}\n4. Params: limit = 500\n   Next page: add cursor = the response's pagination.nextCursor\n5. Don't export or share the environment with the secret in it.`;
     const example = `{\n  "items": [\n    {\n      "id": "665f0c2a9b1e8a0012ab34cd",\n      "workspaceId": "665f0c2a9b1e8a0012ab3400",\n      "boardId": "665f0c2a9b1e8a0012ab3411",\n      "groupId": "group-1",\n      "position": 1000,\n      "archived": false,\n      "values": { "serial": "Example item", "status": "Done", "amount": 125 },\n      "createdAt": "2026-01-15T09:30:00.000Z",\n      "updatedAt": "2026-02-01T14:05:12.000Z",\n      "version": 3\n    }\n  ],\n  "pagination": {\n    "limit": 100,\n    "hasMore": true,\n    "nextCursor": "eyJiIjoiNjY1ZjBjMmE5YjFl..."\n  }\n}`;
     const valuesExample = `{\n  "items": [\n    {\n      "boardId": "665f0c2a9b1e8a0012ab3411",\n      "columnId": "status",\n      "columnName": "Status",\n      "columnType": "status",\n      "recordId": "665f0c2a9b1e8a0012ab34cd",\n      "value": "Done",\n      "updatedAt": "2026-02-01T14:05:12.000Z"\n    }\n  ],\n  "pagination": { "limit": 100, "hasMore": false, "nextCursor": null }\n}`;
     const errors = `{\n  "error": {\n    "code": "TOKEN_EXPIRED",\n    "message": "This API token has expired. Create or rotate a token in JARC."\n  }\n}`;
@@ -22,8 +24,14 @@ const ApiTokenDocs = {
       <p>A token is accepted only in the ${c("Authorization")} header. A token in the URL is refused, because URLs end up in logs and browser history.</p>
 
       <h3>Who can create a token</h3>
-      <p>Only the <strong>JARC API administrators</strong> create, list and revoke tokens, under <strong>Developer → API Tokens</strong>. Everyone else keeps their usual access to every shared board; ask an API administrator when an integration needs a token. Other administrator roles don't count. An API administrator can create read-only tokens for every shared workspace, including boards other employees created or imported. A token is limited to one workspace and the boards chosen, and it can never see more than its owner can.</p>
-      <p>One token reads every board selected, and every column on those boards: you don't need a token per board or per column. Boards created later aren't added to an existing token; rotate it or create a new one to include them. Create one token per integration, and don't share it.</p>
+      <p>Only the <strong>JARC API administrators</strong> create, list and revoke tokens (API keys), under <strong>Developer → API Keys</strong>. Everyone else keeps their usual access to every shared board; ask an API administrator when an integration needs a key. Other administrator roles don't count. An API administrator can create read-only keys for every shared workspace, including boards other employees created or imported. A key reads only the boards chosen for it, from one workspace or several, and it can never see more than its owner can.</p>
+      <p>One token reads every board selected, and every column on those boards: you don't need a token per board or per column. Boards created later aren't added to an existing token; create a new one to include them. Create one token per integration, and don't share it.</p>
+
+      <h3>One key for several boards and workspaces</h3>
+      <ol><li>Open <strong>Developer → API Keys → Create API key</strong>, and give the key a name and an expiry date.</li>
+      <li>Select boards: expand any workspace, search by workspace or board name, and tick the boards (or <em>Select all</em> for a workspace). Boards from different workspaces can go in the same key, up to 100.</li>
+      <li>Review the list and create the key. The next screen shows the secret <strong>once</strong>, and every board's endpoints with copy buttons, including <em>Copy all endpoints</em>.</li></ol>
+      <p>Later, <strong>Connection details</strong> on the key's card lists the same boards and endpoints again, without the secret. Each board is read with its own address, such as ${c("GET /boards/:boardId/records")}: there is no single request that returns the records of several boards, so an integration makes one request (or one paged series) per board, all with the same key. ${c("GET /workspaces")} lists every workspace of the key, and ${c("GET /workspaces/:workspaceId/boards")} the key's boards in one of them.</p>
       <p>JARC checks the owner's access on every request. If the owner loses access to the workspace or their account is disabled, their tokens stop working at once. Any API administrator can revoke any token; JARC records who did it.</p>
 
       <h3>Board and column IDs</h3>
@@ -36,7 +44,7 @@ const ApiTokenDocs = {
       <h3>Endpoints</h3>
       ${table(["Request", "Returns"], [
         [c("GET /me"), "This token's name, scope and expiry"],
-        [c("GET /workspaces"), "The token's workspace"],
+        [c("GET /workspaces"), "The token's workspaces (one or several)"],
         [c("GET /workspaces/:workspaceId/boards"), "The boards this token can read, with record counts"],
         [c("GET /boards/:boardId"), "One board with its columns and groups"],
         [c("GET /boards/:boardId/columns"), "Each column's ID, name, type, options and order"],
@@ -84,6 +92,17 @@ const ApiTokenDocs = {
       <li><strong>Rotate</strong> creates a replacement with the same boards. The old token keeps working for the overlap you choose (up to 7 days), so you can update the integration without an outage. Your other tokens aren't affected.</li>
       <li><strong>Revoke</strong> ends a token immediately and can't be undone. You can always revoke your own tokens.</li>
       <li>The full token is shown once, when it is created. JARC stores only a keyed digest, so nobody can show it again. If you lose it, rotate.</li></ul>
+      <h4>Rotating credentials securely</h4>
+      <ol><li>Rotate the key (its owner) with an overlap, such as 24 hours, or create a new key with the same boards.</li>
+      <li>Copy the new secret straight into the integration's secure credential store. Don't paste it into chat, email or a document.</li>
+      <li>Run the integration once and check <strong>Last used</strong> on the new key.</li>
+      <li>Revoke the old key (or let its overlap end), and confirm in <strong>API Activity</strong> that it is no longer used.</li></ol>
+
+      <h3>What the status codes mean</h3>
+      <ul><li>${c("401")}: the request has no valid key. It is missing, mistyped, expired (${c("TOKEN_EXPIRED")}) or revoked (${c("TOKEN_REVOKED")}).</li>
+      <li>${c("403")}: the key is valid, but its owner can no longer read its workspaces, or plain http was used.</li>
+      <li>${c("404")}: the board, record or column doesn't exist, <em>or</em> isn't one of the key's boards. JARC answers both the same way, so nothing outside the key can be discovered.</li>
+      <li>${c("429")}: too many requests. Wait the number of seconds in ${c("Retry-After")}.</li></ul>
 
       <h3>Common errors</h3>
       ${code("errors", "Every error has this shape", errors)}
@@ -119,8 +138,13 @@ const ApiTokenDocs = {
       ${code("automate", "Action definition", automate)}
       <h4>n8n (HTTP Request node)</h4>
       ${code("n8n", "Node settings", n8n)}
+      <h4>Google Apps Script (UrlFetchApp)</h4>
+      <p>Store the key once under <em>Project Settings → Script properties</em> as ${c("JARC_API_TOKEN")}, never in the script itself.</p>
+      ${code("apps", "Apps Script", apps)}
       <h4>JavaScript fetch, from a secure backend</h4>
       ${code("js", "Node.js", js)}
+      <h4>Postman</h4>
+      ${code("postman", "Request settings", postman)}
       <h4>cURL</h4>
       ${code("curl2", "cURL, for one board's columns", `curl -H "Authorization: Bearer $JARC_API_TOKEN" \\\n  "${api}/boards/BOARD_ID/columns"`)}
     </article>`;

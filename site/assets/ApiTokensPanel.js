@@ -10,7 +10,9 @@ class ApiTokensPanel {
   static STATUS = { active: ["Active", "ok"], rotating: ["Being replaced", "warn"], expired: ["Expired", "muted"], revoked: ["Revoked", "muted"], no_access: ["No access", "danger"] };
   static GRACE = [[0, "End it immediately"], [1, "Keep working for 1 hour"], [24, "Keep working for 24 hours"], [168, "Keep working for 7 days"]];
   static CODES = { API_ADMIN_REQUIRED: "Only JARC API administrators can manage API tokens.", FORBIDDEN: "You need access to this workspace to create its tokens. Ask a workspace admin to add you to its members.", TOKEN_LIMIT_REACHED: "You've reached the limit of 25 active tokens. Revoke one you no longer need.", TOKEN_ALREADY_ROTATED: "This token was already rotated. Rotate its replacement instead.", TOKEN_NOT_ACTIVE: "This token has ended. Create a new one instead.", TOKEN_NO_BOARDS: "None of this token's boards are available any more. Create a new token instead.", RATE_LIMITED: "Too many new tokens in the last hour. Try again later." };
-  static SECTIONS = [["overview", "Overview", "home"], ["tokens", "API Tokens", "lock"], ["explorer", "API Explorer", "search"], ["directory", "Boards & Columns", "board"], ["docs", "Documentation", "records"], ["activity", "API Activity", "refresh"]];
+  static SECTIONS = [["overview", "Overview", "home"], ["tokens", "API Keys", "lock"], ["explorer", "API Explorer", "search"], ["directory", "Boards & Columns", "board"], ["docs", "Documentation", "records"], ["activity", "API Activity", "refresh"]];
+  // Events that are part of a key's normal life, and events about a request that was refused (the Activity outcome filter).
+  static FAILURES = new Set(["token.auth_failed", "token.use_refused", "token.rate_limited"]);
   // Only for the JARC API administrators (the server enforces it; this only hides what would be refused).
   static ADMIN_SECTIONS = new Set(["tokens", "explorer", "activity"]);
   // The longest a token may last, in calendar years from its creation (services/api-token-service.js, the same rule).
@@ -26,6 +28,12 @@ class ApiTokensPanel {
     this.resetCatalog();
     this.ex = { workspaceId: "", boardId: "", data: null, error: "", selected: new Set(), column: "", op: "records", params: { limit: "", groupId: "", includeArchived: false, updatedSince: "" }, record: "", preview: null, previewBusy: false, previewError: "", preset: null };
     this.dir = { workspaceId: "", boardId: "", boardQuery: "", columnQuery: "" };
+    // API Keys and API Activity filters (kept while the Developer Center is open, cleared when it opens again).
+    this.resetFilters();
+  }
+  resetFilters() {
+    this.filters = { q: "", owner: "", status: "", workspace: "", board: "" };
+    this.actFilters = { token: "", owner: "", workspace: "", board: "", type: "", outcome: "", from: "", to: "" };
   }
   get view() { return this.c.view; }
   get adapter() { return this.c.model.storage?.adapter; }
@@ -45,7 +53,7 @@ class ApiTokensPanel {
   // ---- The Developer Center window. It reuses the Settings window's layout, so it behaves the same on desktop and mobile.
   // fresh: read tokens, workspaces and boards again (opening it from the app). Returning from one of its own dialogs keeps them.
   open(section = this.tab, { fresh = true } = {}) {
-    if (fresh) { this.resetCatalog(); this.items = null; this.events = null; this.error = ""; this.ex.data = null; this.ex.workspaceId = ""; }
+    if (fresh) { this.resetCatalog(); this.resetFilters(); this.items = null; this.events = null; this.error = ""; this.ex.data = null; this.ex.workspaceId = ""; this.ex.tokenId = ""; }
     this.tab = this.allowed(section) ? section : "overview";
     const nav = this.sections().map(([id, label, ic]) => `<button type="button" data-action="apitok-tab" data-tab="${id}" class="${id === this.tab ? "active" : ""}" ${id === this.tab ? 'aria-current="page"' : ""} title="${label}">${icon(ic)}<span>${label}</span></button>`).join("");
     this.view.overlay(`<div class="settings-window developer-window" role="dialog" aria-modal="true" aria-labelledby="apitok-title"><nav class="settings-nav" aria-label="Developer sections"><div class="settings-brand"><span class="brand-mark">J</span><strong>Developer</strong></div>${nav}</nav><section class="settings-content"><div class="modal-head"><h2 id="apitok-title">${this.sectionTitle()}</h2>${this.view.closeButton()}</div><div class="settings-body"><div id="apitok-root" class="apitok">${this.body()}</div></div></section></div>`, "settings-overlay developer-overlay");
@@ -61,7 +69,8 @@ class ApiTokensPanel {
   }
   body() {
     if (!this.allowed(this.tab)) this.tab = "overview";
-    if (this.tab === "explorer") return this.explorerHtml();
+    // The Explorer can use a key as its scope reference, so administrators load the key list there too.
+    if (this.tab === "explorer") { if (this.admin() && !this.items && !this.loading && !this.error) setTimeout(() => this.load(), 0); return this.explorerHtml(); }
     if (this.tab === "directory") return this.directoryHtml();
     if (this.tab === "docs") return ApiTokenDocs.html((v) => this.esc(v), window.location.origin);
     // Everyone else: the overview, with nothing to load (the token routes would refuse them).
@@ -74,7 +83,7 @@ class ApiTokensPanel {
   async load() {
     if (this.loading) return;
     this.loading = true;
-    try { const [list, options, activity] = await Promise.all([this.api("GET", ""), this.api("GET", "/options"), this.api("GET", "/activity")]); this.items = list.items; this.options = ApiTokensPanel.unique(options.workspaces); this.events = activity.items || []; this.error = ""; }
+    try { const [list, options, activity] = await Promise.all([this.api("GET", ""), this.api("GET", "/options"), this.api("GET", "/activity")]); this.items = list.items; this.options = ApiTokensPanel.unique(options.workspaces); this.limits = options.limits || this.limits; this.events = activity.items || []; this.error = ""; }
     catch (error) { this.error = this.message(error); }
     finally { this.loading = false; this.redraw(); }
   }
@@ -95,55 +104,129 @@ class ApiTokensPanel {
       <ol class="apitok-steps">${step(1, "Find the board or column", "Every board and column already has a permanent API ID and address, the same for everyone in the company.", "directory", "Boards & Columns")}${step(2, "Read how it works", "Endpoints, filters, paging and error codes.", "docs", "Documentation")}</ol>
       <dl class="apitok-facts"><div><dt>Base URL</dt><dd><code>${this.esc(this.endpoint(""))}</code></dd></div><div><dt>Format</dt><dd>JSON over HTTPS, read-only</dd></div></dl></div>`;
   }
+  // Live keys: active, or being replaced (the old one still works for its overlap).
+  static live(t) { return t.status === "active" || t.status === "rotating"; }
   overviewHtml() {
-    const active = (this.items || []).filter((t) => t.status === "active" || t.status === "rotating").length;
-    const step = (n, title, text, tab, button) => `<li class="apitok-step"><span class="apitok-step-n" aria-hidden="true">${n}</span><div><strong>${title}</strong><p>${text}</p><button type="button" class="button secondary" data-action="apitok-tab" data-tab="${tab}">${button}</button></div></li>`;
-    const status = !this.items ? this.loadState() : `<div class="apitok-stats"><div><span>Active tokens</span><strong>${active}</strong></div><div><span>Workspaces you can connect</span><strong>${this.options?.filter((w) => w.boards.length).length ?? 0}</strong></div></div>${this.blockedHtml()}`;
-    return `<div class="apitok-overview"><p class="apitok-lead">Read JARC boards from Power BI, Power Automate, n8n, Excel or your own scripts, through a read-only REST API.</p>
+    const items = this.items || [];
+    const live = items.filter(ApiTokensPanel.live);
+    const boards = new Set(live.flatMap((t) => t.boards.filter((b) => b.available !== false).map((b) => b.id)));
+    const spaces = new Set(live.flatMap((t) => (t.workspaces || [t.workspace]).filter((w) => w.available !== false && w.name).map((w) => w.id)));
+    const stat = (label, value, tone = "") => `<div class="${tone}"><span>${label}</span><strong>${value}</strong></div>`;
+    const create = this.canCreate() ? `<button type="button" class="button primary apikey-cta" data-action="apitok-new">${icon("plus")}<span>Create API key</span></button>` : "";
+    const status = !this.items ? this.loadState() : `<div class="apitok-stats apikey-stats">${stat("Active keys", live.length)}${stat("Expired keys", items.filter((t) => t.status === "expired").length)}${stat("Revoked keys", items.filter((t) => t.status === "revoked").length)}${stat("Authorized boards", boards.size)}${stat("Workspaces covered", spaces.size)}</div>${this.blockedHtml()}`;
+    const step = (n, title, text) => `<li class="apitok-step"><span class="apitok-step-n" aria-hidden="true">${n}</span><div><strong>${title}</strong><p>${text}</p></div></li>`;
+    const recent = (this.events || []).slice(0, 5);
+    const recentHtml = !this.items ? "" : `<section class="apikey-recent" aria-labelledby="apikey-recent-title"><div class="apikey-section-head"><h3 id="apikey-recent-title">Recent API activity</h3><button type="button" class="button secondary small" data-action="apitok-tab" data-tab="activity">All activity</button></div>${recent.length ? `<ul class="apikey-recent-list">${recent.map((e) => `<li><span class="account-badge is-${ApiTokensPanel.FAILURES.has(e.action) ? "warn" : "ok"}">${this.esc(ApiTokensPanel.EVENTS[e.action] || e.action)}</span><strong>${this.esc(e.token?.name || "Unknown key")}</strong><small>${this.dateTime(e.at)}${e.actor?.name ? ` · ${this.esc(e.actor.name)}` : ""}</small></li>`).join("")}</ul>` : `<p class="account-empty">No API activity yet.</p>`}</section>`;
+    return `<div class="apitok-overview"><div class="apikey-hero"><p class="apitok-lead">Read JARC boards from Power BI, Power Automate, n8n, Excel or your own scripts, through a read-only REST API. One API key can cover boards from several workspaces.</p>${create}</div>
       ${status}
-      <ol class="apitok-steps">${step(1, "Create one token", "One token reads every board you choose in a workspace. You don't need a token per board or column.", "tokens", "API Tokens")}${step(2, "Find the board or column", "Every board and column already has a permanent API ID and address, the same for everyone in the company.", "directory", "Boards & Columns")}${step(3, "Send the request", "Send the token in the Authorization header. Preview responses and copy ready-made examples.", "explorer", "API Explorer")}</ol>
+      <h3>Getting started</h3>
+      <ol class="apitok-steps apikey-start">${step(1, "Create an API key", "Give it a name and an expiry date. Keys are always read-only.")}${step(2, "Select boards", "Pick boards from any shared workspace. Only the boards you select are readable.")}${step(3, "Copy the secret and endpoints", "The secret is shown once. Every board's endpoints are listed with copy buttons.")}${step(4, "Connect the external application", "Send the key in the Authorization header from Power BI, Power Automate, n8n or a script.")}</ol>
+      ${recentHtml}
       <dl class="apitok-facts"><div><dt>Base URL</dt><dd><code>${this.esc(this.endpoint(""))}</code></dd></div><div><dt>Authentication</dt><dd><code>Authorization: Bearer YOUR_JARC_API_TOKEN</code></dd></div><div><dt>Format</dt><dd>JSON over HTTPS, read-only</dd></div></dl>
-      <p class="account-note">IDs aren't secrets and knowing one grants nothing. Each request is checked against the token's boards and its owner's current access.</p></div>`;
+      <p class="account-note">IDs aren't secrets and knowing one grants nothing. Each request is checked against the key's boards and its owner's current access.</p></div>`;
   }
 
   // ---- API Tokens
+  // ---- API Keys: one card per key, with filters that redraw only the list (the filter controls keep focus).
   tokensHtml() {
     const state = this.loadState();
     if (state) return state;
     const canCreate = this.canCreate();
-    const intro = `<div class="apitok-intro"><p>Every JARC API token, whoever created it. Tokens are read-only, read only the boards chosen for them and never see more than their owner can. Any API administrator can revoke any token.</p>${canCreate ? `<button type="button" class="button primary" data-action="apitok-new">${icon("plus")}<span>New token</span></button>` : ""}</div>`;
-    const auth = `<div class="apitok-auth"><strong>How to authenticate</strong><p>Send the token in a header with every request. Never put it in the address, a web page or a shared file.</p><code>Authorization: Bearer YOUR_JARC_API_TOKEN</code></div>`;
-    if (!this.items.length) return `${intro}${this.blockedHtml()}<p class="account-empty">No tokens yet.</p>${auth}`;
-    return `${intro}${this.blockedHtml()}<table class="account-table apitok-table"><thead><tr><th>Name</th><th>Owner</th><th>Status</th><th>Access</th><th>Created</th><th>Expires</th><th>Last used</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${this.items.map((t) => this.row(t)).join("")}</tbody></table>${auth}`;
+    const intro = `<div class="apitok-intro"><p>Every JARC API key, whoever created it. Keys are read-only, read only the boards chosen for them (from one or several workspaces) and never see more than their owner can. Any API administrator can revoke any key.</p>${canCreate ? `<button type="button" class="button primary" data-action="apitok-new">${icon("plus")}<span>Create API key</span></button>` : ""}</div>`;
+    const auth = `<div class="apitok-auth"><strong>How to authenticate</strong><p>Send the key in a header with every request. Never put it in the address, a web page or a shared file.</p><code>Authorization: Bearer YOUR_JARC_API_TOKEN</code></div>`;
+    if (!this.items.length) return `${intro}${this.blockedHtml()}<p class="account-empty">No API keys yet.</p>${auth}`;
+    return `${intro}${this.blockedHtml()}${this.keyFiltersHtml()}<p class="apikey-results" id="apikey-results" role="status" aria-live="polite">${this.keyResultsText()}</p><div class="apikey-list" id="apikey-list">${this.keyCardsHtml()}</div>${auth}`;
   }
   ownerName(t) { return t.mine ? "You" : t.owner?.name || "A former user"; }
-  row(t) {
+  keyWorkspaces(t) { return t.workspaces || [t.workspace]; }
+  // Distinct values for the filter menus, from the keys themselves.
+  static distinct(pairs) { const seen = new Map(); for (const [id, name] of pairs) if (id && !seen.has(id)) seen.set(id, name); return [...seen].sort((a, b) => String(a[1]).localeCompare(String(b[1]))); }
+  filterSelect(kind, name, label, choices, current) { return `<label>${label}<select data-action="${kind}" data-filter="${name}"><option value="">All</option>${choices.map(([v, l]) => `<option value="${this.esc(v)}" ${v === current ? "selected" : ""}>${this.esc(l)}</option>`).join("")}</select></label>`; }
+  keyFiltersHtml() {
+    const f = this.filters, items = this.items;
+    const owners = ApiTokensPanel.distinct(items.map((t) => [t.owner?.id, this.ownerName(t)]));
+    const spaces = ApiTokensPanel.distinct(items.flatMap((t) => this.keyWorkspaces(t).filter((w) => w.name).map((w) => [w.id, w.name])));
+    const statuses = [["active", "Active"], ["rotating", "Being replaced"], ["expired", "Expired"], ["revoked", "Revoked"], ["no_access", "No access"]];
+    return `<div class="apikey-toolbar" role="search" aria-label="Filter API keys"><label class="apikey-grow">Search<input type="search" data-action="apitok-filter" data-filter="q" value="${this.esc(f.q)}" placeholder="Key name or prefix" autocomplete="off"></label>${this.filterSelect("apitok-filter", "owner", "Owner", owners, f.owner)}${this.filterSelect("apitok-filter", "status", "Status", statuses, f.status)}${this.filterSelect("apitok-filter", "workspace", "Workspace", spaces, f.workspace)}<label>Board<input type="search" data-action="apitok-filter" data-filter="board" value="${this.esc(f.board)}" placeholder="Board name or ID" autocomplete="off"></label></div>`;
+  }
+  filteredKeys() {
+    const f = this.filters;
+    return this.items.filter((t) => (!f.q || this.matches(t.name, f.q) || this.matches(t.prefix, f.q) || this.matches(t.description, f.q))
+      && (!f.owner || t.owner?.id === f.owner) && (!f.status || t.status === f.status)
+      && (!f.workspace || this.keyWorkspaces(t).some((w) => w.id === f.workspace))
+      && (!f.board || t.boards.some((b) => this.matches(b.name, f.board) || b.id === f.board.trim().toLowerCase())));
+  }
+  keyResultsText() { const shown = this.filteredKeys().length, all = this.items.length; return shown === all ? `${all} key${all === 1 ? "" : "s"}` : `${shown} of ${all} keys`; }
+  keyCardsHtml() {
+    const keys = this.filteredKeys();
+    return keys.length ? keys.map((t) => this.card(t)).join("") : `<p class="account-empty">No keys match these filters.</p>`;
+  }
+  redrawKeys() {
+    const list = document.querySelector("#apikey-list"), count = document.querySelector("#apikey-results");
+    if (list) list.innerHTML = this.keyCardsHtml();
+    if (count) count.textContent = this.keyResultsText();
+  }
+  card(t) {
     const [label, tone] = ApiTokensPanel.STATUS[t.status] || ["Unknown", "muted"];
-    const boards = t.boards.filter((b) => b.name).map((b) => b.name);
-    const access = t.workspace.name ? `<div class="apitok-access"><strong>${this.esc(t.workspace.name)}</strong><small>${boards.length ? this.esc(boards.join(", ")) : "No boards available"} · Read-only</small></div>` : `<span class="muted">Not available</span>`;
+    const spaces = this.keyWorkspaces(t), named = spaces.filter((w) => w.name).map((w) => w.name);
     const live = t.status === "active" || t.status === "rotating" || t.status === "no_access";
-    const actions = `${t.status === "active" && t.canRotate ? `<button type="button" class="button secondary" data-action="apitok-rotate" data-id="${this.esc(t.id)}">Rotate</button>` : ""}${live ? `<button type="button" class="button secondary danger-text" data-action="apitok-revoke" data-id="${this.esc(t.id)}">Revoke</button>` : ""}`;
-    const revoked = t.status === "revoked" && t.revokedBy?.name ? `<small>by ${this.esc(t.revokedBy.name)}</small>` : "";
-    return `<tr><td data-label="Name"><strong>${this.esc(t.name)}</strong><small><code>${this.esc(t.prefix)}…</code></small></td><td data-label="Owner">${this.esc(this.ownerName(t))}</td><td data-label="Status"><span class="account-badge is-${tone}">${label}</span>${revoked}</td><td data-label="Access">${access}</td><td data-label="Created">${this.date(t.createdAt)}</td><td data-label="Expires">${t.status === "revoked" ? "—" : this.dateTime(t.expiresAt)}</td><td data-label="Last used">${this.dateTime(t.lastUsedAt)}</td><td class="apitok-actions">${actions}</td></tr>`;
+    const id = this.esc(t.id), btn = (action, text, extra = "") => `<button type="button" class="button secondary small ${extra}" data-action="${action}" data-id="${id}">${text}</button>`;
+    const actions = `${btn("apitok-details", "Connection details")}${btn("apitok-key-explorer", "API Explorer")}${btn("apitok-key-activity", "Activity")}${t.status === "active" && t.canRotate ? btn("apitok-rotate", "Rotate") : ""}${live ? btn("apitok-revoke", "Revoke", "danger-text") : ""}`;
+    const revoked = t.status === "revoked" && t.revokedBy?.name ? ` <small>by ${this.esc(t.revokedBy.name)}</small>` : "";
+    const meta = (term, value) => `<div data-meta="${term}"><dt>${term}</dt><dd>${value}</dd></div>`;
+    return `<article class="apikey-card" data-id="${id}" aria-labelledby="apikey-name-${id}">
+      <header class="apikey-card-head"><div class="apikey-card-title"><h3 id="apikey-name-${id}">${this.esc(t.name)}</h3><code>${this.esc(t.prefix)}…</code></div><span class="apikey-status"><span class="account-badge is-${tone}">${label}</span>${revoked}</span></header>
+      ${t.description ? `<p class="apikey-desc">${this.esc(t.description)}</p>` : ""}
+      <dl class="apikey-meta">${meta("Owner", this.esc(this.ownerName(t)))}${meta("Boards", `${t.boards.length}`)}${meta(`Workspace${spaces.length === 1 ? "" : "s"}`, `${spaces.length}${named.length ? ` <small>${this.esc(named.join(", "))}</small>` : ""}`)}${meta("Created", this.date(t.createdAt))}${meta("Expires", t.status === "revoked" ? "—" : this.date(t.expiresAt))}${meta("Last used", this.dateTime(t.lastUsedAt))}${meta("Requests", Number(t.requestCount || 0).toLocaleString())}${meta("Permissions", "Read-only")}</dl>
+      <div class="apikey-card-actions">${actions}</div></article>`;
   }
 
   // ---- API Activity: what the server already records for each token (last use, a request count, status). No request log is shown.
   activityHtml() {
     const state = this.loadState();
     if (state) return state;
-    if (!this.items.length) return `<p>Activity appears here once you have a token.</p><button type="button" class="button secondary" data-action="apitok-tab" data-tab="tokens">API Tokens</button>`;
+    if (!this.items.length) return `<p>Activity appears here once there is an API key.</p><button type="button" class="button secondary" data-action="apitok-tab" data-tab="tokens">API Keys</button>`;
     const time = (t) => (t.lastUsedAt ? new Date(t.lastUsedAt).getTime() : 0);
-    const rows = [...this.items].sort((a, b) => time(b) - time(a)).map((t) => { const [label, tone] = ApiTokensPanel.STATUS[t.status] || ["Unknown", "muted"]; return `<tr><td data-label="Token"><strong>${this.esc(t.name)}</strong><small><code>${this.esc(t.prefix)}…</code></small></td><td data-label="Owner">${this.esc(this.ownerName(t))}</td><td data-label="Status"><span class="account-badge is-${tone}">${label}</span></td><td data-label="Last used">${this.dateTime(t.lastUsedAt)}</td><td data-label="Requests">${Number(t.requestCount || 0).toLocaleString()}</td><td data-label="Boards">${t.boards.length}</td></tr>`; }).join("");
-    return `<p>Every token's use, most recent first. Counts are saved about once a minute, so the latest requests can take a moment to appear.</p><table class="account-table apitok-table apitok-activity"><thead><tr><th>Token</th><th>Owner</th><th>Status</th><th>Last used</th><th>Requests</th><th>Boards</th></tr></thead><tbody>${rows}</tbody></table>
+    const rows = [...this.items].sort((a, b) => time(b) - time(a)).map((t) => { const [label, tone] = ApiTokensPanel.STATUS[t.status] || ["Unknown", "muted"]; return `<tr><td data-label="Key"><strong>${this.esc(t.name)}</strong><small><code>${this.esc(t.prefix)}…</code></small></td><td data-label="Owner">${this.esc(this.ownerName(t))}</td><td data-label="Status"><span class="account-badge is-${tone}">${label}</span></td><td data-label="Last used">${this.dateTime(t.lastUsedAt)}</td><td data-label="Requests">${Number(t.requestCount || 0).toLocaleString()}</td><td data-label="Boards">${t.boards.length}</td></tr>`; }).join("");
+    return `<h3>Key usage</h3><p>Every key's use, most recent first. Counts are saved about once a minute, so the latest requests can take a moment to appear.</p><table class="account-table apitok-table apitok-activity"><thead><tr><th>Key</th><th>Owner</th><th>Status</th><th>Last used</th><th>Requests</th><th>Boards</th></tr></thead><tbody>${rows}</tbody></table>
       ${this.eventsHtml()}`;
   }
   // The token audit: created, rotated, revoked (and by whom), and refused or failed requests. Labels and prefixes only, never a token.
+  // The filters apply here, in the browser, to the entries the server sent (the newest 200).
   eventsHtml() {
     const events = this.events || [];
-    if (!events.length) return `<h3>Recent events</h3><p class="account-empty">No token events yet.</p>`;
+    if (!events.length) return `<h3>Recent events</h3><p class="account-empty">No key events yet.</p>`;
+    const f = this.actFilters;
+    const tokens = ApiTokensPanel.distinct(events.filter((e) => e.token).map((e) => [e.token.id, `${e.token.name || "Unknown key"}${e.token.prefix ? ` (${e.token.prefix}…)` : ""}`]));
+    const owners = ApiTokensPanel.distinct(events.filter((e) => e.owner).map((e) => [e.owner.id, e.owner.name || "A former user"]));
+    const spaces = ApiTokensPanel.distinct(events.flatMap((e) => (e.workspaces?.length ? e.workspaces : e.workspace ? [e.workspace] : []).map((w) => [w.id, w.name || "Unknown workspace"])));
+    const boardNames = new Map((this.items || []).flatMap((t) => t.boards.filter((b) => b.name).map((b) => [b.id, b.name])));
+    const boards = ApiTokensPanel.distinct(events.flatMap((e) => (e.token?.boardIds || []).map((id) => [id, boardNames.get(id) || id])));
+    const types = Object.entries(ApiTokensPanel.EVENTS);
+    const sel = (name, label, choices) => this.filterSelect("apitok-act-filter", name, label, choices, f[name]);
+    const filters = `<div class="apikey-toolbar apikey-act-toolbar" role="search" aria-label="Filter API activity">${sel("token", "Key", tokens)}${sel("owner", "Owner", owners)}${sel("workspace", "Workspace", spaces)}${sel("board", "Board", boards)}${sel("type", "Event", types)}${sel("outcome", "Result", [["success", "Succeeded"], ["failure", "Refused or failed"]])}<label>From<input type="date" data-action="apitok-act-filter" data-filter="from" value="${this.esc(f.from)}"></label><label>To<input type="date" data-action="apitok-act-filter" data-filter="to" value="${this.esc(f.to)}"></label></div>`;
+    return `<h3>Recent events</h3><p class="account-note">The latest ${events.length} entries of JARC's key audit log. Refused and failed requests are kept for 90 days. Requests aren't logged per board: the Board filter shows events of keys that cover the board.</p>${filters}<p class="apikey-results" id="apikey-events-count" role="status" aria-live="polite">${this.eventsCountText()}</p><div class="apitok-table-scroll" tabindex="0"><table class="account-table apitok-table apitok-events"><thead><tr><th>When</th><th>Event</th><th>Key</th><th>By</th><th>Owner</th><th>Workspace</th></tr></thead><tbody id="apikey-events">${this.eventRowsHtml()}</tbody></table></div>`;
+  }
+  filteredEvents() {
+    const f = this.actFilters, from = f.from ? new Date(`${f.from}T00:00:00`).getTime() : null, to = f.to ? new Date(`${f.to}T23:59:59.999`).getTime() : null;
+    return (this.events || []).filter((e) => {
+      const at = new Date(e.at).getTime(), spaces = e.workspaces?.length ? e.workspaces : e.workspace ? [e.workspace] : [];
+      return (!f.token || e.token?.id === f.token) && (!f.owner || e.owner?.id === f.owner) && (!f.workspace || spaces.some((w) => w.id === f.workspace))
+        && (!f.board || (e.token?.boardIds || []).includes(f.board)) && (!f.type || e.action === f.type)
+        && (!f.outcome || (f.outcome === "failure") === ApiTokensPanel.FAILURES.has(e.action))
+        && (from === null || at >= from) && (to === null || at <= to);
+    });
+  }
+  eventsCountText() { const shown = this.filteredEvents().length, all = (this.events || []).length; return shown === all ? `${all} event${all === 1 ? "" : "s"}` : `${shown} of ${all} events`; }
+  eventRowsHtml() {
     const who = (p, fallback) => (p ? this.esc(p.name || "A former user") : fallback);
-    const rows = events.map((e) => `<tr><td data-label="When">${this.dateTime(e.at)}</td><td data-label="Event">${this.esc(ApiTokensPanel.EVENTS[e.action] || e.action)}${e.reason ? ` <small class="muted">(${this.esc(e.reason)})</small>` : ""}</td><td data-label="Token">${e.token ? `<strong>${this.esc(e.token.name || "Unknown token")}</strong>${e.token.prefix ? `<small><code>${this.esc(e.token.prefix)}…</code></small>` : ""}` : "—"}</td><td data-label="By">${who(e.actor, '<span class="muted">An integration</span>')}</td><td data-label="Owner">${who(e.owner, "—")}</td><td data-label="Workspace">${this.esc(e.workspace?.name || "—")}</td></tr>`).join("");
-    return `<h3>Recent events</h3><p class="account-note">The latest ${events.length} entries of JARC's token audit log. Refused and failed requests are kept for 90 days.</p><div class="apitok-table-scroll" tabindex="0"><table class="account-table apitok-table apitok-events"><thead><tr><th>When</th><th>Event</th><th>Token</th><th>By</th><th>Owner</th><th>Workspace</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    const rows = this.filteredEvents().map((e) => { const spaces = e.workspaces?.length ? e.workspaces : e.workspace ? [e.workspace] : []; return `<tr><td data-label="When">${this.dateTime(e.at)}</td><td data-label="Event"><span class="account-badge is-${ApiTokensPanel.FAILURES.has(e.action) ? "warn" : "ok"}">${this.esc(ApiTokensPanel.EVENTS[e.action] || e.action)}</span>${e.reason ? ` <small class="muted">(${this.esc(e.reason)})</small>` : ""}</td><td data-label="Key">${e.token ? `<strong>${this.esc(e.token.name || "Unknown key")}</strong>${e.token.prefix ? `<small><code>${this.esc(e.token.prefix)}…</code></small>` : ""}` : "—"}</td><td data-label="By">${who(e.actor, '<span class="muted">An integration</span>')}</td><td data-label="Owner">${who(e.owner, "—")}</td><td data-label="Workspace">${this.esc(spaces.map((w) => w.name || "Unknown workspace").join(", ") || "—")}</td></tr>`; }).join("");
+    return rows || `<tr><td colspan="6" class="muted">No events match these filters.</td></tr>`;
+  }
+  redrawEvents() {
+    const body = document.querySelector("#apikey-events"), count = document.querySelector("#apikey-events-count");
+    if (body) body.innerHTML = this.eventRowsHtml();
+    if (count) count.textContent = this.eventsCountText();
   }
 
   // ---- New token
@@ -169,60 +252,12 @@ class ApiTokensPanel {
   }
   refreshOptions() {
     if (this.optionsLoading) return this.optionsLoading;
-    const request = this.api("GET", "/options").then((o) => { this.options = ApiTokensPanel.unique(o.workspaces); return this.options; })
+    const request = this.api("GET", "/options").then((o) => { this.options = ApiTokensPanel.unique(o.workspaces); this.limits = o.limits || this.limits; return this.options; })
       .finally(() => { if (this.optionsLoading === request) this.optionsLoading = null; });
     this.optionsLoading = request;
     return request;
   }
-  showCreate(workspaceId = null, error = "") {
-    const gen = this.createGen = (this.createGen || 0) + 1;
-    this.view.overlay(`<form class="modal apitok-modal" data-action="apitok-create-form" data-gen="${gen}" novalidate><div class="modal-head"><div><div class="eyebrow">API Tokens</div><h2>New token</h2></div>${this.view.closeButton()}</div>
-      <div class="form-grid"><label class="full">Name<input name="name" required maxlength="100" placeholder="Power BI Integration" autocomplete="off"></label>
-      <label class="full">Workspace<select name="workspaceId" data-action="apitok-workspace"></select></label>
-      <fieldset class="full apitok-boards"><legend>Boards this token can read</legend><div class="apitok-board-area"></div><small class="muted">The token reads only the boards you tick. Boards created later are never added to an existing token: create or rotate a token to include them.</small></fieldset>
-      <label class="full">Permissions<select name="scope" disabled><option>Read-only</option></select></label>
-      ${this.expiryField("Expires on")}</div>
-      <p class="account-empty apitok-error" role="alert">${this.esc(error)}</p>
-      <div class="modal-actions"><button type="button" class="button secondary" data-action="apitok-cancel">Cancel</button><button class="button primary">Create token</button></div></form>`, "apitok-overlay");
-    const form = this.createForm(gen);
-    if (form) this.fillCreate(form, { workspaceId });
-    this.refreshCreate(gen, workspaceId);
-  }
-  // The New token form of this opening, or null once it was closed or opened again (a late answer then changes nothing).
-  createForm(gen) { const form = document.querySelector('#overlay-root form.apitok-modal[data-action="apitok-create-form"]'); return form && form.dataset.gen === String(gen) ? form : null; }
-  async refreshCreate(gen, wanted) {
-    let failed = "";
-    try { await this.refreshOptions(); } catch (error) { failed = this.message(error); }
-    const form = this.createForm(gen);
-    if (form) this.fillCreate(form, { workspaceId: form.elements.workspaceId.value || wanted, failed });
-  }
-  // Draws the workspace choice and the boards of the chosen workspace into the open form. Ticks are kept only for boards
-  // that are still listed in the chosen workspace; the name and expiry fields are never touched.
-  fillCreate(form, { workspaceId = null, failed = "" } = {}) {
-    const select = form.elements.workspaceId, area = form.querySelector(".apitok-board-area"), submit = form.querySelector("button.primary");
-    const retry = `<button type="button" class="button secondary small" data-action="apitok-boards-retry">Try again</button>`;
-    const focused = area.contains(document.activeElement) ? (document.activeElement.value || document.activeElement.dataset.action) : null;
-    if (!this.options) {
-      select.innerHTML = `<option value="">${failed ? "Not available" : "Loading…"}</option>`; select.disabled = true; submit.disabled = true;
-      area.innerHTML = failed ? `<p class="account-empty apitok-boards-state" role="alert">Couldn't load your workspaces and boards. ${this.esc(failed)}</p>${retry}` : `<p class="apitok-boards-state" role="status"><span class="loading-spinner" aria-hidden="true"></span> Loading boards…</p>`;
-      return;
-    }
-    const spaces = this.options.filter((w) => w.boards.length);
-    const stale = failed ? `<p class="account-empty apitok-boards-state" role="status">Couldn't refresh the board list, so it may be out of date. ${retry}</p>` : "";
-    if (!spaces.length) {
-      select.innerHTML = `<option value="">No workspaces with boards</option>`; select.disabled = true; submit.disabled = true;
-      area.innerHTML = `${stale}<p class="account-empty apitok-boards-state" role="status">There are no boards you can issue a token for yet. Boards of the workspaces you can access appear here as soon as they're created or imported.</p>`;
-      return;
-    }
-    const current = spaces.find((w) => w.id === workspaceId) || spaces[0];
-    const keep = new Set([...form.querySelectorAll('input[name="board"]:checked')].map((i) => i.value));
-    select.innerHTML = spaces.map((w) => `<option value="${this.esc(w.id)}" ${w.id === current.id ? "selected" : ""}>${this.esc(this.withArchived(w))}</option>`).join("");
-    select.value = current.id; select.disabled = false; submit.disabled = false;
-    const boards = current.boards.map((b) => `<label class="apitok-check"><input type="checkbox" name="board" value="${this.esc(b.id)}" ${keep.has(b.id) ? "checked" : ""}><span>${this.esc(this.withArchived(b))}</span></label>`).join("");
-    const all = current.boards.length > 0 && current.boards.every((b) => keep.has(b.id));
-    area.innerHTML = `${stale}<label class="apitok-check apitok-all"><input type="checkbox" data-action="apitok-all-boards" ${all ? "checked" : ""}><span>All ${current.boards.length} current board${current.boards.length === 1 ? "" : "s"}</span></label><div class="apitok-board-list">${boards}</div>`;
-    if (focused) [...area.querySelectorAll("input, button")].find((el) => (el.value || el.dataset.action) === focused)?.focus();
-  }
+  // Create API key (the guided steps), the one-time secret and Connection details: ApiKeyWizard.js.
   // The end of the chosen day, where the person is, or null for a date that isn't offered (in the past, today, more than 5 years
   // away, or not a real date). On the last day offered, the end of the day may lie beyond the exact limit: then the limit is sent.
   endOfDay(value) {
@@ -234,36 +269,16 @@ class ApiTokensPanel {
     return (at > latest ? latest : at).toISOString();
   }
   expiryProblem() { return `Choose an expiry date from tomorrow up to ${ApiTokensPanel.MAX_YEARS} years from today (${this.date(ApiTokensPanel.latestExpiry().toISOString())}).`; }
-  async submitCreate(form) {
-    const name = form.elements.name.value.trim(), workspaceId = form.elements.workspaceId.value;
-    const boardIds = [...form.querySelectorAll('input[name="board"]:checked')].map((i) => i.value), expiresAt = this.endOfDay(form.elements.expires.value);
-    const problem = !name ? "Give the token a name." : !boardIds.length ? "Choose at least one board." : !expiresAt ? this.expiryProblem() : "";
-    const say = (text) => { const el = form.querySelector(".apitok-error"); if (el) el.textContent = text; };
-    if (problem) { say(problem); return; }
-    const button = form.querySelector("button.primary"); button.disabled = true;
-    try { const result = await this.api("POST", "", { name, workspaceId, boardIds, scopes: ["read"], expiresAt }); this.reveal(result, "Token created"); }
-    catch (error) { say(this.message(error)); button.disabled = false; }
-  }
-
-  // ---- The one time a token is shown. Outside clicks and Escape don't close it (data-keep-open); only the button does.
-  reveal(result, title) {
-    this.secret = result.secret;
-    document.querySelector("#overlay-root").innerHTML = `<div class="overlay apitok-overlay" data-keep-open="1"><div class="modal apitok-modal" role="dialog" aria-modal="true" aria-labelledby="apitok-reveal-title"><div class="modal-head"><div><div class="eyebrow">${this.esc(result.token.name)}</div><h2 id="apitok-reveal-title">${this.esc(title)}</h2></div></div>
-      <div class="account-alert is-warn" role="status"><strong>Copy this token now. You won't see it again.</strong><span>Keep it in a secure backend or approved secret store, never in public JavaScript or a shared file.</span></div>
-      <div class="apitok-secret"><input id="apitok-secret" type="text" readonly spellcheck="false" autocomplete="off" aria-label="Your API token" value="${this.esc(result.secret)}"><button type="button" class="button primary" data-action="apitok-copy">Copy</button></div>
-      <p class="account-note">Expires ${this.dateTime(result.token.expiresAt)}. Read-only, for ${result.token.boards.length} board${result.token.boards.length === 1 ? "" : "s"}. Use it with any of their board and column addresses.</p>
-      <div class="modal-actions"><button type="button" class="button secondary" data-action="apitok-done">I've saved it</button></div></div></div>`;
-    document.querySelector("#apitok-secret")?.select();
-  }
   async copySecret(button) {
     const input = document.querySelector("#apitok-secret");
     if (!this.secret || !input) return;
     try { await navigator.clipboard.writeText(this.secret); }
     catch { input.select(); try { document.execCommand("copy"); } catch { this.view.toast("Select the token and copy it"); return; } }
     button.textContent = "Copied";
-    this.view.toast("Token copied");
+    this.view.toast("API key copied");
   }
-  done() { this.secret = null; this.items = null; this.open("tokens", { fresh: false }); }
+  // Closing the one-time screen forgets the secret: from here on only a new key or a rotation gives one.
+  done() { this.secret = null; this.wiz = null; this.items = null; this.open("tokens", { fresh: false }); }
 
   // ---- Rotate and revoke
   showRotate(t, error = "") {
@@ -383,7 +398,7 @@ class ApiTokensPanel {
     catch (error) { cat.error = this.message(error); return []; }
     finally { cat.pending.delete(workspaceId); }
   }
-  workspaceSelect(action, current) { return `<label>Workspace<select data-action="${action}">${this.catalog.workspaces.map((w) => `<option value="${this.esc(w.id)}" ${w.id === current ? "selected" : ""}>${this.esc(w.name)}</option>`).join("")}</select></label>`; }
+  workspaceSelect(action, current, only = null) { return `<label>Workspace<select data-action="${action}">${this.catalog.workspaces.filter((w) => !only || only(w)).map((w) => `<option value="${this.esc(w.id)}" ${w.id === current ? "selected" : ""}>${this.esc(w.name)}</option>`).join("")}</select></label>`; }
 
   // ---- Boards & Columns directory
   directoryHtml() {
@@ -433,13 +448,19 @@ class ApiTokensPanel {
     if (!this.applying) this.applying = this.presetNow().finally(() => { this.applying = null; });
     return this.applying;
   }
+  // The API key chosen as the Explorer's scope reference, or null. It only narrows what is offered: previews still use the
+  // administrator's own session, and the key's secret is never used or needed here.
+  exKey() { return this.ex.tokenId ? (this.items || []).find((t) => t.id === this.ex.tokenId) || null : null; }
+  exKeyBoards() { const key = this.exKey(); return key ? new Set(key.boards.filter((b) => b.available !== false).map((b) => b.id)) : null; }
+  exKeySpaces() { const key = this.exKey(); return key ? new Set(key.boards.filter((b) => b.available !== false && b.workspaceId).map((b) => b.workspaceId)) : null; }
+  exBoards(list) { const only = this.exKeyBoards(); return only ? (list || []).filter((b) => only.has(b.id)) : (list || []); }
   async presetNow() {
     const ex = this.ex, preset = ex.preset;
     ex.preset = null;
-    const workspaces = this.catalog.workspaces;
+    const spaces = this.exKeySpaces(), workspaces = this.catalog.workspaces.filter((w) => !spaces || spaces.has(w.id));
     const workspaceId = workspaces.some((w) => w.id === preset?.workspaceId) ? preset.workspaceId : workspaces.some((w) => w.id === ex.workspaceId) ? ex.workspaceId : workspaces[0]?.id;
-    if (!workspaceId) return;
-    const boards = await this.fetchBoards(workspaceId);
+    if (!workspaceId) { ex.workspaceId = ""; ex.boardId = ""; ex.data = null; return; }
+    const boards = this.exBoards(await this.fetchBoards(workspaceId));
     const boardId = boards.some((b) => b.id === preset?.boardId) ? preset.boardId : workspaceId === ex.workspaceId && boards.some((b) => b.id === ex.boardId) ? ex.boardId : boards[0]?.id || "";
     if (workspaceId === ex.workspaceId && boardId === ex.boardId && ex.data && !preset) return;
     ex.workspaceId = workspaceId;
@@ -447,9 +468,17 @@ class ApiTokensPanel {
   }
   async explorerWorkspace(id) {
     const ex = this.ex;
-    const boards = await this.fetchBoards(id);
+    const boards = this.exBoards(await this.fetchBoards(id));
     ex.workspaceId = id;
     await this.explorerBoard(boards[0]?.id || "");
+  }
+  // Choosing a key (or none) as the scope reference: start on its first board you can see.
+  async explorerKey(id) {
+    const ex = this.ex;
+    ex.tokenId = id || "";
+    const key = this.exKey(), first = key?.boards.find((b) => b.available !== false && b.workspaceId);
+    ex.preset = first ? { workspaceId: first.workspaceId, boardId: first.id } : null;
+    await this.presetNow();
   }
   async explorerBoard(id, column = null, record = null) {
     const ex = this.ex;
@@ -493,12 +522,19 @@ class ApiTokensPanel {
     const wait = this.catalogHtml();
     if (wait) return wait;
     const ex = this.ex, option = (o, current) => `<option value="${this.esc(o.id)}" ${o.id === current ? "selected" : ""}>${this.esc(o.name)}</option>`;
-    if (!ex.workspaceId) { setTimeout(() => this.explorerChange(() => this.applyPreset()), 0); return `<p class="account-empty" aria-busy="true">Loading boards…</p>`; }
-    const boards = this.catalog.boards.get(ex.workspaceId) || [];
+    const key = this.exKey(), spaces = this.exKeySpaces();
+    // The scope reference: any board this administrator can see, or one API key's boards. The two ways of calling are labelled.
+    const keys = (this.items || []).filter((t) => ApiTokensPanel.live(t) || t.id === ex.tokenId);
+    const scope = `<div class="apikey-scope"><label>Scope reference<select data-action="apitok-ex-key"><option value="">Every board you can see (no API key)</option>${keys.map((t) => `<option value="${this.esc(t.id)}" ${t.id === ex.tokenId ? "selected" : ""}>${this.esc(t.name)} (${this.esc(t.prefix)}…, ${t.boards.length} board${t.boards.length === 1 ? "" : "s"})</option>`).join("")}</select></label>
+      <div class="apikey-modes"><div class="apikey-mode"><span class="account-badge is-ok">Preview</span><span>Uses <strong>your signed-in administrator session</strong>. No API key or secret is used here.</span></div><div class="apikey-mode"><span class="account-badge is-warn">Integration</span><span>Calls the same URL with <code>Authorization: Bearer YOUR_JARC_API_TOKEN</code>. The server allows only the key's own boards.</span></div></div>
+      ${key ? `<p class="account-note">Showing the ${key.boards.length} board${key.boards.length === 1 ? "" : "s"} of <strong>${this.esc(key.name)}</strong>${key.boards.some((b) => b.available === false) ? ", except those no longer available" : ""}.</p>` : ""}</div>`;
+    if (key && !spaces.size) return `${scope}<p class="account-empty">None of this key's boards are available.</p>`;
+    if (!ex.workspaceId) { setTimeout(() => this.explorerChange(() => this.applyPreset()), 0); return `${scope}<p class="account-empty" aria-busy="true">Loading boards…</p>`; }
+    const boards = this.exBoards(this.catalog.boards.get(ex.workspaceId));
     const [opId, , , takes, paged] = this.operation();
-    const pickers = `<div class="apitok-ex-pickers apitok-ex-pickers-3">${this.workspaceSelect("apitok-ex-workspace", ex.workspaceId)}<label>Board<select data-action="apitok-ex-board" ${boards.length ? "" : "disabled"}>${boards.map((b) => option(b, ex.boardId)).join("")}</select></label><label>Operation<select data-action="apitok-ex-op">${ApiTokensPanel.OPERATIONS.map(([id, label]) => `<option value="${id}" ${id === opId ? "selected" : ""}>${this.esc(label)}</option>`).join("")}</select></label></div>`;
-    const intro = `<p>Build a request for any board you can see. Previews use your own sign-in; integrations need a token that covers the board.</p>`;
-    if (!boards.length) return `${intro}${pickers}<p class="account-empty">This workspace has no boards yet.</p>`;
+    const pickers = `<div class="apitok-ex-pickers apitok-ex-pickers-3">${this.workspaceSelect("apitok-ex-workspace", ex.workspaceId, spaces ? (w) => spaces.has(w.id) : null)}<label>Board<select data-action="apitok-ex-board" ${boards.length ? "" : "disabled"}>${boards.map((b) => option(b, ex.boardId)).join("")}</select></label><label>Operation<select data-action="apitok-ex-op">${ApiTokensPanel.OPERATIONS.map(([id, label]) => `<option value="${id}" ${id === opId ? "selected" : ""}>${this.esc(label)}</option>`).join("")}</select></label></div>`;
+    const intro = `${this.admin() ? scope : ""}<p>Build a request for ${key ? "this key's boards" : "any board you can see"}. Previews use your own sign-in; integrations need an API key that covers the board.</p>`;
+    if (!boards.length) return `${intro}${pickers}<p class="account-empty">${key ? "This key has no boards in this workspace." : "This workspace has no boards yet."}</p>`;
     if (ex.error) return `${intro}${pickers}<p class="account-empty" role="alert">${this.esc(ex.error)}</p><button type="button" class="button secondary" data-action="apitok-ex-retry">Try again</button>`;
     if (!ex.data) return `${intro}${pickers}<p class="account-empty" aria-busy="true">Loading board…</p>`;
     const input = (c) => takes === "many" ? `<input type="checkbox" data-action="apitok-ex-column" value="${this.esc(c.id)}" aria-label="Include ${this.esc(c.name)}" ${ex.selected.has(c.id) ? "checked" : ""}>` : takes === "one" ? `<input type="radio" name="apitok-ex-one" data-action="apitok-ex-one" value="${this.esc(c.id)}" aria-label="Use ${this.esc(c.name)}" ${ex.column === c.id ? "checked" : ""}>` : "";
@@ -570,7 +606,7 @@ class ApiTokensPanel {
     if (action === "apitok-tab") { this.tab = target.dataset.tab; this.redraw(); const pane = document.querySelector(".developer-window .settings-content"); if (pane) pane.scrollTop = 0; if (target.closest(".settings-nav")) document.querySelector(`.developer-window .settings-nav [data-action="apitok-tab"][data-tab="${CSS.escape(this.tab)}"]`)?.focus(); return; }
     if (action === "apitok-refresh") { this.items = null; this.error = ""; this.redraw(); return; }
     if (action === "apitok-new") { this.showCreate(); return; }
-    if (action === "apitok-boards-retry") { const form = target.closest("form"); if (!form) return; const gen = Number(form.dataset.gen); if (!this.options) this.fillCreate(form, { workspaceId: form.elements.workspaceId.value }); this.refreshCreate(gen, form.elements.workspaceId.value); return; }
+    if (action.startsWith("apitok-wiz-") || action === "apitok-boards-retry" || action === "apitok-copy-all" || action === "apitok-conn-close") { this.onWizardAction(action, target); return; }
     if (action === "apitok-copy-value") { this.copyText(target.dataset.copy, target.dataset.label); return; }
     if (action === "apitok-copy-board") { this.view.closeOverlay(); this.copyText(target.dataset.id, "Board ID"); return; }
     if (action === "apitok-copy-column") { this.view.closeOverlay(); this.copyText(target.dataset.key, "Column ID"); return; }
@@ -589,8 +625,18 @@ class ApiTokensPanel {
     const token = this.items?.find((t) => t.id === target.dataset.id);
     if (action === "apitok-rotate" && token) this.showRotate(token);
     if (action === "apitok-revoke" && token) this.showRevoke(token);
+    if (action === "apitok-details" && token) this.showConnection(token);
+    if (action === "apitok-key-activity" && token) { this.view.closeOverlay?.(); this.resetFilters(); this.actFilters.token = token.id; this.backToTab("activity"); }
+    if (action === "apitok-key-explorer" && token) { this.view.closeOverlay?.(); this.ex.preview = null; this.ex.previewError = ""; this.ex.op = "records"; this.backToTab("explorer"); this.explorerChange(() => this.explorerKey(token.id)); }
+  }
+  // Back in the Developer Center on this section, keeping what it has loaded (opened again if a dialog replaced it).
+  backToTab(tab) {
+    this.tab = tab;
+    if (document.querySelector("#apitok-root")) this.redraw(); else this.open(tab, { fresh: false });
   }
   onInput(input) {
+    if (input.dataset.action === "apitok-filter") { this.filters[input.dataset.filter] = input.value; this.redrawKeys(); return; }
+    if (input.dataset.action === "apitok-wiz-search") { this.wizardSearch(input.value); return; }
     if (input.dataset.action === "apitok-ex-record") { this.ex.record = input.value.trim(); this.ex.preview = null; this.refreshExplorerAddress(); return; }
     if (input.dataset.action === "apitok-dir-board-search" || input.dataset.action === "apitok-dir-column-search") this.directorySearch(input);
   }
@@ -603,14 +649,13 @@ class ApiTokensPanel {
     if (change === "apitok-ex-one") { ex.column = select.value; ex.preview = null; this.redrawKeeping(`[data-action="apitok-ex-one"][value="${CSS.escape(select.value)}"]`); return; }
     if (change === "apitok-ex-param") { const name = select.dataset.param; ex.params[name] = select.type === "checkbox" ? select.checked : select.value; ex.preview = null; this.redrawKeeping(`[data-action="apitok-ex-param"][data-param="${CSS.escape(name)}"]`); return; }
     if (change === "apitok-dir-workspace") { this.dir.workspaceId = select.value; this.dir.boardId = ""; this.dir.boardQuery = ""; this.dir.columnQuery = ""; this.redraw(); return; }
-    if (change === "apitok-all-boards") { select.closest("form")?.querySelectorAll('input[name="board"]').forEach((box) => { box.checked = select.checked; }); return; }
-    // Another workspace: only the board list changes (from the list read when the window opened); name and expiry stay.
-    // Switching workspace: its boards show at once from the list known so far, and the list is read again (a late answer fills the
-    // workspace chosen last, read from the form when it arrives, and only in this same opening of the window).
-    if (change === "apitok-workspace") { const form = select.closest("form"); if (form) { this.fillCreate(form, { workspaceId: select.value }); this.refreshCreate(Number(form.dataset.gen), select.value); } return; }
+    if (change === "apitok-ex-key") { this.ex.preview = null; this.ex.previewError = ""; this.explorerChange(() => this.explorerKey(select.value)); return; }
+    if (change === "apitok-filter") { this.filters[select.dataset.filter] = select.value; this.redrawKeys(); return; }
+    if (change === "apitok-act-filter") { this.actFilters[select.dataset.filter] = select.value; this.redrawEvents(); return; }
+    if (change.startsWith("apitok-wiz-") || change === "apitok-conn-example") this.onWizardChange(select);
   }
   onSubmit(action, form) {
-    if (action === "apitok-create-form") this.submitCreate(form);
+    if (action === "apitok-create-form") this.submitWizard(form);
     if (action === "apitok-rotate-form") this.submitRotate(form);
     if (action === "apitok-revoke-form") this.submitRevoke(form);
   }

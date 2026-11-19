@@ -9,6 +9,7 @@ const assert = require("node:assert/strict");
 const path = require("path");
 const { spawn } = require("child_process");
 const { findBrowser, launch, freePort, waitForServer } = require("./support/headless-browser");
+const { wizard } = require("./support/api-key-wizard");
 
 const BROWSER = findBrowser();
 const DESKTOP = { width: 1440, height: 900 }, MOBILE = { width: 390, height: 844 };
@@ -23,9 +24,10 @@ describe("New token: shared workspaces and other employees' boards (real app)", 
   const has = (sel) => b.evaluate(`!!document.querySelector(${JSON.stringify(sel)})`);
   const click = (sel) => b.evaluate(`(() => { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) return false; el.click(); return true; })()`);
   const wait = (expr, ms = 10000) => b.waitFor(expr, ms);
-  const boardValues = () => b.evaluate(`[...document.querySelectorAll("form.apitok-modal input[name=board]")].map((i) => i.value)`);
-  const workspaceNames = () => b.evaluate(`[...document.querySelectorAll("form.apitok-modal select[name=workspaceId] option")].map((o) => o.textContent.trim())`);
-  const chooseWorkspace = (id) => b.evaluate(`(() => { const s = document.querySelector("form.apitok-modal select[name=workspaceId]"); s.value = ${JSON.stringify(id)}; s.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+  // Create API key (ApiKeyWizard.js): every workspace is listed on one board step; a workspace's boards show when it's expanded.
+  let wz;
+  const boardValues = (ws) => wz.boardValues(ws);
+  const workspaceNames = () => wz.workspaceNames();
   const createBoard = async (workspaceId, name) => { const r = await api("POST", `/workspaces/${workspaceId}/boards`, { name, columns: [{ key: "serial", label: "Item", type: "text", required: true }] }, c); assert.equal(r.status, 201, JSON.stringify(r.body)); return r.body.board.id; };
   const openDeveloper = async (viewport = DESKTOP) => {
     await b.open(`${base}/`, viewport);
@@ -37,16 +39,17 @@ describe("New token: shared workspaces and other employees' boards (real app)", 
     }
     assert.ok(open, "Developer opens");
     await click('.developer-window .settings-nav [data-action="apitok-tab"][data-tab="tokens"]');
-    assert.ok(await wait("!!document.querySelector('[data-action=apitok-new]')"), "New token offered (no membership needed)");
+    assert.ok(await wait("!!document.querySelector('[data-action=apitok-new]')"), "Create API key offered (no membership needed)");
   };
-  const openNewToken = async () => { await click('[data-action="apitok-new"]'); assert.ok(await wait("!!document.querySelector('form.apitok-modal')", 3000), "the window opens"); };
-  const listed = () => wait("!!document.querySelector('form.apitok-modal input[name=board]')", 5000);
+  const openNewToken = async () => { await wz.open(); assert.ok(await wz.toBoards(), "the board step opens"); };
+  const listed = () => wz.listed(5000);
 
   before(async () => {
     const port = await freePort(); base = `http://localhost:${port}`;
     server = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port), "shared"], { stdio: "ignore", env: { ...process.env, JARC_TEST_API_TOKENS: "1", JARC_TEST_API_ADMINS: COLLEAGUE, JARC_TEST_BETA: "1" } });
     await waitForServer(base, { child: server });
     b = await launch(BROWSER); c = await launch(BROWSER); // b: the colleague; c: the employee who creates everything
+    wz = wizard(b);
     await b.motionPreference("reduce");
     await b.open(`${base}/api/v1/health`, DESKTOP); await c.open(`${base}/api/v1/health`, DESKTOP);
     // Another employee (not an API administrator) creates both workspaces and every board. The colleague who later issues the
@@ -62,36 +65,36 @@ describe("New token: shared workspaces and other employees' boards (real app)", 
   });
   after(async () => { await b?.close(); await c?.close(); server?.kill(); });
 
-  test("another employee's workspaces are offered, with all their boards, and switching follows the choice", async () => {
+  test("another employee's workspaces are offered, with all their boards, in each workspace", async () => {
     await openDeveloper();
     await openNewToken(); assert.ok(await listed());
     assert.deepEqual((await workspaceNames()).sort(), ["Core Space", "Field Sales Space"]);
-    await chooseWorkspace(ids.salesWs);
-    assert.deepEqual(await boardValues(), ids.sales, `all ${SALES_BOARDS} boards`);
-    assert.match(await b.evaluate("document.querySelector('.apitok-all').textContent"), new RegExp(`All ${SALES_BOARDS} current boards`));
-    await chooseWorkspace(ids.coreWs);
-    assert.deepEqual(await boardValues(), ids.core, `all ${CORE_BOARDS} boards`);
-    await click('[data-action="apitok-cancel"]');
+    await wz.expand(ids.salesWs);
+    assert.deepEqual(await boardValues(ids.salesWs), ids.sales, `all ${SALES_BOARDS} boards`);
+    assert.match(await b.evaluate(`document.querySelector('#apikey-workspaces [data-action="apitok-wiz-toggle"][data-ws="${ids.salesWs}"]').textContent`), new RegExp(`${SALES_BOARDS} boards`));
+    await wz.expand(ids.coreWs);
+    assert.deepEqual(await boardValues(ids.coreWs), ids.core, `all ${CORE_BOARDS} boards`);
+    await wz.cancel();
   });
 
-  test("a board another employee creates while the window is open appears on switching workspace, without reloading", async () => {
+  test("a board another employee creates is offered the next time the window opens, without reloading the page", async () => {
     await openNewToken(); assert.ok(await listed());
-    await chooseWorkspace(ids.coreWs);
-    // The other employee creates a board in their own browser; this window stays open.
+    // The other employee creates a board in their own browser while this window is open; opening it again reads the list afresh.
     ids.coreLater = await createBoard(ids.coreWs, "Core Board Later");
-    await chooseWorkspace(ids.salesWs); await chooseWorkspace(ids.coreWs);
-    assert.ok(await wait(`[...document.querySelectorAll("form.apitok-modal input[name=board]")].some((i) => i.value === ${JSON.stringify(ids.coreLater)})`, 5000), "the new board is offered");
-    assert.deepEqual(await boardValues(), [...ids.core, ids.coreLater]);
-    await click('[data-action="apitok-cancel"]');
+    await wz.cancel();
+    await openNewToken(); assert.ok(await listed());
+    await wz.expand(ids.coreWs);
+    assert.ok(await wait(`[...document.querySelectorAll('#apikey-workspaces input[data-action="apitok-wiz-board"]')].some((i) => i.value === ${JSON.stringify(ids.coreLater)})`, 5000), "the new board is offered");
+    assert.deepEqual(await boardValues(ids.coreWs), [...ids.core, ids.coreLater]);
+    await wz.cancel();
   });
 
   test("the colleague's token reads only the boards ticked; new records appear; a board created later is never added", async () => {
     await openDeveloper();
-    await openNewToken(); assert.ok(await listed());
-    await chooseWorkspace(ids.salesWs);
-    await b.evaluate(`(() => { const f = document.querySelector("form.apitok-modal"); f.elements.name.value = "Power BI Integration"; for (const id of ${JSON.stringify(ids.sales.slice(0, 2))}) f.querySelector("input[name=board][value='" + id + "']").checked = true; f.requestSubmit(); })()`);
-    assert.ok(await wait("!!document.querySelector('#apitok-secret')"), "token revealed");
-    const secret = await b.evaluate("document.querySelector('#apitok-secret').value");
+    await wz.open();
+    await wz.details({ name: "Power BI Integration" }); assert.ok(await listed());
+    for (const id of ids.sales.slice(0, 2)) await wz.tick(id, ids.salesWs);
+    const secret = await wz.create();
     await click('[data-action="apitok-done"]');
     const read = (id) => b.evaluate(`fetch("/api/v1/external/boards/${id}/records", { credentials: "omit", headers: { Authorization: "Bearer " + ${JSON.stringify(secret)} } }).then(async (r) => ({ status: r.status, body: r.ok ? await r.json() : null }))`);
     const first = await read(ids.sales[0]);

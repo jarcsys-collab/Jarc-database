@@ -9,6 +9,9 @@ const assert = require("node:assert/strict");
 const path = require("path");
 const { spawn } = require("child_process");
 const { findBrowser, launch, freePort, waitForServer, sleep } = require("./support/headless-browser");
+const { wizard } = require("./support/api-key-wizard");
+// Since the multi-workspace upgrade the window is Create API key (ApiKeyWizard.js): details, then every workspace's boards on one
+// list (expand a workspace, or search), review, created. The same guarantees are checked through that window.
 
 const BROWSER = findBrowser();
 const DESKTOP = { width: 1440, height: 900 }, MOBILE = { width: 390, height: 844 };
@@ -22,10 +25,7 @@ describe("New token: board discovery (real app)", { skip: BROWSER ? false : "no 
   const text = (sel) => b.evaluate(`document.querySelector(${JSON.stringify(sel)})?.textContent || ""`);
   const click = (sel) => b.evaluate(`(() => { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) return false; el.click(); return true; })()`);
   const wait = (expr, ms = 10000) => b.waitFor(expr, ms);
-  const boardNames = () => b.evaluate(`[...document.querySelectorAll("form.apitok-modal input[name=board]")].map((i) => i.closest("label").textContent.trim())`);
-  const boardValues = () => b.evaluate(`[...document.querySelectorAll("form.apitok-modal input[name=board]")].map((i) => i.value)`);
-  const workspaceNames = () => b.evaluate(`[...document.querySelectorAll("form.apitok-modal select[name=workspaceId] option")].map((o) => o.textContent.trim())`);
-  const chooseWorkspace = (id) => b.evaluate(`(() => { const s = document.querySelector("form.apitok-modal select[name=workspaceId]"); s.value = ${JSON.stringify(id)}; s.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+  let wz; // the Create API key window's controls (support/api-key-wizard.js)
   const createBoard = async (workspaceId, name) => { const r = await api("POST", `/workspaces/${workspaceId}/boards`, { name, columns: [{ key: "serial", label: "Item", type: "text", required: true }] }); assert.equal(r.status, 201, JSON.stringify(r.body)); return r.body.board.id; };
   // The page's own adapter: the /options request can be delayed, made to fail, or answered with a given body (this browser only).
   const steerOptions = (mode) => b.evaluate(`(() => { const A = ResourceApiAdapter.prototype; A.__real = A.__real || A.request; window.__optionsCalls = 0; const mode = ${JSON.stringify(mode)};
@@ -44,16 +44,18 @@ describe("New token: board discovery (real app)", { skip: BROWSER ? false : "no 
     }
     assert.ok(open, "Developer opens");
     await click('.developer-window .settings-nav [data-action="apitok-tab"][data-tab="tokens"]');
-    assert.ok(await wait("!!document.querySelector('[data-action=apitok-new]')"), "New token offered");
+    assert.ok(await wait("!!document.querySelector('[data-action=apitok-new]')"), "Create API key offered");
   };
-  const openNewToken = async () => { await click('[data-action="apitok-new"]'); assert.ok(await wait("!!document.querySelector('form.apitok-modal')", 3000), "the window opens"); };
-  const listed = () => wait("!!document.querySelector('form.apitok-modal input[name=board]')", 5000);
+  // Opens Create API key and goes on to its board list (the step that replaces the old window's workspace and board fields).
+  const openNewToken = async () => { await wz.open(); assert.ok(await wz.toBoards(), "the board step opens"); };
+  const listed = () => wz.listed(5000);
 
   before(async () => {
     const port = await freePort(); base = `http://localhost:${port}`;
     server = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port)], { stdio: "ignore", env: { ...process.env, JARC_TEST_API_TOKENS: "1", JARC_TEST_API_ADMINS: [OID, OUTSIDER].join(",") } });
     await waitForServer(base, { child: server });
     b = await launch(BROWSER);
+    wz = wizard(b);
     await b.motionPreference("reduce");
     await b.open(`${base}/api/v1/health`, DESKTOP);
     // Someone else's workspace, which this person is not a member of. (Both sign in with the JARC.Admin role so they may
@@ -76,72 +78,90 @@ describe("New token: board discovery (real app)", { skip: BROWSER ? false : "no 
     await openDeveloper();
     ids.terms = await createBoard(ids.core, "Agreements Board"); // after the Center read its lists
     await openNewToken(); assert.ok(await listed());
-    await chooseWorkspace(ids.core);
-    assert.ok(await wait(`[...document.querySelectorAll("form.apitok-modal input[name=board]")].some((i) => i.value === ${JSON.stringify(ids.terms)})`, 5000), "the new board is offered");
-    assert.deepEqual(await boardNames(), ["Product Board", "Customer Board", "Agreements Board"]);
-    assert.match(await text(".apitok-all"), /All 3 current boards/);
-    await chooseWorkspace(ids.sales);
-    assert.deepEqual(await boardNames(), ["Field Board"], "another workspace: only its boards");
-    await click('[data-action="apitok-cancel"]');
+    await wz.expand(ids.core);
+    assert.ok(await wait(`[...document.querySelectorAll('#apikey-workspaces input[data-action="apitok-wiz-board"]')].some((i) => i.value === ${JSON.stringify(ids.terms)})`, 5000), "the new board is offered");
+    assert.deepEqual(await wz.boardNames(ids.core), ["Product Board", "Customer Board", "Agreements Board"]);
+    assert.match(await b.evaluate(`document.querySelector('#apikey-workspaces input[data-action="apitok-wiz-all"][value="${ids.core}"]').getAttribute("aria-label")`), /Select all 3 boards in Core Space/);
+    await wz.expand(ids.sales);
+    assert.deepEqual(await wz.boardNames(ids.sales), ["Field Board"], "another workspace: only its boards");
+    await wz.cancel();
   });
 
   test("only workspaces this person can issue for are offered; someone else's workspace and boards never appear", async () => {
     await openNewToken(); assert.ok(await listed());
-    assert.deepEqual((await workspaceNames()).sort(), ["Core Space", "Sales Space"]);
-    const all = JSON.stringify(await b.evaluate("document.querySelector('form.apitok-modal').outerHTML"));
+    assert.deepEqual((await wz.workspaceNames()).sort(), ["Core Space", "Sales Space"]);
+    for (const ws of [ids.core, ids.sales]) await wz.expand(ws);
+    const all = JSON.stringify(await b.evaluate("document.querySelector('form.apikey-wizard').outerHTML"));
     assert.ok(!all.includes(ids.outside) && !all.includes(ids.outsideBoard) && !all.includes("Outsider"), "nothing from the outsider's workspace");
-    await click('[data-action="apitok-cancel"]');
+    await wz.cancel();
   });
 
-  test("switching workspaces: the list follows, ticks never carry over, and the name and expiry stay", async () => {
-    await openNewToken(); assert.ok(await listed());
-    await chooseWorkspace(ids.core);
-    await b.evaluate(`(() => { const f = document.querySelector("form.apitok-modal"); f.elements.name.value = "Power BI Integration"; f.elements.expires.value = f.elements.expires.max; f.querySelector("input[name=board][value='${ids.product}']").checked = true; })()`);
-    const expires = await b.evaluate("document.querySelector('form.apitok-modal').elements.expires.value");
-    await chooseWorkspace(ids.sales);
-    assert.deepEqual(await boardValues(), [ids.occ]);
-    assert.equal(await b.evaluate("document.querySelectorAll('form.apitok-modal input[name=board]:checked').length"), 0, "nothing ticked in the other workspace");
-    await chooseWorkspace(ids.core);
-    assert.equal(await b.evaluate("document.querySelectorAll('form.apitok-modal input[name=board]:checked').length"), 0, "a tick from before isn't silently restored");
-    assert.equal(await b.evaluate("document.querySelector('form.apitok-modal').elements.name.value"), "Power BI Integration");
-    assert.equal(await b.evaluate("document.querySelector('form.apitok-modal').elements.expires.value"), expires);
-    await click('[data-action="apitok-cancel"]');
+  test("the selection is kept across workspaces, searching, collapsing and the steps; the name and expiry stay", async () => {
+    await wz.open();
+    await wz.details({ name: "Power BI Integration", expires: "max", next: false });
+    const expires = await b.evaluate("document.querySelector('form.apikey-wizard').elements.expires.value");
+    await wz.next(); assert.ok(await listed());
+    await wz.tick(ids.product, ids.core);
+    // Searching shows only what matches; what was ticked stays ticked, whether drawn or not.
+    await wz.search("field"); await wz.settle();
+    assert.deepEqual(await wz.workspaceNames(), ["Sales Space"], "only the workspace with a matching board");
+    assert.deepEqual(await wz.boardNames(ids.sales), ["Field Board"]);
+    await wz.tick(ids.occ);
+    await wz.search(""); await wz.settle();
+    await wz.collapse(ids.core);
+    assert.match(await wz.count(), /2 boards · 2 workspaces selected/);
+    await wz.expand(ids.core); await wz.expand(ids.sales);
+    assert.deepEqual((await wz.checked()).sort(), [ids.product, ids.occ].sort(), "both still ticked");
+    // Back to the details and forward again: nothing is lost.
+    await wz.back();
+    assert.ok(await wait("document.querySelector('form.apikey-wizard')?.dataset.step === 'details'"));
+    assert.equal(await b.evaluate("document.querySelector('form.apikey-wizard').elements.name.value"), "Power BI Integration");
+    assert.equal(await b.evaluate("document.querySelector('form.apikey-wizard').elements.expires.value"), expires);
+    await wz.next(); assert.ok(await listed());
+    assert.match(await wz.count(), /2 boards · 2 workspaces selected/);
+    // Select all, then Clear selection.
+    await wz.selectAll(ids.core);
+    assert.match(await wz.count(), /4 boards · 2 workspaces selected/);
+    await click('[data-action="apitok-wiz-clear"]');
+    assert.match(await wz.count(), /No boards selected/);
+    await wz.next();
+    assert.match(await text("form.apikey-wizard .apitok-error"), /Select at least one board/, "a key needs a board");
+    await wz.cancel();
   });
 
-  test("a late answer during rapid switching never overrides the workspace chosen last, and keeps its ticks", async () => {
+  test("a late answer never changes the selection, and one opening sends one request", async () => {
     await steerOptions({ delay: 700 });
     await openNewToken(); // the earlier list shows at once; a fresh one is on its way
     assert.ok(await listed(), "the list known so far shows at once");
-    await chooseWorkspace(ids.sales); await chooseWorkspace(ids.core); await chooseWorkspace(ids.sales); await chooseWorkspace(ids.core);
-    await b.evaluate(`document.querySelector("form.apitok-modal input[name=board][value='${ids.customer}']").checked = true`);
-    await sleep(1100); // the fresh answer has arrived
-    assert.equal(await b.evaluate("document.querySelector('form.apitok-modal select[name=workspaceId]').value"), ids.core, "still the workspace chosen last");
-    assert.deepEqual(await b.evaluate("[...document.querySelectorAll('form.apitok-modal input[name=board]:checked')].map((i) => i.value)"), [ids.customer], "the tick survived the refresh");
+    await wz.tick(ids.customer, ids.core);
+    await sleep(1100); // the fresh answer has arrived and the list was drawn again
+    assert.deepEqual(await wz.checked(), [ids.customer], "the tick survived the refresh");
+    assert.equal(await wz.expanded(ids.core), true, "the open workspace stays open");
     assert.equal(await b.evaluate("window.__optionsCalls"), 1, "one request for this opening");
-    await click('[data-action="apitok-cancel"]');
+    await wz.cancel();
     await steerOptions(null);
   });
 
   test("an answer for an earlier opening never fills a newer window", async () => {
     await steerOptions({ delay: 900 });
-    await openNewToken(); await click('[data-action="apitok-cancel"]');
+    await wz.open(); await wz.cancel();
     await openNewToken(); // the request of the first opening is shared, and answers the second
     await sleep(1200);
-    assert.equal(await b.evaluate("document.querySelectorAll('form.apitok-modal').length"), 1);
+    assert.equal(await b.evaluate("document.querySelectorAll('form.apikey-wizard').length"), 1);
     assert.equal(await b.evaluate("window.__optionsCalls"), 1, "the two quick openings share one request");
     assert.ok(await listed());
-    await click('[data-action="apitok-cancel"]');
+    await wz.cancel();
     await steerOptions(null);
   });
 
   test("duplicate entries in an answer are shown once", async () => {
     const dup = { workspaces: [{ id: ids.core, name: "Core Space", archived: false, boards: [{ id: ids.product, name: "Product Board", archived: false }, { id: ids.product, name: "Product Board", archived: false }, { id: ids.customer, name: "Customer Board", archived: false }] }, { id: ids.core, name: "Core Space", archived: false, boards: [] }] };
     await steerOptions({ body: dup });
-    await openNewToken();
-    assert.ok(await wait(`document.querySelectorAll("form.apitok-modal input[name=board]").length === 2`, 3000));
-    assert.deepEqual(await boardValues(), [ids.product, ids.customer]);
-    assert.deepEqual(await workspaceNames(), ["Core Space"]);
-    await click('[data-action="apitok-cancel"]');
+    await openNewToken(); assert.ok(await listed());
+    await wz.expand(ids.core);
+    assert.deepEqual(await wz.boardValues(ids.core), [ids.product, ids.customer]);
+    assert.deepEqual(await wz.workspaceNames(), ["Core Space"]);
+    await wz.cancel();
     await steerOptions(null);
   });
 
@@ -150,18 +170,18 @@ describe("New token: board discovery (real app)", { skip: BROWSER ? false : "no 
     // A failing refresh with a list already known: it stays usable and says it may be out of date, with Try again.
     await steerOptions("fail");
     await openNewToken();
-    assert.ok(await wait("/may be out of date/.test(document.querySelector('.apitok-board-area')?.textContent || '')", 3000), "says the list may be out of date");
-    assert.ok(await has("form.apitok-modal input[name=board]"), "still usable");
+    assert.ok(await wait("/may be out of date/.test(document.querySelector('#apikey-workspaces')?.textContent || '')", 3000), "says the list may be out of date");
+    assert.ok(await has("#apikey-workspaces .apikey-ws"), "still usable");
     await steerOptions(null);
     await click('[data-action="apitok-boards-retry"]');
-    assert.ok(await wait("!/may be out of date/.test(document.querySelector('.apitok-board-area')?.textContent || '')", 3000), "Try again refreshes it");
-    await click('[data-action="apitok-cancel"]');
+    assert.ok(await wait("!/may be out of date/.test(document.querySelector('#apikey-workspaces')?.textContent || '')", 3000), "Try again refreshes it");
+    await wz.cancel();
     // Empty: no workspace with boards.
     await steerOptions({ body: { workspaces: [{ id: ids.core, name: "Core Space", archived: false, boards: [] }] } });
     await openNewToken();
-    assert.ok(await wait("/no boards you can issue a token for/i.test(document.querySelector('.apitok-board-area')?.textContent || '')", 3000), "empty state");
-    assert.equal(await b.evaluate("document.querySelector('form.apitok-modal button.primary').disabled"), true, "nothing to create");
-    await click('[data-action="apitok-cancel"]');
+    assert.ok(await wait("/no boards you can create a key for/i.test(document.querySelector('#apikey-workspaces')?.textContent || '')", 3000), "empty state");
+    assert.equal(await b.evaluate(`document.querySelector('form.apikey-wizard [data-role="next"]').disabled`), true, "nothing to choose, so no next step");
+    await wz.cancel();
     await steerOptions(null);
   });
 
@@ -169,41 +189,45 @@ describe("New token: board discovery (real app)", { skip: BROWSER ? false : "no 
     await b.open(`${base}/`, DESKTOP);
     assert.ok(await wait("!!document.querySelector('.app-shell')", 15000));
     await steerOptions({ delay: 600 });
-    // The panel's very first list: call New token straight from the page, before any list was read.
+    // The panel's very first list: call Create API key straight from the page, before any list was read.
     await b.evaluate("(() => { const el = document.createElement('button'); el.dataset.action = 'apitok-new'; el.hidden = true; document.querySelector('#app').append(el); el.click(); el.remove(); })()");
-    assert.ok(await wait("!!document.querySelector('form.apitok-modal')", 1000), "opens at once");
-    assert.match(await text(".apitok-board-area"), /Loading boards/);
-    assert.equal(await b.evaluate("document.querySelector('form.apitok-modal button.primary').disabled"), true, "can't create while loading");
+    assert.ok(await wait("!!document.querySelector('form.apikey-wizard')", 1000), "opens at once");
+    await wz.details({ name: "Fresh" });
+    assert.match(await text("#apikey-workspaces"), /Loading workspaces and boards/);
+    assert.equal(await b.evaluate(`document.querySelector('form.apikey-wizard [data-role="next"]').disabled`), true, "can't go on while loading");
     assert.ok(await listed(), "then the boards");
-    await click('[data-action="apitok-cancel"]');
+    await wz.cancel();
     await b.open(`${base}/`, DESKTOP);
     assert.ok(await wait("!!document.querySelector('.app-shell')", 15000));
     await steerOptions("fail");
     await b.evaluate("(() => { const el = document.createElement('button'); el.dataset.action = 'apitok-new'; el.hidden = true; document.querySelector('#app').append(el); el.click(); el.remove(); })()");
-    assert.ok(await wait("/Couldn't load your workspaces and boards/.test(document.querySelector('.apitok-board-area')?.textContent || '')", 3000), "the error is shown");
+    assert.ok(await wait("!!document.querySelector('form.apikey-wizard')", 1000));
+    await wz.details({ name: "Fresh" });
+    assert.ok(await wait("/Couldn't load the workspaces and boards/.test(document.querySelector('#apikey-workspaces')?.textContent || '')", 3000), "the error is shown");
     assert.ok(await has('[data-action="apitok-boards-retry"]'), "with Try again");
     await steerOptions(null);
     await click('[data-action="apitok-boards-retry"]');
     assert.ok(await listed(), "Try again loads the boards");
-    await click('[data-action="apitok-cancel"]');
+    await wz.cancel();
   });
 
   test("phone: the window fits, with no sideways scrolling, and the boards can be ticked", async () => {
     await openDeveloper(MOBILE);
     await openNewToken(); assert.ok(await listed());
+    await wz.expand(ids.core);
     assert.equal(await b.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true);
-    assert.ok(await b.evaluate("(() => { const r = document.querySelector('form.apitok-modal').getBoundingClientRect(); return r.left >= 0 && r.right <= window.innerWidth; })()"), "the window fits the screen");
-    assert.ok(await b.evaluate("(() => { const i = document.querySelector('form.apitok-modal input[name=board]'); const r = i.getBoundingClientRect(); return r.width > 0 && r.height > 0; })()"), "boards can be ticked");
-    await click('[data-action="apitok-cancel"]');
+    assert.ok(await b.evaluate("(() => { const r = document.querySelector('form.apikey-wizard').getBoundingClientRect(); return r.left >= 0 && r.right <= window.innerWidth; })()"), "the window fits the screen");
+    assert.ok(await b.evaluate(`(() => { const i = document.querySelector('form.apikey-wizard input[data-action="apitok-wiz-board"]'); const r = i.getBoundingClientRect(); return r.width > 0 && r.height > 0; })()`), "boards can be ticked");
+    assert.ok(await b.evaluate("(() => { const f = document.querySelector('form.apikey-wizard'); return f.scrollWidth <= f.clientWidth + 1; })()"), "nothing in the window scrolls sideways");
+    await wz.cancel();
   });
 
   test("the token holds only the boards ticked; it reads them and nothing else; a board created later is never added", async () => {
     await openDeveloper();
-    await openNewToken(); assert.ok(await listed());
-    await chooseWorkspace(ids.core);
-    await b.evaluate(`(() => { const f = document.querySelector("form.apitok-modal"); f.elements.name.value = "Scoped"; f.querySelector("input[name=board][value='${ids.terms}']").checked = true; f.requestSubmit(); })()`);
-    assert.ok(await wait("!!document.querySelector('#apitok-secret')"), "token revealed");
-    const secret = await b.evaluate("document.querySelector('#apitok-secret').value");
+    await wz.open();
+    await wz.details({ name: "Scoped" }); assert.ok(await listed());
+    await wz.tick(ids.terms, ids.core);
+    const secret = await wz.create();
     await click('[data-action="apitok-done"]');
     const read = (id) => b.evaluate(`fetch("/api/v1/external/boards/${id}/records", { credentials: "omit", headers: { Authorization: "Bearer " + ${JSON.stringify(secret)} } }).then((r) => r.status)`);
     assert.equal(await read(ids.terms), 200, "the board ticked");
@@ -225,5 +249,53 @@ describe("New token: board discovery (real app)", { skip: BROWSER ? false : "no 
     assert.equal((await api("POST", "/me/api-tokens", { name: "Outside", workspaceId: ids.outside, boardIds: [ids.outsideBoard], scopes: ["read"], expiresAt })).status >= 400, true, "no token for someone else's workspace");
     assert.equal((await api("POST", "/me/api-tokens", { name: "Write", workspaceId: ids.core, boardIds: [ids.product], scopes: ["write"], expiresAt })).status, 400, "read-only only");
     assert.ok(!(await api("GET", "/me/api-tokens")).body.items.some((t) => ["Forged", "Outside", "Write"].includes(t.name)), "none of them was created");
+    // Without a workspace (the Create API key window's request): unknown, unreachable and repeated boards are refused too.
+    const multi = (boardIds) => api("POST", "/me/api-tokens", { name: "Forged multi", boardIds, scopes: ["read"], expiresAt });
+    for (const forged of [[ids.product, ids.outsideBoard], [ids.product, "0123456789abcdef01234567"], [ids.product, ids.product], [ids.product, ids.occ, ids.product]]) assert.equal((await multi(forged)).status, 400, JSON.stringify(forged));
+    assert.ok(!(await api("GET", "/me/api-tokens")).body.items.some((t) => t.name === "Forged multi"), "none was created");
+  });
+
+  test("one key for boards in two workspaces: review, one creation despite repeated clicks, the secret once, every endpoint", async () => {
+    await openDeveloper();
+    const before = (await api("GET", "/me/api-tokens")).body.items.length;
+    await wz.open();
+    await wz.details({ name: "Company Reports", description: "Power BI dashboards" }); assert.ok(await listed());
+    await wz.tick(ids.product, ids.core); await wz.tick(ids.occ, ids.sales);
+    await wz.next();
+    assert.ok(await wait("document.querySelector('form.apikey-wizard')?.dataset.step === 'review'"));
+    const review = await text("form.apikey-wizard .apikey-step-body");
+    assert.match(review, /Company Reports/); assert.match(review, /Read-only/); assert.match(review, /2 boards in 2 workspaces/);
+    assert.match(review, /Core Space[\s\S]*Product Board/); assert.match(review, /Sales Space[\s\S]*Field Board/);
+    assert.equal(await b.evaluate(`document.querySelector('form.apikey-wizard [data-role="create"]').disabled`), true, "Create waits for the confirmation");
+    const secret = await wz.create({ clicks: 3 });
+    const items = (await api("GET", "/me/api-tokens")).body.items;
+    assert.equal(items.length, before + 1, "three clicks, one key");
+    const made = items.find((t) => t.name === "Company Reports");
+    assert.deepEqual(made.workspaces.map((w) => w.name), ["Core Space", "Sales Space"]);
+    // The created screen: the secret, both boards with their IDs and endpoints, and Escape can't lose it.
+    const shown = await text(".apikey-created");
+    for (const id of [ids.product, ids.occ]) { assert.ok(shown.includes(id), `board ID ${id}`); assert.ok(shown.includes(`/api/v1/external/boards/${id}/records`), `records endpoint ${id}`); }
+    assert.match(shown, /2 boards in 2 workspaces/);
+    const copyAll = await b.evaluate(`document.querySelector('.apikey-created [data-action="apitok-copy-all"]').dataset.copy`);
+    assert.ok(copyAll.includes(`/boards/${ids.occ}/records`) && copyAll.includes("Authorization: Bearer YOUR_JARC_API_TOKEN"));
+    assert.ok(!copyAll.includes(secret), "Copy all endpoints never includes the secret");
+    await b.evaluate(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+    assert.ok(await has("#apitok-secret"), "Escape doesn't close the one-time screen");
+    // Every board's records answer with the one key; a board that wasn't chosen doesn't.
+    const read = (id) => b.evaluate(`fetch("/api/v1/external/boards/${id}/records", { credentials: "omit", headers: { Authorization: "Bearer " + ${JSON.stringify(secret)} } }).then((r) => r.status)`);
+    assert.equal(await read(ids.product), 200); assert.equal(await read(ids.occ), 200);
+    assert.equal(await read(ids.customer), 404); assert.equal(await read(ids.outsideBoard), 404);
+    // Closing forgets the secret; Connection details show the boards and endpoints again, without it.
+    await click('[data-action="apitok-done"]');
+    assert.ok(await wait("!!document.querySelector('#apikey-list')"));
+    assert.ok(!(await b.evaluate("document.body.innerHTML")).includes(secret), "the secret is gone from the page");
+    assert.ok(!(await b.evaluate("JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage })")).includes(secret), "and was never stored");
+    await click(`#apikey-list [data-action="apitok-details"][data-id="${made.id}"]`);
+    assert.ok(await wait("!!document.querySelector('.apikey-details')"));
+    const details = await text(".apikey-details");
+    assert.ok(details.includes(`/api/v1/external/boards/${ids.product}`) && details.includes(ids.occ));
+    assert.match(details, /The secret isn't shown again/);
+    assert.ok(!(await b.evaluate("document.body.innerHTML")).includes(secret) && !(await has("#apitok-secret")), "no secret in the details");
+    await click('[data-action="apitok-conn-close"]');
   });
 });

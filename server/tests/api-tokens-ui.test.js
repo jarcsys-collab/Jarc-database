@@ -6,6 +6,7 @@ const assert = require("node:assert/strict");
 const fs = require("fs"), path = require("path");
 const { spawn } = require("child_process");
 const { findBrowser, launch, freePort, waitForServer } = require("./support/headless-browser");
+const { wizard } = require("./support/api-key-wizard");
 
 const BROWSER = findBrowser();
 const DESKTOP = { width: 1440, height: 900 }, MOBILE = { width: 390, height: 844 };
@@ -39,6 +40,10 @@ describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false :
     await click(`.developer-window .settings-nav [data-action="apitok-tab"][data-tab="${section}"]`);
   };
   const openPanel = async () => { await openDeveloper("tokens"); assert.ok(await wait("!!document.querySelector('#apitok-root .apitok-intro')"), "tokens loaded"); };
+  // API Keys are cards (#apikey-list); a card's "Last used" and other facts are data-meta rows.
+  const KEYS = "#apitok-root #apikey-list";
+  const firstMeta = (term) => b.evaluate(`document.querySelector('#apikey-list .apikey-card [data-meta=${JSON.stringify(term)}] dd')?.textContent || ""`);
+  let wz;
   const reload = async (viewport, section = null) => { await b.open(`${base}/`, viewport); if (section) await openDeveloper(section); else await openPanel(); };
   const setValue = (sel, value, event = "change") => b.evaluate(`(() => { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) return false; if (el.type === "checkbox") el.checked = ${JSON.stringify(Boolean(value))}; else el.value = ${JSON.stringify(String(value))}; el.dispatchEvent(new Event(${JSON.stringify(event)}, { bubbles: true })); return true; })()`);
   let directoryIds = null;
@@ -47,6 +52,7 @@ describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false :
     server = await start({ JARC_TEST_API_TOKENS: "1", JARC_TEST_API_ADMINS: API_ADMINS });
     base = server.url;
     b = await launch(BROWSER);
+    wz = wizard(b);
     await b.motionPreference("reduce");
     await b.open(`${base}/api/v1/health`, DESKTOP);
     assert.equal(await signIn(OID, "Tess Token", true), 201);
@@ -90,20 +96,21 @@ describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false :
   let revealed;
   test("creating a token: choose boards, see it once, Escape and outside clicks can't lose it", async () => {
     await reload(DESKTOP);
-    await click('[data-action="apitok-new"]');
-    assert.ok(await wait("!!document.querySelector('form.apitok-modal')"));
-    assert.match(await text("form.apitok-modal"), /Synthetic Ops/);
-    assert.match(await text(".apitok-boards"), /Synthetic Board/);
-    assert.match(await text("form.apitok-modal"), /Read-only/);
-    assert.equal(await b.evaluate("document.querySelector('form.apitok-modal select[name=scope]').disabled"), true, "read-only is the only choice");
-    // Asks for what's missing.
-    await b.evaluate("document.querySelector('form.apitok-modal').requestSubmit()");
+    await wz.open();
+    assert.match(await text("form.apikey-wizard"), /Read-only/);
+    assert.equal(await b.evaluate("document.querySelector('form.apikey-wizard select[name=scope]').disabled"), true, "read-only is the only choice");
+    // Asks for what's missing, one step at a time.
+    await wz.next();
     assert.match(await text(".apitok-error"), /name/);
-    await b.evaluate(`(() => { const f = document.querySelector("form.apitok-modal"); f.elements.name.value = "Power BI Integration"; f.requestSubmit(); })()`);
+    await wz.details({ name: "Power BI Integration" });
+    assert.ok(await wz.listed(), "the boards step");
+    assert.match(await text("#apikey-workspaces"), /Synthetic Ops/);
+    await wz.next();
     assert.match(await text(".apitok-error"), /board/);
-    await b.evaluate(`(() => { const f = document.querySelector("form.apitok-modal"); const box = [...f.querySelectorAll("input[name=board]")].find((i) => i.value === ${JSON.stringify(boardId)}); box.checked = true; f.requestSubmit(); })()`);
-    assert.ok(await wait("!!document.querySelector('#apitok-secret')"), "token revealed");
-    revealed = await b.evaluate("document.querySelector('#apitok-secret').value");
+    const ws = await b.evaluate(`document.querySelector('#apikey-workspaces .apikey-ws').dataset.ws`);
+    await wz.tick(boardId, ws);
+    assert.match(await text("#apikey-workspaces"), /Synthetic Board/);
+    revealed = await wz.create();
     assert.match(revealed, /^jarc_[0-9a-f]{24}_[A-Za-z0-9_-]{43}$/);
     assert.match(await text(".apitok-modal"), /won't see it again/);
     await b.evaluate(`document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
@@ -115,12 +122,13 @@ describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false :
     const stored = await b.evaluate(`JSON.stringify([Object.entries(localStorage), Object.entries(sessionStorage), document.cookie])`);
     assert.ok(!stored.includes(revealed));
     await click('[data-action="apitok-done"]');
-    assert.ok(await wait("!!document.querySelector('#apitok-root .apitok-table')"), "back to the list");
+    assert.ok(await wait(`!!document.querySelector(${JSON.stringify(KEYS)})`), "back to the list");
     const page = await b.evaluate("document.documentElement.outerHTML");
     assert.ok(!page.includes(revealed), "gone from the page");
-    assert.match(await text(".apitok-table"), /Power BI Integration/);
-    assert.match(await text(".apitok-table"), /Synthetic Board/);
-    assert.match(await text(".apitok-table"), /Active/);
+    assert.match(await text("#apikey-list"), /Power BI Integration/);
+    assert.match(await text("#apikey-list"), /Synthetic Ops/);
+    assert.match(await text("#apikey-list"), /Active/);
+    assert.equal(await firstMeta("Boards"), "1");
   });
 
   test("the new token reads the board; the list then shows when it was last used", async () => {
@@ -128,8 +136,9 @@ describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false :
     assert.equal(res.status, 200);
     assert.deepEqual(res.body.items.map((r) => r.values.serial), ["Row one"]);
     await reload(DESKTOP);
-    assert.ok(await wait("!!document.querySelector('.apitok-table')"));
-    assert.doesNotMatch(await b.evaluate(`[...document.querySelectorAll('.apitok-table td[data-label="Last used"]')][0].textContent`), /Never/);
+    assert.ok(await wait(`!!document.querySelector(${JSON.stringify(KEYS)})`));
+    assert.doesNotMatch(await firstMeta("Last used"), /Never/);
+    assert.notEqual(await firstMeta("Requests"), "0");
   });
 
   for (const [label, viewport] of [["desktop", DESKTOP], ["mobile", MOBILE]]) {
@@ -137,11 +146,15 @@ describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false :
       await reload(viewport, "overview");
       assert.ok(await wait("!!document.querySelector('.apitok-overview .apitok-stats')", 8000), "overview");
       const nav = JSON.parse(await b.evaluate(`JSON.stringify([...document.querySelectorAll('.developer-window .settings-nav [data-action="apitok-tab"]')].map((x) => x.title))`));
-      assert.deepEqual(nav, ["Overview", "API Tokens", "API Explorer", "Boards & Columns", "Documentation", "API Activity"]);
-      assert.match(await text(".apitok-overview"), /same for everyone/);
+      assert.deepEqual(nav, ["Overview", "API Keys", "API Explorer", "Boards & Columns", "Documentation", "API Activity"]);
+      assert.match(await text(".apitok-overview"), /IDs aren't secrets/);
       assert.ok((await text(".apitok-overview")).includes(`${base}/api/v1/external`));
+      // The overview: key counts, getting started, recent activity and Create API key.
+      const overview = await text(".apitok-overview");
+      for (const part of ["Active keys", "Expired keys", "Revoked keys", "Authorized boards", "Workspaces covered", "Getting started", "Recent API activity"]) assert.ok(overview.includes(part), part);
+      assert.ok(await has('.apitok-overview [data-action="apitok-new"]'), "Create API key, on the overview");
       const ids = ["overview", "tokens", "explorer", "directory", "docs", "activity"];
-      for (const [section, selector] of [["overview", ".apitok-overview"], ["tokens", ".apitok-table"], ["explorer", ".apitok-ex-columns"], ["directory", ".apitok-dir-columns"], ["docs", ".apitok-docs"], ["activity", ".apitok-activity"]]) {
+      for (const [section, selector] of [["overview", ".apitok-overview"], ["tokens", "#apikey-list"], ["explorer", ".apitok-ex-columns"], ["directory", ".apitok-dir-columns"], ["docs", ".apitok-docs"], ["activity", ".apitok-activity"]]) {
         await click(`.developer-window .settings-nav [data-action="apitok-tab"][data-tab="${section}"]`);
         assert.ok(await wait(`!!document.querySelector('#apitok-root ${selector}')`, 8000), section);
         assert.equal(await text("#apitok-title"), nav[ids.indexOf(section)]);
@@ -163,8 +176,8 @@ describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false :
     for (let i = 0; i < 4 && !listed; i++) { if (!(await has(".settings-window"))) await click('[data-action="settings"]'); listed = await wait("!!document.querySelector('.settings-window [data-section=\"api-tokens\"]')", 3000); }
     assert.ok(listed);
     await click('.settings-window [data-section="api-tokens"]');
-    assert.ok(await wait("!!document.querySelector('.developer-window #apitok-root .apitok-table')", 8000));
-    assert.equal(await text("#apitok-title"), "API Tokens");
+    assert.ok(await wait("!!document.querySelector('.developer-window #apitok-root #apikey-list')", 8000));
+    assert.equal(await text("#apitok-title"), "API Keys");
   });
 
   test("the documentation opens from the section and uses this server's address, on desktop and mobile", async () => {
@@ -173,12 +186,12 @@ describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false :
       await click('[data-action="apitok-tab"][data-tab="docs"]');
       assert.ok(await wait("!!document.querySelector('.apitok-docs')"));
       const docs = await text(".apitok-docs");
-      for (const part of ["Base URL", `${base}/api/v1/external`, "Pagination", "Rate limits", "Common errors", "Security recommendations", "Power Query M", "Power Automate", "n8n", "secure backend", "curl -H"]) assert.ok(docs.includes(part), part);
+      for (const part of ["Base URL", `${base}/api/v1/external`, "Pagination", "Rate limits", "Common errors", "Security recommendations", "Power Query M", "Power Automate", "n8n", "Google Apps Script", "UrlFetchApp", "Postman", "secure backend", "curl -H", "One key for several boards and workspaces", "Rotating credentials securely", "What the status codes mean", "no single request that returns the records of several boards"]) assert.ok(docs.includes(part), part);
       assert.ok(!docs.includes(revealed));
       assert.ok(await noSidewaysScroll(), "no sideways page scroll");
       assert.ok(await b.evaluate(`[...document.querySelectorAll(".apitok-docs pre")].every((p) => p.getBoundingClientRect().right <= window.innerWidth + 1)`), "code stays on screen");
       await click('[data-action="apitok-tab"][data-tab="tokens"]');
-      assert.ok(await has(".apitok-table"));
+      assert.ok(await has("#apikey-list"));
       assert.ok(await noSidewaysScroll());
     }
   });
@@ -196,13 +209,83 @@ describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false :
     assert.ok(await noSidewaysScroll(), "the token fits on a phone");
     assert.ok(!(await b.evaluate(`JSON.stringify([Object.entries(localStorage), Object.entries(sessionStorage)])`)).includes(replacement));
     await click('[data-action="apitok-done"]');
-    assert.ok(await wait("!!document.querySelector('.apitok-table')"));
-    assert.match(await text(".apitok-table"), /Being replaced/);
+    assert.ok(await wait("!!document.querySelector('#apikey-list')"));
+    assert.match(await text("#apikey-list"), /Being replaced/);
+    assert.ok(await noSidewaysScroll(), "the key cards fit a phone");
     await click('[data-action="apitok-revoke"]');
     assert.ok(await wait("!!document.querySelector('form[data-action=\"apitok-revoke-form\"]')"));
     assert.match(await text('form[data-action="apitok-revoke-form"]'), /can't be undone/);
     await b.evaluate(`document.querySelector('form[data-action="apitok-revoke-form"]').requestSubmit()`);
-    assert.ok(await wait("/Revoked/.test(document.querySelector('.apitok-table')?.textContent || '')"), "marked revoked");
+    assert.ok(await wait("/Revoked/.test(document.querySelector('#apikey-list')?.textContent || '')"), "marked revoked");
+  });
+
+  test("API Keys: filters by name, owner, status, workspace and board redraw only the list", async () => {
+    await reload(DESKTOP);
+    const shown = () => b.evaluate(`[...document.querySelectorAll("#apikey-list .apikey-card h3")].map((h) => h.textContent)`);
+    const all = await shown();
+    assert.ok(all.length >= 2, "there are keys to filter");
+    const filter = (name, value, event) => setValue(`#apitok-root [data-action="apitok-filter"][data-filter="${name}"]`, value, event);
+    await b.evaluate(`document.querySelector('#apitok-root [data-filter="q"]').focus()`);
+    await filter("q", "Power BI", "input");
+    assert.ok((await shown()).every((n) => /Power BI/.test(n)));
+    assert.equal(await b.evaluate(`document.activeElement?.dataset.filter`), "q", "the search box keeps focus");
+    await filter("q", "", "input");
+    await filter("status", "revoked");
+    assert.ok((await shown()).length >= 1 && (await b.evaluate(`[...document.querySelectorAll("#apikey-list .apikey-card")].every((c) => /Revoked/.test(c.querySelector(".apikey-status").textContent))`)));
+    await filter("status", "");
+    await filter("board", "no board is called this", "input");
+    assert.match(await text("#apikey-list"), /No keys match/);
+    await filter("board", boardId, "input");
+    assert.deepEqual((await shown()).length, all.length, "every key here covers the board");
+    await filter("board", "", "input");
+    const ws = await b.evaluate(`document.querySelector('#apitok-root [data-filter="workspace"] option:nth-child(2)')?.value || ""`);
+    await filter("workspace", ws);
+    assert.equal((await shown()).length, all.length);
+    assert.match(await text("#apikey-results"), /keys?/);
+  });
+
+  test("API Explorer: a key as the scope reference offers only its boards; previews say they use the signed-in session", async () => {
+    await reload(DESKTOP);
+    // A key for Second Board only, made through the API (an administrator's session).
+    const second = await b.evaluate(`fetch("/api/v1/workspaces").then((r) => r.json()).then(async (x) => { const ws = x.items.find((w) => w.name === "Synthetic Ops"); return (await (await fetch("/api/v1/workspaces/" + ws.id + "/boards")).json()).items.find((bd) => bd.name === "Second Board").id; })`);
+    const made = await b.evaluate(`(async () => { const { csrfToken } = await (await fetch("/api/v1/auth/session")).json(); const r = await fetch("/api/v1/me/api-tokens", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: JSON.stringify({ name: "Second only", boardIds: [${JSON.stringify(second)}], scopes: ["read"], expiresAt: new Date(Date.now() + 7 * 864e5).toISOString() }) }); return (await r.json()).token.id; })()`);
+    await reload(DESKTOP);
+    assert.ok(await wait(`!!document.querySelector('#apikey-list [data-action="apitok-key-explorer"][data-id="${made}"]')`));
+    await click(`#apikey-list [data-action="apitok-key-explorer"][data-id="${made}"]`);
+    assert.ok(await wait("!!document.querySelector('#apitok-root .apitok-ex-columns')", 8000), "the Explorer opens on the key's board");
+    assert.equal(await b.evaluate(`document.querySelector('[data-action="apitok-ex-key"]').value`), made);
+    assert.deepEqual(await b.evaluate(`[...document.querySelectorAll('[data-action="apitok-ex-board"] option')].map((o) => o.value)`), [second], "only the key's boards");
+    const scope = await text("#apitok-root .apikey-scope");
+    assert.match(scope, /signed-in administrator session/); assert.match(scope, /Authorization: Bearer YOUR_JARC_API_TOKEN/);
+    assert.ok((await text("#apitok-root")).includes(`/api/v1/external/boards/${second}/records`), "the address to copy");
+    // No key: every board this administrator can see again.
+    await setValue('[data-action="apitok-ex-key"]', "");
+    assert.ok(await wait(`document.querySelectorAll('[data-action="apitok-ex-board"] option').length >= 2`, 5000));
+    assert.doesNotMatch(await b.evaluate(`document.querySelector("#apitok-root").innerHTML`), /jarc_[0-9a-f]{24}_/, "no secret anywhere");
+  });
+
+  test("API Activity: filters by key, event, result and date", async () => {
+    await reload(DESKTOP, "activity");
+    assert.ok(await wait("!!document.querySelector('#apikey-events')", 8000));
+    const rows = () => b.evaluate(`[...document.querySelectorAll("#apikey-events tr")].filter((r) => !r.querySelector("td[colspan]")).length`);
+    const all = await rows();
+    assert.ok(all >= 3, `events to filter: ${all}`);
+    const filter = (name, value) => setValue(`#apitok-root [data-action="apitok-act-filter"][data-filter="${name}"]`, value);
+    await filter("type", "token.revoked");
+    assert.ok((await rows()) >= 1 && (await b.evaluate(`[...document.querySelectorAll('#apikey-events td[data-label="Event"]')].every((td) => /Revoked/.test(td.textContent))`)));
+    await filter("type", "");
+    await filter("outcome", "failure");
+    assert.ok(await b.evaluate(`[...document.querySelectorAll('#apikey-events td[data-label="Event"]')].every((td) => !/Created|Rotated|Revoked/.test(td.textContent))`), "only refused or failed requests");
+    await filter("outcome", "");
+    const key = await b.evaluate(`document.querySelector('#apitok-root [data-filter="token"] option:nth-child(2)').value`);
+    await filter("token", key);
+    assert.ok((await rows()) >= 1 && (await rows()) <= all);
+    await filter("token", "");
+    await filter("from", "2099-01-01");
+    assert.match(await text("#apikey-events"), /No events match/);
+    await filter("from", "");
+    assert.equal(await rows(), all);
+    assert.doesNotMatch(await b.evaluate(`document.querySelector("#apitok-root").innerHTML`), /jarc_[0-9a-f]{24}_|Bearer jarc/, "no secret or header");
   });
 
   // Records what the app copies, whichever way the browser allows it.
@@ -412,23 +495,25 @@ describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false :
   for (const [label, viewport] of [["desktop", DESKTOP], ["mobile", MOBILE]]) {
     test(`New token expiry (${label}): up to 5 years ahead; the last day offered is accepted, later or past dates are explained`, async () => {
       await reload(viewport);
-      await click('[data-action="apitok-new"]');
-      assert.ok(await wait("!!document.querySelector('form.apitok-modal input[name=\"board\"]')", 8000));
-      const range = JSON.parse(await b.evaluate(`(() => { const i = document.querySelector('form.apitok-modal input[name="expires"]'); const max = new Date(Date.UTC(new Date().getUTCFullYear() + 5, new Date().getUTCMonth(), Math.min(new Date().getUTCDate(), new Date(Date.UTC(new Date().getUTCFullYear() + 5, new Date().getUTCMonth() + 1, 0)).getUTCDate()), new Date().getUTCHours(), new Date().getUTCMinutes()) - 120000); const local = max.getFullYear() + "-" + String(max.getMonth() + 1).padStart(2, "0") + "-" + String(max.getDate()).padStart(2, "0"); return JSON.stringify({ min: i.min, max: i.max, value: i.value, expected: local, help: document.querySelector("#apitok-expiry-help")?.textContent || "" }); })()`));
+      await wz.open();
+      const range = JSON.parse(await b.evaluate(`(() => { const i = document.querySelector('form.apikey-wizard input[name="expires"]'); const max = new Date(Date.UTC(new Date().getUTCFullYear() + 5, new Date().getUTCMonth(), Math.min(new Date().getUTCDate(), new Date(Date.UTC(new Date().getUTCFullYear() + 5, new Date().getUTCMonth() + 1, 0)).getUTCDate()), new Date().getUTCHours(), new Date().getUTCMinutes()) - 120000); const local = max.getFullYear() + "-" + String(max.getMonth() + 1).padStart(2, "0") + "-" + String(max.getDate()).padStart(2, "0"); return JSON.stringify({ min: i.min, max: i.max, value: i.value, expected: local, help: document.querySelector("#apitok-expiry-help")?.textContent || "" }); })()`));
       assert.equal(range.max, range.expected, "the picker reaches 5 calendar years ahead");
       assert.ok(range.min < range.value && range.value < range.max, "the default stays well inside");
       assert.match(range.help, /up to 5 years/);
       assert.ok(await noSidewaysScroll(), "fits the screen");
-      const fill = (expires, name) => b.evaluate(`(() => { const f = document.querySelector("form.apitok-modal"); f.querySelector('input[name="board"]').checked = true; f.elements.name.value = ${JSON.stringify(name)}; f.elements.expires.value = ${JSON.stringify(expires)}; f.requestSubmit(); })()`);
-      const error = () => text("form.apitok-modal .apitok-error");
-      // Past and beyond the limit: explained, and nothing is sent.
+      const fill = (expires, name) => wz.details({ name, expires });
+      const error = () => text("form.apikey-wizard .apitok-error");
+      // Past and beyond the limit: explained on the first step, and nothing is sent.
       await fill("2020-01-01", "Too early"); assert.match(await error(), /from tomorrow up to 5 years/);
       const beyond = await b.evaluate(`(() => { const [y, m, d] = ${JSON.stringify(range.max)}.split("-").map(Number); const next = new Date(y, m - 1, d + 1); return next.getFullYear() + "-" + String(next.getMonth() + 1).padStart(2, "0") + "-" + String(next.getDate()).padStart(2, "0"); })()`);
       await fill(beyond, "Too late"); assert.match(await error(), /from tomorrow up to 5 years/);
+      assert.equal(await wz.step(), "details", "it stays on the first step");
       assert.equal(await has("#apitok-secret"), false, "nothing was created");
       // The last day offered: accepted by the server, and never more than 5 years from now.
       await fill(range.max, `Five years ${label}`);
-      assert.ok(await wait("!!document.querySelector('#apitok-secret')", 8000), `created: ${await error()}`);
+      assert.ok(await wz.listed(), `on to the boards: ${await error()}`);
+      await wz.tick(boardId, await b.evaluate(`document.querySelector('#apikey-workspaces .apikey-ws').dataset.ws`));
+      assert.ok(await wz.create(), `created: ${await error()}`);
       const expires = await b.evaluate(`fetch("/api/v1/me/api-tokens").then((r) => r.json()).then((x) => x.items.find((t) => t.name === ${JSON.stringify(`Five years ${label}`)}).expiresAt)`);
       const years = (new Date(expires) - Date.now()) / (365.25 * 86400000);
       assert.ok(years > 4.99 && years <= 5.001, `about five years: ${years}`);
@@ -478,17 +563,23 @@ describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false :
     assert.equal(await signIn(OTHER, "Nora Nonadmin", false), 201);
     await reload(DESKTOP);
     assert.ok(await has('[data-action="apitok-new"]'), "a Viewer may create a read-only token");
-    await click('[data-action="apitok-new"]');
-    assert.ok(await wait("!!document.querySelector('form.apitok-modal')"));
-    await setValue('form.apitok-modal [data-action="apitok-all-boards"]', true);
-    assert.equal(await b.evaluate(`[...document.querySelectorAll('form.apitok-modal input[name="board"]')].every((x) => x.checked)`), true, "Select all boards");
-    await b.evaluate(`(() => { const f = document.querySelector("form.apitok-modal"); f.elements.name.value = "Nora n8n"; f.requestSubmit(); })()`);
-    assert.ok(await wait("!!document.querySelector('#apitok-secret')"), "token revealed");
-    const noraToken = await b.evaluate("document.querySelector('#apitok-secret').value");
+    await wz.open();
+    await wz.details({ name: "Nora n8n" }); assert.ok(await wz.listed());
+    const ws = await b.evaluate(`document.querySelector('#apikey-workspaces .apikey-ws').dataset.ws`);
+    await wz.expand(ws); await wz.selectAll(ws);
+    assert.equal(await b.evaluate(`[...document.querySelectorAll('#apikey-workspaces input[data-action="apitok-wiz-board"]')].every((x) => x.checked)`), true, "Select all boards");
+    assert.match(await wz.count(), /2 boards · 1 workspace selected/);
+    const noraToken = await wz.create();
     await click('[data-action="apitok-done"]');
-    assert.ok(await wait("!!document.querySelector('#apitok-root .apitok-table')"));
-    assert.match(await text(".apitok-table"), /Nora n8n/);
-    assert.match(await text(".apitok-table"), /Synthetic Board, Second Board|Second Board, Synthetic Board/);
+    assert.ok(await wait("!!document.querySelector('#apitok-root #apikey-list')"));
+    assert.match(await text("#apikey-list"), /Nora n8n/);
+    // Connection details list both boards.
+    const nora = await b.evaluate(`[...document.querySelectorAll("#apikey-list .apikey-card")].find((c) => /Nora n8n/.test(c.textContent)).dataset.id`);
+    await click(`#apikey-list [data-action="apitok-details"][data-id="${nora}"]`);
+    assert.ok(await wait("!!document.querySelector('.apikey-details')"));
+    assert.match(await text(".apikey-details"), /Synthetic Board[\s\S]*Second Board|Second Board[\s\S]*Synthetic Board/);
+    await click('[data-action="apitok-conn-close"]');
+    assert.ok(await wait("!!document.querySelector('#apitok-root #apikey-list')"));
     const read = await b.evaluate(`fetch("/api/v1/external/boards/${boardId}/records?columns=serial", { credentials: "omit", headers: { Authorization: "Bearer " + ${JSON.stringify(noraToken)} } }).then((r) => r.status)`);
     assert.equal(read, 200, "one token reads the board and chosen columns");
     // The same IDs as Tess saw.

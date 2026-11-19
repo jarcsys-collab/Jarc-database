@@ -39,9 +39,10 @@ class ApiTokenRepository {
 
   async recordUse(id, at, requests) { await this.tokens.updateOne({ _id: id }, { $set: { lastUsedAt: at }, $inc: { requestCount: requests } }); }
 
-  async appendAudit({ action, tokenId = null, ownerUserId = null, actorUserId = null, actorName = null, workspaceId = null, reason = null, at = new Date() }, { session } = {}) {
+  // workspaceIds: only for a token covering several workspaces (workspaceId is then the first of them).
+  async appendAudit({ action, tokenId = null, ownerUserId = null, actorUserId = null, actorName = null, workspaceId = null, workspaceIds = null, reason = null, at = new Date() }, { session } = {}) {
     if (!AUDIT_ACTIONS.includes(action)) throw new TypeError(`Unknown API token audit action: ${action}`);
-    const doc = { action, tokenId, ownerUserId, actorUserId, actorName, workspaceId, ...(reason ? { reason } : {}), at, ...(SECURITY_ACTIONS.has(action) ? { expiresAt: new Date(at.getTime() + SECURITY_RETENTION_MS) } : {}) };
+    const doc = { action, tokenId, ownerUserId, actorUserId, actorName, workspaceId, ...(Array.isArray(workspaceIds) && workspaceIds.length > 1 ? { workspaceIds } : {}), ...(reason ? { reason } : {}), at, ...(SECURITY_ACTIONS.has(action) ? { expiresAt: new Date(at.getTime() + SECURITY_RETENTION_MS) } : {}) };
     await this.audit.insertOne(doc, { session });
     return doc;
   }

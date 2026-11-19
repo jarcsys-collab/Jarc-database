@@ -20,7 +20,8 @@
 // JavaScript on other sites can't call this API. Nothing here changes data except the token's own usage metadata.
 //
 // Each request: the method, HTTPS, no token in the URL, the token (existence, secret, revocation, expiry), the rate limit, then the
-// owner's current access (services/api-token-service.js). Anything outside the token's workspace and boards answers 404, exactly
+// owner's current access (services/api-token-service.js). Anything outside the token's boards, or in a workspace of the token that
+// its owner can no longer read, answers 404, exactly
 // like something that doesn't exist. Archived workspaces, boards and records are left out unless the request says includeArchived=true.
 // A column hidden on the board is a display choice, not a permission: it is returned, marked visible: false. JARC has no column-level or
 // board-level permissions, so the workspace role decides access to everything in a board.
@@ -30,6 +31,8 @@ const { groupColumnOf } = require("../domain/board-schema");
 const { ApiError, sendError, apiNotFound } = require("../middleware/errors");
 const { hex, iso } = require("../api/serialize");
 const { LOOKS_LIKE_TOKEN } = require("../auth/api-token");
+// The token's workspaces: its workspaceIds when it covers several, else its one workspaceId (services/api-token-service.js).
+const workspacesOf = (doc) => (Array.isArray(doc.workspaceIds) && doc.workspaceIds.length ? doc.workspaceIds : [doc.workspaceId]).filter(Boolean);
 
 const PAGE = Object.freeze({ defaultLimit: 100, maxLimit: 500 });
 const QUERY_TIME_MS = 15000;
@@ -166,9 +169,11 @@ function externalApiRoutes({ tokens, repos, environment = "development", rate = 
       res.set("Retry-After", String(usage.resetSeconds));
       return sendError(res, 429, "RATE_LIMITED", `This API token is limited to ${usage.limit} requests per minute. Wait ${usage.resetSeconds} seconds and try again.`);
     }
-    await tokens.authorize(doc); // refuses when the owner has lost access, whatever the token says
+    // Refuses when the owner has lost access to every workspace of the token, whatever the token says; otherwise names the
+    // token's workspaces the owner can read right now. Only those are ever reached.
+    const { workspaceIds } = await tokens.authorize(doc);
     await tokens.recordUse(doc);
-    req.apiToken = { doc, boardIds: new Set(doc.boardIds.map(hex)) };
+    req.apiToken = { doc, boardIds: new Set(doc.boardIds.map(hex)), workspaceIds: new Set(workspaceIds.map(hex)), workspaceList: workspaceIds };
     return next();
   });
 
@@ -180,37 +185,41 @@ function externalApiRoutes({ tokens, repos, environment = "development", rate = 
     return value === "true";
   };
   const missing = (what) => new ApiError(404, "NOT_FOUND", `This ${what} doesn't exist or this token can't reach it.`);
-  const tokenWorkspace = async (req) => {
-    const workspace = await repos.workspaces.findById(req.apiToken.doc.workspaceId);
+  // One of the token's workspaces that its owner can read now (and not archived, unless asked for), or null.
+  const tokenWorkspace = async (req, workspaceId) => {
+    if (!workspaceId || !req.apiToken.workspaceIds.has(hex(workspaceId))) return null;
+    const workspace = await repos.workspaces.findById(workspaceId);
     return workspace && (!workspace.archived || wantsArchived(req)) ? workspace : null;
   };
-  // A board this token covers. Scope is checked before anything is loaded, and against where the board is NOW.
+  // A board this token covers. Scope is checked before anything is loaded, and against where the board is NOW: it must still be in
+  // one of the token's workspaces, and one its owner can read.
   const scopedBoard = async (req, boardId) => {
-    const { doc, boardIds } = req.apiToken;
+    const { boardIds } = req.apiToken;
     if (!boardIds.has(hex(boardId))) throw missing("board");
-    const [workspace, board] = await Promise.all([tokenWorkspace(req), repos.boards.findById(boardId)]);
-    if (!workspace || !board || (board.archived && !wantsArchived(req)) || !board.workspaceId.equals(doc.workspaceId)) throw missing("board");
+    const board = await repos.boards.findById(boardId);
+    if (!board || (board.archived && !wantsArchived(req)) || !await tokenWorkspace(req, board.workspaceId)) throw missing("board");
     return board;
   };
   const boardParam = (req) => parseId(req.params.boardId, "boardId");
 
+  // workspaceId stays the token's first (or only) workspace, as before; workspaceIds lists every workspace it was issued for.
   router.get("/me", async (req, res) => {
     noQuery(req);
     const { doc } = req.apiToken;
-    send(res, { token: { id: hex(doc._id), name: doc.name, scopes: [...doc.scopes], workspaceId: hex(doc.workspaceId), boardIds: doc.boardIds.map(hex), createdAt: iso(doc.createdAt), expiresAt: iso(doc.expiresAt) } });
+    send(res, { token: { id: hex(doc._id), name: doc.name, scopes: [...doc.scopes], workspaceId: hex(doc.workspaceId), workspaceIds: workspacesOf(doc).map(hex), boardIds: doc.boardIds.map(hex), createdAt: iso(doc.createdAt), expiresAt: iso(doc.expiresAt) } });
   });
 
   router.get("/workspaces", async (req, res) => {
     archivedOnly(req);
-    const workspace = await tokenWorkspace(req);
-    send(res, { items: workspace ? [workspaceToExternal(workspace)] : [] });
+    const workspaces = await Promise.all(req.apiToken.workspaceList.map((id) => tokenWorkspace(req, id)));
+    send(res, { items: workspaces.filter(Boolean).map(workspaceToExternal) });
   });
 
   router.get("/workspaces/:workspaceId/boards", async (req, res) => {
     const workspaceId = parseId(req.params.workspaceId, "workspaceId");
     archivedOnly(req);
     const { doc } = req.apiToken;
-    if (!workspaceId.equals(doc.workspaceId) || !await tokenWorkspace(req)) throw missing("workspace");
+    if (!await tokenWorkspace(req, workspaceId)) throw missing("workspace");
     const boards = (await repos.boards.findManyInWorkspace(workspaceId, doc.boardIds)).filter((b) => !b.archived || wantsArchived(req));
     send(res, { items: await Promise.all(boards.map(async (b) => boardSummary(b, await repos.records.countActive(b._id)))) });
   });
@@ -279,7 +288,7 @@ function externalApiRoutes({ tokens, repos, environment = "development", rate = 
     const id = parseId(req.params.recordId, "recordId");
     archivedOnly(req);
     const record = await repos.records.findById(id);
-    if (!record || (record.archived && !wantsArchived(req)) || !req.apiToken.boardIds.has(hex(record.boardId)) || !record.workspaceId.equals(req.apiToken.doc.workspaceId)) throw missing("record");
+    if (!record || (record.archived && !wantsArchived(req)) || !req.apiToken.boardIds.has(hex(record.boardId)) || !req.apiToken.workspaceIds.has(hex(record.workspaceId))) throw missing("record");
     const board = await scopedBoard(req, record.boardId).catch((error) => { throw error instanceof ApiError && error.status === 404 ? missing("record") : error; });
     send(res, { record: recordToExternal(record, board, board.columns) });
   });

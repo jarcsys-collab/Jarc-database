@@ -1,7 +1,7 @@
 // JARC API tokens: who may issue them, what they may reach, and whether one may be used right now.
 //
-// A token never carries authority of its own. It is a narrowing of its owner's CURRENT access: one workspace, a chosen list of
-// boards, read-only. Every request checks the token and then the owner, so disabling or blocking the person, or removing their
+// A token never carries authority of its own. It is a narrowing of its owner's CURRENT access: a chosen list of boards, from one
+// workspace or several (see SCOPE below), read-only. Every request checks the token and then the owner, so disabling or blocking the person, or removing their
 // membership, stops the token on its very next use.
 //
 // Authority comes from the stored person (an active user of the configured tenant, not blocked) and their access to the token's
@@ -55,6 +55,24 @@ const latestExpiry = (createdAt) => addUtcYears(createdAt, LIMITS.maxLifetimeYea
 const ISO_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,3})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const USE_RECORD_INTERVAL_MS = 60 * 1000;
 const AUDIT_THROTTLE_MS = 10 * 60 * 1000;
+
+// SCOPE, stored on the token document (additive and backward compatible):
+//   one workspace      { workspaceId, boardIds }                       every token issued before multi-workspace scopes, and every
+//                                                                      new token whose boards are all in one workspace (unchanged)
+//   several workspaces { workspaceId, workspaceIds, boardIds, scopeVersion: 2 }
+//                      workspaceIds lists every workspace of the chosen boards, in the order chosen; workspaceId is the first of
+//                      them, so code that knows only workspaceId (an older deployment) reaches at most that workspace's boards:
+//                      always less than the token was issued for, never more.
+// The boards are the authority: a token reads a board only when the board is in boardIds AND is now in one of the token's
+// workspaces AND the owner can read that workspace right now. Workspaces come from the stored boards, never from the request.
+const workspacesOf = (doc) => (Array.isArray(doc.workspaceIds) && doc.workspaceIds.length ? doc.workspaceIds : [doc.workspaceId]).filter(Boolean);
+const scopeFields = (workspaceIds) => (workspaceIds.length > 1 ? { workspaceId: workspaceIds[0], workspaceIds, scopeVersion: 2 } : { workspaceId: workspaceIds[0] });
+// The workspaces of these boards, each once, in the order the boards were given.
+const workspacesIn = (boardIds, boards) => {
+  const where = new Map(boards.map((b) => [hex(b._id), b.workspaceId])), seen = new Map();
+  for (const id of boardIds) { const w = where.get(hex(id)); if (w && !seen.has(hex(w))) seen.set(hex(w), w); }
+  return [...seen.values()];
+};
 
 const invalidToken = () => new ApiError(401, "INVALID_TOKEN", "This API token isn't valid.");
 const conflict = (code, message) => new ApiError(409, code, message);
@@ -122,8 +140,9 @@ class ApiTokenService {
     if (!actor) return { workspaces: [] };
     const roles = new Map((await this.repos.memberships.listForUser(actor.userId)).map((m) => [m.workspaceId.toHexString(), this.access.effective(actor, m.role)]));
     const all = (await this.repos.workspaces.list()).filter((w) => Access.atLeast(roles.get(w._id.toHexString()) || this.sharedRole(), ISSUER_ROLE));
-    const workspaces = await Promise.all(all.map(async (w) => ({ id: hex(w._id), name: w.name, archived: Boolean(w.archived), boards: (await this.repos.boards.listByWorkspace(w._id)).map((b) => ({ id: hex(b._id), name: b.name, archived: Boolean(b.archived) })) })));
-    return { workspaces };
+    // Only each board's ID, name and archived flag: the columns and views of every board aren't read for a list to choose from.
+    const workspaces = await Promise.all(all.map(async (w) => ({ id: hex(w._id), name: w.name, archived: Boolean(w.archived), boards: (await this.repos.boards.listSummariesByWorkspace(w._id)).map((b) => ({ id: hex(b._id), name: b.name, archived: Boolean(b.archived) })) })));
+    return { workspaces, limits: { boardsPerToken: LIMITS.boardsPerToken, maxLifetimeYears: LIMITS.maxLifetimeYears } };
   }
 
   // An ISO 8601 date and time with its offset (as toISOString() writes it), on a calendar date that exists: JavaScript would
@@ -139,34 +158,62 @@ class ApiTokenService {
     return at;
   }
 
+  // { name, description?, boardIds, scopes: ["read"], expiresAt } and, from clients that choose one workspace, workspaceId.
+  // With workspaceId every board must be in that workspace (as before). Without it the boards may come from several
+  // workspaces: each board is looked up in the database, its workspace is the one it is stored in, and this administrator must
+  // be able to issue tokens in every one of them. A board ID that doesn't exist, or that they can't reach, refuses the whole
+  // request, and naming a board twice is refused too, so the token holds exactly the boards that were reviewed.
   async create(sessionActor, raw) {
     this.requireAdmin(sessionActor);
     const body = requireBody(raw);
-    allowOnly(body, ["name", "workspaceId", "boardIds", "scopes", "expiresAt"], "the token");
+    allowOnly(body, ["name", "description", "workspaceId", "boardIds", "scopes", "expiresAt"], "the token");
     const name = text(body.name, "name", { max: 100, required: true });
-    const workspaceId = parseId(body.workspaceId, "workspaceId");
+    const description = body.description === undefined || body.description === null ? "" : text(body.description, "description", { max: 500 });
+    const workspaceId = body.workspaceId === undefined ? null : parseId(body.workspaceId, "workspaceId");
     if (!Array.isArray(body.boardIds) || !body.boardIds.length || body.boardIds.length > LIMITS.boardsPerToken) fail(`boardIds must list 1 to ${LIMITS.boardsPerToken} boards.`);
-    const boardIds = [...new Set(body.boardIds.map((id) => parseId(id, "boardIds").toHexString()))].map((id) => new ObjectId(id));
+    const boardIds = body.boardIds.map((id) => parseId(id, "boardIds"));
+    if (new Set(boardIds.map(hex)).size !== boardIds.length) fail("boardIds lists the same board more than once.");
     if (!Array.isArray(body.scopes) || body.scopes.length !== 1 || !SCOPES.includes(body.scopes[0])) fail('scopes must be ["read"]: API tokens are read-only.');
     const now = new Date();
     const expiresAt = this.parseExpiry(body.expiresAt, now);
+    const { actor, workspaceIds, boards } = workspaceId ? await this.oneWorkspaceScope(sessionActor, workspaceId, boardIds) : await this.boardScope(sessionActor, boardIds);
+    if (await this.repos.apiTokens.countActive(actor.userId, now) >= this.maxActive) throw conflict("TOKEN_LIMIT_REACHED", `You can have ${this.maxActive} active tokens. Revoke one you no longer need.`);
+    const { doc, token } = this.newDocument({ name, description, ownerUserId: actor.userId, workspaceIds, boardIds: boards, expiresAt, now });
+    await this.connection.withTransaction(async (session) => {
+      await this.repos.apiTokens.insert(doc, { session });
+      await this.repos.apiTokens.appendAudit({ action: "token.created", tokenId: doc._id, ownerUserId: actor.userId, actorUserId: actor.userId, actorName: actor.displayName, workspaceId: doc.workspaceId, workspaceIds: doc.workspaceIds, at: now }, { session });
+    });
+    return { token: await this.describe(doc, actor), secret: token };
+  }
+
+  // One workspace named by the client (the original request shape): every board must be in it.
+  async oneWorkspaceScope(sessionActor, workspaceId, boardIds) {
     const actor = await this.requireIssuer(sessionActor, workspaceId);
     const workspace = await this.repos.workspaces.findById(workspaceId);
     if (!workspace) throw new ApiError(404, "NOT_FOUND", "This workspace doesn't exist or you don't have access to it.");
     const boards = await this.repos.boards.findManyInWorkspace(workspaceId, boardIds);
     if (boards.length !== boardIds.length) fail("A selected board isn't a board of this workspace.");
-    if (await this.repos.apiTokens.countActive(actor.userId, now) >= this.maxActive) throw conflict("TOKEN_LIMIT_REACHED", `You can have ${this.maxActive} active tokens. Revoke one you no longer need.`);
-    const { doc, token } = this.newDocument({ name, ownerUserId: actor.userId, workspaceId, boardIds, expiresAt, now });
-    await this.connection.withTransaction(async (session) => {
-      await this.repos.apiTokens.insert(doc, { session });
-      await this.repos.apiTokens.appendAudit({ action: "token.created", tokenId: doc._id, ownerUserId: actor.userId, actorUserId: actor.userId, actorName: actor.displayName, workspaceId, at: now }, { session });
-    });
-    return { token: await this.describe(doc, actor), secret: token };
+    return { actor, workspaceIds: [workspaceId], boards: boardIds };
   }
 
-  newDocument({ name, ownerUserId, workspaceId, boardIds, expiresAt, now, rotatedFromId = null }) {
+  // Boards from anywhere: their workspaces are read from the database. Any board that doesn't exist, or whose workspace this
+  // person can't issue tokens for, gets the same answer, so a guessed ID tells them nothing.
+  async boardScope(sessionActor, boardIds) {
+    this.requireAdmin(sessionActor);
+    const actor = await this.ownerActor(sessionActor.userId);
+    if (!actor) throw new ApiError(403, "FORBIDDEN", "Your JARC account can't manage API tokens.");
+    const boards = await this.repos.boards.findSummariesByIds(boardIds);
+    const unreachable = () => fail("A selected board doesn't exist or you can't create tokens for it. Refresh the list and choose again.");
+    if (boards.length !== boardIds.length) unreachable();
+    const workspaceIds = workspacesIn(boardIds, boards);
+    const found = await Promise.all(workspaceIds.map(async (id) => [await this.repos.workspaces.findById(id), await this.roleOf(actor, id)]));
+    if (found.some(([workspace, role]) => !workspace || !Access.atLeast(role, ISSUER_ROLE))) unreachable();
+    return { actor, workspaceIds, boards: boardIds };
+  }
+
+  newDocument({ name, description = "", ownerUserId, workspaceIds, boardIds, expiresAt, now, rotatedFromId = null }) {
     const { publicId, token, digest } = generateToken(this.key);
-    return { token, doc: { _id: new ObjectId(), publicId, digest, name, ownerUserId, workspaceId, boardIds, scopes: [...SCOPES], createdAt: now, expiresAt, revokedAt: null, lastUsedAt: null, requestCount: 0, rotatedFromId, rotatedToId: null } };
+    return { token, doc: { _id: new ObjectId(), publicId, digest, name, ...(description ? { description } : {}), ownerUserId, ...scopeFields(workspaceIds), boardIds, scopes: [...SCOPES], createdAt: now, expiresAt, revokedAt: null, lastUsedAt: null, requestCount: 0, rotatedFromId, rotatedToId: null } };
   }
 
   // Every owner's tokens, for an API administrator. Each token's status and names follow its OWNER's current access (that is
@@ -177,11 +224,21 @@ class ApiTokenService {
     const people = await this.peopleNamed(docs.flatMap((d) => [d.ownerUserId, d.revokedByUserId]));
     const owners = new Map(), roles = new Map();
     await Promise.all([...new Set(docs.map((d) => hex(d.ownerUserId)))].map(async (id) => owners.set(id, await this.ownerActor(new ObjectId(id)))));
-    await Promise.all([...new Set(docs.map((d) => `${hex(d.ownerUserId)}:${hex(d.workspaceId)}`))].map(async (key) => {
+    await Promise.all([...new Set(docs.flatMap((d) => workspacesOf(d).map((w) => `${hex(d.ownerUserId)}:${hex(w)}`)))].map(async (key) => {
       const [owner, workspace] = key.split(":"), actor = owners.get(owner);
       roles.set(key, actor ? await this.roleOf(actor, new ObjectId(workspace)) : null);
     }));
-    return Promise.all(docs.map((doc) => this.describe(doc, owners.get(hex(doc.ownerUserId)), roles.get(`${hex(doc.ownerUserId)}:${hex(doc.workspaceId)}`), { viewerUserId: sessionActor.userId, people })));
+    // Every workspace and board named by any token, read once for the whole list (names only).
+    const context = await this.scopeContext(docs);
+    return Promise.all(docs.map((doc) => this.describe(doc, owners.get(hex(doc.ownerUserId)), new Map(workspacesOf(doc).map((w) => [hex(w), roles.get(`${hex(doc.ownerUserId)}:${hex(w)}`) ?? null])), { viewerUserId: sessionActor.userId, people, context })));
+  }
+
+  // The workspaces and boards these tokens name, as they are now: { workspaces: Map(id → doc), boards: Map(id → summary) }.
+  async scopeContext(docs) {
+    const workspaceIds = [...new Set(docs.flatMap((d) => workspacesOf(d).map(hex)))].map((id) => new ObjectId(id));
+    const boardIds = [...new Set(docs.flatMap((d) => (d.boardIds || []).map(hex)))].map((id) => new ObjectId(id));
+    const [workspaces, boards] = await Promise.all([Promise.all(workspaceIds.map((id) => this.repos.workspaces.findById(id))), this.repos.boards.findSummariesByIds(boardIds)]);
+    return { workspaces: new Map(workspaces.filter(Boolean).map((w) => [hex(w._id), w])), boards: new Map(boards.map((b) => [hex(b._id), b])) };
   }
 
   // Display names of stored people, by ID (a person no longer stored has none).
@@ -193,20 +250,29 @@ class ApiTokenService {
 
   // A token's details for an API administrator: never the digest. Workspace and board names appear only while the owner still has
   // access. mine: the viewer owns it (only the owner may rotate it); owner and revokedBy name the people involved.
-  async describe(doc, actor, knownRole, { viewerUserId = actor?.userId ?? null, people = null } = {}) {
-    const role = knownRole !== undefined ? knownRole : (actor ? await this.roleOf(actor, doc.workspaceId) : null);
-    const [workspace, boards] = role ? await Promise.all([this.repos.workspaces.findById(doc.workspaceId), this.repos.boards.findManyInWorkspace(doc.workspaceId, doc.boardIds)]) : [null, []];
-    const names = new Map(boards.map((b) => [hex(b._id), b.name]));
+  // knownRoles: Map(workspace id → the owner's role there, or null), when the caller has worked them out already.
+  // workspace is the first (or only) workspace, as before; workspaces lists them all. A board is named, and counted as reachable,
+  // only while it is still in one of the token's workspaces and the owner can read that workspace (what the token can read now).
+  async describe(doc, actor, knownRoles, { viewerUserId = actor?.userId ?? null, people = null, context = null } = {}) {
+    const spaces = workspacesOf(doc);
+    const roles = knownRoles instanceof Map ? knownRoles : new Map(await Promise.all(spaces.map(async (w) => [hex(w), actor ? await this.roleOf(actor, w) : null])));
+    const readable = spaces.filter((w) => roles.get(hex(w)));
+    const ctx = context || await this.scopeContext([doc]);
     const named = people || await this.peopleNamed([doc.ownerUserId, doc.revokedByUserId]);
     const now = new Date();
-    const status = doc.revokedAt ? "revoked" : doc.expiresAt <= now ? "expired" : role ? (doc.rotatedToId ? "rotating" : "active") : "no_access";
+    const status = doc.revokedAt ? "revoked" : doc.expiresAt <= now ? "expired" : readable.length ? (doc.rotatedToId ? "rotating" : "active") : "no_access";
     const mine = Boolean(viewerUserId && doc.ownerUserId?.equals?.(viewerUserId));
-    const canRotate = mine && Access.atLeast(role, ISSUER_ROLE);
+    const canRotate = mine && readable.length === spaces.length && spaces.every((w) => Access.atLeast(roles.get(hex(w)), ISSUER_ROLE));
+    const inScope = new Set(spaces.map(hex)), canRead = new Set(readable.map(hex));
+    const boardOf = (id) => { const b = ctx.boards.get(hex(id)); return b && inScope.has(hex(b.workspaceId)) && canRead.has(hex(b.workspaceId)) ? b : null; };
+    const workspaceName = (id) => (canRead.has(hex(id)) ? ctx.workspaces.get(hex(id))?.name ?? null : null);
+    const boards = doc.boardIds.map((id) => { const b = boardOf(id); return { id: hex(id), name: b?.name ?? null, workspaceId: b ? hex(b.workspaceId) : null, archived: Boolean(b?.archived), available: Boolean(b) }; });
     return {
-      id: hex(doc._id), name: doc.name, prefix: displayPrefix(doc.publicId), status, canRotate, mine, scopes: [...doc.scopes],
+      id: hex(doc._id), name: doc.name, description: doc.description || "", prefix: displayPrefix(doc.publicId), status, canRotate, mine, scopes: [...doc.scopes],
       owner: { id: hex(doc.ownerUserId), name: named.get(hex(doc.ownerUserId)) ?? null },
-      workspace: { id: hex(doc.workspaceId), name: workspace?.name ?? null },
-      boards: doc.boardIds.map((id) => ({ id: hex(id), name: names.get(hex(id)) ?? null })),
+      workspace: { id: hex(doc.workspaceId), name: workspaceName(doc.workspaceId) },
+      workspaces: spaces.map((w) => ({ id: hex(w), name: workspaceName(w), available: canRead.has(hex(w)), boardCount: boards.filter((b) => b.workspaceId === hex(w)).length })),
+      boards,
       createdAt: iso(doc.createdAt), expiresAt: iso(doc.expiresAt), lastUsedAt: iso(doc.lastUsedAt), revokedAt: iso(doc.revokedAt), requestCount: doc.requestCount || 0,
       revokedBy: doc.revokedByUserId ? { id: hex(doc.revokedByUserId), name: named.get(hex(doc.revokedByUserId)) ?? null } : null,
       rotatedFromId: hex(doc.rotatedFromId), rotatedToId: hex(doc.rotatedToId)
@@ -226,20 +292,29 @@ class ApiTokenService {
     const now = new Date();
     if (old.revokedAt || old.expiresAt <= now) throw conflict("TOKEN_NOT_ACTIVE", "This token has ended. Create a new one instead.");
     if (old.rotatedToId) throw conflict("TOKEN_ALREADY_ROTATED", "This token was already rotated. Rotate its replacement instead.");
-    const actor = await this.requireIssuer(sessionActor, old.workspaceId, { ownToken: true });
-    const workspace = await this.repos.workspaces.findById(old.workspaceId);
-    if (!workspace) throw new ApiError(404, "NOT_FOUND", "This workspace doesn't exist or you don't have access to it.");
-    const boards = await this.repos.boards.findManyInWorkspace(old.workspaceId, old.boardIds);
+    // Every workspace of the token is checked, as when it was created; the replacement keeps the boards that are still in them.
+    let actor = null;
+    for (const w of workspacesOf(old)) {
+      actor = await this.requireIssuer(sessionActor, w, { ownToken: true });
+      if (!await this.repos.workspaces.findById(w)) throw new ApiError(404, "NOT_FOUND", "This workspace doesn't exist or you don't have access to it.");
+    }
+    const inScope = new Set(workspacesOf(old).map(hex));
+    const current = (await this.repos.boards.findSummariesByIds(old.boardIds)).filter((b) => inScope.has(hex(b.workspaceId)));
+    const still = new Set(current.map((b) => hex(b._id)));
+    const boards = old.boardIds.filter((id) => still.has(hex(id)));
     if (!boards.length) throw conflict("TOKEN_NO_BOARDS", "None of this token's boards are available any more. Create a new token instead.");
     const lifetime = Math.min(old.expiresAt.getTime() - old.createdAt.getTime(), latestExpiry(now).getTime() - now.getTime());
     const expiresAt = body.expiresAt === undefined ? new Date(now.getTime() + lifetime) : this.parseExpiry(body.expiresAt, now);
-    const { doc, token } = this.newDocument({ name: old.name, ownerUserId: actor.userId, workspaceId: old.workspaceId, boardIds: boards.map((b) => b._id), expiresAt, now, rotatedFromId: old._id });
+    // The workspaces that still hold one of its boards, in the token's own order (never one it didn't have).
+    const holding = new Set(current.map((b) => hex(b.workspaceId)));
+    const remaining = workspacesOf(old).filter((w) => holding.has(hex(w)));
+    const { doc, token } = this.newDocument({ name: old.name, description: old.description || "", ownerUserId: actor.userId, workspaceIds: remaining, boardIds: boards, expiresAt, now, rotatedFromId: old._id });
     const graceEnds = new Date(now.getTime() + graceHours * 60 * 60 * 1000);
     const change = { rotatedToId: doc._id, expiresAt: graceEnds < old.expiresAt ? graceEnds : old.expiresAt, ...(graceHours === 0 ? { revokedAt: now } : {}) };
     await this.connection.withTransaction(async (session) => {
       if (!await this.repos.apiTokens.markRotated(old._id, actor.userId, change, { session })) throw conflict("TOKEN_ALREADY_ROTATED", "This token was already rotated or revoked.");
       await this.repos.apiTokens.insert(doc, { session });
-      await this.repos.apiTokens.appendAudit({ action: "token.rotated", tokenId: old._id, ownerUserId: actor.userId, actorUserId: actor.userId, actorName: actor.displayName, workspaceId: old.workspaceId, at: now }, { session });
+      await this.repos.apiTokens.appendAudit({ action: "token.rotated", tokenId: old._id, ownerUserId: actor.userId, actorUserId: actor.userId, actorName: actor.displayName, workspaceId: old.workspaceId, workspaceIds: old.workspaceIds, at: now }, { session });
     });
     return { token: await this.describe(doc, actor), secret: token, previous: await this.describe({ ...old, ...change }, actor) };
   }
@@ -251,7 +326,7 @@ class ApiTokenService {
     this.requireAdmin(sessionActor);
     const now = new Date();
     const revoked = await this.repos.apiTokens.revokeAny(tokenId, sessionActor.userId, now);
-    if (revoked) await this.repos.apiTokens.appendAudit({ action: "token.revoked", tokenId, ownerUserId: revoked.ownerUserId, actorUserId: sessionActor.userId, actorName: sessionActor.displayName ?? null, workspaceId: revoked.workspaceId, at: now });
+    if (revoked) await this.repos.apiTokens.appendAudit({ action: "token.revoked", tokenId, ownerUserId: revoked.ownerUserId, actorUserId: sessionActor.userId, actorName: sessionActor.displayName ?? null, workspaceId: revoked.workspaceId, workspaceIds: revoked.workspaceIds, at: now });
     const doc = revoked || await this.repos.apiTokens.findById(tokenId);
     if (!doc) throw new ApiError(404, "NOT_FOUND", "This token doesn't exist.");
     return { token: await this.describe(doc, await this.ownerActor(doc.ownerUserId), undefined, { viewerUserId: sessionActor.userId }) };
@@ -269,9 +344,11 @@ class ApiTokenService {
     return {
       items: entries.map((e) => { const t = tokens.get(hex(e.tokenId)); return {
         action: e.action, at: iso(e.at), reason: e.reason || null,
-        token: e.tokenId ? { id: hex(e.tokenId), name: t?.name ?? null, prefix: t ? displayPrefix(t.publicId) : null } : null,
+        // boardIds: the token's boards (identifiers, not secrets), so Activity can be filtered by board. Requests aren't logged per board.
+        token: e.tokenId ? { id: hex(e.tokenId), name: t?.name ?? null, prefix: t ? displayPrefix(t.publicId) : null, boardIds: (t?.boardIds || []).map(hex) } : null,
         actor: person(e.actorUserId, e.actorName || null), owner: person(e.ownerUserId),
-        workspace: e.workspaceId ? { id: hex(e.workspaceId), name: workspaces.get(hex(e.workspaceId)) ?? null } : null
+        workspace: e.workspaceId ? { id: hex(e.workspaceId), name: workspaces.get(hex(e.workspaceId)) ?? null } : null,
+        workspaces: (Array.isArray(e.workspaceIds) && e.workspaceIds.length ? e.workspaceIds : e.workspaceId ? [e.workspaceId] : []).map((w) => ({ id: hex(w), name: workspaces.get(hex(w)) ?? null }))
       }; })
     };
   }
@@ -298,9 +375,12 @@ class ApiTokenService {
     if (!doc.scopes.includes("read")) throw new ApiError(403, "INSUFFICIENT_SCOPE", "This API token doesn't allow reading.");
     const actor = await this.ownerActor(doc.ownerUserId);
     if (!actor) { this.auditOnce(doc, "token.use_refused", "owner disabled"); throw new ApiError(403, "TOKEN_OWNER_DISABLED", "The person who created this API token can no longer use JARC."); }
-    const role = await this.roleOf(actor, doc.workspaceId);
-    if (!role) { this.auditOnce(doc, "token.use_refused", "owner lost access"); throw new ApiError(403, "TOKEN_ACCESS_REVOKED", "The person who created this API token no longer has access to its workspace."); }
-    return { actor, role };
+    // Each of the token's workspaces, now. A token keeps reading the workspaces its owner can still read; with none left it stops.
+    const spaces = workspacesOf(doc);
+    const roles = await Promise.all(spaces.map((w) => this.roleOf(actor, w)));
+    const readable = spaces.filter((_, i) => roles[i]);
+    if (!readable.length) { this.auditOnce(doc, "token.use_refused", "owner lost access"); throw new ApiError(403, "TOKEN_ACCESS_REVOKED", "The person who created this API token no longer has access to its workspace."); }
+    return { actor, role: roles.find(Boolean), workspaceIds: readable };
   }
 
   // lastUsedAt and a request count, at most once a minute per token. Failing to record it never fails the request.
@@ -322,8 +402,8 @@ class ApiTokenService {
     if (now - (this.audited.get(key) || 0) < AUDIT_THROTTLE_MS) return;
     this.audited.set(key, now);
     if (this.audited.size > 5000) this.audited.clear();
-    this.repos.apiTokens.appendAudit({ action, tokenId: doc._id, ownerUserId: doc.ownerUserId, workspaceId: doc.workspaceId, reason }).catch((error) => this.logger?.error?.(`[api-tokens] couldn't record an audit entry: ${error.name}`));
+    this.repos.apiTokens.appendAudit({ action, tokenId: doc._id, ownerUserId: doc.ownerUserId, workspaceId: doc.workspaceId, workspaceIds: doc.workspaceIds, reason }).catch((error) => this.logger?.error?.(`[api-tokens] couldn't record an audit entry: ${error.name}`));
   }
 }
 
-module.exports = { ApiTokenService, SCOPES, LIMITS, ISSUER_ROLE, addUtcYears, latestExpiry };
+module.exports = { ApiTokenService, SCOPES, LIMITS, ISSUER_ROLE, addUtcYears, latestExpiry, workspacesOf };
