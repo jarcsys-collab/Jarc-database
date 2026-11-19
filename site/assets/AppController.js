@@ -441,7 +441,9 @@ class AppController {
     if (action === "request-delete-view") { const v=this.model.board.savedViews.find((x)=>String(x.id)===String(target.dataset.id)); if(v)this.view.showConfirm(`Delete the "${v.name}" view?`,"The view is removed for everyone on this board. Its records are not affected.","confirm-delete-view",String(v.id),"Delete view"); return; }
     if (action === "confirm-delete-view") { this.model.deleteView(target.dataset.payload); this.view.closeOverlay(); this.update(); this.view.toast("View deleted"); return; }
     if (action === "save-active-view") { if(this.model.saveActiveView()){this.view.closeOverlay();this.update();this.view.toast("View saved");} return; }
-    if (["open-form","new-item"].includes(action)) this.view.showRecordForm(this.model);
+    // New record: quick create (the name, the group, and only what the board requires). The full form stays one click away.
+    if (["open-form","new-item"].includes(action)) this.showQuickCreate();
+    if (action === "quick-create-more") { const form=target.closest("form"); const name=String(form?.elements.serial?.value||"").trim(), group=form?.elements.group?.value||""; this.view.closeOverlay(); this.view.showRecordForm(this.model,null,{prefill:{serial:name,...(group&&this.model.activeGroups.includes(group)?{[this.model.groupField]:group}:{})}}); return; }
     if (action === "edit") this.view.showRecordForm(this.model,this.model.rows.find((row)=>row.id===this.model.idOf(target.dataset.id)));
     if (action === "duplicate-record") { const id=this.model.duplicateRecord(target.dataset.id); this.update(); if(id)this.focusItem(id); this.view.toast("Item duplicated"); }
     if (action === "pin-item") { this.model.togglePin(target.dataset.id); this.update(); this.view.toast("Pin updated"); }
@@ -742,6 +744,7 @@ class AppController {
   }
   onSubmit(event) {
     event.preventDefault(); const action=event.target.dataset.action; const data=Object.fromEntries(new FormData(event.target));
+    if (action === "quick-create-form") { this.submitQuickCreate(event.target); return; }
     if (action === "form-design-form") { if (this.model.features?.nativeForms) this.forms?.saveDesigner(); return; }
     if (action === "form-fill-form") { if (this.model.features?.nativeForms) this.forms?.submitFill(); return; }
     if (action?.startsWith("integration-")) { this.integrations?.onSubmit(action, data, event.target); return; }
@@ -974,7 +977,7 @@ class AppController {
   download(blob,filename) { try { const url=URL.createObjectURL(blob),link=document.createElement("a"); link.href=url; link.download=filename; link.click(); setTimeout(()=>URL.revokeObjectURL(url),500); return true; } catch(error) { this.view.showMessage("Export failed",`The file could not be created in this browser (${error.message}). Try again, or use a different browser.`); return false; } }
   chooseBoardAction(action) {
     if(this.needsWorkspace(false))return;
-    if(this.model.screen==="board"&&this.model.board&&!this.model.board.archived){action==="import"?this.view.showImport(this.model):this.view.showRecordForm(this.model);return;}
+    if(this.model.screen==="board"&&this.model.board&&!this.model.board.archived){action==="import"?this.view.showImport(this.model):this.showQuickCreate();return;}
     const boards=this.model.workspaces.filter(w=>!w.archived).flatMap(w=>w.boards.filter(b=>!b.archived).map(b=>({...b,workspaceId:w.id,workspaceName:w.name})));
     const fromFile=action==="import"&&this.view.canImportFile(this.model);
     this.view.overlay(`<div class="modal small-modal"><div class="modal-head"><h2>${fromFile?"Import data":action==="import"?"Import into a board":"Create a record in…"}</h2>${this.view.closeButton()}</div><div class="choice-list">${fromFile?`<button data-action="xl-import-new">${icon("import")}<span><strong>New board from a file</strong><small>Excel or CSV, in ${this.view.escape(this.model.workspace.name)}</small></span></button>`:""}${boards.map(b=>`<button data-action="choose-board-action" data-mode="${this.view.attr(action)}" data-id="${this.view.attr(b.id)}" data-workspace="${this.view.attr(b.workspaceId)}">${icon("board")}<span><strong>${this.view.escape(b.name)}</strong><small>${this.view.escape(b.workspaceName)}</small></span></button>`).join("")||'<p>Create a board first to add records.</p><button data-action="new-board" class="button primary">Create board</button>'}</div></div>`);
@@ -1525,10 +1528,54 @@ class AppController {
     }
     return false;
   }
+  // ---- Quick create (New record). Like monday.com's "+ Add item": type a name, press Enter. The record is shown at once (the
+  // usual optimistic change), the server assigns its Record ID and applies the columns' defaults, and the dialog waits for that
+  // save: it closes when the record is stored, or stays open with the reason if it isn't (the change is rolled back, as for any
+  // failed save). One submission at a time. The board keeps its scroll position (refreshBoard).
+  showQuickCreate({group=""}={}){
+    const m=this.model; if(!m.board||m.board.archived||m.screen!=="board")return;
+    this.view.showQuickCreate(m,{group});
+  }
+  async submitQuickCreate(form){
+    if(form.dataset.busy||this.busy)return;
+    const m=this.model, say=(text)=>{const el=form.querySelector(".quick-create-error");if(el)el.textContent=text;};
+    const name=String(form.elements.serial.value||"").trim();
+    if(!name){say("Type a name for the record.");form.elements.serial.focus();return;}
+    const record={serial:name};
+    for(const c of m.quickCreateColumns){
+      const value=String(form.elements[c.key]?.value??"").trim();
+      if(!value){say(`${c.label} is required.`);form.elements[c.key]?.focus();return;}
+      record[c.key]=m.isMultiColumn(c)?[value]:value;
+    }
+    const group=form.elements.group?.value||"";
+    if(group&&m.activeGroups.includes(group)){record[m.groupField]=group;if(m.isGroupCollapsed?.(group))m.toggleGroupCollapsed(group,false);}
+    const button=form.querySelector('[data-role="quick-create-submit"]');
+    form.dataset.busy="1";form.setAttribute("aria-busy","true");say("");
+    if(button){button.disabled=true;button.textContent="Creating…";}
+    // busy (as in runBusy): a failed save then leaves this dialog open with the reason, instead of the usual rollback redraw
+    // (onRollback), which would close it and lose what was typed. The row itself is shown at once, as for any edit.
+    this.busy=true; let ok=false;
+    let created=null;
+    try{ created=m.upsert(record); const saving=m.lastSave; this.refreshBoard(); ok=await saving; }
+    finally{ this.busy=false; }
+    if(!ok){
+      // Rolled back by the model: show the board as it is again, and keep what was typed so it can be tried again.
+      this.refreshBoard(); this.saveFeedback(); delete form.dataset.busy; form.removeAttribute("aria-busy");
+      if(button){button.disabled=false;button.textContent="Create";}
+      if(form.isConnected){say(`The record wasn't created. ${(m.saveError&&StorageError.describe(m.saveError)?.message)||"Check your connection and try again."}`);form.elements.serial.focus();}
+      return;
+    }
+    if(form.isConnected)this.view.closeOverlay();
+    const id=m.idOf(created.id), shown=m.visibleRows.some((r)=>r.id===id);
+    // No redraw here: the row is already shown, its Record ID cell was patched in place when the server's ID arrived
+    // (patchRecordIds), and closing the dialog runs the app's usual deferred refresh.
+    if(shown){this.view.toast(`Created “${name}”`,{label:"Open",onClick:()=>{const row=m.rows.find((r)=>r.id===m.idOf(id));if(row)this.view.showRecordForm(m,row);}});}
+    else this.view.toast(`Created “${name}”. The current search or filters hide it.`,{label:"Show",onClick:()=>{m.resetMainView();this.update();this.focusItem(m.idOf(id));}});
+  }
   // Inline add: a temporary draft row. Nothing is stored until a non-empty name is entered.
   startInlineAdd(trigger){
-    const blocking=this.model.board.columns.some((c)=>c.key!=="serial"&&c.required&&c.type!=="checkbox"&&!this.model.hasValue(c.defaultValue));
-    if(blocking){this.view.showRecordForm(this.model);return;} // other required fields need the full form
+    // Other required fields without a default: quick create asks for just those (in this group), not the full form.
+    if(this.model.quickCreateColumns.length){this.showQuickCreate({group:trigger.dataset.group||""});return;}
     const quick=trigger.closest("tr"); quick.parentElement.querySelector(".draft-row")?.remove();
     quick.insertAdjacentHTML("beforebegin",this.view.draftRow(this.model,trigger.dataset.group||""));
     quick.previousElementSibling.querySelector("input").focus();

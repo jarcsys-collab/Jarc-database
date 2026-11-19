@@ -639,6 +639,10 @@ class BoardModel {
   get groupField(){return this.groupColumn?.key||"@group";}
   groupOf(row){return String(row?.[this.groupField]??"").trim();}
   get activeGroups(){const meta=this.board?.groupMeta||{};return (this.board?.groups||[]).filter((g)=>!meta[g]?.archived);}
+  // The columns a new record can't be saved without: required, with no default, and not filled in automatically (the Name is asked
+  // for separately; the group comes from the group choice; a checkbox starts unticked; files are added after creation). The server
+  // checks the same rule (validation/resources.js), so quick create asks for exactly these and nothing else.
+  get quickCreateColumns(){return (this.board?.columns||[]).filter((c)=>c.key!=="serial"&&c.key!==this.groupField&&c.required&&!["checkbox","files","group"].includes(c.type)&&!this.hasValue(c.defaultValue));}
   get archivedGroupNames(){const meta=this.board?.groupMeta||{};return (this.board?.groups||[]).filter((g)=>meta[g]?.archived);}
   groupColor(name){const own=this.board?.groupMeta?.[name]?.color;if(BoardModel.isGroupColor(own))return own;const i=Math.max(0,(this.board?.groups||[]).indexOf(name));return BoardModel.GROUP_COLORS[i%BoardModel.GROUP_COLORS.length].value;}
   nextGroupColor(){const used=new Set(this.board.groups.map((g)=>this.groupColor(g)));return (BoardModel.GROUP_COLORS.find((c)=>!used.has(c.value))||BoardModel.GROUP_COLORS[this.board.groups.length%BoardModel.GROUP_COLORS.length]).value;}

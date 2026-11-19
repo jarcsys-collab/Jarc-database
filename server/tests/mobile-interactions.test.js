@@ -165,7 +165,11 @@ describe("Mobile interactions (real app, headless browser)", { skip: BROWSER ? f
       await browser.evaluate("document.querySelector('.board-list-row .board-list-open')?.scrollIntoView({ block: 'center' })"); await sleep(100);
       await browser.tapOn(".board-list-row .board-list-open", { settle: 800 });
       assert.ok(await browser.evaluate(smallest) >= 16, `${width}px board toolbar fields`);
+      // New record opens quick create (the name, the group); More fields… opens the full record form. Both stay on screen.
       await browser.tapOn('.board-tools [data-action="open-form"]', { settle: 400 });
+      assert.equal(await browser.evaluate(onScreen("form.quick-create-modal")), true, `${width}px quick create`);
+      assert.ok(await browser.evaluate(smallest) >= 16, `${width}px quick create fields`);
+      await browser.tapOn('form.quick-create-modal [data-action="quick-create-more"]', { settle: 400 });
       assert.equal(await browser.evaluate(onScreen(".record-drawer")), true, `${width}px record form`);
       assert.ok(await browser.evaluate(smallest) >= 16, `${width}px record form fields`);
       await browser.key("Escape");

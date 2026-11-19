@@ -175,7 +175,7 @@ describe("Phase 14: Command Center (real app, headless browser, role_based)", { 
     await type(mia, "create record");
     assert.ok(await mia.evaluate("[...document.querySelectorAll('[data-command=new-record]')].some((b) => /Service jobs/.test(b.textContent))"), "Create record in the current editable board");
     await click(mia, "[data-command=new-record]");
-    assert.ok(await mia.waitFor("!!document.querySelector('.record-drawer, form.record-form, [data-action=record-form]')", 4000), "opens the normal record form (nothing saved yet)");
+    assert.ok(await mia.waitFor("!!document.querySelector('form.quick-create-modal')", 4000), "opens New record, quick create (nothing saved yet)");
     await mia.key("Escape");
     await openApp(vic); await openBoard(vic, "Service jobs");
     await palette(vic);

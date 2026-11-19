@@ -1821,3 +1821,21 @@ tr:hover .record-id-copy, .record-id-copy:focus-visible { opacity: 1; }
 .file-filter-empty { color: var(--muted); font-size: var(--fs-sm); margin: 6px 2px; }
 .file-preview-body.is-zoomed { overflow: auto; max-height: 70vh; }
 .file-preview-body.is-zoomed .file-preview-image { max-width: none; max-height: none; width: auto; height: auto; cursor: zoom-out; }
+
+/* Quick create (New record): a compact dialog with the name, the group and only the required fields (AppView.showQuickCreate). */
+.quick-create-modal { width: min(440px, 100%); }
+.quick-create-modal .modal-head { margin-bottom: 16px; }
+.quick-create-fields { display: grid; gap: 14px; }
+.quick-create-fields label { display: flex; flex-direction: column; gap: 6px; font-size: 11px; font-weight: 550; color: var(--muted); }
+.quick-create-fields input, .quick-create-fields select { font-size: 14px; font-weight: 400; min-height: 40px; }
+.quick-create-modal .field-note { margin: 10px 0 0; font-size: 11px; color: var(--faint); }
+.quick-create-error { margin: 8px 0 0; font-size: 12px; color: var(--danger); min-height: 0; }
+.quick-create-error:empty { display: none; }
+.quick-create-modal[aria-busy="true"] [data-role="quick-create-submit"] { cursor: progress; }
+@media (max-width: 620px) {
+  .quick-create-overlay { align-items: flex-end; }
+  .quick-create-modal { width: 100%; border-radius: 14px 14px 0 0; }
+  .quick-create-fields input, .quick-create-fields select { font-size: 16px; } /* 16 px or more: no iOS zoom on focus */
+  .quick-create-modal .modal-actions { flex-wrap: wrap; }
+  .quick-create-modal .modal-actions .button { flex: 1 1 auto; min-height: 44px; }
+}
