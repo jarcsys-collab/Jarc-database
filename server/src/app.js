@@ -116,8 +116,10 @@ function createApp({ apiTokens = null, features = {}, repository, environment = 
     const identify = (req, res, next) => (req.actor ? next() : authenticate(req, res, next));
     // Everything after `identify` requires a caller (in Entra mode, a valid session — including unknown paths).
     if (auth) api.use(identify, sessionRoutes({ repos: dataLayer.repos, access, accounts: accountService }));
-    // API tokens: managed with a session (and CSRF) here; used only under /external, which never reads a session.
-    const tokenService = auth && apiTokens ? dataLayer.services.apiTokens.configure({ key: apiTokens.key, access, tenantId: auth.entra.tenantId, ...(apiTokens.maxActive ? { maxActive: apiTokens.maxActive } : {}) }) : null;
+    // API tokens: managed with a session (and CSRF) here; used only under /external, which never reads a session. Managing them is
+    // for the JARC API administrators only (apiTokens.adminObjectIds, JARC_API_ADMIN_OIDS in this tenant), never decided by
+    // open access, workspace roles or JARC.Admin.
+    const tokenService = auth && apiTokens ? dataLayer.services.apiTokens.configure({ key: apiTokens.key, access, tenantId: auth.entra.tenantId, adminObjectIds: apiTokens.adminObjectIds || [], ...(apiTokens.maxActive ? { maxActive: apiTokens.maxActive } : {}) }) : null;
     if (tokenService) {
       external.use(externalApiRoutes({ tokens: tokenService, repos: dataLayer.repos, environment, ...(apiTokens.perMinute ? { rate: { perWindow: apiTokens.perMinute, windowMs: 60 * 1000 } } : {}), ...(apiTokens.failedAuth ? { failedAuth: apiTokens.failedAuth } : {}) }));
       api.use(identify, apiTokenRoutes({ tokens: tokenService, access, repos: dataLayer.repos, ...(apiTokens.issuePerHour ? { limiter: createSearchLimiter({ perWindow: apiTokens.issuePerHour, windowMs: 60 * 60 * 1000 }) } : {}) }));
@@ -133,7 +135,8 @@ function createApp({ apiTokens = null, features = {}, repository, environment = 
     if (enabled.nativeForms && dataLayer.services?.forms) api.use(identify, formRoutes({ services: dataLayer.services, access }));
     if (enabled.spreadsheetImports && dataLayer.services?.importJobs) api.use(identify, importRoutes({ services: dataLayer.services, access }));
     // What this server has switched on, so the browser shows only what will work. The routes above are what enforce it.
-    api.get("/features", identify, (req, res) => res.status(200).set("Cache-Control", "no-store").json({ features: tokenService ? { ...enabled, apiTokens: true } : enabled }));
+    // apiTokenAdmin: whether THIS caller is a JARC API administrator (only to show or hide the Developer sections).
+    api.get("/features", identify, (req, res) => res.status(200).set("Cache-Control", "no-store").json({ features: tokenService ? { ...enabled, apiTokens: true, apiTokenAdmin: tokenService.isAdmin(req.actor) } : enabled }));
     api.use(identify, preferenceRoutes({ repos: dataLayer.repos }));
     if (dataLayer.services?.integration) api.use(identify, integrationRoutes({ integration: dataLayer.services.integration, access }));
     if (googleDrive) api.use(identify, googleDriveRoutes({ drive: googleDrive, canManage: (actor) => actorCanManageDrive(actor, googleDrive.config, auth.entra.tenantId) }));

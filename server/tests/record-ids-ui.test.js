@@ -37,7 +37,8 @@ describe("Sidebar without the icon rail, and Record IDs (real app)", { skip: BRO
   };
 
   before(async () => {
-    server = await start({ JARC_TEST_API_TOKENS: "1" });
+    // Rhea is a JARC API administrator, so the record's API Information offers the API Explorer.
+    server = await start({ JARC_TEST_API_TOKENS: "1", JARC_TEST_API_ADMINS: OID });
     base = server.url;
     b = await launch(BROWSER);
     await b.motionPreference("reduce");

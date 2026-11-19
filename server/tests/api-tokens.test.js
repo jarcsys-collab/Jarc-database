@@ -38,6 +38,11 @@ async function call(token, url, { method = "GET", target = app, headers = {} } =
   return { status: res.status, body: text ? JSON.parse(text) : null, headers: res.headers, text };
 }
 const code = (res) => res.body?.error?.code;
+// Makes these test people JARC API administrators on a running test app (as JARC_API_ADMIN_OIDS would), keeping any already set.
+function grantApiAdmin(target, ...persons) {
+  const service = target.dataLayer.services.apiTokens;
+  service.adminObjectIds = Object.freeze([...new Set([...(service.adminObjectIds || []), ...persons.map((p) => p.oid.toLowerCase())])]);
+}
 
 // A workspace with a real admin, member, viewer, and two boards with synthetic records.
 async function workspace(name, target = app) {
@@ -59,7 +64,11 @@ const issue = (person, { ws, boards, name = "Power BI Integration", expiresAt = 
 before(async () => {
   issuer = await createTokenIssuer();
   app = await startEntraApp({ issuer, apiTokens: { key: KEY, issuePerHour: 1000, maxActive: 1000 } });
-  people = { sysadmin: issuer.person("Sys Admin", { admin: true }), admin: issuer.person("Wanda Admin"), member: issuer.person("Manny Member"), viewer: issuer.person("Vic Viewer"), outsider: issuer.person("Olive Outsider") };
+  people = { sysadmin: issuer.person("Sys Admin", { admin: true }), admin: issuer.person("Wanda Admin"), member: issuer.person("Manny Member"), viewer: issuer.person("Vic Viewer"), outsider: issuer.person("Olive Outsider"), adminOutsider: issuer.person("Otto Outside"), appRoleOnly: issuer.person("Ella Entra", { admin: true }) };
+  // appRoleOnly holds the JARC.Admin app role but isn't an API administrator.
+  // Everyone here but the outsider is an API administrator, so the membership rules below are tested on their own. adminOutsider is
+  // an API administrator with no membership anywhere.
+  grantApiAdmin(app, people.sysadmin, people.admin, people.member, people.viewer, people.adminOutsider);
   for (const p of Object.values(people)) await browserOf(p);
 });
 after(async () => { await app.close(); });
@@ -104,7 +113,8 @@ describe("Token generation and storage", () => {
     await bad({ scopes: ["write"] }, /read-only/);
     await bad({ scopes: ["read", "write"] }, /read-only/);
     await bad({ expiresAt: inDays(-1) }, /future/);
-    await bad({ expiresAt: inDays(400) }, /366/);
+    await bad({ expiresAt: inDays(5 * 366 + 2) }, /5 years/);
+    await bad({ expiresAt: "not a date" }, /expiresAt/);
     await bad({ expiresAt: undefined }, /expiresAt/);
     await bad({ name: "  " }, /name/);
     await bad({ boardIds: [] }, /boardIds/);
@@ -117,6 +127,7 @@ describe("Token generation and storage", () => {
 describe("Limits on issuing", () => {
   test("new tokens per hour, and active tokens per person, are limited", async () => {
     const limited = await startEntraApp({ issuer, apiTokens: { key: KEY, issuePerHour: 2 } });
+    grantApiAdmin(limited, people.admin);
     try {
       const f = await workspace("Hourly", limited);
       for (let i = 0; i < 2; i++) assert.equal((await issue(people.admin, { ws: f.ws, boards: [f.one] }, limited)).status, 201);
@@ -124,6 +135,7 @@ describe("Limits on issuing", () => {
       assert.deepEqual([over.status, over.body.error.code], [429, "RATE_LIMITED"]);
     } finally { await limited.close(); }
     const capped = await startEntraApp({ issuer, apiTokens: { key: KEY, issuePerHour: 1000 } });
+    grantApiAdmin(capped, people.admin);
     try {
       const f = await workspace("Cap", capped);
       const made = [];
@@ -137,7 +149,7 @@ describe("Limits on issuing", () => {
 });
 
 describe("Who may issue a token", () => {
-  test("any real member (admin, member or viewer) may issue a read-only token; outsiders can't; nobody can reach beyond their workspace", async () => {
+  test("an API administrator with any real membership (admin, member or viewer) may issue a read-only token; outsiders can't; nobody can reach beyond their workspace", async () => {
     const f = await workspace("Issuers"), other = await workspace("Issuers elsewhere");
     for (const who of ["admin", "member", "viewer"]) {
       const res = await issue(people[who], { ws: f.ws, boards: [f.one, f.two], name: `${who} token` });
@@ -148,7 +160,8 @@ describe("Who may issue a token", () => {
       assert.equal((await call(res.body.secret, `/boards/${f.two.board.id}/records?columns=serial,status`)).status, 200);
       assert.equal((await call(res.body.secret, `/boards/${other.one.board.id}/records`)).status, 404, `${who}: not another workspace`);
     }
-    assert.equal((await issue(people.outsider, { ws: f.ws, boards: [f.one] })).status, 404, "an outsider can't tell the workspace exists");
+    assert.equal((await issue(people.adminOutsider, { ws: f.ws, boards: [f.one] })).status, 404, "an administrator without access can't tell the workspace exists");
+    assert.equal(code(await issue(people.outsider, { ws: f.ws, boards: [f.one] })), "API_ADMIN_REQUIRED", "not an API administrator: refused before anything is looked up");
     // A member can't name a board from a workspace they aren't in.
     assert.equal((await issue(people.viewer, { ws: f.ws, boards: [other.one] })).status, 400);
   });
@@ -176,7 +189,8 @@ describe("Who may issue a token", () => {
     assert.ok((await names(people.admin)).includes("Options"));
     assert.ok((await names(people.member)).includes("Options"));
     assert.ok((await names(people.viewer)).includes("Options"));
-    assert.ok(!(await names(people.outsider)).includes("Options"));
+    assert.ok(!(await names(people.adminOutsider)).includes("Options"));
+    assert.equal(code(await as(people.outsider, "GET", "/api/v1/me/api-tokens/options")), "API_ADMIN_REQUIRED");
     const listed = (await as(people.admin, "GET", "/api/v1/me/api-tokens/options")).body.workspaces.find((w) => w.id === f.ws.id);
     assert.deepEqual(listed.boards.map((b) => b.name), ["Alpha", "Beta"]);
   });
@@ -188,7 +202,9 @@ describe("Who may issue a token", () => {
     test(`${label}: shared workspaces and other employees' boards can be chosen for a token, which stays limited to its boards`, async () => {
       const shared = await startEntraApp({ issuer, apiTokens: { key: KEY }, ...options });
       try {
+        // A (no administrator) creates; B is a JARC API administrator.
         const a = issuer.person("Ana Creator"), b = issuer.person("Ben Colleague");
+        grantApiAdmin(shared, b);
         // User A creates a workspace and a board; user B holds no membership anywhere.
         const ws = (await as(a, "POST", "/api/v1/workspaces", { name: "Sales Space" }, shared)).body.workspace;
         const board = (await as(a, "POST", `/api/v1/workspaces/${ws.id}/boards`, { name: "Field Board", columns: COLUMNS }, shared)).body.board;
@@ -275,10 +291,16 @@ describe("Who may issue a token", () => {
       const res = await fetch(`${app.url}/api/v1${url}`, { method, headers: { Authorization: `Bearer ${secret}` } });
       assert.equal(res.status, 401, `${method} ${url}`);
     }
-    // Other people's tokens don't exist for you.
-    assert.equal((await as(people.member, "POST", `/api/v1/me/api-tokens/${token.id}/revoke`, {})).status, 404);
+    // Another API administrator sees the token (to revoke it if needed) but can't rotate it: a replacement would be theirs.
     assert.equal((await as(people.member, "POST", `/api/v1/me/api-tokens/${token.id}/rotate`, {})).status, 404);
-    assert.ok(!(await as(people.member, "GET", "/api/v1/me/api-tokens")).body.items.some((t) => t.id === token.id));
+    const seen = (await as(people.member, "GET", "/api/v1/me/api-tokens")).body.items.find((t) => t.id === token.id);
+    assert.deepEqual([seen.mine, seen.canRotate, seen.owner.name], [false, false, "Wanda Admin"]);
+    // Someone who isn't an API administrator can't list, revoke or rotate anything, however they ask.
+    for (const [method, url] of [["GET", "/me/api-tokens"], ["GET", "/me/api-tokens/options"], ["GET", "/me/api-tokens/activity"], ["POST", `/me/api-tokens/${token.id}/revoke`], ["POST", `/me/api-tokens/${token.id}/rotate`], ["POST", "/me/api-tokens"]]) {
+      const res = await as(people.outsider, method, `/api/v1${url}`, method === "POST" ? {} : undefined);
+      assert.deepEqual([res.status, code(res)], [403, "API_ADMIN_REQUIRED"], `${method} ${url}`);
+    }
+    assert.equal((await app.db.collection(COLLECTIONS.apiTokens).findOne({ _id: new ObjectId(token.id) })).revokedAt, null);
     assert.equal((await call(secret, "/workspaces")).status, 200, "still valid after all of that");
   });
 });
@@ -461,8 +483,9 @@ describe("Expiry, revocation and rotation", () => {
       await revoke(token.id);
       const after = await stored(token.id);
       assert.ok(after.revokedAt instanceof Date);
-      const { revokedAt: _a, ...kept } = after, { revokedAt: _b, ...was } = before;
-      assert.deepEqual(kept, was, "only revokedAt changed");
+      const { revokedAt: _a, revokedByUserId, ...kept } = after, { revokedAt: _b, ...was } = before;
+      assert.deepEqual(kept, was, "only revokedAt and who revoked it changed");
+      assert.equal(revokedByUserId.toHexString(), await userId(people.admin));
       assert.deepEqual(await members.findOne(filter), memberBefore, "the membership is untouched");
       assert.deepEqual((await as(people.admin, "GET", "/api/v1/me/api-tokens/options")).body, optionsBefore, "the right to create tokens is exactly as it was");
       assert.equal((await as(people.admin, "POST", `/api/v1/me/api-tokens/${token.id}/rotate`, {})).status, 409, "and a revoked token can't be rotated back");
@@ -472,16 +495,30 @@ describe("Expiry, revocation and rotation", () => {
       assert.equal((await audits(token.id)).length, 1, "and records nothing more");
     });
 
-    test("nobody can revoke another person's token, administrators included", async () => {
+    test("only an API administrator can revoke another person's token: it stops at once and the administrator is recorded", async () => {
       const { filter, members, token, secret } = await setup("Revoke others");
       await members.updateOne(filter, { $set: { role: "VIEWER" } });
-      for (const person of [people.member, people.outsider, people.sysadmin]) {
+      // Not API administrators: an employee, and one with the JARC.Admin app role. Refused, and nothing changes.
+      for (const person of [people.outsider, people.appRoleOnly]) {
         const res = await as(person, "POST", `/api/v1/me/api-tokens/${token.id}/revoke`, {});
-        assert.deepEqual([res.status, res.body.error.code], [404, "NOT_FOUND"], person.name);
+        assert.deepEqual([res.status, res.body.error.code], [403, "API_ADMIN_REQUIRED"], person.name);
       }
       assert.equal((await stored(token.id)).revokedAt, null);
       assert.equal((await call(secret, "/me")).status, 200);
       assert.deepEqual(await audits(token.id), []);
+      // Another API administrator (who isn't a member of this workspace at all) revokes it.
+      const res = await as(people.adminOutsider, "POST", `/api/v1/me/api-tokens/${token.id}/revoke`, {});
+      assert.deepEqual([res.status, res.body.token.status, res.body.token.mine, res.body.token.owner.name, res.body.token.revokedBy.name], [200, "revoked", false, "Wanda Admin", "Otto Outside"]);
+      assert.equal(code(await call(secret, "/me")), "TOKEN_REVOKED", "the very next request is refused");
+      const [entry] = await audits(token.id);
+      assert.equal(entry.actorUserId.toHexString(), await userId(people.adminOutsider), "the administrator who revoked it");
+      assert.equal(entry.ownerUserId.toHexString(), await userId(people.admin), "the token's owner");
+      assert.equal(entry.actorName, "Otto Outside");
+      // The owner and other administrators see who did it.
+      const listed = (await as(people.admin, "GET", "/api/v1/me/api-tokens")).body.items.find((t) => t.id === token.id);
+      assert.deepEqual([listed.status, listed.revokedBy.name, listed.mine], ["revoked", "Otto Outside", true]);
+      assert.equal((await as(people.adminOutsider, "POST", `/api/v1/me/api-tokens/${token.id}/revoke`, {})).status, 200, "repeating changes nothing");
+      assert.equal((await audits(token.id)).length, 1);
     });
 
     test("CSRF protection, the session and ownership all still apply", async () => {
@@ -498,6 +535,7 @@ describe("Expiry, revocation and rotation", () => {
     test("a disabled or deleted account can't sign in to revoke, and its tokens are refused anyway", async () => {
       for (const [how, change] of [["disabled", (users, id) => users.updateOne({ _id: id }, { $set: { status: "disabled" } })], ["deleted", (users, id) => users.deleteOne({ _id: id })]]) {
         const owner = issuer.person(`Gone ${how}`), target = await startEntraApp({ issuer, apiTokens: { key: KEY } });
+        grantApiAdmin(target, owner);
         try {
           const f = await workspace(`Account ${how}`, target);
           assert.equal((await as(people.sysadmin, "POST", `/api/v1/workspaces/${f.ws.id}/members`, { userId: await userId(owner, target), role: "WORKSPACE_ADMIN" }, target)).status, 201);
@@ -512,10 +550,15 @@ describe("Expiry, revocation and rotation", () => {
     });
   });
 
-  test("an Entra administrator gets no standing through their role over someone else's token", async () => {
+  test("the JARC.Admin app role, without being an API administrator, gives no standing over tokens", async () => {
     const f = await workspace("No admin bypass");
     const { token, secret } = (await issue(people.admin, { ws: f.ws, boards: [f.one] })).body;
-    assert.equal((await as(people.sysadmin, "POST", `/api/v1/me/api-tokens/${token.id}/revoke`, {})).status, 404, "another person's token doesn't exist for them");
+    for (const [method, url] of [["POST", `/me/api-tokens/${token.id}/revoke`], ["GET", "/me/api-tokens"], ["POST", "/me/api-tokens"], ["GET", `/me/api-explorer/boards/${f.one.board.id}`]]) {
+      const res = await as(people.appRoleOnly, method, `/api/v1${url}`, method === "POST" ? {} : undefined);
+      assert.deepEqual([res.status, code(res)], [403, "API_ADMIN_REQUIRED"], `${method} ${url}`);
+    }
+    assert.equal((await as(people.appRoleOnly, "GET", "/api/v1/features")).body.features.apiTokenAdmin, false);
+    assert.equal((await as(people.admin, "GET", "/api/v1/features")).body.features.apiTokenAdmin, true);
     assert.equal((await call(secret, "/me")).status, 200);
   });
 });
@@ -636,6 +679,7 @@ describe("Permission changes after a token is created", () => {
 
   test("a disabled owner's tokens stop at once", async () => {
     const owner = issuer.person("Dana Disabled");
+    grantApiAdmin(app, owner);
     await browserOf(owner);
     const f = await workspace("Disabled");
     assert.equal((await as(people.sysadmin, "POST", `/api/v1/workspaces/${f.ws.id}/members`, { userId: await userId(owner), role: "WORKSPACE_ADMIN" })).status, 201);
@@ -651,6 +695,7 @@ describe("Permission changes after a token is created", () => {
     const managed = await startEntraApp({ issuer, apiTokens: { key: KEY }, accounts: { mode: "enforced", superAdmin: { tenantId: issuer.config.tenantId, objectId: SUPER, email: null } } });
     try {
       const owner = issuer.person("Ann Enforced");
+      grantApiAdmin(managed, owner);
       await browserOf(owner, managed);
       const ownerId = new ObjectId(await (async () => { const u = await managed.db.collection(COLLECTIONS.users).findOne({ displayName: "Ann Enforced" }); return u._id.toHexString(); })());
       const users = managed.db.collection(COLLECTIONS.users);
@@ -921,7 +966,8 @@ describe("Reading specific columns", () => {
     assert.deepEqual(res.body.example.items.find((r) => r.id === full.toHexString()).values, { qty: 12.5 });
     assert.ok(res.body.example.items.length <= 3 && res.body.example.pagination.limit === 3);
     assert.doesNotMatch(res.text, /jarc_[0-9a-f]{24}_|digest/);
-    assert.equal((await as(people.outsider, "GET", url)).status, 404, "not a member");
+    assert.equal((await as(people.adminOutsider, "GET", url)).status, 404, "an API administrator who isn't a member");
+    assert.equal(code(await as(people.outsider, "GET", url)), "API_ADMIN_REQUIRED", "not an API administrator");
     assert.equal((await new SessionClient(app.url, app.entra.appOrigin).request("GET", url)).status, 401);
     assert.equal((await fetch(`${app.url}${url}`, { headers: { Authorization: `Bearer ${secret}` } })).status, 401, "a token can't use it");
     assert.equal((await as(people.viewer, "GET", `${url}?columns=missing`)).status, 400);
@@ -957,17 +1003,18 @@ describe("Reading specific columns", () => {
     assert.deepEqual(admin.listed, admin.columns);
     // Opening it again changes nothing: nothing is generated per person or per visit.
     assert.deepEqual(await ids(people.viewer), viewer);
-    // Someone outside the workspace learns nothing, and an ID alone opens nothing.
-    assert.deepEqual((await ids(people.outsider)).status, [404, 404]);
+    // Someone outside the workspace learns nothing, and an ID alone opens nothing (the Explorer is for API administrators anyway).
+    assert.deepEqual((await ids(people.outsider)).status, [403, 404]);
+    assert.deepEqual((await ids(people.adminOutsider)).status, [404, 404], "an API administrator outside the workspace learns nothing either");
     assert.equal((await call(null, `/boards/${boardId}/records`)).status, 401);
     const outsiderWs = await as(people.sysadmin, "POST", "/api/v1/workspaces", { name: "Outsider's own" });
-    await as(people.sysadmin, "POST", `/api/v1/workspaces/${outsiderWs.body.workspace.id}/members`, { userId: await userId(people.outsider), role: "VIEWER" });
+    await as(people.sysadmin, "POST", `/api/v1/workspaces/${outsiderWs.body.workspace.id}/members`, { userId: await userId(people.adminOutsider), role: "VIEWER" });
     const ownBoard = (await as(people.sysadmin, "POST", `/api/v1/workspaces/${outsiderWs.body.workspace.id}/boards`, { name: "Own", columns: COLUMNS })).body.board;
-    const theirs = (await issue(people.outsider, { ws: outsiderWs.body.workspace, boards: [{ board: ownBoard }] })).body.secret;
+    const theirs = (await issue(people.adminOutsider, { ws: outsiderWs.body.workspace, boards: [{ board: ownBoard }] })).body.secret;
     assert.equal((await call(theirs, `/boards/${ownBoard.id}/records`)).status, 200, "their own token reads their own board");
     assert.equal((await call(theirs, `/boards/${boardId}/records`)).status, 404, "but not a board they only know the ID of");
     assert.equal((await call(theirs, `/boards/${boardId}/columns/qty/values`)).status, 404);
-    assert.equal((await issue(people.outsider, { ws: f.ws, boards: [{ board: { id: boardId } }] })).status, 404, "nor can they issue one for it");
+    assert.equal((await issue(people.adminOutsider, { ws: f.ws, boards: [{ board: { id: boardId } }] })).status, 404, "nor can they issue one for it");
   });
 });
 
@@ -1100,6 +1147,7 @@ describe("Pagination and incremental sync", () => {
 describe("Rate limits", () => {
   test("each token has its own limit, with headers and Retry-After; another token isn't affected", async () => {
     const limited = await startEntraApp({ issuer, apiTokens: { key: KEY, perMinute: 3 } });
+    grantApiAdmin(limited, people.admin);
     try {
       const f = await workspace("Limited", limited);
       const a = (await issue(people.admin, { ws: f.ws, boards: [f.one] }, limited)).body.secret, b = (await issue(people.admin, { ws: f.ws, boards: [f.one], name: "B" }, limited)).body.secret;
@@ -1118,6 +1166,7 @@ describe("Rate limits", () => {
 
   test("repeated failed attempts are slowed, without affecting a valid token", async () => {
     const guarded = await startEntraApp({ issuer, apiTokens: { key: KEY, failedAuth: { perWindow: 2, windowMs: 60000 } } });
+    grantApiAdmin(guarded, people.admin);
     try {
       const f = await workspace("Guarded", guarded);
       const { secret } = (await issue(people.admin, { ws: f.ws, boards: [f.one] }, guarded)).body;
@@ -1131,7 +1180,12 @@ describe("Off by default, and existing behaviour", () => {
   test("configuration: off unless asked for; needs Entra and a valid key; the key stays out of output", () => {
     const key = KEY.toString("base64");
     const off = loadConfig({});
-    assert.deepEqual({ ...off.apiTokens }, { enabled: false, perMinute: 120 });
+    assert.deepEqual({ ...off.apiTokens }, { enabled: false, perMinute: 120, adminObjectIds: [] });
+    // JARC_API_ADMIN_OIDS: object IDs only, normalised, no duplicates, at most 20; unset means nobody.
+    const A = "0C7C7C7C-0000-4000-8000-0000000000B1", B = "0c7c7c7c-0000-4000-8000-0000000000b2";
+    assert.deepEqual(loadConfig({ JARC_API_ADMIN_OIDS: ` ${A}, ${B};${A.toLowerCase()} ` }).apiTokens.adminObjectIds, [A.toLowerCase(), B]);
+    assert.throws(() => loadConfig({ JARC_API_ADMIN_OIDS: "adriane@example.invalid" }), /object IDs \(GUIDs\)/);
+    assert.throws(() => loadConfig({ JARC_API_ADMIN_OIDS: Array.from({ length: 21 }, (_, i) => `0c7c7c7c-0000-4000-8000-${String(i).padStart(12, "0")}`).join(",") }), /at most 20/);
     const prod = (extra) => loadConfig(entraEnv({ NODE_ENV: "production", ...extra }));
     assert.equal(prod({}).apiTokens.enabled, false, "off in production unless switched on");
     assert.throws(() => prod({ JARC_FEATURE_API_TOKENS: "true" }), (e) => e instanceof ConfigError && /JARC_API_TOKEN_KEY/.test(e.message));

@@ -9,7 +9,9 @@ const { findBrowser, launch, freePort, waitForServer } = require("./support/head
 
 const BROWSER = findBrowser();
 const DESKTOP = { width: 1440, height: 900 }, MOBILE = { width: 390, height: 844 };
-const OID = "0e7e7e7e-0000-4000-8000-000000000091", OTHER = "0e7e7e7e-0000-4000-8000-000000000092";
+const OID = "0e7e7e7e-0000-4000-8000-000000000091", OTHER = "0e7e7e7e-0000-4000-8000-000000000092", EMPLOYEE = "0e7e7e7e-0000-4000-8000-000000000093";
+// OID and OTHER are JARC API administrators (JARC_API_ADMIN_OIDS); EMPLOYEE is an ordinary employee.
+const API_ADMINS = [OID, OTHER].join(",");
 
 describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false : "no Chrome or Edge installed" }, () => {
   let server, base, b, boardId;
@@ -42,7 +44,7 @@ describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false :
   let directoryIds = null;
 
   before(async () => {
-    server = await start({ JARC_TEST_API_TOKENS: "1" });
+    server = await start({ JARC_TEST_API_TOKENS: "1", JARC_TEST_API_ADMINS: API_ADMINS });
     base = server.url;
     b = await launch(BROWSER);
     await b.motionPreference("reduce");
@@ -405,6 +407,52 @@ describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false :
       assert.ok(await wait(`document.querySelector('[data-action="apitok-ex-op"]')?.value === "values" && document.querySelector('[data-action="apitok-ex-board"]')?.value === ${JSON.stringify(boardId)}`, 8000), "Explore opens the column in the Explorer");
     });
   }
+
+  // The expiry: any date from tomorrow up to 5 calendar years ahead, checked here as the server checks it.
+  for (const [label, viewport] of [["desktop", DESKTOP], ["mobile", MOBILE]]) {
+    test(`New token expiry (${label}): up to 5 years ahead; the last day offered is accepted, later or past dates are explained`, async () => {
+      await reload(viewport);
+      await click('[data-action="apitok-new"]');
+      assert.ok(await wait("!!document.querySelector('form.apitok-modal input[name=\"board\"]')", 8000));
+      const range = JSON.parse(await b.evaluate(`(() => { const i = document.querySelector('form.apitok-modal input[name="expires"]'); const max = new Date(Date.UTC(new Date().getUTCFullYear() + 5, new Date().getUTCMonth(), Math.min(new Date().getUTCDate(), new Date(Date.UTC(new Date().getUTCFullYear() + 5, new Date().getUTCMonth() + 1, 0)).getUTCDate()), new Date().getUTCHours(), new Date().getUTCMinutes()) - 120000); const local = max.getFullYear() + "-" + String(max.getMonth() + 1).padStart(2, "0") + "-" + String(max.getDate()).padStart(2, "0"); return JSON.stringify({ min: i.min, max: i.max, value: i.value, expected: local, help: document.querySelector("#apitok-expiry-help")?.textContent || "" }); })()`));
+      assert.equal(range.max, range.expected, "the picker reaches 5 calendar years ahead");
+      assert.ok(range.min < range.value && range.value < range.max, "the default stays well inside");
+      assert.match(range.help, /up to 5 years/);
+      assert.ok(await noSidewaysScroll(), "fits the screen");
+      const fill = (expires, name) => b.evaluate(`(() => { const f = document.querySelector("form.apitok-modal"); f.querySelector('input[name="board"]').checked = true; f.elements.name.value = ${JSON.stringify(name)}; f.elements.expires.value = ${JSON.stringify(expires)}; f.requestSubmit(); })()`);
+      const error = () => text("form.apitok-modal .apitok-error");
+      // Past and beyond the limit: explained, and nothing is sent.
+      await fill("2020-01-01", "Too early"); assert.match(await error(), /from tomorrow up to 5 years/);
+      const beyond = await b.evaluate(`(() => { const [y, m, d] = ${JSON.stringify(range.max)}.split("-").map(Number); const next = new Date(y, m - 1, d + 1); return next.getFullYear() + "-" + String(next.getMonth() + 1).padStart(2, "0") + "-" + String(next.getDate()).padStart(2, "0"); })()`);
+      await fill(beyond, "Too late"); assert.match(await error(), /from tomorrow up to 5 years/);
+      assert.equal(await has("#apitok-secret"), false, "nothing was created");
+      // The last day offered: accepted by the server, and never more than 5 years from now.
+      await fill(range.max, `Five years ${label}`);
+      assert.ok(await wait("!!document.querySelector('#apitok-secret')", 8000), `created: ${await error()}`);
+      const expires = await b.evaluate(`fetch("/api/v1/me/api-tokens").then((r) => r.json()).then((x) => x.items.find((t) => t.name === ${JSON.stringify(`Five years ${label}`)}).expiresAt)`);
+      const years = (new Date(expires) - Date.now()) / (365.25 * 86400000);
+      assert.ok(years > 4.99 && years <= 5.001, `about five years: ${years}`);
+      await click('[data-action="apitok-done"]');
+    });
+  }
+
+  test("someone who isn't an API administrator keeps the board IDs and documentation, but sees no token sections", async () => {
+    await b.open(`${base}/api/v1/health`, DESKTOP);
+    assert.equal(await signIn(EMPLOYEE, "Eve Employee", true), 201);
+    await b.open(`${base}/`, DESKTOP);
+    await openDeveloper("overview");
+    const nav = JSON.parse(await b.evaluate(`JSON.stringify([...document.querySelectorAll('.developer-window .settings-nav [data-action="apitok-tab"]')].map((x) => x.dataset.tab))`));
+    assert.deepEqual(nav, ["overview", "directory", "docs"], "no API Tokens, API Explorer or API Activity, even with the JARC.Admin role");
+    assert.match(await text("#apitok-root .account-alert"), /issued by JARC API administrators/);
+    assert.equal(await has('[data-action="apitok-new"]'), false);
+    await click('.developer-window [data-action="apitok-tab"][data-tab="directory"]');
+    assert.ok(await wait("!!document.querySelector('.apitok-dir-columns')", 8000), "Boards & Columns still lists the boards");
+    assert.equal(await has('#apitok-root [data-action="apitok-open-explorer"]'), false, "no Explorer buttons");
+    // Asking the server directly is refused, while the boards stay readable.
+    const statuses = JSON.parse(await b.evaluate(`Promise.all(["/api/v1/me/api-tokens", "/api/v1/me/api-tokens/options", "/api/v1/me/api-tokens/activity", "/api/v1/me/api-explorer/boards/${boardId}", "/api/v1/workspaces"].map((u) => fetch(u).then((r) => r.status))).then(JSON.stringify)`));
+    assert.deepEqual(statuses.slice(0, 4), [403, 403, 403, 403]);
+    assert.equal(statuses[4], 200);
+  });
 
   test("someone without a membership is told why and offered nothing to create", async () => {
     await b.open(`${base}/api/v1/health`, DESKTOP);

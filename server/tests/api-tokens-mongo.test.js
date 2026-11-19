@@ -61,9 +61,10 @@ describe("API tokens on the local test MongoDB", { concurrency: false }, async (
     const logger = { errors: [], error(...a) { this.errors.push(a.map(String).join(" ")); } };
     const dataLayer = createDataLayer({ connection, logger, fileStore: new MemoryFileStore() });
     const entra = issuer.config;
-    app = await startApp({ dataLayer, auth: { mode: "entra", entra, verify: createEntraVerifier({ ...entra, keySet: issuer.keySet }) }, logger, apiTokens: { key: crypto.randomBytes(32), perMinute: 6000 } });
+    const owner = issuer.person("Local Owner", { admin: true });
+    app = await startApp({ dataLayer, auth: { mode: "entra", entra, verify: createEntraVerifier({ ...entra, keySet: issuer.keySet }) }, logger, apiTokens: { key: crypto.randomBytes(32), perMinute: 6000, adminObjectIds: [owner.oid.toLowerCase()] } });
     browser = new SessionClient(app.url, entra.appOrigin);
-    assert.equal((await browser.signIn(issuer.person("Local Owner", { admin: true }))).status, 201);
+    assert.equal((await browser.signIn(owner)).status, 201);
     const ws = (await browser.request("POST", "/api/v1/workspaces", { name: "Synthetic" })).body.workspace;
     workspaceOid = new ObjectId(ws.id);
     const board = (await browser.request("POST", `/api/v1/workspaces/${ws.id}/boards`, { name: "Large", columns: [{ key: "serial", label: "Item", type: "text", required: true }, { key: "qty", label: "Qty", type: "number" }] })).body.board;

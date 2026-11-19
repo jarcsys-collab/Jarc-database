@@ -126,9 +126,22 @@ function loadApiTokenConfig(env, authMode) {
   if (env.JARC_API_TOKEN_KEY) { key = Buffer.from(env.JARC_API_TOKEN_KEY, "base64"); if (key.length !== 32) throw new ConfigError("JARC_API_TOKEN_KEY must be 32 random bytes, base64-encoded (for example: openssl rand -base64 32)."); }
   if (enabled && authMode !== "entra") throw new ConfigError("JARC_FEATURE_API_TOKENS=true needs AUTH_MODE=entra.");
   if (enabled && !key) throw new ConfigError("JARC_FEATURE_API_TOKENS=true needs JARC_API_TOKEN_KEY.");
-  const config = { enabled, perMinute: wholeNumberSetting(env, "JARC_API_TOKEN_RATE_PER_MINUTE", 120, 10, 6000) };
+  const config = { enabled, perMinute: wholeNumberSetting(env, "JARC_API_TOKEN_RATE_PER_MINUTE", 120, 10, 6000), adminObjectIds: loadApiAdminObjectIds(env) };
   Object.defineProperty(config, "key", { value: key, enumerable: false });
   return Object.freeze(config);
+}
+
+//   JARC_API_ADMIN_OIDS   the JARC API administrators: Microsoft Entra object IDs (GUIDs, separated by commas), matched within
+//                         ENTRA_TENANT_ID against the identity verified at sign-in. Only they may list, create, rotate and revoke
+//                         tokens (revoking anyone's), and use API Activity and the API Explorer (services/api-token-service.js).
+//                         Nothing else grants it: not JARC.Admin, workspace roles or open access. Unset or empty means nobody.
+const MAX_API_ADMINS = 20;
+function loadApiAdminObjectIds(env) {
+  const ids = String(env.JARC_API_ADMIN_OIDS || "").split(/[\s,;]+/).filter(Boolean).map((id) => id.toLowerCase());
+  if (ids.some((id) => !GUID.test(id))) throw new ConfigError("JARC_API_ADMIN_OIDS must list Microsoft Entra object IDs (GUIDs), separated by commas.");
+  const unique = Object.freeze([...new Set(ids)]);
+  if (unique.length > MAX_API_ADMINS) throw new ConfigError(`JARC_API_ADMIN_OIDS can list at most ${MAX_API_ADMINS} people.`);
+  return unique;
 }
 
 function loadRecordSearchMode(env) {
@@ -368,4 +381,4 @@ function assertMongoUri(uri) {
   if (pathDb && pathDb !== JARC_DB_NAME) throw new ConfigError(`MONGODB_URI names a different database in its path. Remove it (or use "${JARC_DB_NAME}"); the database always comes from MONGODB_DB_NAME.`);
 }
 
-module.exports = { FEATURE_SWITCHES, loadConfig, loadAccountConfig, loadMondayConfig, loadGoogleDriveConfig, loadMidAttachmentsConfig, loadAttachmentConfig, assertJarcDatabaseName, ConfigError, JARC_DB_NAME, ACCESS_POLICIES };
+module.exports = { FEATURE_SWITCHES, loadConfig, loadAccountConfig, loadMondayConfig, loadGoogleDriveConfig, loadMidAttachmentsConfig, loadAttachmentConfig, loadApiAdminObjectIds, assertJarcDatabaseName, ConfigError, JARC_DB_NAME, ACCESS_POLICIES };

@@ -16,11 +16,21 @@ class ApiTokenRepository {
   findOwned(id, ownerUserId) { return this.tokens.findOne({ _id: id, ownerUserId }); }
   listForOwner(ownerUserId, { limit = 100 } = {}) { return this.tokens.find({ ownerUserId }, { sort: { createdAt: -1, _id: -1 }, limit }).toArray(); }
   countActive(ownerUserId, now) { return this.tokens.countDocuments({ ownerUserId, revokedAt: null, expiresAt: { $gt: now } }); }
+  // Any owner's tokens, newest first (API administrators). The service describes them field by field and never returns the digest.
+  findById(id) { return this.tokens.findOne({ _id: id }); }
+  listAll({ limit = 500 } = {}) { return this.tokens.find({}, { sort: { createdAt: -1, _id: -1 }, limit }).toArray(); }
+  findManyByIds(ids) { return ids.length ? this.tokens.find({ _id: { $in: ids } }).toArray() : Promise.resolve([]); }
 
   // Null when it was already revoked or isn't this person's.
   revoke(id, ownerUserId, now, { session } = {}) {
     return this.tokens.findOneAndUpdate({ _id: id, ownerUserId, revokedAt: null }, { $set: { revokedAt: now } }, { returnDocument: "after", session });
   }
+  // Any owner's token, by an API administrator, who is recorded on it. Null when it was already revoked or doesn't exist.
+  revokeAny(id, byUserId, now, { session } = {}) {
+    return this.tokens.findOneAndUpdate({ _id: id, revokedAt: null }, { $set: { revokedAt: now, revokedByUserId: byUserId } }, { returnDocument: "after", session });
+  }
+  // The newest audit entries, for API Activity. They hold IDs, the action and a short reason only.
+  listAudit({ limit = 200 } = {}) { return this.audit.find({}, { sort: { at: -1, _id: -1 }, limit }).toArray(); }
 
   // Marks a token as replaced, once only. Null when it was revoked or rotated meanwhile.
   markRotated(id, ownerUserId, set, { session } = {}) {

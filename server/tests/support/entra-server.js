@@ -50,9 +50,11 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
   const verify = createEntraVerifier({ ...entra, keySet: issuer.keySet });
   // Optional 2nd argument "shared": ACCESS_POLICY=development_shared (as on Railway); default role_based.
   const accessPolicy = process.argv[3] === "shared" ? "development_shared" : "role_based";
-  // JARC_TEST_API_TOKENS=1: API tokens on, with a key made up for this run.
+  // JARC_TEST_API_TOKENS=1: API tokens on, with a key made up for this run. JARC_TEST_API_ADMINS: the API administrators' object IDs
+  // (JARC_API_ADMIN_OIDS, comma-separated test object IDs; read through the real config parser).
   // JARC_TEST_SITE_DIR: serve another copy of site/ (benchmarks compare the committed frontend with the working copy).
-  const app = createApp({ ...(process.env.JARC_TEST_SITE_DIR ? { siteDir: process.env.JARC_TEST_SITE_DIR } : {}), ...(process.env.JARC_TEST_API_TOKENS === "1" ? { apiTokens: { key: require("crypto").randomBytes(32) } } : {}), ...(process.env.JARC_TEST_FEATURES === "off" ? { features: { nativeForms: false, spreadsheetImports: false } } : {}), repository: new MemoryStateRepository(), environment: "test", dataLayer, auth: { mode: "entra", entra, verify }, accessPolicy, betaOpenEditing: process.env.JARC_TEST_BETA === "1", ...(process.env.JARC_TEST_ACCOUNTS ? { accounts: { mode: process.env.JARC_TEST_ACCOUNTS, superAdmin: process.env.JARC_TEST_SUPER_ADMIN_OID ? { tenantId: entra.tenantId, objectId: process.env.JARC_TEST_SUPER_ADMIN_OID.toLowerCase(), email: null } : null } } : {}), logger: { error() {} } });
+  const apiAdmins = require("../../src/config").loadApiAdminObjectIds({ JARC_API_ADMIN_OIDS: process.env.JARC_TEST_API_ADMINS || "" });
+  const app = createApp({ ...(process.env.JARC_TEST_SITE_DIR ? { siteDir: process.env.JARC_TEST_SITE_DIR } : {}), ...(process.env.JARC_TEST_API_TOKENS === "1" ? { apiTokens: { key: require("crypto").randomBytes(32), adminObjectIds: apiAdmins } } : {}), ...(process.env.JARC_TEST_FEATURES === "off" ? { features: { nativeForms: false, spreadsheetImports: false } } : {}), repository: new MemoryStateRepository(), environment: "test", dataLayer, auth: { mode: "entra", entra, verify }, accessPolicy, betaOpenEditing: process.env.JARC_TEST_BETA === "1", ...(process.env.JARC_TEST_ACCOUNTS ? { accounts: { mode: process.env.JARC_TEST_ACCOUNTS, superAdmin: process.env.JARC_TEST_SUPER_ADMIN_OID ? { tenantId: entra.tenantId, objectId: process.env.JARC_TEST_SUPER_ADMIN_OID.toLowerCase(), email: null } : null } } : {}), logger: { error() {} } });
   const sim = { protected: 0, withSession: 0, withoutSession: [], log: [] };
 
   const outer = express();

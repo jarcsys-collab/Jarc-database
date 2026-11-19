@@ -44,12 +44,13 @@ describe("New token: shared workspaces and other employees' boards (real app)", 
 
   before(async () => {
     const port = await freePort(); base = `http://localhost:${port}`;
-    server = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port), "shared"], { stdio: "ignore", env: { ...process.env, JARC_TEST_API_TOKENS: "1", JARC_TEST_BETA: "1" } });
+    server = spawn(process.execPath, [path.join(__dirname, "support", "entra-server.js"), String(port), "shared"], { stdio: "ignore", env: { ...process.env, JARC_TEST_API_TOKENS: "1", JARC_TEST_API_ADMINS: COLLEAGUE, JARC_TEST_BETA: "1" } });
     await waitForServer(base, { child: server });
     b = await launch(BROWSER); c = await launch(BROWSER); // b: the colleague; c: the employee who creates everything
     await b.motionPreference("reduce");
     await b.open(`${base}/api/v1/health`, DESKTOP); await c.open(`${base}/api/v1/health`, DESKTOP);
-    // Another employee creates both workspaces and every board. The colleague who later issues the token is a member of nothing.
+    // Another employee (not an API administrator) creates both workspaces and every board. The colleague who later issues the
+    // token is a JARC API administrator and a member of nothing.
     assert.equal(await signIn(CREATOR, "Cara Creator", c), 201);
     ids.salesWs = (await api("POST", "/workspaces", { name: "Field Sales Space" }, c)).body.workspace.id;
     ids.coreWs = (await api("POST", "/workspaces", { name: "Core Space" }, c)).body.workspace.id;

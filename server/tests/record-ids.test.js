@@ -42,6 +42,9 @@ before(async () => {
   issuer = await createTokenIssuer();
   app = await startEntraApp({ issuer, apiTokens: { key: KEY, issuePerHour: 1000, maxActive: 1000 } });
   people = { sysadmin: issuer.person("Sys Admin", { admin: true }), admin: issuer.person("Ada Admin"), viewer: issuer.person("Vik Viewer"), outsider: issuer.person("Oona Outsider") };
+  // All four are JARC API administrators (as JARC_API_ADMIN_OIDS would make them), so these tests turn on workspace access alone;
+  // the administrators' own rules are tested in api-tokens.test.js and api-admins.test.js.
+  app.dataLayer.services.apiTokens.adminObjectIds = Object.freeze(Object.values(people).map((p) => p.oid.toLowerCase()));
   for (const p of Object.values(people)) await browserOf(p);
 });
 after(async () => { await app.close(); });

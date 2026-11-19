@@ -22,9 +22,9 @@ const ApiTokenDocs = {
       <p>A token is accepted only in the ${c("Authorization")} header. A token in the URL is refused, because URLs end up in logs and browser history.</p>
 
       <h3>Who can create a token</h3>
-      <p>Any signed-in employee with access to a workspace can create read-only tokens for it under <strong>Developer → API Tokens</strong>: every shared workspace, including boards other employees created or imported, or a workspace where they have their own membership (Viewer or above). Administrator roles don't count on their own. A token is limited to one workspace and the boards you select, and it can never see more than you can.</p>
-      <p>One token reads every board you selected, and every column on those boards: you don't need a token per board or per column. Boards created later aren't added to an existing token; rotate it or create a new one to include them. Each token is personal: don't share it, create one per integration instead.</p>
-      <p>JARC checks your access on every request. If your membership is removed or your account is disabled, your tokens stop working at once. You can always revoke your own tokens while you can sign in, even with no membership left.</p>
+      <p>Only the <strong>JARC API administrators</strong> create, list and revoke tokens, under <strong>Developer → API Tokens</strong>. Everyone else keeps their usual access to every shared board; ask an API administrator when an integration needs a token. Other administrator roles don't count. An API administrator can create read-only tokens for every shared workspace, including boards other employees created or imported. A token is limited to one workspace and the boards chosen, and it can never see more than its owner can.</p>
+      <p>One token reads every board selected, and every column on those boards: you don't need a token per board or per column. Boards created later aren't added to an existing token; rotate it or create a new one to include them. Create one token per integration, and don't share it.</p>
+      <p>JARC checks the owner's access on every request. If the owner loses access to the workspace or their account is disabled, their tokens stop working at once. Any API administrator can revoke any token; JARC records who did it.</p>
 
       <h3>Board and column IDs</h3>
       <p>Every board and column has a permanent ID, the same for everyone in the company. Copy a board's from its menu and a column's from its header menu (each also has <strong>API Information</strong>), or look them up under <strong>Developer → Boards &amp; Columns</strong>. An ID stays the same when something is renamed, moved, reordered or hidden, and isn't used again after deletion. A column ID is unique within its board, so identify a column by its board ID and column ID together.</p>
@@ -80,7 +80,7 @@ const ApiTokenDocs = {
       <p>Each token has its own limit, 120 requests per minute unless your administrator has changed it. Every response has ${c("X-RateLimit-Limit")}, ${c("X-RateLimit-Remaining")} and ${c("X-RateLimit-Reset")} (seconds). Over the limit you get ${c("429")} with ${c("Retry-After")}: wait that many seconds and try again.</p>
 
       <h3>Expiry, rotation and revocation</h3>
-      <ul><li>Every token has an expiry date, at most 366 days away. After it, requests get ${c("TOKEN_EXPIRED")}.</li>
+      <ul><li>Every token has an expiry date, at most 5 years after it is created (any shorter date can be chosen; no token lasts forever). After it, requests get ${c("TOKEN_EXPIRED")}. A revoked token is refused at once, whatever its expiry date.</li>
       <li><strong>Rotate</strong> creates a replacement with the same boards. The old token keeps working for the overlap you choose (up to 7 days), so you can update the integration without an outage. Your other tokens aren't affected.</li>
       <li><strong>Revoke</strong> ends a token immediately and can't be undone. You can always revoke your own tokens.</li>
       <li>The full token is shown once, when it is created. JARC stores only a keyed digest, so nobody can show it again. If you lose it, rotate.</li></ul>

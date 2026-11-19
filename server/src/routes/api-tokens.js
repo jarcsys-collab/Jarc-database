@@ -1,11 +1,14 @@
-// Managing API tokens from JARC itself (Settings → API Tokens). Mounted after the session check, so every route needs a signed-in
-// session and every change needs the CSRF token (auth/session.js). Each person sees and changes only their own tokens.
+// Managing API tokens from JARC itself (Developer → API Tokens). Mounted after the session check, so every route needs a signed-in
+// session and every change needs the CSRF token (auth/session.js). Every route here is for the JARC API ADMINISTRATORS only
+// (JARC_API_ADMIN_OIDS, services/api-token-service.js isAdmin): anyone else gets 403 API_ADMIN_REQUIRED before anything is read,
+// checked here for the whole path and again in the service. Reading boards in the app is unaffected.
 //
-//   GET    /me/api-tokens                what this person has issued (never the digest or the token)
-//   GET    /me/api-tokens/options        the workspaces and boards they could issue a token for
+//   GET    /me/api-tokens                every owner's tokens (never the digest or the token)
+//   GET    /me/api-tokens/options        the workspaces and boards this administrator could issue a token for
+//   GET    /me/api-tokens/activity       the newest token audit entries (API Activity)
 //   POST   /me/api-tokens                { name, workspaceId, boardIds, scopes: ["read"], expiresAt } → the token, this once
-//   POST   /me/api-tokens/:tokenId/rotate  { expiresAt?, graceHours? } → the replacement, this once
-//   POST   /me/api-tokens/:tokenId/revoke
+//   POST   /me/api-tokens/:tokenId/rotate  { expiresAt?, graceHours? } → the replacement, this once (own tokens only)
+//   POST   /me/api-tokens/:tokenId/revoke  anyone's token
 //   GET    /me/api-explorer/boards/:boardId?columns=a,b  a board as GET /external/boards/:boardId returns it, and example records (and,
 //                                                 for exactly one column, that column's values), with the caller's own access
 //                                                 &record=ID  also that record as GET /external/records/:id returns it (it must be on this board)
@@ -24,8 +27,11 @@ function apiTokenRoutes({ tokens, access, repos, limiter = searchLimiter({ perWi
   const tokenId = (req) => parseId(req.params.tokenId, "tokenId");
   const tooMany = (res) => sendError(res, 429, "RATE_LIMITED", "Too many new tokens in the last hour. Try again later.");
 
+  // The administrators' check for everything below, before any rate limit is counted or anything is read.
+  router.use(["/me/api-tokens", "/me/api-explorer"], (req, res, next) => { tokens.requireAdmin(req.actor); next(); });
   router.get("/me/api-tokens", async (req, res) => { noQuery(req); send(res, 200, { items: await tokens.list(req.actor) }); });
   router.get("/me/api-tokens/options", async (req, res) => { noQuery(req); send(res, 200, await tokens.options(req.actor)); });
+  router.get("/me/api-tokens/activity", async (req, res) => { noQuery(req); send(res, 200, await tokens.activity(req.actor)); });
   router.post("/me/api-tokens", async (req, res) => {
     noQuery(req);
     if (!limiter(req.actor.userId.toHexString())) return tooMany(res);
@@ -39,8 +45,10 @@ function apiTokenRoutes({ tokens, access, repos, limiter = searchLimiter({ perWi
   });
   router.post("/me/api-tokens/:tokenId/revoke", async (req, res) => { noQuery(req); send(res, 200, await tokens.revoke(req.actor, tokenId(req))); });
 
-  // API Explorer: a board's IDs and a small example, in the token API's format, under the caller's OWN session and role.
+  // API Explorer (API administrators): a board's IDs and a small example, in the token API's format, under the caller's OWN
+  // session and role.
   router.get("/me/api-explorer/boards/:boardId", async (req, res) => {
+    tokens.requireAdmin(req.actor);
     const id = parseId(req.params.boardId, "boardId");
     const { board } = await access.board(req.actor, id, "VIEWER");
     allowOnly(req.query, ["columns", "record"], "the query");
