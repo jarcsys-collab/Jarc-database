@@ -152,7 +152,9 @@ function recordPatch(raw, board) {
 
 // ---- Record listing: limit, cursor, an allowlisted sort, and a few exact filters.
 const RECORD_SORTS = Object.freeze({ position: "position", createdAt: "createdAt", updatedAt: "updatedAt" });
-const PAGE = Object.freeze({ defaultLimit: 50, maxLimit: 200, maxIds: 100 });
+// maxLimit: the plain list (keyset order on an index), which the browser reads a whole board with in few round trips.
+// maxFilteredLimit: lists with filter, orderBy, q or group, whose sorting and matching cost grows with the page.
+const PAGE = Object.freeze({ defaultLimit: 50, maxLimit: 1000, maxFilteredLimit: 200, maxIds: 100 });
 
 // ?filter= and ?orderBy= (JSON, see domain/record-filter.js). Null when neither is given: the list works as it always has.
 function parseJsonParam(raw, label) {
@@ -223,6 +225,7 @@ function recordListQuery(query, board) {
   }
   const filtered = filteredQuery(query, board);
   if (filtered) {
+    if (limit > PAGE.maxFilteredLimit) fail(`limit can be at most ${PAGE.maxFilteredLimit} with filter, orderBy, q or group.`);
     if (query.sort !== undefined || query.dir !== undefined) fail("Use orderBy, not sort and dir, with a filter.");
     const cursor = queryString(query.cursor, "cursor");
     if (filter.groupId !== undefined) filtered.groupId = filter.groupId;

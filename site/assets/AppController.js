@@ -42,9 +42,20 @@ class AppController {
     root.addEventListener("pointerdown",e=>this.startColumnDrag(e));
     // Leaving a cell editor saves it (Esc cancels first); leaving an empty draft row discards it.
     root.addEventListener("focusout",e=>{const a=e.target.dataset?.action;if(a==="cell-input")this.commitCell(e.target,"none");else if(a==="draft-input")this.commitDraft(e.target);});
+    // A refresh held back while someone typed (a colleague's change, a board's saved copy replaced by the server's) is drawn as
+    // soon as they leave the field — unless they moved straight into another one (refreshWhenIdle checks again).
+    root.addEventListener("focusout",e=>{if(this.pendingRefresh&&e.target.matches?.('input:not([type="checkbox"]),textarea,select'))setTimeout(()=>this.flushRefresh(),0);});
     document.addEventListener("pointerdown",e=>{const overlay=this.root.querySelector('#overlay-root');if(overlay?.querySelector('.popover,.profile-popover')&&!overlay.contains(e.target)&&!e.target.closest('[data-action]'))this.view.closeOverlay();});
-    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("jarc-session-expired",()=>{if(this.entra)this.showEntraGate("expired");});window.addEventListener("jarc-access-denied",()=>{if(this.entra)this.showEntraGate("denied");});window.addEventListener("jarc-account-pending",()=>{if(this.entra)this.showEntraGate("pending");});window.addEventListener("jarc-board-status",()=>this.refreshWhenIdle());window.addEventListener("jarc-server-view",(e)=>this.renderServerView(e.detail?.groups||null));this.root.addEventListener("scroll",()=>this.scheduleVirtual(),true);window.addEventListener("jarc-ids-changed",()=>{this.patchRecordIds();this.refreshWhenIdle();});window.addEventListener("jarc-rollback",(event)=>this.onRollback(event.detail));window.addEventListener("jarc-connection",()=>this.saveFeedback());window.addEventListener("online",()=>this.saveFeedback());window.addEventListener("offline",()=>this.saveFeedback());
+    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("jarc-session-expired",()=>{if(this.entra)this.showEntraGate("expired");});window.addEventListener("jarc-access-denied",()=>{if(this.entra){if(typeof BoardCache==="function")BoardCache.clearAll();this.showEntraGate("denied");}});
+    // A board's saved copy asks to be checked: revalidateBoard. Saves that change shared data are counted by the model
+    // (dataSaves) from the start, so a check made before live updates connect is protected too.
+    this.model.refreshFailed = new Set(); // boards showing their saved copy whose check failed (server IDs): Retry is offered
+    window.addEventListener("jarc-board-revalidate", (event) => this.revalidateBoard(event.detail?.boardId, { copy: true }));window.addEventListener("jarc-account-pending",()=>{if(this.entra)this.showEntraGate("pending");});window.addEventListener("jarc-board-status",()=>this.refreshWhenIdle());window.addEventListener("jarc-server-view",(e)=>this.renderServerView(e.detail?.groups||null));this.root.addEventListener("scroll",()=>this.scheduleVirtual(),true);window.addEventListener("jarc-ids-changed",()=>{this.patchRecordIds();this.refreshWhenIdle();});window.addEventListener("jarc-rollback",(event)=>this.onRollback(event.detail));window.addEventListener("jarc-connection",()=>this.saveFeedback());window.addEventListener("online",()=>this.saveFeedback());window.addEventListener("offline",()=>this.saveFeedback());
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>this.view.applyDisplay(this.model));
+    // Printing a long board prints all of its records in this view (search, filters and collapsed groups as on screen),
+    // not only the rows drawn near the viewport: the board is drawn in full for the print, then as before.
+    window.addEventListener("beforeprint",()=>{if(this.signedIn&&this.model.screen==="board"&&this.view.virtual&&!this.view.printAll){this.view.printAll=true;this.update();this.watchPrintEnd();}});
+    window.addEventListener("afterprint",()=>this.endPrintAll());
     root.addEventListener("pointerover",e=>{
       const target=e.target.closest('button');if(!target)return;
       const label=target.getAttribute("aria-label")||target.dataset.tooltip||target.title;
@@ -76,8 +87,14 @@ class AppController {
         this.entra = signIn.entra;
         // Pending (Account Management enforced): the configured administrator may claim the first Super Admin role here.
         if (signIn.state === "pending") this.model.permissions = { accountManagement: signIn.me?.accountManagement || null, account: signIn.me?.account || null };
+        // A refused account: every board copy saved in this browser goes. Other gates (signed out, expired) keep them for this
+        // person; whoever signs in next only ever reads their own, after the others are deleted (BoardCache.prepare).
+        if (signIn.state === "denied" && typeof BoardCache === "function") BoardCache.clearAll();
         if (signIn.state !== "signed-in") { this.showEntraGate(signIn.state, { claim: Boolean(signIn.me?.accountManagement?.canClaimSuperAdmin) }); return; }
         this.auth = new EntraSession(signIn.entra, signIn.me);
+        // Saved copies of boards (BoardCache): only now that the server has confirmed who this is, and only theirs.
+        this.boardCache = typeof BoardCache === "function" ? BoardCache.forScope(signIn.me?.user?.id) : null;
+        this.model.storage.adapter.useCache?.(this.boardCache); this.boardCache?.prepare();
         // The server confirmed who this is: their own last appearance can show while their data loads (never before).
         this.view.appearanceOwner = this.auth.userId || null; this.view.applyOwnerAppearance?.(this.view.appearanceOwner);
         // From the server (shown in Settings); the server alone decides what is allowed.
@@ -86,7 +103,7 @@ class AppController {
       }
     }
     this.loadStartedAt = new Date().toISOString(); // live updates replay anything saved while loading
-    try { await this.model.init(); await this.model.loadFeatures(); }
+    try { await this.model.init({ prefetch: !(this.boardLinksEnabled && AppController.boardIdInPath(window.location.pathname) !== undefined) }); await this.model.loadFeatures(); }
     catch (error) {
       if (this.entra && error?.code === StorageError.CODES.UNAUTHENTICATED) { this.showEntraGate("expired"); return; }
       if (this.entra && error?.code === StorageError.CODES.ACCOUNT_DISABLED) { this.showEntraGate("denied"); return; }
@@ -108,15 +125,14 @@ class AppController {
     // so the default screen never shows first. The board list is complete by now (only boards this person may see).
     this.applyBoardUrl(); this.boardUrlStart = true;
     this.root.onclick = null; this.ready = true; this.update(); this.integrations?.afterStart(); this.appearance?.afterStart();
-    this.loadPeople(); this.loadFeed(); this.startLive();
+    this.loadPeople(); this.loadFeed(); this.startLive(); this.startBoardRefresh();
     if (!this.feedTimer && this.model.storage.adapter.loadActivityFeed) this.feedTimer = setInterval(() => { if (this.ready && document.visibilityState === "visible") this.loadFeed(); }, 60000);
   }
   // ---- Live updates (resource mode): other people's saved changes appear without a reload --------------------------
   startLive() {
     const adapter = this.model.storage.adapter;
     if (this.live || !adapter.fetchRemote || typeof LiveUpdates === "undefined") return;
-    this.remoteQueue = []; this.liveState = "connecting"; this.saveSeq = 0;
-    window.addEventListener("jarc-save", (event) => { if (event.detail === "saving") this.saveSeq += 1; }); // any save started
+    this.remoteQueue ??= []; this.liveState = "connecting"; // a board's saved copy may already have asked to be checked (revalidateBoard)
     this.live = new LiveUpdates({
       baseUrl: adapter.http.baseUrl, since: this.loadStartedAt, request: (method, p) => adapter.http.request(method, p, undefined, { background: true }),
       onChanges: (events) => {
@@ -150,21 +166,95 @@ class AppController {
     const saving = () => this.model.pendingSaves > 0 || this.busy;
     if (saving()) { clearTimeout(this.remoteTimer); this.remoteTimer = setTimeout(() => this.processRemote(), 300); return; }
     this.remoteBusy = true;
-    const events = this.remoteQueue.splice(0), adapter = this.model.storage.adapter, seq = this.saveSeq;
+    // dataSaves: saves that change shared data (BoardModel.save) — a per-user save (selection, last view) never makes an answer stale.
+    const events = this.remoteQueue.splice(0), adapter = this.model.storage.adapter, seq = this.model.dataSaves;
     try {
       const plan = await adapter.fetchRemote(events);
       // A save started (and maybe even finished) while fetching: what was fetched may predate it. Fetch again.
-      if (saving() || this.saveSeq !== seq) { this.remoteQueue.unshift(...events); return; }
+      if (saving() || this.model.dataSaves !== seq) { this.remoteQueue.unshift(...events); return; }
       const { reconcile, summary } = adapter.commitRemote(plan);
       const before = this.remoteSnapshot(summary);
       if (this.model.applyRemote(reconcile)) this.renderRemote(summary, before, events);
       const boardId = this.model.board?.id, reloaded = boardId && [...summary.boards].some((id) => String(id) === String(this.model.serverId?.(boardId) ?? boardId));
       if (reloaded) this.model.afterBoardReload(boardId); else this.model.scheduleViewCount();
-    } catch { this.remoteQueue.unshift(...events); this.needsResync = true; } // e.g. offline: retried when live again
+      this.afterRevalidate(summary);
+    } catch { this.remoteQueue.unshift(...events); this.needsResync = true; this.revalidateFailed(events); } // e.g. offline: retried when live again
     finally {
       this.remoteBusy = false;
       if (this.remoteQueue.length) { clearTimeout(this.remoteTimer); this.remoteTimer = setTimeout(() => this.processRemote(), 300); }
     }
+  }
+  // ---- A board's saved copy (BoardCache) and keeping the open board current ------------------------------------------
+  // The server's copy of a board is asked for through the same path as live updates (processRemote): an answer that may
+  // predate a save made here is fetched again, nothing is applied while a save runs, and a cell being edited or a dialog
+  // is never redrawn away (refreshBoardWhenIdle). copy: the board is showing its saved copy (timed, Retry on failure).
+  revalidateBoard(boardId, { copy = false } = {}) {
+    if (!boardId || !this.model.storage?.adapter?.fetchRemote) return;
+    const id = String(this.model.serverId(boardId));
+    if (copy) { (this.checking ||= new Map()).set(id, performance.now()); this.model.refreshFailed?.delete(id); }
+    (this.remoteQueue ||= []).push({ action: "board.updated", boardId: id, workspaceId: null });
+    this.processRemote();
+  }
+  afterRevalidate(summary) {
+    for (const id of summary.refreshed || []) {
+      const key = String(id), started = this.checking?.get(key);
+      this.checking?.delete(key); this.staleTries?.delete(key); this.model.refreshFailed?.delete(key);
+      if (started !== undefined) AppController.perf("board-refresh", { ms: Math.round(performance.now() - started) });
+    }
+    // The answer predated a save made here: asked for again (a few times), then offered as Retry.
+    for (const id of summary.stale || []) {
+      const key = String(id), tries = (this.staleTries ||= new Map()).get(key) || 0;
+      if (tries < 3) { this.staleTries.set(key, tries + 1); setTimeout(() => this.revalidateBoard(key, { copy: true }), 1000); } else this.model.refreshFailed?.add(key);
+    }
+    if (summary.refreshed?.size || summary.stale?.size) this.refreshWhenIdle();
+  }
+  // The check failed (offline, server error): a board still showing its saved copy says so, with Retry. It's also retried
+  // with every other queued change, as before.
+  revalidateFailed(events) {
+    // Redrawn only when a board first shows the failure: the queue retries every 300 ms while offline, and redrawing the page
+    // on every retry would keep the page busy for nothing.
+    let shown = false;
+    for (const e of events) {
+      const key = e.boardId && String(this.model.serverId(e.boardId));
+      if (key && this.model.boardLoadState(e.boardId)?.state === "cached" && !this.model.refreshFailed?.has(key)) { this.model.refreshFailed?.add(key); shown = true; }
+    }
+    if (shown) this.refreshWhenIdle();
+  }
+  // The open board is read again only when live updates can't keep it current (not connected): every BOARD_REFRESH_MS while
+  // the tab is visible, and on returning to the tab after at least that long. Connected, live updates already bring every
+  // change, so no extra requests are made. Large boards (partly loaded) are kept current by their server view instead.
+  static BOARD_REFRESH_MS = 60000;
+  startBoardRefresh() {
+    if (this.boardRefreshTimer || !this.model.storage?.adapter?.fetchRemote) return;
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") { this.hiddenAt = Date.now(); return; }
+      const away = this.hiddenAt ? Date.now() - this.hiddenAt : 0; this.hiddenAt = 0;
+      if (away >= AppController.BOARD_REFRESH_MS && this.liveState !== "live") this.refreshOpenBoard();
+    });
+    this.boardRefreshTimer = setInterval(() => { if (document.visibilityState === "visible" && this.liveState !== "live") this.refreshOpenBoard(); }, AppController.BOARD_REFRESH_MS);
+  }
+  refreshOpenBoard() {
+    if (!this.ready || !this.signedIn || this.model.screen !== "board" || !this.model.board || this.remoteBusy) return;
+    if (["full", "cached"].includes(this.model.boardLoadState().state)) this.revalidateBoard(this.model.board.id);
+  }
+  // ---- Measurements: window.jarcPerf.entries (newest last, at most 100) and performance.measure("jarc:…"). Timings, a
+  // source and a record count only — never names, values or IDs.
+  static perf(name, detail = {}) {
+    const log = (window.jarcPerf ||= { entries: [] });
+    log.entries.push({ name, at: new Date().toISOString(), ...detail });
+    if (log.entries.length > 100) log.entries.shift();
+    try { if (detail.ms !== undefined) performance.measure(`jarc:${name}`, { start: Math.max(0, performance.now() - detail.ms), duration: detail.ms }); } catch { /* older browsers */ }
+  }
+  // A board just opened has its records drawn: how long it took, and where they came from (already here, this browser's saved
+  // copy, or the server).
+  notePerf() {
+    const t = this.model.openTiming, board = this.model.board;
+    if (!t || this.model.screen !== "board" || !board || String(board.id) !== String(t.boardId)) return;
+    const state = this.model.boardLoadState().state;
+    if (state === "loading" || state === "none") return;
+    this.model.openTiming = null;
+    if (state === "error") return;
+    AppController.perf("board-open", { ms: Math.round(performance.now() - t.at), source: t.from === "memory" ? "memory" : t.from === "copy" || state === "cached" ? "saved copy" : "server", records: (board.records || []).length });
   }
   remoteSnapshot(summary) { const ids = new Set(summary.records.map((r) => String(r.id))); return new Map(this.model.rows.filter((r) => ids.has(String(r.id))).map((r) => [String(r.id), JSON.parse(JSON.stringify(r))])); }
   actorFor(events, recordId) { const e = [...events].reverse().find((x) => !recordId || x.recordId === recordId); const p = e?.actorId ? this.model.people.get(`user:${e.actorId}`) : null; return p ? p.displayName : "A colleague"; }
@@ -268,7 +358,7 @@ class AppController {
     this.scheduleVirtual(); this.refocus(focus); if (place === this.lastPlace) this.restoreScroll(scroll); else if (this.lastPlace !== undefined) window.scrollTo(0, 0);
     this.lastPlace = place;
     if (this.ready && this.model.workspace && this.model.workspace.id !== this.peopleKey) this.loadPeople();
-    this.ensureAttachments(); this.trackRows(); this.reapplyFlashes(); this.syncBoardUrl();
+    this.ensureAttachments(); this.trackRows(); this.reapplyFlashes(); this.syncBoardUrl(); this.notePerf();
   }
   // ---- Direct board links (resource mode): the address bar shows /boards/{boardId} while a board is open, such a link opens
   // that board after sign-in, and Back/Forward move between the boards opened. Access is unchanged: a link only finds boards
@@ -619,7 +709,8 @@ class AppController {
     if (action === "invite") this.view.showInvite();
     if (action === "profile-menu") this.togglePanel("profile",()=>this.view.showProfileMenu(this.model,this.auth));
     if (action === "lock-session") { this.command?.reset(); this.auth.lock(); this.update(); }
-    if (action === "request-logout") this.view.showConfirm("Sign out of Jarc?","Your local board data will remain on this browser.","confirm-logout");
+    if (action === "request-logout") this.view.showConfirm("Sign out of Jarc?",this.entra?"The copies of boards saved in this browser for faster opening are deleted when you sign out.":"Your local board data will remain on this browser.","confirm-logout");
+    if (action === "retry-board-refresh") { const id=this.model.board?.id; if(id)this.revalidateBoard(id,{copy:true}); this.update(); return; }
     if (action === "confirm-logout") { this.command?.reset(); this.auth.logout(); this.update(); }
     if (action === "profile-settings") this.view.showProfileSettings(this.model);
     if (action === "choose-avatar") document.querySelector("#avatar-file").click();
@@ -712,7 +803,12 @@ class AppController {
     const view=this.view, wrap=this.root.querySelector(".board-view-region .table-wrap");
     if(!wrap||!view.virtual)return;
     const sample=wrap.querySelector("tr[data-record-context]"); if(sample?.offsetHeight)view.rowHeight=sample.offsetHeight;
-    const h=view.rowHeight||AppView.ROW_HEIGHT, box=wrap.getBoundingClientRect(), BUFFER=15;
+    // The rows' pitch: their height plus the table's row gap (border-spacing), from two neighbouring rows. Spacers and the
+    // window use it, so they match a fully drawn table at any density.
+    const next=sample?.nextElementSibling, measured=view.rowPitch; if(next?.matches("tr[data-record-context]")){const pitch=next.offsetTop-sample.offsetTop;if(pitch>=sample.offsetHeight&&pitch<sample.offsetHeight*2){view.rowPitch=pitch;view.rowGap=pitch-sample.offsetHeight;}}
+    // Spacers drawn before the pitch was known (the first drawing) or at another density are corrected in place.
+    if(view.rowPitch&&view.rowPitch!==measured)for(const s of wrap.querySelectorAll("tr.row-spacer[data-rows]")){const td=s.firstElementChild;if(td)td.style.height=`${view.spacerHeight(Number(s.dataset.rows))}px`;if(s.classList.contains("row-reserved")&&td)td.style.backgroundSize=`100% ${view.rowPitch}px`;}
+    const h=view.rowPitch||view.rowHeight||AppView.ROW_HEIGHT, box=wrap.getBoundingClientRect(), BUFFER=15;
     view.rowRanges||=new Map();
     const rebuild=[];
     for(const body of wrap.querySelectorAll("tbody[data-window-key]")){
@@ -732,7 +828,42 @@ class AppController {
     const all=this.model.visibleRows;
     for(const {body,name,range} of rebuild){const rows=all.filter((r)=>this.model.groupOf(r)===name);if(!view.moveGroupWindow(body,this.model,name,rows,range))this.rebuildGroup(body,name,rows);}
   }
-  rebuildGroup(body,name,rows){body.outerHTML=this.view.groupSection(this.model,name,rows,{editable:!this.model.board.source?.readOnly,loose:!this.model.board.groups.includes(name),large:true});}
+  // Redraws one group's rows. A cell or button that had keyboard focus in it gets it back (without scrolling), so moving
+  // through a long board with the keyboard never drops focus when the rows around it are redrawn.
+  rebuildGroup(body,name,rows){
+    const active=document.activeElement, keep=body.contains(active)&&active.dataset?.id?{id:active.dataset.id,field:active.dataset.field||"",action:active.dataset.action||""}:null;
+    body.outerHTML=this.view.groupSection(this.model,name,rows,{editable:!this.model.board.source?.readOnly,loose:!this.model.board.groups.includes(name),large:true});
+    if(!keep)return;
+    const group=[...this.root.querySelectorAll("tbody.board-group")].find((b)=>b.dataset.group===name);
+    [...(group?.querySelectorAll(`[data-id="${CSS.escape(keep.id)}"]`)||[])].find((el)=>(el.dataset.field||"")===keep.field&&(el.dataset.action||"")===keep.action)?.focus({preventScroll:true});
+  }
+  // After a print the board is drawn near the viewport again. afterprint does that when the print or its cancellation
+  // ends; if a browser never sends it, print mode ending (matchMedia) or the person's next pointer, key, wheel or focus
+  // does, so a long board never stays drawn in full.
+  endPrintAll(){if(this.view.printAll){this.view.printAll=false;this.update();}}
+  watchPrintEnd(){
+    const events=["pointerdown","keydown","wheel","focus"], media=window.matchMedia?.("print");
+    const stop=()=>{for(const t of events)window.removeEventListener(t,stop,true);media?.removeEventListener?.("change",onMedia);this.endPrintAll();};
+    const onMedia=(e)=>{if(!e.matches)stop();};
+    media?.addEventListener?.("change",onMedia);
+    setTimeout(()=>{for(const t of events)window.addEventListener(t,stop,true);},0);
+  }
+  // Some of the board's records aren't in the page: rows drawn only near the viewport, or records not loaded yet.
+  rowsOffPage(){const v=this.view.virtual;return Boolean(v&&[...v.values()].some((i)=>i.end-i.start<i.count))||Boolean(this.model.serverView);}
+  // Puts keyboard focus on a record's control (e.g. its drag handle) after a redraw. On a long board the record may be
+  // outside the rows that are drawn: its group's window is moved to it first, then it is focused and scrolled into view.
+  focusRecordControl(id,selector){
+    const find=()=>this.root.querySelector(`${selector}[data-id="${CSS.escape(String(id))}"]`);
+    let el=find();
+    if(!el&&this.view.virtual){
+      const row=this.model.visibleRows.find((r)=>r.id===id), name=row&&this.model.groupOf(row), info=name!==undefined&&this.view.virtual.get(`group:${name}`);
+      const body=info&&[...this.root.querySelectorAll("tbody[data-window-key]")].find((b)=>b.dataset.group===name);
+      if(body){const rows=this.model.visibleRows.filter((r)=>this.model.groupOf(r)===name),i=rows.findIndex((r)=>r.id===id);if(i>=0){(this.view.rowRanges||=new Map()).set(`group:${name}`,[Math.max(0,i-15),Math.min(rows.length,i+16)]);this.rebuildGroup(body,name,rows);el=find();}}
+    }
+    if(!el)return false;
+    el.focus({preventScroll:true}); el.scrollIntoView({block:"nearest",inline:"nearest"}); this.scheduleVirtual();
+    return true;
+  }
   // A page of a group arrived while scrolling: only that group changes. → false when the whole screen has to be drawn instead.
   showGroupPages(names){
     const view=this.view, wrap=this.root.querySelector(".board-view-region .table-wrap");
@@ -885,10 +1016,17 @@ class AppController {
     if(event.target.dataset?.action==="row-drag"&&event.altKey&&["ArrowUp","ArrowDown"].includes(event.key)&&this.rowDragBlocked()){event.preventDefault();this.view.toast(this.rowDragBlocked());return;}
     if(event.target.dataset?.action==="row-drag"&&event.altKey&&["ArrowUp","ArrowDown"].includes(event.key)){
       event.preventDefault();const id=this.model.idOf(event.target.dataset.id),rows=this.model.visibleRows,index=rows.findIndex(r=>r.id===id),up=event.key==="ArrowUp",target=rows[index+(up?-1:1)];
-      if(target&&this.model.reorderRecord(id,target.id,up?"before":"after")){this.update();this.root.querySelector('[data-action="row-drag"][data-id="'+id+'"]')?.focus();this.view.toast("Row moved",true);}return;
+      if(target&&this.model.reorderRecord(id,target.id,up?"before":"after")){this.update();this.focusRecordControl(id,'[data-action="row-drag"]');this.view.toast("Row moved",true);}return;
     }
     const editing=event.target.matches?.('input,textarea,select,[contenteditable="true"]');
     if(!this.signedIn)return; // no shortcuts (Ctrl K included) behind a sign-in screen or gate
+    // Ctrl+F (⌘F) on a long board whose rows are drawn only near the viewport: the browser's Find can't see the others, so
+    // the first press goes to the board's own search, which covers every record. Pressing it again (now in the search box)
+    // opens the browser's Find as usual. Anywhere else, and on boards drawn in full, the shortcut is left alone.
+    if((event.ctrlKey||event.metaKey)&&!event.altKey&&!event.shiftKey&&event.key?.toLowerCase()==="f"&&!editing&&this.model.screen==="board"&&this.rowsOffPage()&&!document.querySelector("#overlay-root")?.children.length){
+      const input=document.querySelector("#board-search");
+      if(input){event.preventDefault();input.focus();input.select();this.view.toast(`Board search covers every record. Press ${event.metaKey?"⌘":"Ctrl"}+F again for the browser's Find, which only sees the rows on screen.`);return;}
+    }
     if(event.target.dataset?.action==="cell-input"){this.cellInputKey(event);return;}
     if(event.target.dataset?.action==="draft-input"){this.draftKey(event);return;}
     if(event.target.classList?.contains("cell-display")&&!document.querySelector("#overlay-root")?.children.length&&this.cellKey(event))return;

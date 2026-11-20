@@ -165,7 +165,12 @@ class EntraSession {
   touch() {}
   checkTimeout() { return false; } // the server enforces idle and absolute session expiry
   lock() { this.authenticated = false; } // back to the Microsoft sign-in screen
-  logout() { this.authenticated = false; return this.entra.signOut(); }
+  // Signing out deletes every copy of boards saved in this browser (BoardCache) first; that never takes more than a moment.
+  logout() {
+    this.authenticated = false;
+    const clear = typeof window.BoardCache === "function" ? window.BoardCache.clearAll().catch(() => {}) : Promise.resolve();
+    return clear.then(() => this.entra.signOut());
+  }
 }
 
 window.EntraAuth = EntraAuth;

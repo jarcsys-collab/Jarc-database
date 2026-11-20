@@ -476,3 +476,14 @@ td.cell-rejected .cell-display { animation: jarc-cell-reject 700ms var(--ease-ou
   .cc-filter-panel { grid-template-columns: 1fr 1fr; }
   .cc-badges { display: none; }
 }
+
+/* A board showing the copy saved in this browser while the server's is fetched (AppView.boardFreshness): quiet, never in the way. */
+.board-freshness { display: flex; align-items: center; gap: 8px; margin: 0 28px 8px; color: var(--muted); font-size: var(--fs-xs, 12px); line-height: 1.4; }
+.board-freshness > span:not(.board-freshness-dot) { flex: 1 1 auto; min-width: 0; } /* the text wraps beside its dot or icon, never below it */
+.board-freshness .icon, .board-freshness .link-button { flex: none; }
+.board-freshness .icon { width: 14px; height: 14px; }
+.board-freshness .link-button { font-size: inherit; font-weight: 600; padding: 2px 4px; border-radius: 4px; }
+.board-freshness-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; animation: board-freshness-pulse 1.2s ease-in-out infinite; }
+@keyframes board-freshness-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .board-freshness-dot { animation: none; } }
+@media (max-width: 620px) { .board-freshness { margin: 0 16px 8px; } }

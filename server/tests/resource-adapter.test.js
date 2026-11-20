@@ -344,7 +344,7 @@ describe("Pagination and loading", () => {
     }
   };
 
-  test("a board under the threshold loads completely, page by page (200 per request)", async () => {
+  test("a board under the threshold loads completely, in pages of 1000 (450 records: one request)", async () => {
     const a = await tab();
     const board = await newBoard(a, "Stage11 Paged", "blank");
     await seed(board.id, 450);
@@ -355,7 +355,7 @@ describe("Pagination and loading", () => {
     assert.equal(b.rows.length, 450);
     assert.equal(new Set(b.rows.map((r) => r.id)).size, 450, "no duplicates");
     same(b.rows.slice(0, 3).map((r) => r.serial), ["Stage11 00000", "Stage11 00001", "Stage11 00002"], "server order");
-    assert.equal(requests.filter((r) => r === `GET /api/v1/boards/${board.id}/records`).length, 3);
+    assert.equal(requests.filter((r) => r === `GET /api/v1/boards/${board.id}/records`).length, 1);
   });
 
   test("a board over 2,000 records loads a page at a time; unloaded records are never deleted", async () => {

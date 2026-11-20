@@ -84,9 +84,22 @@ function resourcePositions(ids, positionOf) {
   return result;
 }
 
+// A Map that reports which board each change belongs to (records: their boardId; boards: their id), so the saved copy of
+// a board in this browser (BoardCache) is rewritten whenever the adapter's server copy of it changes, however it changed.
+class ResourceTrackedMap extends Map {
+  constructor(boardOf, onChange) { super(); this.boardOf = boardOf; this.onChange = onChange; }
+  set(key, value) { const old = super.get(key); if (old) this.onChange(this.boardOf(old)); if (value) this.onChange(this.boardOf(value)); return super.set(key, value); }
+  delete(key) { const old = super.get(key); if (old) this.onChange(this.boardOf(old)); return super.delete(key); }
+}
+
 class ResourceApiAdapter {
-  static PAGE_SIZE = 200;          // records per request
+  static PAGE_SIZE = 200;          // records per request (a large board's pages, filtered pages)
+  static FULL_PAGE_SIZE = 1000;    // records per request while a board is read completely: few round trips (server maximum 1000)
   static FULL_LOAD_LIMIT = 2000;   // a board up to this size is loaded completely; larger boards load in steps
+  // Memory bounds: past either, the least recently opened boards' records are let go of (they load again when opened).
+  static MEMORY_RECORD_LIMIT = 30000;
+  static MEMORY_BOARD_LIMIT = 20;
+  static CACHE_FLUSH_MS = 1500;    // a board's saved copy is rewritten this long after its last change
   static BATCH_LIMIT = 5000;       // records per batch request (the server's limit)
   static USER_KEY = "jarc-resource-user";
   static USER_FIELDS = Object.freeze(["currentWorkspaceId", "currentBoardId", "currentView", "screen", "settings", "profile", "notifications", "recentBoards", "recentRecords", "recentCommands", "feedSeenAt", "collapsedGroups"]);
@@ -115,7 +128,57 @@ class ResourceApiAdapter {
 
   get timeoutMs() { return this.http.timeoutMs; }
   set timeoutMs(value) { this.http.timeoutMs = value; }
-  reset() { this.workspaces = new Map(); this.boards = new Map(); this.records = new Map(); this.aliases = new Map(); }
+  reset() {
+    const changed = (boardId) => this.markDirty(boardId);
+    this.workspaces = new Map(); this.boards = new ResourceTrackedMap((b) => b.id, changed); this.records = new ResourceTrackedMap((r) => r.boardId, changed); this.aliases = new Map();
+    this.dirty = new Set();
+  }
+
+  // ---- Saved copies of boards in this browser (BoardCache; null = none). Only the adapter's copy is ever saved: what the
+  // server confirmed, never an edit still being saved or one that failed.
+  useCache(cache) { this.cache = cache || null; }
+  markDirty(boardId) {
+    if (!this.cache || boardId === undefined || boardId === null) return;
+    this.dirty.add(String(boardId));
+    if (!this.flushTimer) this.flushTimer = setTimeout(() => this.flushCache(), ResourceApiAdapter.CACHE_FLUSH_MS);
+  }
+  async flushCache() {
+    this.flushTimer = null;
+    const cache = this.cache, ids = [...this.dirty];
+    this.dirty.clear();
+    if (!cache) return;
+    for (const id of ids) {
+      const b = this.boards.get(id);
+      // Gone (deleted, moved out of reach): its copy goes. Partly loaded: never kept. Not loaded, loading, or showing the
+      // saved copy itself: left as it is.
+      if (!b || b.load.state === "partial") { await cache.remove(id); continue; }
+      if (b.load.state !== "full") continue;
+      const records = this.boardRecords(id);
+      if (records.length > ResourceApiAdapter.FULL_LOAD_LIMIT) { await cache.remove(id); continue; }
+      await cache.write(id, { boardVersion: b.version, records });
+    }
+  }
+  // After the board list is loaded: copies of boards this person no longer sees are deleted (access is never taken from them).
+  async retainCachedBoards() { if (this.cache) await this.cache.retainOnly?.([...this.boards.keys()]); }
+
+  // ---- Memory bounds (least recently opened first; never the open board).
+  touchBoard(boardId) { const b = this.boards.get(String(this.resolve(boardId))); if (b) b.load.usedAt = Date.now(); }
+  evictionCandidates(keep) {
+    const loaded = [...this.boards.values()].filter((b) => ["full", "partial", "cached"].includes(b.load.state));
+    let records = this.records.size, boards = loaded.length;
+    const out = [];
+    for (const b of loaded.filter((x) => String(x.id) !== String(this.resolve(keep))).sort((x, y) => (x.load.usedAt || 0) - (y.load.usedAt || 0))) {
+      if (records <= ResourceApiAdapter.MEMORY_RECORD_LIMIT && boards <= ResourceApiAdapter.MEMORY_BOARD_LIMIT) break;
+      out.push(b.id); records -= this.boardRecords(b.id).length; boards -= 1;
+    }
+    return out;
+  }
+  // Lets go of a board's records here (its saved copy in this browser stays); it loads again when opened.
+  forgetRecords(boardId) {
+    for (const r of this.boardRecords(boardId)) this.records.delete(r.id);
+    const b = this.boards.get(boardId);
+    if (b) b.load = { state: "none", cursor: null, activity: [], recordActivity: {} };
+  }
 
   // Per-device values stay in this browser.
   read(areaName, key) { return this.device.read(areaName, key); }
@@ -223,8 +286,11 @@ class ResourceApiAdapter {
       if (!workspace.boards.some((b) => b.id === user.currentBoardId)) user.currentBoardId = workspace.boards[0]?.id || "";
     }
     if (Array.isArray(stored.members)) data.members = stored.members;
+    this.retainCachedBoards(); // in the background: never delays startup
     return { data, user };
   }
+  // Records per request: a board read completely in few, large pages; a large board's first page small (the rest come as needed).
+  pageSize(board) { return board && board.recordCount > ResourceApiAdapter.FULL_LOAD_LIMIT ? ResourceApiAdapter.PAGE_SIZE : ResourceApiAdapter.FULL_PAGE_SIZE; }
 
   // Records of one board, page by page (PAGE_SIZE), up to FULL_LOAD_LIMIT per call; `more` continues a large board.
   async fetchRecords(boardId, { more = false } = {}) {
@@ -233,7 +299,7 @@ class ResourceApiAdapter {
     if (more && !cursor) return [];
     const ids = [];
     do {
-      const query = `?limit=${ResourceApiAdapter.PAGE_SIZE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+      const query = `?limit=${more ? ResourceApiAdapter.PAGE_SIZE : this.pageSize(board)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
       const page = await this.request("GET", `/boards/${boardId}/records${query}`);
       for (const r of page.items) { this.records.set(r.id, this.recordFrom(r)); ids.push(r.id); }
       cursor = page.nextCursor;
@@ -392,8 +458,15 @@ class ResourceApiAdapter {
     }
     for (const boardId of boardIds) {
       if (!this.boards.has(boardId)) continue; // new boards arrive with the workspace refresh above
-      const board = await get(`/boards/${boardId}`);
-      plan.boards.set(boardId, { board: board?.board || null, records: board && this.boards.get(boardId).load.state !== "none" ? await this.fetchAllRecords(boardId) : null });
+      // The board, its records (if loaded here) and — for a board showing its saved copy, which has none — its history, all at
+      // once. Fetching the history only sets the history kept here. A board deleted meanwhile: no records (404 → null).
+      const state = this.boards.get(boardId).load.state;
+      const [board, records] = await Promise.all([
+        get(`/boards/${boardId}`),
+        state !== "none" ? this.fetchAllRecords(boardId).catch((error) => { if (error instanceof StorageError && error.code === StorageError.CODES.NOT_FOUND) return null; throw error; }) : null,
+        state === "cached" ? this.fetchActivity(boardId) : null
+      ]);
+      plan.boards.set(boardId, { board: board?.board || null, records: board ? records : null });
     }
     for (const [boardId, ids] of recordsByBoard) {
       const cached = this.boards.get(boardId);
@@ -407,7 +480,7 @@ class ResourceApiAdapter {
     const wanted = Math.max(this.boardRecords(boardId).length, 1), out = [];
     let cursor = null;
     do {
-      const page = await this.background(`/boards/${boardId}/records?limit=${ResourceApiAdapter.PAGE_SIZE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+      const page = await this.background(`/boards/${boardId}/records?limit=${this.pageSize(this.boards.get(boardId))}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
       out.push(...page.items); cursor = page.nextCursor;
     } while (cursor && out.length < (this.boards.get(boardId)?.recordCount > ResourceApiAdapter.FULL_LOAD_LIMIT ? 1 : Math.max(wanted, ResourceApiAdapter.FULL_LOAD_LIMIT)));
     return { items: out, partial: Boolean(cursor) };
@@ -415,7 +488,9 @@ class ResourceApiAdapter {
   commitRemote(plan) {
     const reconcile = new ResourceReconcile();
     // boardConfig: boards whose own document (name, columns, views…) changed — not just their records.
-    const summary = { records: [], removed: [], boards: new Set(), boardConfig: new Set(), removedBoards: new Set(), structure: false };
+    // refreshed: boards that were showing their saved copy and now show the server's. stale: such boards whose answer predates a
+    // save made here (they stay on the copy and are asked for again).
+    const summary = { records: [], removed: [], boards: new Set(), boardConfig: new Set(), removedBoards: new Set(), structure: false, refreshed: new Set(), stale: new Set() };
     const fields = (a, b) => [...new Set([...Object.keys(a?.values || {}), ...Object.keys(b?.values || {})])].filter((k) => !resourceSame(a?.values?.[k], b?.values?.[k]));
     // Workspaces and board lists.
     if (plan.structure) {
@@ -462,11 +537,24 @@ class ResourceApiAdapter {
         const before = new Map(this.boardRecords(boardId).map((r) => [r.id, r.version]));
         const same = before.size === records.items.length && records.items.every((r) => before.get(r.id) === r.version);
         const older = records.items.some((r) => before.has(r.id) && r.version < before.get(r.id)); // fetched before a newer save here
-        if (!same && !older) {
+        // A saved copy (state "cached") is always replaced by the server's records, even when they match: that ends the
+        // "saved copy" state and brings each record's history. Records deleted since are dropped; none is ever brought back.
+        const fromCopy = this.boards.get(boardId).load.state === "cached";
+        if (fromCopy && older) summary.stale.add(boardId);
+        else if (fromCopy && same) {
+          // The saved copy was current: nothing to replace. Only its state, its count and the history it lacked (the board's,
+          // and the rows that have some) change — a fraction of the work of replacing every row.
+          const b = this.boards.get(boardId); b.load.state = "full"; b.load.cachedAt = undefined; b.recordCount = records.items.filter((r) => !r.archived).length;
+          for (const id of Object.keys(b.load.recordActivity || {})) { const r = this.records.get(id); if (r && r.boardId === boardId) reconcile.replaceRecord(boardId, this.modelRow(r, b)); }
+          reconcile.replaceBoard(boardId, { activity: resourceClone(b.load.activity), recordCount: b.recordCount });
+          summary.refreshed.add(boardId); changed = true;
+        }
+        else if ((!same || fromCopy) && !older) {
           for (const r of this.boardRecords(boardId)) this.records.delete(r.id);
           for (const r of records.items) this.records.set(r.id, this.recordFrom(r));
-          const b = this.boards.get(boardId); b.load.state = records.partial ? "partial" : "full"; if (!records.partial) b.recordCount = records.items.filter((r) => !r.archived).length; // a partial reload saw only part of the board
+          const b = this.boards.get(boardId); b.load.state = records.partial ? "partial" : "full"; b.load.cachedAt = undefined; if (!records.partial) b.recordCount = records.items.filter((r) => !r.archived).length; // a partial reload saw only part of the board
           reconcile.replaceBoardRecords(boardId, this.boardRecords(boardId).map((r) => this.modelRow(r, b)));
+          if (fromCopy) { reconcile.replaceBoard(boardId, { activity: resourceClone(b.load.activity), recordCount: b.recordCount }); summary.refreshed.add(boardId); this.markDirty(boardId); }
           changed = true;
         }
       }
@@ -504,14 +592,28 @@ class ResourceApiAdapter {
   async loadBoardRecords(boardId, { more = false } = {}) {
     const board = this.boards.get(this.resolve(boardId));
     if (!board) throw new StorageError(StorageError.CODES.NOT_FOUND, "This board no longer exists. Reload to see the latest data.");
+    if (!more && board.load.state === "none") { const cached = await this.loadCachedBoard(board); if (cached) return cached; }
     const ids = await this.fetchRecords(board.id, { more });
     if (!more) await this.fetchActivity(board.id);
     return { records: ids.map((id) => this.modelRow(this.records.get(id), board)), activity: more ? null : resourceClone(board.load.activity), state: board.load.state };
   }
+  // The board's saved copy in this browser, shown while the server's copy is fetched (state "cached": the caller asks for
+  // it to be checked at once — see BoardModel.ensureBoardRecords). Used only when this board was just listed by the server
+  // for this person (so they may still see it), with the same version (columns and groups unchanged) and no more records
+  // than load at once. Anything else: null, and the board loads from the server as before.
+  async loadCachedBoard(board) {
+    if (!this.cache || board.recordCount > ResourceApiAdapter.FULL_LOAD_LIMIT) return null;
+    const entry = await this.cache.read(board.id, { version: board.version });
+    // The board may have changed while the copy was read (a live update, another load): then the copy isn't used.
+    if (!entry || this.boards.get(board.id) !== board || board.load.state !== "none" || board.version !== entry.boardVersion) return null;
+    for (const r of entry.records) this.records.set(r.id, this.recordFrom(r));
+    board.load = { ...board.load, state: "cached", cursor: null, cachedAt: entry.savedAt };
+    return { records: this.boardRecords(board.id).map((r) => this.modelRow(r, board)), activity: [], state: "cached", cachedAt: entry.savedAt };
+  }
   boardLoadState(boardId) {
     const board = this.boards.get(this.resolve(boardId));
     if (!board) return null;
-    return { state: board.load.state, total: board.recordCount, loaded: board.load.state === "partial" ? this.boardRecords(board.id).length : undefined };
+    return { state: board.load.state, total: board.recordCount, loaded: board.load.state === "partial" ? this.boardRecords(board.id).length : undefined, ...(board.load.state === "cached" ? { cachedAt: board.load.cachedAt } : {}) };
   }
   // Reloads the records already loaded for a board (after schema changes and conflicts) and returns model rows.
   async refreshBoardRecords(boardId) {
@@ -521,7 +623,7 @@ class ResourceApiAdapter {
     if (board.load.state === "none") return [];
     let cursor = null, count = 0;
     do {
-      const page = await this.request("GET", `/boards/${boardId}/records?limit=${ResourceApiAdapter.PAGE_SIZE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+      const page = await this.request("GET", `/boards/${boardId}/records?limit=${this.pageSize(board)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
       for (const r of page.items) { this.records.set(r.id, this.recordFrom(r)); count += 1; }
       cursor = page.nextCursor;
     } while (cursor && count < (board.recordCount > ResourceApiAdapter.FULL_LOAD_LIMIT ? 1 : Math.max(wanted, ResourceApiAdapter.FULL_LOAD_LIMIT)));

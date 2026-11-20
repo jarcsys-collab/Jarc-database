@@ -288,12 +288,17 @@ describe("Record pagination, sorting and filtering", () => {
     assert.deepEqual(again.body.items.map((r) => r.id), seen.slice(0, 50).map((r) => r.id), "repeatable");
   });
 
-  test("default limit 50; limit over 200 is rejected (documented contract), as are 0 and non-numbers", async () => {
+  test("default limit 50; limit over 1000 is rejected (documented contract), as are 0 and non-numbers; filtered lists stay at 200", async () => {
     const res = await page("");
     assert.equal(res.body.items.length, 50);
     assert.equal(res.body.limit, 50);
     assert.equal((await page("?limit=200")).body.items.length, 125);
-    for (const q of ["?limit=201", "?limit=100000", "?limit=0", "?limit=-1", "?limit=abc", "?limit=10&limit=20"]) assert.equal((await page(q)).status, 400, q);
+    assert.equal((await page("?limit=1000")).body.items.length, 125);
+    for (const q of ["?limit=1001", "?limit=100000", "?limit=0", "?limit=-1", "?limit=abc", "?limit=10&limit=20"]) assert.equal((await page(q)).status, 400, q);
+    // With filter, orderBy, q or group the server sorts and matches: those pages stay at most 200.
+    const orderBy = encodeURIComponent(JSON.stringify([{ key: "position", dir: "asc" }]));
+    assert.equal((await page(`?limit=200&orderBy=${orderBy}`)).status, 200);
+    for (const q of [`?limit=201&orderBy=${orderBy}`, "?limit=500&q=ab", "?limit=1000&group=none"]) assert.equal((await page(q)).status, 400, q);
   });
 
   test("invalid or mismatched cursors → safe 400 VALIDATION_ERROR", async () => {

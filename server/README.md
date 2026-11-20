@@ -42,10 +42,23 @@ string is never logged or returned by the API.
 | `http://127.0.0.1:3000/?storage=resource` | RESOURCE (development, needs `DATA_STORE=mongodb`) | MongoDB, through the resource endpoints below |
 
 The modes never share data, and nothing is copied from one to another. In resource mode the browser loads workspaces,
-then board summaries, then records page by page (200 per request) for the board being opened: up to 2,000 records
-load at once, larger boards show "Load more". Saves send only what changed, with each item's expected version; a 409
-loads the latest server copy instead of overwriting. Per-user state (selection, settings, favourites, last view,
-recent items, local contacts) stays in that browser. Restoring a backup is disabled in resource mode.
+then board summaries, then records for the board being opened: up to 2,000 records load at once (pages of 1,000),
+larger boards start with a page of 200 and load the rest as needed. Saves send only what changed, with each item's
+expected version; a 409 loads the latest server copy instead of overwriting. Per-user state (selection, settings,
+favourites, last view, recent items, local contacts) stays in that browser. Restoring a backup is disabled in resource mode.
+
+**Saved copies of boards (Microsoft sign-in only; `site/assets/BoardCache.js`).** A board loaded completely (≤ 2,000
+records) is kept in the browser's IndexedDB, per signed-in JARC user, as the server last confirmed it (never an unsaved
+edit; no tokens, cookies, comments or file contents). After a reload it is shown at once, marked "Showing the copy saved
+in this browser · checking for changes…", and replaced by the server's copy through the live-update path (no save is
+overwritten; a cell being edited is redrawn only when the person leaves it). A copy is used only after the server has
+confirmed the session and listed the board for that person, and only if the board's version is unchanged. Other people's
+copies are deleted when someone signs in, all copies on sign-out or a refused account, copies of boards no longer listed
+when the board list loads; copies expire after 3 days and are bounded (40 MB, 40 boards, least recently used first).
+IndexedDB unavailable or failing: boards load from the server as before. `localStorage["jarc-board-cache"] = "off"`
+switches it off in one browser. In memory, at most 20 boards / 30,000 records stay loaded (least recently opened are let
+go of and load again when opened). The open board is read again every 60 s only while live updates are disconnected.
+Timings: `window.jarcPerf.entries` (`board-open` with its source — memory, saved copy, server — and `board-refresh`).
 
 ## Endpoints
 
@@ -170,7 +183,7 @@ imports data. Not a member → 404; not allowed → 403. Every check uses the st
 | GET / PATCH / DELETE | `/api/v1/workspaces/:workspaceId` | PATCH needs `expectedVersion`; DELETE needs `?expectedVersion=` and cascades |
 | GET / POST | `/api/v1/workspaces/:workspaceId/boards` | POST: `{ name, columns?, groups?, savedViews?, ... }` |
 | GET / PATCH / DELETE | `/api/v1/boards/:boardId` | DELETE cascades to the board's records |
-| GET / POST | `/api/v1/boards/:boardId/records` | GET: `limit` (1–200, default 50), `cursor`, `sort` (`position`\|`createdAt`\|`updatedAt`), `dir`, `groupId`, `status`, `archived` |
+| GET / POST | `/api/v1/boards/:boardId/records` | GET: `limit` (1–1000, default 50; at most 200 with `filter`, `orderBy`, `q` or `group`), `cursor`, `sort` (`position`\|`createdAt`\|`updatedAt`), `dir`, `groupId`, `status`, `archived` |
 | GET / PATCH / DELETE | `/api/v1/records/:recordId` | PATCH `{ expectedVersion, values?, groupId?, position?, archived?, pinned? }`; a stale version → 409 |
 | POST | `/api/v1/boards/:boardId/records/batch` | Create up to 5,000 records in one transaction (CSV import, duplicate board, undo) |
 | PATCH | `/api/v1/boards/:boardId/records` | `{ items: [{ id, expectedVersion, ...changes }] }` — bulk edits and reorders; one stale version → 409, nothing written |

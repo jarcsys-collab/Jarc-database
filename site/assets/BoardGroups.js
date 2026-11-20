@@ -17,7 +17,7 @@ Object.assign(AppView.prototype, {
       .filter((s) => !filtering || s.rows.length || model.groupDisplayCount?.(s.name, 0) > 0);
     const shown = [...sections.flatMap((s) => (model.isGroupCollapsed(s.name) ? [] : s.rows)), ...loose];
     // Large board: only the rows near the viewport are in the page; the rest are spacers (see groupRowsHtml).
-    const large = rows.length > AppView.LARGE_BOARD_ROWS || Boolean(model.serverView);
+    const large = !this.printAll && (rows.length >= AppView.VIRTUAL_ROWS || Boolean(model.serverView));
     this.virtual = large ? new Map() : null;
     const bodies = sections.map((s) => this.groupSection(model, s.name, s.rows, { editable, large })).join("") + (loose.length ? this.groupSection(model, "", loose, { editable, loose: true, large }) : "");
     const hiddenCount = [...archived].reduce((n, name) => n + (byGroup.get(name)?.length || 0), 0);
@@ -42,9 +42,9 @@ Object.assign(AppView.prototype, {
     const first = !this.virtual.size, range = this.rowRanges?.get(key) || (first ? [0, AppView.ROW_WINDOW] : [0, 0]);
     const start = Math.min(range[0], rows.length), end = Math.min(range[1], rows.length);
     this.virtual.set(key, { name, count: rows.length, start, end });
-    const spacer = (n) => (n > 0 ? `<tr class="row-spacer" aria-hidden="true"><td colspan="${span}" style="height:${n * h}px"></td></tr>` : "");
+    const spacer = (n) => (n > 0 ? `<tr class="row-spacer" aria-hidden="true" data-rows="${n}"><td colspan="${span}" style="height:${this.spacerHeight(n)}px"></td></tr>` : "");
     const more = model.groupHasMore?.(name), reserved = more ? Math.max(0, model.groupDisplayCount(name, rows.length) - rows.length - 1) : 0;
-    return spacer(start) + rows.slice(start, end).map((row) => this.row(row, model)).join("") + spacer(rows.length - end) + (more ? `<tr class="rows-loading" data-more-group="${this.attr(name)}"><td></td><td colspan="${span - 1}"><span class="empty-table-note">Loading more records…</span></td></tr>` : "") + (reserved > 0 ? `<tr class="row-spacer row-reserved" aria-hidden="true"><td colspan="${span}" style="height:${reserved * h}px;background-size:100% ${h}px"></td></tr>` : "");
+    return spacer(start) + rows.slice(start, end).map((row) => this.row(row, model)).join("") + spacer(rows.length - end) + (more ? `<tr class="rows-loading" data-more-group="${this.attr(name)}"><td></td><td colspan="${span - 1}"><span class="empty-table-note">Loading more records…</span></td></tr>` : "") + (reserved > 0 ? `<tr class="row-spacer row-reserved" aria-hidden="true" data-rows="${reserved}"><td colspan="${span}" style="height:${this.spacerHeight(reserved)}px;background-size:100% ${this.rowPitch || h}px"></td></tr>` : "");
   },
   // Moves a group's window by adding and removing only the rows that enter and leave, so a wide board doesn't redraw rows that
   // stay in view. → false when the rows on screen aren't what was last drawn: the caller then rebuilds the group.
@@ -59,7 +59,7 @@ Object.assign(AppView.prototype, {
     if (from < info.start) staying[0].insertAdjacentHTML("beforebegin", html(from, info.start));
     if (to > info.end) staying.at(-1).insertAdjacentHTML("afterend", html(info.end, to));
     for (const spacer of body.querySelectorAll(":scope > tr.row-spacer:not(.row-reserved)")) spacer.remove();
-    const spacer = (n) => (n > 0 ? `<tr class="row-spacer" aria-hidden="true"><td colspan="${model.visibleColumns.length + model.systemColumnCount + 3}" style="height:${n * h}px"></td></tr>` : "");
+    const spacer = (n) => (n > 0 ? `<tr class="row-spacer" aria-hidden="true" data-rows="${n}"><td colspan="${model.visibleColumns.length + model.systemColumnCount + 3}" style="height:${this.spacerHeight(n)}px"></td></tr>` : "");
     const now = [...body.querySelectorAll(":scope > tr[data-record-context]")];
     now[0].insertAdjacentHTML("beforebegin", spacer(from));
     now.at(-1).insertAdjacentHTML("afterend", spacer(rows.length - to));

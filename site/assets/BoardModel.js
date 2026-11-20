@@ -57,7 +57,7 @@ class BoardModel {
     this.history = [];
     this.activeSavedViewId = null;
     this.showArchived = false;
-    this.pendingSaves = 0; this.lastSave = Promise.resolve(true); this.failure = null; this.collecting = null;
+    this.pendingSaves = 0; this.dataSaves = 0; this.lastSave = Promise.resolve(true); this.failure = null; this.collecting = null;
     this.idAliases = new Map(); // temporary client IDs → server IDs (resource mode), so stale references still resolve
     this.boardLoading = {};     // boardId → "loading" | "error" while records are fetched (resource mode)
     this.applyState({});
@@ -65,11 +65,12 @@ class BoardModel {
   }
 
   // Loads stored data (asynchronously) and adopts it. Throws StorageError; the controller shows the recovery screen.
-  async init() {
+  // prefetch: false when the page opens at a board link — that board loads instead, without waiting behind the last one used.
+  async init({ prefetch = true } = {}) {
     const { data, user } = await this.storage.loadState();
     this.applyState({ ...(user || {}), ...(data || {}) });
     this.markPersisted();
-    if (this.board) this.ensureBoardRecords(this.board.id); // resource mode loads records per board
+    if (this.board && prefetch) this.ensureBoardRecords(this.board.id); // resource mode loads records per board
     return this;
   }
 
@@ -143,7 +144,7 @@ class BoardModel {
     if (this.collecting) { this.collecting.push(change); return Promise.resolve(true); } // inside applyAfterSave
     if (change.op !== "updateUserState") this.scheduleViewCount();
     const state = this.toStorageState(), text = JSON.stringify(state), history = this.history.slice();
-    this.pendingSaves += 1; this.saveState = "saving";
+    this.pendingSaves += 1; this.saveState = "saving"; this.countDataSave(change);
     window.dispatchEvent(new CustomEvent("jarc-save", {detail:"saving"}));
     const done = this.storage.commit(change, state).then((result) => {
       this.pendingSaves -= 1;
@@ -162,6 +163,9 @@ class BoardModel {
     this.lastSave = done;
     return done;
   }
+  // Saves that change shared data, counted (AppController.processRemote: an answer fetched before one may predate it).
+  // Per-user state never reaches the server (ResourceApiAdapter.USER_ONLY_OPS), so it never makes an answer stale.
+  countDataSave(change) { if (!(change.ops || [change.op]).every((op) => op === "updateUserState" || op === "updateMembers")) this.dataSaves += 1; }
   markPersisted() { this.persisted = { text: JSON.stringify(this.toStorageState()), history: this.history.slice() }; this.failure = null; }
   // Replaces shared data and per-user state from a serialized storage state, keeping view-only state (search, filters).
   adoptState(text) {
@@ -234,13 +238,16 @@ class BoardModel {
   async ensureBoardRecords(boardId, { more = false } = {}) {
     if (!this.storage.loadBoard || !boardId) return;
     const current = this.boardLoadState(boardId).state;
-    if (current === "loading" || (current === "full" && !more) || (current === "partial" && !more)) return;
+    if (current === "loading" || (["full", "partial", "cached"].includes(current) && !more)) return;
     this.boardLoading[boardId] = "loading";
     window.dispatchEvent(new CustomEvent("jarc-board-status", { detail: { boardId } }));
     try {
       const loaded = await this.storage.loadBoard(boardId, { more });
       delete this.boardLoading[boardId];
       this.mergeLoadedRecords(boardId, loaded);
+      // The board's saved copy in this browser is showing: the server's copy is fetched at once (AppController.revalidateBoard).
+      if (loaded.state === "cached") window.dispatchEvent(new CustomEvent("jarc-board-revalidate", { detail: { boardId } }));
+      this.scheduleEviction();
       // Searching beyond what's loaded depends on the server's search index, so ask once a board is only partly loaded.
       if (this.boardLoadState(boardId).state === "partial") await this.askBoardSearch();
     } catch (error) {
@@ -452,7 +459,7 @@ class BoardModel {
     restore(before);
 
     const change = { ...changes[changes.length - 1], ops: changes.map((c) => c.op) };
-    this.pendingSaves += 1; this.saveState = "saving";
+    this.pendingSaves += 1; this.saveState = "saving"; this.countDataSave(change);
     window.dispatchEvent(new CustomEvent("jarc-save", {detail:"saving"}));
     const done = this.storage.commit(change, JSON.parse(proposed.text));
     this.lastSave = done.then((outcome) => outcome.ok);
@@ -525,7 +532,25 @@ class BoardModel {
       .filter((row) => !this.personFilter || !this.ownerColumn || this.valueList(row[this.ownerColumn.key]).includes(this.personFilter))
       .filter((row) => this.matchesColumnFilter(row))
       .filter((row) => !query || this.board.columns.some((column) => this.valueText(column, row[column.key]).toLowerCase().includes(query)) || (BoardModel.isRecordId(query) && this.recordIdOf(row) === query))
-      .sort((a, b) => { if(!server&&Boolean(a.pinned)!==Boolean(b.pinned))return a.pinned?-1:1; if(serverOrder){const x=serverOrder.get(String(a.id))??-1,y=serverOrder.get(String(b.id))??-1;if(x!==y)return x-y;} if(orderBy){for(const s of orderBy){const col=this.board.columns.find((c)=>c.key===s.key),x=this.sortText(col,this.cellOf(a,s.key)),y=this.sortText(col,this.cellOf(b,s.key)),c=x.localeCompare(y,undefined,{numeric:true});if(c)return s.dir==="desc"?-c:c;}} if(this.manualSort)return place.get(a)-place.get(b); const key=this.sortKey || this.sortColumn?.key; if(!key)return place.get(a)-place.get(b); const column=this.board.columns.find((c)=>c.key===key), x=this.sortText(column,this.cellOf(a,key)), y=this.sortText(column,this.cellOf(b,key)); return this.sortDirection === "desc" ? y.localeCompare(x,undefined,{numeric:true}) : x.localeCompare(y,undefined,{numeric:true}); });
+      .sort(this.rowComparator(place, server, serverOrder, orderBy));
+  }
+  // The order of visibleRows. Same order as comparing with localeCompare(…, { numeric: true }), but with one shared collator
+  // (localeCompare builds a new one on every call) and each row's sort text worked out once, not on every comparison:
+  // sorting is redone on every redraw and every scroll step of a long board.
+  static COLLATOR = new Intl.Collator(undefined, { numeric: true });
+  rowComparator(place, server, serverOrder, orderBy) {
+    const compare = BoardModel.COLLATOR.compare, memo = new Map();
+    const textOf = (column, row, key) => { let byRow = memo.get(key); if (!byRow) memo.set(key, (byRow = new Map())); let text = byRow.get(row); if (text === undefined) { text = this.sortText(column, this.cellOf(row, key)); byRow.set(row, text); } return text; };
+    const order = orderBy ? orderBy.map((s) => ({ ...s, column: this.board.columns.find((c) => c.key === s.key) })) : null;
+    const key = this.sortKey || this.sortColumn?.key, column = key ? this.board.columns.find((c) => c.key === key) : null, desc = this.sortDirection === "desc", manual = this.manualSort;
+    return (a, b) => {
+      if (!server && Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
+      if (serverOrder) { const x = serverOrder.get(String(a.id)) ?? -1, y = serverOrder.get(String(b.id)) ?? -1; if (x !== y) return x - y; }
+      if (order) for (const s of order) { const c = compare(textOf(s.column, a, s.key), textOf(s.column, b, s.key)); if (c) return s.dir === "desc" ? -c : c; }
+      if (manual || !key) return place.get(a) - place.get(b);
+      const x = textOf(column, a, key), y = textOf(column, b, key);
+      return desc ? compare(y, x) : compare(x, y);
+    };
   }
 
   // A direct board link (/boards/{id}) that didn't open: "invalid" | "missing", shown instead of the screen until the next navigation.
@@ -542,12 +567,42 @@ class BoardModel {
     const space = this.workspaces.find(w=>w.id===workspaceId);
     const board = space?.boards.find(b=>b.id===boardId);
     if (!board) throw Error("This board is no longer available.");
+    // Timing (window.jarcPerf, AppController.notePerf): from here until the board's records are drawn, and where they came from.
+    const before = this.boardLoadState(boardId)?.state || "full";
+    this.openTiming = { boardId, at: globalThis.performance?.now?.() ?? Date.now(), from: before === "full" || before === "partial" ? "memory" : before === "cached" ? "copy" : "load" };
     this.boardLinkProblem = null; this.currentWorkspaceId=workspaceId; this.currentBoardId=boardId; this.screen="board";
     this.currentView="table"; this.resetMainView(); this.selected.clear(); // Main Table is always the board's first view
     board.openCount=(board.openCount||0)+1;
     this.recentBoards=[{boardId,workspaceId,openedAt:new Date().toISOString()},...this.recentBoards.filter(r=>r.boardId!==boardId||r.workspaceId!==workspaceId)].slice(0,10);
     this.save({op:"updateUserState",boardId,workspaceId});
+    this.storage?.adapter?.touchBoard?.(this.serverId(boardId));
     this.ensureBoardRecords(boardId);
+  }
+  // Memory bounds are checked once a board's records have arrived (ensureBoardRecords), and only once every save has
+  // finished: a save still queued carries the state from when it was made, records and all.
+  scheduleEviction(tries = 5) {
+    if (!this.storage?.adapter?.evictionCandidates) return;
+    this.lastSave.then(() => { if ((this.pendingSaves > 0 || this.collecting) && tries > 0) this.scheduleEviction(tries - 1); else this.evictLoadedBoards(); }, () => {});
+  }
+  // Memory bounds (resource mode): past ResourceApiAdapter's limits, the least recently opened boards' records are let go of
+  // here and in the adapter; they load again (from this browser's saved copy or the server) when opened. Every copy of the
+  // state forgets them together — the live state, the last saved state and the undo history — so nothing can ever read
+  // their absence as a deletion, and no undo can bring them back as new records. Never while a save is running or failed.
+  evictLoadedBoards() {
+    const adapter = this.storage?.adapter;
+    if (!adapter?.evictionCandidates || this.pendingSaves > 0 || this.failure || this.collecting) return [];
+    const ids = adapter.evictionCandidates(this.serverId(this.currentBoardId));
+    if (!ids.length) return [];
+    const drop = new Set(ids.map(String)), modelIds = new Set();
+    const clear = (workspaces) => { for (const w of workspaces) for (const b of w.boards || []) if (drop.has(this.serverId(b.id))) { b.records = []; modelIds.add(b.id); } };
+    const fix = (text) => { const state = JSON.parse(text); clear(state.data.workspaces); return JSON.stringify(state); };
+    const live = this.toStorageState(), manualSort = this.manualSort; clear(live.data.workspaces); this.adoptState(JSON.stringify(live)); this.manualSort = manualSort;
+    this.persisted = { ...this.persisted, text: fix(this.persisted.text), history: [] };
+    this.history = []; this.future = [];
+    for (const id of ids) adapter.forgetRecords(id);
+    for (const id of modelIds) { delete this.boardLoading[id]; this.selected.clear(); }
+    this.evicted = (this.evicted || 0) + ids.length;
+    return ids;
   }
 
   switchWorkspace(id) { const space = this.workspaces.find((item) => item.id === id); if (!space) return; this.boardLinkProblem = null; this.currentWorkspaceId = id; this.currentBoardId = space.boards[0]?.id || ""; this.screen = "home"; this.save({op:"updateUserState",workspaceId:id}); }

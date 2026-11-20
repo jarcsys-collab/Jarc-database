@@ -277,7 +277,9 @@ describe("Motion, loading states and feedback (real app, headless browser)", { s
     assert.ok(outline, "keyboard focus is visible");
     await click(ana, 'th[data-column-key="notes"] .column-menu-button'); await ana.key("Escape");
     assert.deepEqual(await ana.evaluate("(() => { const h = document.getElementById('jarc-exit-layer'); return [h.getAttribute('aria-hidden'), h.inert, getComputedStyle(h).pointerEvents]; })()"), ["true", true, "none"], "exit layer: hidden, inert, never clickable");
-    // A slow board load: the placeholder is a busy region with a status and a text alternative.
+    // A slow board load: the placeholder is a busy region with a status and a text alternative. (Beta board was opened before,
+    // so this browser has a copy of it that would show at once instead: switched off here, with BoardCache's own switch.)
+    await ana.evaluate(`localStorage.setItem("jarc-board-cache", "off")`);
     await ana.open(`${base}/`, { width: 1280, height: 860 }); await ana.waitFor("!!document.querySelector('#sidebar .tree-item')", 15000); await instrument(ana);
     await shape(ana, [{ match: `/boards/${beta.id}/records`, delay: 1500 }]);
     await ana.evaluate(`[...document.querySelectorAll('#sidebar .tree-item')].find((el) => el.textContent.includes("Beta board"))?.click()`);
@@ -285,6 +287,7 @@ describe("Motion, loading states and feedback (real app, headless browser)", { s
     assert.match(await ana.evaluate("document.querySelector('.skeleton-region .sr-only').textContent"), /Loading records/);
     assert.ok(await ana.waitFor("!document.querySelector('[aria-busy=\"true\"]')", 6000), "busy state cleared once loaded");
     await shape(ana, []);
+    await ana.evaluate(`localStorage.removeItem("jarc-board-cache")`);
     assert.deepEqual(await errors(ana), []);
   });
 });
