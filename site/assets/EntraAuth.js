@@ -68,7 +68,10 @@ class EntraAuth {
     return this.app;
   }
 
-  // Back from Microsoft: put the original path and query (e.g. ?storage=resource) back in the address bar.
+  // The pages JARC itself serves, the only places a sign-in may return to: the app (/ or /index.html) and a direct board link.
+  static isAppPath(pathname) { return /^\/(?:index\.html)?$/.test(pathname) || /^\/boards\/[^/]{1,200}\/?$/.test(pathname); }
+  // Back from Microsoft: put the original path and query (e.g. /boards/{id} or ?storage=resource) back in the address bar.
+  // Only a page of this app on this origin; anything else leaves the URL as it is.
   restoreReturnUrl() {
     let target = null;
     try {
@@ -76,9 +79,9 @@ class EntraAuth {
       this.session.removeItem(EntraAuth.RETURN_KEY);
       this.session.removeItem(EntraAuth.SIGNED_OUT_KEY);
     } catch { /* session storage blocked: the URL stays as it is */ }
-    if (!target) return;
-    const url = new URL(target, this.location.origin);
-    if (url.origin === this.location.origin && `${this.location.pathname}${this.location.search}` !== `${url.pathname}${url.search}`) {
+    if (!target || !target.startsWith("/") || target.startsWith("//")) return;
+    let url; try { url = new URL(target, this.location.origin); } catch { return; }
+    if (url.origin === this.location.origin && EntraAuth.isAppPath(url.pathname) && `${this.location.pathname}${this.location.search}` !== `${url.pathname}${url.search}`) {
       this.history.replaceState(null, "", `${url.pathname}${url.search}`);
     }
   }

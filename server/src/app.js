@@ -3,6 +3,7 @@
 //
 //   /api/v1/*  → JSON API (unknown paths → JSON 404, never index.html)
 //   /*         → the existing static frontend in site/ (same origin, so no CORS)
+//   /boards/:id → the same page (a direct board link; GET only)
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
@@ -52,6 +53,10 @@ function resourceModeIndex(siteDir) {
   if (!html.includes(STORAGE_DEFAULT_LOCAL)) throw new Error("site/index.html has no jarc-storage-default marker.");
   return html.replace(STORAGE_DEFAULT_LOCAL, STORAGE_DEFAULT_RESOURCE);
 }
+// Direct board links: /boards/{boardId} is the same page as /. Its stylesheets, fonts and scripts are named relative to the
+// page ("assets/…"), which from /boards/ would mean /boards/assets/…, so here they are named from the site root.
+const BOARD_LINK_PATH = /^\/boards\/[^/]{1,200}\/?$/;
+const rootRelative = (html) => html.replace(/(\s(?:href|src))="assets\//g, '$1="/assets/');
 
 // An optional feature not stated is off in production and on elsewhere.
 const resolveFeatures = (features = {}, environment = "development") => { const on = (name) => (typeof features[name] === "boolean" ? features[name] : environment !== "production"); return Object.freeze({ nativeForms: on("nativeForms"), spreadsheetImports: on("spreadsheetImports") }); };
@@ -153,10 +158,17 @@ function createApp({ apiTokens = null, features = {}, repository, environment = 
   app.use("/api/v1", api);
   app.use("/api", apiNotFound); // unversioned API paths are not served either
 
+  let boardLinkHtml = null;
   if (auth) {
     const indexHtml = resourceModeIndex(siteDir);
+    boardLinkHtml = rootRelative(indexHtml);
     app.get(["/", "/index.html"], (req, res) => res.set("Cache-Control", "no-cache").type("html").send(indexHtml));
   }
+  // GET (and HEAD) only, one path segment only; the page itself checks the ID and whether this person may see the board.
+  app.get(BOARD_LINK_PATH, (req, res, next) => {
+    try { boardLinkHtml ??= rootRelative(fs.readFileSync(path.join(siteDir, "index.html"), "utf8")); } catch { return next(); }
+    res.set("Cache-Control", "no-cache").type("html").send(boardLinkHtml);
+  });
   app.get("/vendor/msal-browser.min.js", (req, res) => res.set("Cache-Control", "public, max-age=3600").type("text/javascript").sendFile(MSAL_BUNDLE));
   app.use(express.static(siteDir, { index: "index.html", dotfiles: "ignore" }));
   app.use((req, res) => sendError(res, 404, "NOT_FOUND", "Not found."));

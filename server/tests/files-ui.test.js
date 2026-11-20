@@ -118,9 +118,10 @@ describe("Files column and column guidance (real app, headless browser)", { skip
     const after = await record("F-2");
     assert.equal(after.version, before.version, "the record itself is unchanged (no version conflict for anyone editing it)");
     await ana.key("Escape");
+    const address = await ana.evaluate("location.href"); // the open board's link (/boards/{id})
     assert.ok(await drop(ana, ".board-head", [["stray.png", "image/png", "png"]]));
     await sleep(300);
-    assert.equal(await ana.evaluate("location.pathname"), "/", "still in JARC");
+    assert.equal(await ana.evaluate("location.href"), address, "still in JARC, on the same board");
     assert.equal((await serverFiles("F-2")).length, 1, "nothing uploaded from a stray drop");
   });
 

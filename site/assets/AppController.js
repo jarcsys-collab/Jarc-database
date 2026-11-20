@@ -1,6 +1,7 @@
 class AppController {
   constructor(root) {
     this.root = root; this.auth = new AuthModel(); this.model = new BoardModel(); this.view = new AppView(root);this.view.onUndo=()=>{if(this.busy)return;const label=this.model.undo();this.update();this.view.toast(label);};
+    this.view.boardLinks = this.boardLinksEnabled; window.addEventListener("popstate", (event) => this.onBoardHistory(event));
     this.integrations = typeof IntegrationsPanel === "function" ? new IntegrationsPanel(this) : null; this.view.integrations = this.integrations;
     this.health = typeof SystemHealthPanel === "function" ? new SystemHealthPanel(this) : null; this.view.healthPanel = this.health;
     this.accounts = typeof AccountsPanel === "function" ? new AccountsPanel(this) : null; this.view.accountsPanel = this.accounts;
@@ -103,6 +104,9 @@ class AppController {
     // couldn't find a signed-in person's choice, so a collapsed sidebar used to reopen after every reload).
     document.body.classList.toggle("nav-collapsed", window.jarcStorage.getPreference("navCollapsed")==="1");
     document.body.classList.toggle("workspace-section-collapsed", window.jarcStorage.getPreference("workspaceSectionCollapsed")==="1");
+    // A direct board link (/boards/{id}, kept through Microsoft sign-in by EntraAuth): open that board before anything is drawn,
+    // so the default screen never shows first. The board list is complete by now (only boards this person may see).
+    this.applyBoardUrl(); this.boardUrlStart = true;
     this.root.onclick = null; this.ready = true; this.update(); this.integrations?.afterStart(); this.appearance?.afterStart();
     this.loadPeople(); this.loadFeed(); this.startLive();
     if (!this.feedTimer && this.model.storage.adapter.loadActivityFeed) this.feedTimer = setInterval(() => { if (this.ready && document.visibilityState === "visible") this.loadFeed(); }, 60000);
@@ -264,7 +268,55 @@ class AppController {
     this.scheduleVirtual(); this.refocus(focus); if (place === this.lastPlace) this.restoreScroll(scroll); else if (this.lastPlace !== undefined) window.scrollTo(0, 0);
     this.lastPlace = place;
     if (this.ready && this.model.workspace && this.model.workspace.id !== this.peopleKey) this.loadPeople();
-    this.ensureAttachments(); this.trackRows(); this.reapplyFlashes();
+    this.ensureAttachments(); this.trackRows(); this.reapplyFlashes(); this.syncBoardUrl();
+  }
+  // ---- Direct board links (resource mode): the address bar shows /boards/{boardId} while a board is open, such a link opens
+  // that board after sign-in, and Back/Forward move between the boards opened. Access is unchanged: a link only finds boards
+  // the server already listed for this person. Local mode keeps its single address.
+  static BOARD_PATH = /^\/boards\/([^/]{1,200})\/?$/;
+  static HISTORY_SCREENS = new Set(["home", "mywork", "integrations"]); // screens that Back/Forward may return to
+  get boardLinksEnabled() { return this.model.storage?.adapter?.mode === "resource" && /^https?:$/.test(window.location.protocol) && typeof window.history?.pushState === "function"; }
+  // What a path asks for: undefined (not a board link), null (a board link without a valid board ID) or the board ID, lowercase.
+  static boardIdInPath(pathname) {
+    const match = AppController.BOARD_PATH.exec(pathname || "");
+    if (!match) return undefined;
+    let id; try { id = decodeURIComponent(match[1]); } catch { return null; }
+    return BoardModel.isRecordId(id) ? id.toLowerCase() : null;
+  }
+  // The board's shareable address on this site, or null while it has no server ID yet (still being created).
+  boardLinkFor(board) { const id = board ? this.model.serverId(board.id) : ""; return BoardModel.isRecordId(id) ? `${window.location.origin}/boards/${id.toLowerCase()}` : null; }
+  // Shows what the address asks for (at startup and on Back/Forward). Returns whether anything changed; already showing it → nothing.
+  applyBoardUrl({ screen = null } = {}) {
+    if (!this.boardLinksEnabled) return false;
+    const id = AppController.boardIdInPath(window.location.pathname), model = this.model;
+    if (id === undefined) {
+      if (screen === null) return false; // startup at /: the usual start screen
+      const target = AppController.HISTORY_SCREENS.has(screen) ? screen : "home";
+      if (model.screen === target && !model.boardLinkProblem) return false;
+      model.openScreen(target); return true;
+    }
+    const hit = id ? model.findBoardByServerId(id) : null;
+    if (!hit) { const problem = id ? "missing" : "invalid"; if (model.boardLinkProblem === problem) return false; model.boardLinkProblem = problem; return true; }
+    if (model.screen === "board" && model.board === hit.board && model.workspace === hit.workspace && !model.boardLinkProblem) return false;
+    model.openBoard(hit.board.id, hit.workspace.id); return true;
+  }
+  // Back/Forward. A fragment link (#main) also fires popstate; then the address still matches the screen and nothing happens.
+  onBoardHistory(event) {
+    if (!this.ready || !this.boardLinksEnabled || !this.signedIn) return;
+    if (!this.applyBoardUrl({ screen: event.state?.jarcScreen || "home" })) return;
+    this.view.closeOverlay(); this.update();
+  }
+  // After each render: the address follows the open board. A new board or screen adds a history entry (pushState); the first
+  // render, and moving between screens that share "/", only update the current entry (replaceState). A board link that didn't open
+  // keeps its address, so the person can see what was asked for.
+  syncBoardUrl() {
+    if (!this.ready || !this.boardLinksEnabled || !this.signedIn || this.model.boardLinkProblem) return;
+    const model = this.model, start = this.boardUrlStart; this.boardUrlStart = false;
+    let wanted = "/";
+    if (model.screen === "board" && model.board) { const link = this.boardLinkFor(model.board); if (!link) return; wanted = new URL(link).pathname; }
+    const here = window.location.pathname === "/index.html" ? "/" : window.location.pathname, state = { jarcScreen: model.screen };
+    if (here === wanted) { if (window.history.state?.jarcScreen !== state.jarcScreen) window.history.replaceState(state, "", window.location.href); return; }
+    window.history[start ? "replaceState" : "pushState"](state, "", `${wanted}${window.location.search}`);
   }
   // Microsoft sign-in screens: "signed-out" | "expired" | "denied" | "error". Shown instead of the app.
   // Someone may use the app now: signed in, and no sign-in gate (an expired, denied or signed-out session) is shown.
@@ -417,6 +469,8 @@ class AppController {
     if (action === "workspace-menu") this.togglePanel("workspace",()=>this.view.showWorkspaceMenu(this.model));
     if (action === "create-workspace") this.view.showWorkspaceForm();
     if (action === "record-menu") this.togglePanel(`record-${target.dataset.id}`,()=>this.view.showRecordMenu(this.model.rows.find((row)=>row.id===this.model.idOf(target.dataset.id)),this.model));
+    // Copy board link (board header and board menus): this site's /boards/{id} address of that board.
+    if (action === "copy-board-link") { this.view.closeOverlay(); const id=this.model.idOf(target.dataset.id), board=this.model.workspaces.flatMap((w)=>w.boards).find((b)=>b.id===id), link=this.boardLinkFor(board); if(link)this.copyText(link,"Board link"); else this.view.toast("This board is still being saved"); return; }
     // Record ID (the system column): copy it, its header menu, and hiding or showing it for this person.
     if (action === "copy-record-id") { this.view.closeOverlay(); const row=this.model.rows.find((r)=>r.id===this.model.idOf(target.dataset.id)), id=this.model.recordIdOf(row); if(id)this.copyText(id,"Record ID"); else this.view.toast("This record is still being saved"); return; }
     if (action === "record-id-menu") { this.togglePanel("column-menu-record-id",()=>this.view.showRecordIdMenu(this.model)); return; }

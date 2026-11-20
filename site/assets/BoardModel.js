@@ -528,13 +528,21 @@ class BoardModel {
       .sort((a, b) => { if(!server&&Boolean(a.pinned)!==Boolean(b.pinned))return a.pinned?-1:1; if(serverOrder){const x=serverOrder.get(String(a.id))??-1,y=serverOrder.get(String(b.id))??-1;if(x!==y)return x-y;} if(orderBy){for(const s of orderBy){const col=this.board.columns.find((c)=>c.key===s.key),x=this.sortText(col,this.cellOf(a,s.key)),y=this.sortText(col,this.cellOf(b,s.key)),c=x.localeCompare(y,undefined,{numeric:true});if(c)return s.dir==="desc"?-c:c;}} if(this.manualSort)return place.get(a)-place.get(b); const key=this.sortKey || this.sortColumn?.key; if(!key)return place.get(a)-place.get(b); const column=this.board.columns.find((c)=>c.key===key), x=this.sortText(column,this.cellOf(a,key)), y=this.sortText(column,this.cellOf(b,key)); return this.sortDirection === "desc" ? y.localeCompare(x,undefined,{numeric:true}) : x.localeCompare(y,undefined,{numeric:true}); });
   }
 
-  openScreen(screen) { this.screen = screen; this.selected.clear(); this.save({op:"updateUserState"}); }
+  // A direct board link (/boards/{id}) that didn't open: "invalid" | "missing", shown instead of the screen until the next navigation.
+  openScreen(screen) { this.boardLinkProblem = null; this.screen = screen; this.selected.clear(); this.save({op:"updateUserState"}); }
+  // The board with this server ID (24 hex characters) in any workspace this person can see, or null.
+  findBoardByServerId(id) {
+    const wanted = String(id ?? "").toLowerCase();
+    if (!BoardModel.isRecordId(wanted)) return null;
+    for (const workspace of this.workspaces) for (const board of workspace.boards) if (this.serverId(board.id).toLowerCase() === wanted) return { board, workspace };
+    return null;
+  }
   openBoard(boardId, workspaceId = this.currentWorkspaceId) {
     boardId = this.idOf(boardId); workspaceId = this.idOf(workspaceId);
     const space = this.workspaces.find(w=>w.id===workspaceId);
     const board = space?.boards.find(b=>b.id===boardId);
     if (!board) throw Error("This board is no longer available.");
-    this.currentWorkspaceId=workspaceId; this.currentBoardId=boardId; this.screen="board";
+    this.boardLinkProblem = null; this.currentWorkspaceId=workspaceId; this.currentBoardId=boardId; this.screen="board";
     this.currentView="table"; this.resetMainView(); this.selected.clear(); // Main Table is always the board's first view
     board.openCount=(board.openCount||0)+1;
     this.recentBoards=[{boardId,workspaceId,openedAt:new Date().toISOString()},...this.recentBoards.filter(r=>r.boardId!==boardId||r.workspaceId!==workspaceId)].slice(0,10);
@@ -542,7 +550,7 @@ class BoardModel {
     this.ensureBoardRecords(boardId);
   }
 
-  switchWorkspace(id) { const space = this.workspaces.find((item) => item.id === id); if (!space) return; this.currentWorkspaceId = id; this.currentBoardId = space.boards[0]?.id || ""; this.screen = "home"; this.save({op:"updateUserState",workspaceId:id}); }
+  switchWorkspace(id) { const space = this.workspaces.find((item) => item.id === id); if (!space) return; this.boardLinkProblem = null; this.currentWorkspaceId = id; this.currentBoardId = space.boards[0]?.id || ""; this.screen = "home"; this.save({op:"updateUserState",workspaceId:id}); }
   createWorkspace({name,color="#0f9489",icon="W",description=""}) {
     const clean=String(name||"").trim(); if(!clean)return null;
     const workspace={id:"workspace-"+crypto.randomUUID(),name:clean,color,icon:String(icon||clean[0]).slice(0,2),description,boards:[],createdAt:new Date().toISOString()};
