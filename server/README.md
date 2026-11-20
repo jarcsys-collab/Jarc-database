@@ -60,6 +60,20 @@ switches it off in one browser. In memory, at most 20 boards / 30,000 records st
 go of and load again when opened). The open board is read again every 60 s only while live updates are disconnected.
 Timings: `window.jarcPerf.entries` (`board-open` with its source — memory, saved copy, server — and `board-refresh`).
 
+**Board numbers and links (`src/domain/board-public-id.js`).** Every board has a public number (`publicId`, from 100001) for
+its link: `/boards/100001`. It is allocated once from an atomic counter (`counters._id = "boardPublicId"`, `$inc`) when the
+board is inserted (any path: app, monday.com integration, imports), unique (`boards` index `uniq_board_public_id`, partial),
+never changed by rename, move or archive, never reused, never accepted from a client. The board's `_id` stays its identity
+everywhere else (records, permissions, API tokens, `/api/v1/external`, caches). The browser resolves a number only among the
+boards the server listed for that person; older links by `_id` keep working and are rewritten to the number in place. Boards
+from before numbers existed get theirs from `scripts/board-public-ids.js` (`plan` read-only; `apply`, idempotent; production
+needs `--confirm-production` and its own approval); until then their links use the `_id`. The board API adds `publicId`.
+
+**Keyboard shortcuts (`site/assets/KeyboardShortcuts.js`).** One registry (key, Mac/Windows labels, context, availability,
+handler) behind `AppController.onKeydown` and the list shown with `?`; Quick search (Ctrl/⌘ B) over the boards already
+listed. Grid keys stay in `AppController.cellKey`, copy/cut/paste in the clipboard events. A shortcut does nothing — and the
+key is left to the browser — while typing, while an input method composes, behind a dialog, or where its action isn't possible.
+
 ## Endpoints
 
 | Method and path | Purpose |

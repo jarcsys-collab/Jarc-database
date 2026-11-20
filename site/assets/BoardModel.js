@@ -556,6 +556,13 @@ class BoardModel {
   // A direct board link (/boards/{id}) that didn't open: "invalid" | "missing", shown instead of the screen until the next navigation.
   openScreen(screen) { this.boardLinkProblem = null; this.screen = screen; this.selected.clear(); this.save({op:"updateUserState"}); }
   // The board with this server ID (24 hex characters) in any workspace this person can see, or null.
+  // A board link's token: the public board number ("100001", canonical decimal) or, for older links, the 24-character server ID.
+  // Only boards the server listed for this person are searched, so a number never reveals anything about other boards.
+  findBoardByLink(token) {
+    const text = String(token ?? "");
+    if (/^[1-9][0-9]{0,11}$/.test(text)) { for (const workspace of this.workspaces) for (const board of workspace.boards) if (board.publicId !== undefined && board.publicId !== null && String(board.publicId) === text) return { board, workspace }; return null; }
+    return this.findBoardByServerId(text);
+  }
   findBoardByServerId(id) {
     const wanted = String(id ?? "").toLowerCase();
     if (!BoardModel.isRecordId(wanted)) return null;
@@ -641,7 +648,7 @@ class BoardModel {
   // Board icon (shared): "icon:<name>", one emoji, or "" for the default. The server validates the value.
   setBoardIcon(id, value) { const board = this.workspaces.flatMap((w) => w.boards).find((b) => String(b.id) === String(this.idOf(id))); if (!board || board.source?.readOnly) return false; const v = String(value || "").trim().slice(0, 40); if ((board.icon || "") === v) return true; this.snapshot("Icon change undone"); board.icon = v; this.save({ op: "updateBoard", boardId: board.id }); return true; }
   renameBoard(id, name) { const board = this.workspace.boards.find((item) => item.id === id); if (board && name.trim()) { this.snapshot("Board rename undone"); board.name = name.trim(); this.log("Board renamed"); this.save({op:"updateBoard",boardId:id}); } }
-  duplicateBoard(id) { const source = this.workspace.boards.find((item) => item.id === id); if (!source) return; this.snapshot("Board duplication undone"); const copy = JSON.parse(JSON.stringify(source)); delete copy.source; copy.id = `board-${Date.now()}`; copy.name = `${source.name} copy`; copy.activity = [{ id: Date.now(), text: `Duplicated from ${source.name}`, at: new Date().toISOString() }]; this.workspace.boards.push(copy); this.openBoard(copy.id); this.save({op:"createBoard",boardId:copy.id,workspaceId:this.workspace.id}); }
+  duplicateBoard(id) { const source = this.workspace.boards.find((item) => item.id === id); if (!source) return; this.snapshot("Board duplication undone"); const copy = JSON.parse(JSON.stringify(source)); delete copy.source; copy.id = `board-${Date.now()}`; delete copy.publicId; copy.name = `${source.name} copy`; copy.activity = [{ id: Date.now(), text: `Duplicated from ${source.name}`, at: new Date().toISOString() }]; this.workspace.boards.push(copy); this.openBoard(copy.id); this.save({op:"createBoard",boardId:copy.id,workspaceId:this.workspace.id}); }
   deleteBoard(id) {
     this.snapshot("Board deletion undone"); this.workspace.boards=this.workspace.boards.filter(b=>b.id!==id);
     if(this.currentBoardId===id){this.currentBoardId=this.workspace.boards.find(b=>!b.archived)?.id||"";this.screen="home";} this.save({op:"deleteBoard",boardId:id,workspaceId:this.workspace.id});
@@ -700,6 +707,15 @@ class BoardModel {
   static migrateAppearance(settings){if(Number(settings.appearanceVersion)>=2)return settings;const out={...settings,appearanceVersion:2};if(String(out.accentColor||"").toLowerCase()===BoardModel.LEGACY_ACCENT)out.accentColor=BoardModel.JARC_TEAL;if(!out.palette)out.palette="default";return out;}
   static isGroupColor(c){return /^#[0-9a-f]{6}$/i.test(String(c||""));}
   get groupField(){return this.groupColumn?.key||"@group";}
+  // The records in the order the table shows them: by group (expanded groups only) when the board shows its groups, otherwise
+  // as listed. Keyboard range selection uses it, so it never reaches records that aren't on screen.
+  screenRows(){
+    const rows=this.visibleRows;
+    if(!(this.currentView==="table"&&!this.groupByColumn&&!this.showArchived&&this.board?.groups?.length))return rows;
+    const out=[], shown=[...this.activeGroups,""];
+    for(const g of shown){if(this.isGroupCollapsed(g))continue;for(const r of rows)if(this.groupOf(r)===g)out.push(r);}
+    return out;
+  }
   groupOf(row){return String(row?.[this.groupField]??"").trim();}
   get activeGroups(){const meta=this.board?.groupMeta||{};return (this.board?.groups||[]).filter((g)=>!meta[g]?.archived);}
   // The columns a new record can't be saved without: required, with no default, and not filled in automatically (the Name is asked

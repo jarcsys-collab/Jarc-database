@@ -26,6 +26,10 @@ class AppController {
     root.addEventListener("focusin", (event) => { if (this.cellRange && !this.extendingRange && event.target.classList?.contains("cell-display") && !event.target.closest("td")?.classList.contains("cell-in-range")) this.clearRange(); });
     document.addEventListener("copy", (event) => this.onCopy(event));
     document.addEventListener("paste", (event) => this.onPaste(event));
+    document.addEventListener("cut", (event) => this.onCut(event));
+    // Keyboard shortcuts: one registry (KeyboardShortcuts.js), its help list, and Quick search (Ctrl/⌘ + B).
+    this.shortcuts = typeof KeyboardShortcuts === "function" ? new KeyboardShortcuts(this) : null; this.view.keyboard = this.shortcuts;
+    this.quickSearch = typeof QuickSearch === "function" ? new QuickSearch(this) : null;
     window.addEventListener("resize", () => { cancelAnimationFrame(this.fitFrame); this.fitFrame = requestAnimationFrame(() => this.view.fitBoard()); });
     this.uploads = new Map(); this.filesConfirm = null; this.filesNotice = null; this.freshFiles = new Set(); this.fileSeq = new Map();
     root.addEventListener("keyup", (event) => { if (event.target.dataset?.action === "password-input") { const warning=document.querySelector("#caps-warning"); if(warning) warning.hidden=!event.getModifierState("CapsLock"); } });
@@ -366,15 +370,22 @@ class AppController {
   static BOARD_PATH = /^\/boards\/([^/]{1,200})\/?$/;
   static HISTORY_SCREENS = new Set(["home", "mywork", "integrations"]); // screens that Back/Forward may return to
   get boardLinksEnabled() { return this.model.storage?.adapter?.mode === "resource" && /^https?:$/.test(window.location.protocol) && typeof window.history?.pushState === "function"; }
-  // What a path asks for: undefined (not a board link), null (a board link without a valid board ID) or the board ID, lowercase.
+  // What a path asks for: undefined (not a board link), null (not a valid board link) or its token: the public board number
+  // ("100001": plain decimal, no leading zeros) or, for links made before numbers existed, the server ID (lowercase).
   static boardIdInPath(pathname) {
     const match = AppController.BOARD_PATH.exec(pathname || "");
     if (!match) return undefined;
     let id; try { id = decodeURIComponent(match[1]); } catch { return null; }
+    if (/^[1-9][0-9]{0,11}$/.test(id)) return id;
     return BoardModel.isRecordId(id) ? id.toLowerCase() : null;
   }
-  // The board's shareable address on this site, or null while it has no server ID yet (still being created).
-  boardLinkFor(board) { const id = board ? this.model.serverId(board.id) : ""; return BoardModel.isRecordId(id) ? `${window.location.origin}/boards/${id.toLowerCase()}` : null; }
+  // The board's shareable address on this site: its public number, or its server ID for a board that has no number yet (from
+  // before numbers existed, until the backfill); null while it is still being created.
+  boardLinkFor(board) {
+    if (!board) return null;
+    if (board.publicId !== undefined && board.publicId !== null && /^[1-9][0-9]{0,11}$/.test(String(board.publicId))) return `${window.location.origin}/boards/${board.publicId}`;
+    const id = this.model.serverId(board.id); return BoardModel.isRecordId(id) ? `${window.location.origin}/boards/${id.toLowerCase()}` : null;
+  }
   // Shows what the address asks for (at startup and on Back/Forward). Returns whether anything changed; already showing it → nothing.
   applyBoardUrl({ screen = null } = {}) {
     if (!this.boardLinksEnabled) return false;
@@ -385,7 +396,7 @@ class AppController {
       if (model.screen === target && !model.boardLinkProblem) return false;
       model.openScreen(target); return true;
     }
-    const hit = id ? model.findBoardByServerId(id) : null;
+    const hit = id ? model.findBoardByLink(id) : null;
     if (!hit) { const problem = id ? "missing" : "invalid"; if (model.boardLinkProblem === problem) return false; model.boardLinkProblem = problem; return true; }
     if (model.screen === "board" && model.board === hit.board && model.workspace === hit.workspace && !model.boardLinkProblem) return false;
     model.openBoard(hit.board.id, hit.workspace.id); return true;
@@ -406,7 +417,10 @@ class AppController {
     if (model.screen === "board" && model.board) { const link = this.boardLinkFor(model.board); if (!link) return; wanted = new URL(link).pathname; }
     const here = window.location.pathname === "/index.html" ? "/" : window.location.pathname, state = { jarcScreen: model.screen };
     if (here === wanted) { if (window.history.state?.jarcScreen !== state.jarcScreen) window.history.replaceState(state, "", window.location.href); return; }
-    window.history[start ? "replaceState" : "pushState"](state, "", `${wanted}${window.location.search}`);
+    // The address already names this board another way (an older link by server ID, upper case, a trailing slash): it becomes
+    // the canonical link in place, without a new history entry.
+    const token = AppController.boardIdInPath(here), same = model.screen === "board" && token && model.findBoardByLink(token)?.board === model.board;
+    window.history[start || same ? "replaceState" : "pushState"](state, "", `${wanted}${window.location.search}`);
   }
   // Microsoft sign-in screens: "signed-out" | "expired" | "denied" | "error". Shown instead of the app.
   // Someone may use the app now: signed in, and no sign-in gate (an expired, denied or signed-out session) is shown.
@@ -503,8 +517,11 @@ class AppController {
   }
 
   onClick(event) {
+    // Ctrl/⌘ + click on a column header adds that column to the sort (again: reverses it). Never on a field in the header.
+    if((event.ctrlKey||event.metaKey)&&!event.altKey&&this.signedIn&&this.model.screen==="board"){const th=event.target.closest?.(".editable-table thead th[data-column-key]");if(th&&!event.target.closest("input,select,textarea,.column-resizer")){event.preventDefault();this.addSortColumn(th.dataset.columnKey);return;}}
     const target = event.target.closest("[data-action]"); if (!target) return;
     const action = target.dataset.action;
+    if (action === "quick-search-open") { this.quickSearch?.openAt(Number(target.dataset.index)); return; }
     if (action === "entra-sign-in" && this.entra) { this.entraSignIn(); return; }
     if (action === "entra-sign-out" && this.entra) { this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true, signingOut: true }); this.entra.signOut(); return; }
     if (window.jarcStorage?.connection === "offline" && ["cell-open","set-cell-option","inline-add","open-form","new-item","new-board","add-column","create-workspace","import"].includes(action)) { this.view.toast(StorageError.describe(StorageError.CODES.OFFLINE).message); return; }
@@ -1010,6 +1027,9 @@ class AppController {
     return changed;
   }
   onKeydown(event) {
+    // An input method composing a character (Chinese, Japanese, Korean…): every key belongs to it, never to a shortcut.
+    if (event.isComposing || event.keyCode === 229) return;
+    if (this.quickSearch?.onKeydown(event)) return;
     if (this.appearance?.onKeydown(event)) return;
     if (event.target.dataset?.action === "comment-input" && this.comments?.onKeydown(event)) return;
     if(this.busy)return;
@@ -1020,23 +1040,14 @@ class AppController {
     }
     const editing=event.target.matches?.('input,textarea,select,[contenteditable="true"]');
     if(!this.signedIn)return; // no shortcuts (Ctrl K included) behind a sign-in screen or gate
-    // Ctrl+F (⌘F) on a long board whose rows are drawn only near the viewport: the browser's Find can't see the others, so
-    // the first press goes to the board's own search, which covers every record. Pressing it again (now in the search box)
-    // opens the browser's Find as usual. Anywhere else, and on boards drawn in full, the shortcut is left alone.
-    if((event.ctrlKey||event.metaKey)&&!event.altKey&&!event.shiftKey&&event.key?.toLowerCase()==="f"&&!editing&&this.model.screen==="board"&&this.rowsOffPage()&&!document.querySelector("#overlay-root")?.children.length){
-      const input=document.querySelector("#board-search");
-      if(input){event.preventDefault();input.focus();input.select();this.view.toast(`Board search covers every record. Press ${event.metaKey?"⌘":"Ctrl"}+F again for the browser's Find, which only sees the rows on screen.`);return;}
-    }
     if(event.target.dataset?.action==="cell-input"){this.cellInputKey(event);return;}
     if(event.target.dataset?.action==="draft-input"){this.draftKey(event);return;}
     if(event.target.classList?.contains("cell-display")&&!document.querySelector("#overlay-root")?.children.length&&this.cellKey(event))return;
     // Undo / redo for board changes — never inside text fields (their own undo stays native) or open dialogs.
     if((event.ctrlKey||event.metaKey)&&!event.altKey&&["z","y"].includes(event.key.toLowerCase())&&!editing&&!document.querySelector("#overlay-root")?.children.length&&this.model.screen==="board"){event.preventDefault();this.undoRedo(event.key.toLowerCase()==="y"||event.shiftKey);return;}
-    // Ctrl + G (⌘ G on a Mac): collapse every group on the board. Only on a board showing its groups, never while typing or
-    // with a dialog or menu open — there the key is left alone, so the browser keeps its own meaning for it.
-    if(this.isCollapseShortcut(event)){if(this.collapseShortcutActive(event,editing)){event.preventDefault();this.collapseAllBoardGroups({via:"keyboard"});}return;}
-    if(this.isPaletteShortcut(event)){event.preventDefault();if(this.command)this.command.toggle();else this.view.showCommandPalette(this.model);return;}
-    if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="b"&&!editing){event.preventDefault();this.toggleSidebar();return;}
+    // Every other shortcut (Quick search, the sidebar, board search, groups, new group or column, activity, export, selection,
+    // help, / and N): the registry (KeyboardShortcuts.js), which leaves a key alone where it does nothing.
+    if(this.shortcuts?.handle(event,{editing}))return;
     if(event.target.dataset?.action==="column-type-search"&&event.key==="Enter"){event.preventDefault();event.target.closest(".column-chooser")?.querySelector(".chooser-option:not([hidden]):not(:disabled)")?.click();return;}
     if(event.key==="Escape"){
       event.preventDefault();
@@ -1067,11 +1078,6 @@ class AppController {
     }
     if(event.target.dataset.action==="resize-column"&&["ArrowLeft","ArrowRight"].includes(event.key)){event.preventDefault();const c=this.model.board.columns.find(c=>c.key===event.target.dataset.key);this.model.resizeColumn(c.key,(this.view.colWidth(c))+(event.key==="ArrowRight"?20:-20));this.update();return;}
     if(event.target.dataset.action==="board-title-inline"&&event.key==="Enter"){event.preventDefault();event.target.blur();return;}
-    if(!editing&&!event.ctrlKey&&!event.metaKey&&!event.altKey){
-      if(event.key==="/"){event.preventDefault();if(this.model.screen==="board")document.querySelector("#board-search")?.focus();else this.view.showCommandPalette(this.model);}
-      if(event.key==="?"){event.preventDefault();this.view.showShortcuts();}
-      if(event.key.toLowerCase()==="n"){event.preventDefault();this.chooseBoardAction("record");}
-    }
   }
 
   // The file warning must be right: if this board's file list is still arriving, wait for it (briefly) first; if it
@@ -1584,6 +1590,65 @@ class AppController {
     this.cellRange.focus=this.coord(next);this.paintRange();this.extendingRange=true;next.focus();this.extendingRange=false;
   }
   focusedCell(){const el=document.activeElement;return el?.classList?.contains("cell-display")&&this.root.contains(el)?el:null;}
+  // ArrowDown/Up past the rows drawn (a long board draws rows near the viewport only) or past the end of a group: the next
+  // record comes from the board's order, its group's rows are drawn around it if needed (focusRecordControl), and focus moves
+  // to the same column there. The next expanded group follows the last row of a group. No request, no full redraw.
+  moveBeyondDrawn(cell,step){
+    const tbody=cell.closest("tbody.board-group[data-group]"), field=cell.dataset.field, m=this.model;
+    if(!tbody||!field)return false;
+    const rowsOf=(name)=>m.visibleRows.filter((r)=>m.groupOf(r)===name);
+    const name=tbody.dataset.group, list=rowsOf(name), i=list.findIndex((r)=>String(r.id)===String(m.idOf(cell.dataset.id)));
+    let target=i>=0?list[i+step]:null;
+    if(!target){
+      const groups=[...this.root.querySelectorAll(".editable-table tbody.board-group[data-group]")].map((b)=>b.dataset.group);
+      for(let g=groups.indexOf(name)+step;g>=0&&g<groups.length;g+=step){if(m.isGroupCollapsed?.(groups[g]))continue;const rows=rowsOf(groups[g]);if(rows.length){target=step>0?rows[0]:rows.at(-1);break;}}
+    }
+    return Boolean(target)&&this.focusRecordControl(target.id,`.cell-display[data-field="${CSS.escape(field)}"]`);
+  }
+  // Ctrl/⌘ + Enter: select or unselect the focused record. Shift + Enter: also every record between the last one selected and
+  // this one, in the order they are on screen — never records in collapsed groups or filtered out. The bulk actions are those of
+  // the checkboxes.
+  selectFocusedRecord(target,{extend=false}={}){
+    const tr=target?.closest?.("tr[data-record-context]"), m=this.model; if(!tr)return false;
+    const id=m.idOf(tr.dataset.recordContext), focus=document.activeElement;
+    if(extend&&this.lastSelected!==undefined&&this.lastSelected!==null){
+      const order=m.screenRows(), a=order.findIndex((r)=>r.id===this.lastSelected), b=order.findIndex((r)=>r.id===id);
+      if(a<0||b<0){m.selected.add(id);}else{const [s,e]=a<b?[a,b]:[b,a];for(let k=s;k<=e;k+=1)m.selected.add(order[k].id);}
+    }else if(m.selected.has(id))m.selected.delete(id);else m.selected.add(id);
+    this.lastSelected=id;
+    this.update();
+    const again=focus?.dataset?.id&&this.root.querySelector(`.cell-display[data-id="${CSS.escape(focus.dataset.id)}"][data-field="${CSS.escape(focus.dataset.field||"")}"]`);
+    again?.focus({preventScroll:true});
+    this.view.toast(m.selected.size?`${m.selected.size} selected`:"Nothing selected",true);
+    return true;
+  }
+  // Ctrl/⌘ + G: collapse all groups; when they are all collapsed already, expand them all.
+  toggleAllBoardGroups(){
+    const m=this.model, all=m.board?.groups||[];
+    if(all.length&&all.every((g)=>m.isGroupCollapsed(g))){const n=m.collapseAllGroups(false);this.update();this.root.querySelector(".board-group[data-group] [data-action=\"group-toggle\"]:not(:disabled)")?.focus();this.view.toast(`Expanded ${n} group${n===1?"":"s"}`);return n;}
+    return this.collapseAllBoardGroups({via:"keyboard"});
+  }
+  // Ctrl/⌘ + click a column header: that column joins the sort (in the order clicked); clicking it again reverses it.
+  addSortColumn(key){
+    const m=this.model, column=m.board?.columns.find((c)=>c.key===key);
+    if(!column){this.view.toast("This column can't be added to the sort.");return;}
+    const list=[...(m.liveOrderBy||[])];
+    if(!list.length&&m.sortKey&&!m.manualSort&&m.sortKey!==key&&m.board.columns.some((c)=>c.key===m.sortKey))list.push({key:m.sortKey,dir:m.sortDirection==="desc"?"desc":"asc"});
+    const i=list.findIndex((s)=>s.key===key);
+    if(i>=0)list[i]={key,dir:list[i].dir==="asc"?"desc":"asc"};else list.push({key,dir:"asc"});
+    m.viewOrderBy=list; m.sortKey=""; m.manualSort=false;
+    this.update();
+    const label=(s)=>`${m.board.columns.find((c)=>c.key===s.key)?.label||s.key} ${s.dir==="asc"?"↑":"↓"}`;
+    this.view.toast(`Sorted by ${list.map(label).join(", then ")}`);
+  }
+  // Ctrl/⌘ + X on cells: copy them (as Ctrl/⌘ + C), then clear them as Delete does (same checks; one undo step). Text selected in
+  // a field or on the page: the browser's own cut.
+  onCut(event){
+    const cell=this.focusedCell();if(!cell||window.getSelection()?.toString()||this.model.screen!=="board")return;
+    if(this.model.board?.source?.readOnly){event.preventDefault();this.view.toast("This board is read-only.");return;}
+    this.onCopy(event);
+    if(event.defaultPrevented){this.clearCells(cell);this.clearRange();}
+  }
   onCopy(event){
     const cell=this.focusedCell();if(!cell||window.getSelection()?.toString())return;
     const {rows,cols}=this.rangeCells(cell);if(!rows.length)return;
@@ -1709,7 +1774,7 @@ class AppController {
     if(key==="Delete"||key==="Backspace"){event.preventDefault();this.clearCells(cell);this.clearRange();return true;}
     if(key==="Escape"&&this.cellRange){this.clearRange();return true;}
     if(key==="Tab"){this.clearRange();const next=this.adjacentCell(cell,event.shiftKey?-1:1);if(next){event.preventDefault();next.focus();}return true;}
-    if(key.startsWith("Arrow")){this.clearRange();const next=this.adjacentCell(cell,key);if(next){event.preventDefault();next.focus();}return true;}
+    if(key.startsWith("Arrow")){this.clearRange();const next=this.adjacentCell(cell,key);if(next){event.preventDefault();next.focus();}else if((key==="ArrowDown"||key==="ArrowUp")&&this.moveBeyondDrawn(cell,key==="ArrowDown"?1:-1))event.preventDefault();return true;}
     if(key==="F2"){event.preventDefault();cell.click();return true;}
     if(key.length===1&&key!==" "){
       // Typing on a focused text-like cell starts editing with that character; letter shortcuts stay quiet here.

@@ -209,7 +209,7 @@ class ResourceApiAdapter {
   workspaceFrom(w) { return { id: w.id, name: w.name, description: w.description, icon: w.icon, color: w.color, archived: w.archived, position: w.position, version: w.version, createdAt: w.createdAt, ...(w.role ? { role: w.role } : {}) }; }
   boardFrom(b, previous = this.boards.get(b.id)) {
     return {
-      id: b.id, workspaceId: b.workspaceId, name: b.name, description: b.description, icon: b.icon, archived: b.archived, position: b.position,
+      id: b.id, publicId: b.publicId ?? previous?.publicId ?? null, workspaceId: b.workspaceId, name: b.name, description: b.description, icon: b.icon, archived: b.archived, position: b.position,
       manualOrder: b.manualOrder, nextItemNumber: b.nextItemNumber, columns: resourceClone(b.columns), groups: resourceClone(b.groups),
       savedViews: resourceClone(b.savedViews), version: b.version, createdAt: b.createdAt, updatedAt: b.updatedAt,
       source: b.source ? resourceClone(b.source) : null,
@@ -232,7 +232,7 @@ class ResourceApiAdapter {
   }
   modelBoardFields(b) {
     // nextItemNumber is not shared: the model derives it from the board's "New item N" names when it loads.
-    return { source: b.source ? resourceClone(b.source) : null, name: b.name, description: b.description, icon: b.icon, archived: b.archived, manualOrder: b.manualOrder, columns: resourceClone(b.columns), groups: b.groups.map((g) => g.name), groupMeta: Object.fromEntries(b.groups.map((g) => [g.name, { color: g.color || "", archived: Boolean(g.archived) }])), savedViews: b.savedViews.map((v) => ({ ...resourceClone(v.state), id: v.id, name: v.name })), createdAt: b.createdAt, updatedAt: b.updatedAt, recordCount: b.recordCount };
+    return { publicId: b.publicId ?? null, source: b.source ? resourceClone(b.source) : null, name: b.name, description: b.description, icon: b.icon, archived: b.archived, manualOrder: b.manualOrder, columns: resourceClone(b.columns), groups: b.groups.map((g) => g.name), groupMeta: Object.fromEntries(b.groups.map((g) => [g.name, { color: g.color || "", archived: Boolean(g.archived) }])), savedViews: b.savedViews.map((v) => ({ ...resourceClone(v.state), id: v.id, name: v.name })), createdAt: b.createdAt, updatedAt: b.updatedAt, recordCount: b.recordCount };
   }
   modelBoard(b, pref = {}) {
     return { id: b.id, ...this.modelBoardFields(b), records: this.boardRecords(b.id).map((r) => this.modelRow(r, b)), activity: resourceClone(b.load.activity), favorite: Boolean(pref.favorite), ...(pref.lastView ? { lastView: pref.lastView } : {}), openCount: pref.openCount || 0 };
@@ -774,6 +774,7 @@ class ResourceApiAdapter {
     const { board } = await this.request("POST", `/workspaces/${workspaceId}/boards`, body, { kind: "boards" });
     this.boards.set(board.id, this.boardFrom(board, { load: { state: "full", cursor: null, activity: [], recordActivity: {} }, recordCount: 0 }));
     this.alias(b.id, board.id, reconcile);
+    reconcile.replaceBoard(board.id, { publicId: board.publicId ?? null }); // its own number: a duplicate never keeps its source's
     (b.savedViews || []).forEach((v, i) => this.alias(v.id, board.savedViews[i].id, reconcile));
     b.id = board.id;
     if ((b.records || []).length) {

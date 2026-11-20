@@ -1,11 +1,18 @@
 // boards collection. A board holds its bounded configuration (columns, groups, saved views); records are separate.
 const { COLLECTIONS } = require("../../db/bootstrap");
 const { VersionedRepository, scopedId } = require("./base-repository");
+const { allocateBoardPublicId } = require("../../domain/board-public-id");
 
 const MAX_BOARDS_PER_WORKSPACE = 1000;
 
 class BoardRepository extends VersionedRepository {
-  constructor(db) { super(db.collection(COLLECTIONS.boards)); }
+  constructor(db) { super(db.collection(COLLECTIONS.boards)); this.db = db; }
+
+  // Every new board gets its public number here, however it is created (the app, the monday.com integration, an import):
+  // allocated before the board is written and outside any transaction, so an aborted creation only leaves a gap.
+  async insert(doc, options) { await this.assignPublicIds([doc]); return super.insert(doc, options); }
+  async insertMany(docs, options) { await this.assignPublicIds(docs); return super.insertMany(docs, options); }
+  async assignPublicIds(docs) { for (const doc of docs) if (doc.publicId === undefined) doc.publicId = await allocateBoardPublicId(this.db); }
 
   // Global search: the non-archived boards of the given workspaces (null = all), only the fields search needs.
   // withNames (Command Center): also the name, icon and read-only source, to show and open board results.

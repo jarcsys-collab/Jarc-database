@@ -13,7 +13,7 @@ function workspaceToApi(doc) {
 
 function boardToApi(doc) {
   return withLegacy(doc, {
-    id: hex(doc._id), workspaceId: hex(doc.workspaceId), name: doc.name, description: doc.description, icon: doc.icon,
+    id: hex(doc._id), ...(doc.publicId === undefined ? {} : { publicId: doc.publicId }), workspaceId: hex(doc.workspaceId), name: doc.name, description: doc.description, icon: doc.icon,
     archived: doc.archived, position: doc.position, manualOrder: doc.manualOrder,
     columns: doc.columns.map((c) => ({ ...c, options: [...c.options] })),
     groups: doc.groups.map(({ id, name, color, archived, position }) => ({ id, name, color, archived: Boolean(archived), position })),

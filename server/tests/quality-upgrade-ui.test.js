@@ -99,20 +99,25 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
       await b.evaluate("document.activeElement?.blur(); document.body.focus()");
       assert.equal(await ctrlD("document.body"), false, "Ctrl + D not prevented");
       assert.equal(await press("document.body", { key: "d", code: "KeyD", metaKey: true }), false, "⌘ D not prevented");
-      assert.equal(await press("document.body", { key: "G", code: "KeyG", ctrlKey: true, shiftKey: true }), false, "Ctrl + Shift + G (find previous) is left alone");
+      // Ctrl + Shift + G is now New group (monday.com's key, KeyboardShortcuts.js): it opens the form and never collapses anything.
+      assert.equal(await press("document.body", { key: "G", code: "KeyG", ctrlKey: true, shiftKey: true }), true, "Ctrl + Shift + G is New group");
       await sleep(200);
+      await b.evaluate("document.querySelector('#overlay-root [data-action=\"close-overlay\"]')?.click()"); await sleep(150);
       assert.equal((await expanded()).length, open, "nothing collapsed");
       assert.equal(await ctrlG("document.body"), true);
       await sleep(300);
       assert.deepEqual(await expanded(), []);
     });
-    test("already collapsed: stays collapsed, says so, and still sends nothing", async () => {
+    test("already collapsed: the same key expands them all again (monday.com's toggle), and still sends nothing", async () => {
       await quiet();
       const requests = (await serverLog()).length, since = await mark();
       assert.equal(await ctrlG("document.body"), true);
       await sleep(200);
-      assert.deepEqual(await expanded(), []);
-      assert.match(await toastText(), /already collapsed/);
+      assert.ok((await expanded()).length >= 8, "expanded");
+      assert.match(await toastText(), /Expanded/);
+      assert.equal(await ctrlG("document.body"), true);
+      await sleep(200);
+      assert.deepEqual(await expanded(), [], "and collapsed again");
       assert.deepEqual(await requestsSince(since), [], "the page sent nothing");
       assert.deepEqual(await serverSince(requests), [], "the server received nothing");
     });
@@ -128,11 +133,11 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
       await b.evaluate("document.querySelector('.board-group[data-group=\"Delta\"] [data-action=\"group-toggle\"]').click()"); await sleep(200);
       assert.deepEqual(await expanded(), [], "mouse collapse still works");
     });
-    test("focus inside a group's rows moves to that group's toggle; ⌘ G works too", async () => {
+    test("focus inside a group's rows moves to that group's toggle (Ctrl + G here; ⌘ G on a Mac)", async () => {
       await expandAll();
       const focused = await b.evaluate("(() => { const c = document.querySelector('.board-group[data-group=\"Alpha\"] tr[data-record-context] .cell-display'); c?.focus(); return document.activeElement === c; })()");
       assert.ok(focused, "a cell has focus");
-      assert.equal(await press("document.activeElement", { key: "g", code: "KeyG", metaKey: true }), true);
+      assert.equal(await press("document.activeElement", { key: "g", code: "KeyG", ctrlKey: true }), true);
       await sleep(300);
       assert.deepEqual(await expanded(), []);
       assert.deepEqual(await b.evaluate("[document.activeElement?.dataset.action, document.activeElement?.closest('.board-group')?.dataset.group]"), ["group-toggle", "Alpha"]);
@@ -155,7 +160,7 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
       await b.evaluate("document.querySelector('[data-action=\"shortcuts\"]').click()"); await sleep(200);
       assert.ok(await b.evaluate("!!document.querySelector('#overlay-root .modal')"), "the shortcuts dialog is open");
       assert.ok(await b.evaluate("document.querySelector('#overlay-root').textContent.includes('Collapse all groups')"), "the shortcut is listed");
-      assert.equal(await b.evaluate("[...document.querySelectorAll('#overlay-root .shortcut-list > div')].find((d) => d.textContent.includes('Collapse all groups'))?.querySelector('kbd')?.textContent"), "Ctrl / ⌘ G", "listed as Ctrl / ⌘ G");
+      assert.equal(await b.evaluate("[...[...document.querySelectorAll('#overlay-root .shortcut-item')].find((d) => d.textContent.includes('Collapse all groups'))?.querySelectorAll('kbd') || []].map((k) => k.textContent).join(' ')"), "Ctrl G", "listed with this computer's keys (⌘ G on a Mac)");
       const groups = (await expanded()).length;
       assert.equal(await ctrlG("document.querySelector('#overlay-root .modal') || document.body"), false);
       assert.equal(await ctrlG("document.body"), false);

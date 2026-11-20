@@ -119,6 +119,7 @@ function applyUpdate(doc, update, { inserting = false } = {}) {
     if (op === "$set") for (const [p, v] of Object.entries(fields)) setPath(doc, p, clone(v));
     else if (op === "$setOnInsert") { if (inserting) for (const [p, v] of Object.entries(fields)) setPath(doc, p, clone(v)); }
     else if (op === "$inc") for (const [p, v] of Object.entries(fields)) setPath(doc, p, (getPath(doc, p) ?? 0) + v);
+    else if (op === "$max") for (const [p, v] of Object.entries(fields)) { const cur = getPath(doc, p); if (cur === undefined || v > cur) setPath(doc, p, v); }
     else if (op === "$unset") for (const p of Object.keys(fields)) unsetPath(doc, p);
     else if (op === "$push") for (const [p, v] of Object.entries(fields)) { const cur = getPath(doc, p); if (cur !== undefined && !Array.isArray(cur)) throw new Error(`fake-mongo: $push to a non-array field ${p}`); if (v && typeof v === "object" && Array.isArray(v.$each)) { const next = [...(cur || []), ...v.$each]; setPath(doc, p, v.$slice === undefined ? next : v.$slice >= 0 ? next.slice(0, v.$slice) : next.slice(v.$slice)); continue; } setPath(doc, p, [...(cur || []), clone(v)]); }
     else throw new Error(`fake-mongo: unsupported update operator ${op}`);
@@ -251,7 +252,14 @@ class FakeCollection {
   async findOneAndUpdate(filter, update, options = {}) {
     this.record("findOneAndUpdate", { filter, update, options });
     const index = this.docs.findIndex((d) => matches(d, filter));
-    if (index < 0) return null;
+    if (index < 0) {
+      if (!options.upsert) return null;
+      // Upsert, as MongoDB does it: a new document from the filter's plain fields plus the update; "before" is null.
+      const base = Object.fromEntries(Object.entries(filter).filter(([k, v]) => !k.startsWith("$") && !isOperatorObject(v)));
+      const doc = applyUpdate({ _id: new ObjectId(), ...clone(base) }, update, { inserting: true });
+      const next = [...this.docs, doc]; this.assertUnique(next); this.docs = next;
+      return options.returnDocument === "after" ? clone(doc) : null;
+    }
     const before = clone(this.docs[index]);
     const after = applyUpdate(clone(before), update);
     this.replaceAt(index, after);

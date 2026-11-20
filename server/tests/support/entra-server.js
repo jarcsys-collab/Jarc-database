@@ -69,6 +69,8 @@ const PUBLIC = new Set(["GET /health", "GET /health/ready", "GET /auth/config", 
     for (const [field, status] of [["disableEmail", "disabled"], ["enableEmail", "active"]]) {
       if (req.body[field]) await connection.db.collection("users").updateOne({ emailNormalized: String(req.body[field]).toLowerCase() }, { $set: { status } });
     }
+    // Boards as an older server stored them (no public number): the state right after deploying numbers, before the backfill.
+    if (req.body.stripBoardPublicIds) await connection.db.collection("boards").updateMany({ publicId: { $exists: true } }, { $unset: { publicId: "" } });
     if (req.body.legacyActivity) await connection.db.collection("activities").insertOne({ workspaceId: new ObjectId(String(req.body.legacyActivity)), boardId: null, recordId: null, actorUserId: null, action: "legacy.board.activity", entityType: "board", entityId: null, changes: [], summary: "Imported history", createdAt: new Date() });
     res.json({ ok: true });
   });

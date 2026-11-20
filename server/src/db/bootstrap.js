@@ -31,6 +31,8 @@ const COLLECTIONS = Object.freeze({
   comments: "comments",
   // Attachment storage counters per provider (see repositories/mongo/storage-usage-repository.js).
   storageUsage: "storageUsage",
+  // Atomic counters, one document each: { _id: name, value } (boardPublicId: see domain/board-public-id.js).
+  counters: "counters",
   // Derived search text, one document per record; rebuilt from records at any time (see services/record-search-index.js).
   recordSearch: "recordSearch",
   // Native forms and who submitted them (see services/form-service.js).
@@ -97,7 +99,9 @@ const INDEXES = Object.freeze({
   ],
   boards: [
     { name: "workspace_position", key: { workspaceId: 1, position: 1 } },
-    { name: "uniq_workspace_legacy_id", key: { workspaceId: 1, legacyId: 1 }, unique: true, partialFilterExpression: { legacyId: present } }
+    { name: "uniq_workspace_legacy_id", key: { workspaceId: 1, legacyId: 1 }, unique: true, partialFilterExpression: { legacyId: present } },
+    // Public board numbers (domain/board-public-id.js): unique; boards from before the backfill have none yet.
+    { name: "uniq_board_public_id", key: { publicId: 1 }, unique: true, partialFilterExpression: { publicId: present } }
   ],
   records: [
     { name: "board_position", key: { boardId: 1, position: 1, _id: 1 } },

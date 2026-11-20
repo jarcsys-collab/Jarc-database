@@ -42,7 +42,7 @@ function pageTools(b) {
     async showsBoard(board, rows = true) {
       assert.ok(await tools.wait(`document.querySelector(".board-title-input")?.value === ${JSON.stringify(board.name)}`), `${board.name} is open (shown: ${await tools.title()})`);
       if (rows) assert.ok(await tools.wait(`[...document.querySelectorAll("tr[data-record-context]")].some((tr) => tr.textContent.includes(${JSON.stringify(`${board.name} row 1`)}))`), `${board.name}'s records are shown`);
-      assert.equal(await tools.path(), `/boards/${board.id}`);
+      assert.equal(await tools.path(), `/boards/${board.publicId}`);
     },
     async sidebarBoard(name) {
       assert.ok(await b.evaluate(`(() => { const el = [...document.querySelectorAll("#sidebar .tree-item[data-action='open-board']")].find((e) => e.textContent.trim().startsWith(${JSON.stringify(name)})); if (!el) return false; el.click(); return true; })()`), `${name} is in the sidebar`);
@@ -72,7 +72,7 @@ describe("Direct board links (real app)", { skip: BROWSER ? false : "no Chrome o
   const makeBoard = async (workspaceId, name, rows = 3) => {
     const board = (await t.api("POST", `/api/v1/workspaces/${workspaceId}/boards`, { name, columns: COLUMNS })).body.board;
     if (rows) assert.equal((await t.api("POST", `/api/v1/boards/${board.id}/records/batch`, { records: Array.from({ length: rows }, (_, i) => ({ values: { serial: `${name} row ${i + 1}`, note: `Note ${i + 1}` } })) })).status, 201);
-    return { id: board.id, name, version: board.version };
+    return { id: board.id, publicId: board.publicId, name, version: board.version }; // links show the public number
   };
 
   before(async () => {
@@ -190,7 +190,7 @@ describe("Direct board links (real app)", { skip: BROWSER ? false : "no Chrome o
     await t.holdRecords(boards.b.id, "fail");
     await t.sidebarBoard("Alpha Stock");
     assert.ok(await t.wait(`!!document.querySelector('[data-action="retry-board-load"]')`), "Try again");
-    assert.equal(await t.path(), `/boards/${boards.b.id}`);
+    assert.equal(await t.path(), `/boards/${boards.b.publicId}`);
     await t.release();
     await t.click('[data-action="retry-board-load"]');
     await t.showsBoard(boards.b);
@@ -209,7 +209,7 @@ describe("Direct board links (real app)", { skip: BROWSER ? false : "no Chrome o
     assert.equal(await b.evaluate(`document.activeElement.matches(":focus-visible") && getComputedStyle(document.activeElement).outlineStyle !== "none"`), true, "a visible focus state");
     await b.key("Enter");
     assert.ok(await t.wait(`window.__copied.length === 1`, 3000));
-    assert.equal(await b.evaluate("window.__copied[0]"), `${srv.base}/boards/${boards.c.id}`);
+    assert.equal(await b.evaluate("window.__copied[0]"), `${srv.base}/boards/${boards.c.publicId}`);
     assert.ok(await t.wait(`document.querySelector("#toast-region")?.textContent.includes("Board link copied")`, 3000));
     for (const forbidden of ["/api/", "token", "code=", "eyJ", "?", "#"]) assert.ok(!(await b.evaluate("window.__copied[0]")).includes(forbidden), forbidden);
     // The board menu of ANOTHER board (sidebar): that board's link, not the open one's.
@@ -218,13 +218,13 @@ describe("Direct board links (real app)", { skip: BROWSER ? false : "no Chrome o
     assert.ok(await t.wait(`!!document.querySelector('.board-popover [data-action="copy-board-link"]')`, 3000));
     await t.click('.board-popover [data-action="copy-board-link"]');
     assert.ok(await t.wait(`window.__copied.length === 2`, 3000));
-    assert.equal(await b.evaluate("window.__copied[1]"), `${srv.base}/boards/${boards.b.id}`);
+    assert.equal(await b.evaluate("window.__copied[1]"), `${srv.base}/boards/${boards.b.publicId}`);
     // The clipboard refuses: the link is shown to copy by hand.
     await t.openPath(`/boards/${boards.a.id}`);
     await t.showsBoard(boards.a);
     await t.stubClipboard(true);
     await t.click('.board-actions [data-action="copy-board-link"]');
-    assert.ok(await t.wait(`document.querySelector("#overlay-root .modal")?.textContent.includes(${JSON.stringify(`${srv.base}/boards/${boards.a.id}`)})`, 3000), "the link, to copy by hand");
+    assert.ok(await t.wait(`document.querySelector("#overlay-root .modal")?.textContent.includes(${JSON.stringify(`${srv.base}/boards/${boards.a.publicId}`)})`, 3000), "the link, to copy by hand");
     await t.click('#overlay-root [data-action="close-overlay"]');
   });
 
@@ -238,7 +238,7 @@ describe("Direct board links (real app)", { skip: BROWSER ? false : "no Chrome o
       assert.equal(await t.noSidewaysScroll(), true, name);
       await t.stubClipboard(false);
       assert.ok(await b.tapOn('.board-actions [data-action="copy-board-link"]'));
-      assert.ok(await t.wait(`window.__copied[0] === ${JSON.stringify(`${srv.base}/boards/${boards.c.id}`)}`, 3000), `${name}: copied`);
+      assert.ok(await t.wait(`window.__copied[0] === ${JSON.stringify(`${srv.base}/boards/${boards.c.publicId}`)}`, 3000), `${name}: copied`);
       await t.openPath("/boards/not-a-valid-board-id", viewport);
       assert.ok(await t.wait(`!!document.querySelector(".board-link-problem")`));
       assert.equal(await t.noSidewaysScroll(), true, `${name}: problem screen`);
@@ -280,7 +280,7 @@ describe("Direct board links (real app)", { skip: BROWSER ? false : "no Chrome o
       assert.ok(await f.wait("!!document.querySelector('.app-shell')", 20000), "signed in");
       await f.showsBoard(boards.b);
       const href = await fresh.evaluate("location.href");
-      assert.equal(href, `${srv.base}/boards/${boards.b.id}`);
+      assert.equal(href, `${srv.base}/boards/${boards.b.publicId}`);
       assert.doesNotMatch(href, /code=|state=|token|eyJ/);
       assert.equal(await fresh.evaluate(`sessionStorage.getItem("jarc-auth-return")`), null, "the kept link was used once");
       assert.equal(await f.workspaceName(), "Alpha Space");
