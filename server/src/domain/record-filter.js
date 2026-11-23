@@ -23,8 +23,9 @@
 //            value sent as an identity). The same saved filter shows each person their own records. With no reader
 //            known, a rule using it matches no record at all (never "everyone"). Elsewhere "@me" is plain text.
 //            before, after, onOrAfter, dateRange   dates, compared as their ISO text; dateRange is [from, to] inclusive
-//   numbers  eq, gte, lte, between, gt and lt match only cells holding a number (numbers kept as text count); an empty or
-//            non-numeric cell never matches them. ne matches every cell that isn't that number, empty ones included.
+//   numbers  eq, gte, lte and between match only cells holding a number (numbers kept as text count); an empty or
+//            non-numeric cell never matches them. ne matches every cell that isn't that number, empty ones included. gt and lt
+//            keep their earlier answers (saved views from before): empty never matches; other non-numbers count as below every number.
 //   group    a Group column with in / notIn and group names ("" = no group): the record's group (groupId), not a cell
 //   connect  a Connect boards column: empty / notEmpty only. mirror: never (its values live on other boards)
 //   key      a column; also updatedAt with onOrAfter (a date and time), and __record_id with in (exact record IDs)
@@ -202,6 +203,7 @@ function ruleQuery(rule, byKey, board) {
   // take part in a comparison, because MongoDB orders null below every number (it would be "less than 7").
   const asNumber = { $convert: { input: `$${path}`, to: "double", onError: null, onNull: null } };
   const numeric = (op, value = values[0]) => ({ $expr: { $and: [{ $ne: [asNumber, null] }, { [op]: [asNumber, Number(value)] }] } });
+  const legacyNumeric = (op) => ({ $expr: { [op]: [asNumber, Number(values[0])] } }); // gt / lt, unchanged
   if (rule.cmp === "never") return { _id: null }; // every record has an _id: matches nothing
   if (!column && rule.key === "updatedAt") return { updatedAt: { $gte: new Date(values[0]) } };
   if (!column && rule.key === RECORD_ID_KEY) return { _id: { $in: values.map((v) => new ObjectId(v)) } };
@@ -223,8 +225,10 @@ function ruleQuery(rule, byKey, board) {
     case "checked": return { [path]: { $in: [true, "true"] } };
     case "unchecked": return { [path]: { $nin: [true, "true"] } };
     case "equalsText": return { [path]: { $regex: `^${escapeRegex(values[0].trim())}$`, $options: "i" } };
-    case "gt": return { $and: [numeric("$gt"), { [path]: { $nin: ["", null] } }] };
-    case "lt": return { $and: [numeric("$lt"), { [path]: { $nin: ["", null] } }] };
+    // gt / lt answer exactly as before Advanced Filters (saved views keep their results): a cell that isn't a number counts
+    // as below every number (MongoDB orders null first), so "lt" includes words; empty cells never match.
+    case "gt": return { $and: [legacyNumeric("$gt"), { [path]: { $nin: ["", null] } }] };
+    case "lt": return { $and: [legacyNumeric("$lt"), { [path]: { $nin: ["", null] } }] };
     case "before": return { [path]: { $lt: values[0], $nin: ["", null] } };
     case "after": return { [path]: { $gt: values[0] } };
     case "onOrAfter": return { [path]: { $gte: values[0] } };

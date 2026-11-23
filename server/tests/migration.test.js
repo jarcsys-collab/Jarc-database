@@ -80,6 +80,15 @@ describe("Migration transform (pure)", () => {
     assert.equal(plan.records.find((r) => r.legacyId === legacy.ids.a).values[legacy.ids.done], true);
   });
 
+  test("Connect and Mirror columns are never created by the legacy import (they link to other boards)", () => {
+    const state = JSON.parse(JSON.stringify(legacy.state));
+    const find = (o) => (o && typeof o === "object" ? (o.name === "Repairs" && Array.isArray(o.columns) ? o : Object.values(o).map(find).find(Boolean)) : null);
+    const repairs = find(state); assert.ok(repairs, "the Repairs board in the legacy data");
+    for (const column of [{ key: "c", label: "C", type: "connect", link: { boardId: "0123456789abcdef01234567" } }, { key: "m", label: "M", type: "mirror", mirror: { via: "c", column: "serial" } }]) {
+      const copy = JSON.parse(JSON.stringify(state)); find(copy).columns.push(column);
+      assert.throws(() => buildImportPlan(copy, { actorId: app.devActor._id }), /can.t be imported/, column.type);
+    }
+  });
   test("groups: names become stable IDs, records map by name, unknown names are added and reported, empty → null", () => {
     const plan = buildImportPlan(legacy.state, { actorId: app.devActor._id });
     const repairs = plan.boards.find((b) => b.name === "Repairs");

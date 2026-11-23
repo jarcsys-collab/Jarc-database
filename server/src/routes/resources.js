@@ -46,7 +46,8 @@ function resourceRoutes({ services, access, features = { personalViews: true, co
   const boardOut = async (req, doc) => boardToApi(doc, { personal: personalRepo && req.actor?.userId ? await personalRepo.get(doc._id, req.actor.userId) : null });
   // Connect / Mirror columns: cross-board checks and lookups, always for the person asking (services/related-service.js).
   const related = new RelatedService({ repos: services?.records?.repos, access }); // services is absent only in start-up checks that fail later
-  const valuesIn = (body) => (isObject(body) ? [body.values, ...(Array.isArray(body.records) ? body.records.map((r) => r?.values) : [])].filter(isObject) : []);
+  // Every values object a write carries: one record (values), a batch create (records[].values), a bulk update (items[].values).
+  const valuesIn = (body) => (isObject(body) ? [body.values, ...(Array.isArray(body.records) ? body.records.map((r) => r?.values) : []), ...(Array.isArray(body.items) ? body.items.map((i) => i?.values) : [])].filter(isObject) : []);
   const columnsIn = (body) => (isObject(body) ? [...(Array.isArray(body.columns) ? body.columns : []), ...(isObject(body.column) ? [body.column] : []), ...(body.type === "connect" ? [body] : [])].filter(isObject) : []);
   const reading = (req) => { const id = req.actor?.userId, hex = typeof id?.toHexString === "function" ? id.toHexString() : typeof id === "string" ? id : ""; return { me: /^[0-9a-f]{24}$/.test(hex) ? `user:${hex}` : null }; };
 

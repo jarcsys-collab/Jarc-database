@@ -90,6 +90,10 @@ describe("Connect boards and Mirror columns", () => {
     assert.ok(!JSON.stringify(res.body).includes("Acme"), "nothing from Clients in the response");
     const write = await as(people.member, "POST", `/api/v1/boards/${projects.id}/records`, { values: { serial: "Mine", client: [link.Initech] } });
     assert.equal(write.status, 403, "can't link to a board they can't open");
+    const bulk = await as(people.member, "PATCH", `/api/v1/boards/${projects.id}/records`, { items: [{ id: alpha.id, expectedVersion: alpha.version, values: { client: [link.Initech] } }] });
+    assert.equal(bulk.status, 403, "nor through a bulk edit");
+    const ghost = await as(people.owner, "PATCH", `/api/v1/boards/${projects.id}/records`, { items: [{ id: alpha.id, expectedVersion: alpha.version, values: { client: ["0123456789abcdef01234567"] } }] });
+    assert.equal(ghost.status, 400, "a bulk edit can't link a record that isn't on the linked board");
     assert.equal((await as(people.member, "POST", `/api/v1/boards/${projects.id}/records`, { values: { serial: "No links" } })).status, 201, "other edits still work");
     // Access granted later: the same request now shows everything.
     const memberId = (await as(people.member, "GET", "/api/v1/me")).body.user.id;

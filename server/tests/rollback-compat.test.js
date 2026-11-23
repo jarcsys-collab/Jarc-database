@@ -116,4 +116,11 @@ describe(`Rollback to ${BASE} with data written by this release`, { skip: oldHel
     if (text.status === 200) assert.equal(after, "Acme", "old code CAN overwrite links with text: a documented rollback restriction");
     else assert.deepEqual(after, links);
   });
+  test(`filters already in use answer the same as on ${BASE} (gt, lt, in, contains, empty) on the same data`, async () => {
+    const t = (await nowAs(people.owner, "POST", `/api/v1/workspaces/${ws.id}/boards`, { name: "Same answers", columns: [{ key: "serial", label: "Item", type: "text", required: true }, { key: "amt", label: "Amount", type: "text" }, { key: "tags", label: "Tags", type: "dropdown", multiple: true, options: ["a", "b"] }] })).body.board;
+    await nowAs(people.owner, "POST", `/api/v1/boards/${t.id}/records/batch`, { records: [["A", "5", ["a"]], ["B", "abc", []], ["C", "", ["b"]], ["D", "12", ["a", "b"]], ["E", null, []], ["F", "7.5", []]].map(([serial, amt, tags]) => ({ values: { serial, amt, tags } })) });
+    const filters = [["amt", "lt", ["10"]], ["amt", "gt", ["6"]], ["amt", "lt", ["0"]], ["amt", "in", ["5"]], ["amt", "contains", ["b"]], ["amt", "empty"], ["tags", "in", ["a"]], ["tags", "empty"]].map(([key, cmp, values]) => ({ op: "and", rules: [{ key, cmp, ...(values ? { values } : {}) }] }));
+    const run = async (as, f) => (await as(people.owner, "GET", `/api/v1/boards/${t.id}/records?filter=${encodeURIComponent(JSON.stringify(f))}`)).body.items.map((r) => r.values.serial).sort();
+    for (const f of filters) assert.deepEqual(await run(nowAs, f), await run(oldAs, f), JSON.stringify(f.rules[0]));
+  });
 });

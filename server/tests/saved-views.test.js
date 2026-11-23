@@ -161,7 +161,10 @@ describe("Switched off AFTER use (the same database): what exists keeps working 
     const rel = (await api(off.url, "GET", `/api/v1/boards/${board.id}/related?ids=${rec.id}`)).body;
     assert.equal(rel.values[rec.id].m, 4); assert.equal(rel.linked.c[rec.links[0]].name, "T1");
     assert.equal((await api(off.url, "PATCH", `/api/v1/records/${rec.id}`, { expectedVersion: rec.version, values: { c: rec.links } })).status, 400, "single record");
-    assert.equal((await api(off.url, "PATCH", `/api/v1/boards/${board.id}/records`, { records: [{ id: rec.id, expectedVersion: rec.version, values: { c: [] } }] })).status, 400, "bulk edit");
+    const bulk = await api(off.url, "PATCH", `/api/v1/boards/${board.id}/records`, { items: [{ id: rec.id, expectedVersion: rec.version, values: { c: [] } }] });
+    assert.equal(bulk.status, 400, "bulk edit (the batch shape the page sends)"); assert.match(bulk.body.error.message, /switched off/, "refused by the switch, not by the request shape");
+    const bulkOk = await api(off.url, "PATCH", `/api/v1/boards/${board.id}/records`, { items: [{ id: rec.id, expectedVersion: rec.version, values: { serial: "S1 bulk" } }] });
+    assert.equal(bulkOk.status, 200, "a bulk edit of other cells works"); rec.version = bulkOk.body.items[0].version;
     assert.equal((await api(off.url, "POST", `/api/v1/boards/${board.id}/records`, { values: { serial: "S2", c: [rec.links[1]] } })).status, 400, "new record with links");
     const b = (await api(off.url, "GET", `/api/v1/boards/${board.id}`)).body.board;
     const retarget = b.columns.map((c) => (c.key === "c" ? { ...c, link: { boardId: board.id } } : c));
@@ -170,5 +173,34 @@ describe("Switched off AFTER use (the same database): what exists keeps working 
     assert.equal((await api(off.url, "PATCH", `/api/v1/boards/${board.id}`, { expectedVersion: b.version, columns: renamed })).status, 200, "unrelated column edits work");
     assert.equal((await api(off.url, "PATCH", `/api/v1/records/${rec.id}`, { expectedVersion: rec.version, values: { serial: "S1 renamed" } })).status, 200, "other cells work");
     assert.deepEqual((await off.db.collection("records").findOne({ "values.serial": "S1 renamed" })).values.c, [rec.links[0]], "links kept");
+  });
+});
+
+describe("Unchanged from 7e863f4 for existing saved views and filters (switches off)", () => {
+  const { startMongoApp, api } = require("./helpers");
+  let app, board;
+  const call = (m, p, b) => api(app.url, m, p, b);
+  before(async () => {
+    app = await startMongoApp({ app: { features: { personalViews: false, connectBoards: false } } });
+    const ws = (await call("POST", "/api/v1/workspaces", { name: "Same" })).body.workspace;
+    board = (await call("POST", `/api/v1/workspaces/${ws.id}/boards`, { name: "Same", columns: [{ key: "serial", label: "Item", type: "text", required: true }, { key: "amount", label: "Amount", type: "text" }] })).body.board;
+    await call("POST", `/api/v1/boards/${board.id}/records/batch`, { records: [["A", "5"], ["B", "abc"], ["C", ""], ["D", "12"], ["E", null]].map(([serial, amount]) => ({ values: { serial, amount } })) });
+  });
+  after(async () => { await app?.close(); });
+  test("gt / lt keep their earlier answers: words count as below every number, empty never matches", async () => {
+    const names = async (filter) => { const r = await call("GET", `/api/v1/boards/${board.id}/records?filter=${encodeURIComponent(JSON.stringify(filter))}`); return r.body.items.map((x) => x.values.serial).sort(); };
+    assert.deepEqual(await names({ op: "and", rules: [{ key: "amount", cmp: "lt", values: ["10"] }] }), ["A", "B"], "as on 7e863f4: \"abc\" is below 10");
+    assert.deepEqual(await names({ op: "and", rules: [{ key: "amount", cmp: "gt", values: ["1"] }] }), ["A", "D"]);
+  });
+  test("saving views that didn't change still writes the board: version checked and bumped, as before", async () => {
+    const b = (await call("GET", `/api/v1/boards/${board.id}`)).body.board;
+    const views = [{ name: "V", state: {} }];
+    const first = await call("PATCH", `/api/v1/boards/${board.id}`, { expectedVersion: b.version, savedViews: views });
+    assert.equal(first.body.board.version, b.version + 1);
+    const same = first.body.board.savedViews.map(({ id, name, state }) => ({ id, name, state }));
+    assert.equal((await call("PATCH", `/api/v1/boards/${board.id}`, { expectedVersion: b.version, savedViews: same })).status, 409, "a stale version is refused");
+    const again = await call("PATCH", `/api/v1/boards/${board.id}`, { expectedVersion: first.body.board.version, savedViews: same });
+    assert.equal(again.status, 200); assert.equal(again.body.board.version, first.body.board.version + 1);
+    assert.equal((await call("PATCH", `/api/v1/boards/${board.id}`, { expectedVersion: again.body.board.version, savedViews: [{ ...same[0], createdBy: "x" }] })).status, 400, "unknown fields refused, as before");
   });
 });

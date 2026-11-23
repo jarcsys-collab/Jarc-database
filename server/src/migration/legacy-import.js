@@ -18,7 +18,7 @@
 const crypto = require("crypto");
 const { ObjectId } = require("mongodb");
 const { ApiError } = require("../middleware/errors");
-const { assertSafeJson, isObject, isPrimitive, isSafeKey } = require("../validation/common");
+const { assertSafeJson, isObject, isPrimitive, isSafeKey, fail } = require("../validation/common");
 const { validateState, SCHEMA_VERSION } = require("../validation/state");
 const GROUP_FIELD = "@group"; // a record's group when its board has no group column (browser state, Phase 8)
 const { normalizeColumns, normalizeGroups, viewState, groupColumnOf, hasValue, newViewId, LEGACY_DEFAULT_COLUMNS, LEGACY_DEFAULT_GROUPS, LIMITS } = require("../domain/board-schema");
@@ -121,7 +121,9 @@ function invalid(errors) {
   return new ApiError(400, "VALIDATION_ERROR", `The data can't be imported: ${errors[0]}${errors.length > 1 ? ` (and ${errors.length - 1} more problem${errors.length > 2 ? "s" : ""})` : ""}`, { errors });
 }
 function collect(add, fn, prefix) { try { fn(); } catch (error) { if (error instanceof ApiError) add(prefix + error.message); else throw error; } }
-const pickColumn = (c) => (isObject(c) ? Object.fromEntries(COLUMN_FIELDS.filter((k) => c[k] !== undefined).map((k) => [k, c[k]])) : c);
+// Connect and Mirror columns link to other boards: they are made in the app (which checks who may link to what), never by
+// the legacy import.
+const pickColumn = (c) => { if (isObject(c) && (c.type === "connect" || c.type === "mirror")) fail(`Column "${String(c.key).slice(0, 40)}": Connect and Mirror columns can't be imported.`); return isObject(c) ? Object.fromEntries(COLUMN_FIELDS.filter((k) => c[k] !== undefined).map((k) => [k, c[k]])) : c; };
 const viewStateOf = (view) => Object.fromEntries(Object.entries(view).filter(([k, v]) => k !== "id" && k !== "name" && v !== undefined));
 
 // Columns for a legacy board without its own column list: exactly what the frontend shows for it (normalizeBoards).

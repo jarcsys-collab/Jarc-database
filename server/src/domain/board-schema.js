@@ -188,10 +188,10 @@ function splitSavedViews(views, { board, mine = null, actorId, now, canEditShare
     if (typeof id !== "string" || !VIEW_ID.test(id) || ids.has(id)) fail(`Saved view ${index + 1} has an invalid or duplicate ID.`);
     ids.add(id); order.push(id);
     const wasMine = minePrev.get(id), wasShared = sharedPrev.get(id), isPersonal = view.personal === undefined ? Boolean(wasMine) : view.personal;
+    for (const key of Object.keys(view)) if (!["id", "name", "state", "personal"].includes(key)) fail(`Saved view ${index + 1} has an unknown field "${key.slice(0, 40)}".`);
     if (!isPersonal) { shared.push({ id, name: view.name, state: view.state }); return; }
     if (!wasMine && !allowPersonal) fail("Personal views aren't switched on yet.");
     if (wasShared && !sameId(wasShared.createdBy, actorId)) fail(`Saved view "${String(wasShared.name).slice(0, 60)}" was created by someone else, so it can't be made personal. Duplicate it instead.`);
-    for (const key of Object.keys(view)) if (!["id", "name", "state", "personal"].includes(key)) fail(`Saved view ${index + 1} has an unknown field "${key.slice(0, 40)}".`);
     const before = wasMine || wasShared;
     personal.push({ id, name: text(view.name, `The name of saved view ${index + 1}`, { max: 200, required: true }), state: viewState(view.state ?? {}, index), createdAt: before?.createdAt ?? now, ...(before?.legacyId !== undefined ? { legacyId: before.legacyId } : {}) });
   });

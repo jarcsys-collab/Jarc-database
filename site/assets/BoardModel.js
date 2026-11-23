@@ -296,7 +296,11 @@ class BoardModel {
       case "startsWith":return list.some((t)=>t.toLowerCase().startsWith(String(values[0]??"").toLowerCase()));
       case "endsWith":return list.some((t)=>t.toLowerCase().endsWith(String(values[0]??"").toLowerCase()));
       case "gt":case "lt":case "eq":case "gte":case "lte":case "between":{
-        const n=BoardModel.asNumber(raw); if(n===null)return false; // empty cells, words and lists never count as a number
+        const n=BoardModel.asNumber(raw);
+        // gt / lt as the server has always answered them: an empty cell (or a list holding an empty entry) never matches; any
+        // other non-number counts as below every number, so it matches "lt" and never "gt".
+        if(n===null&&(rule.cmp==="gt"||rule.cmp==="lt")){const filled=Array.isArray(raw)?!raw.some((v)=>v===""||v===null):raw!==""&&raw!==null&&raw!==undefined;return rule.cmp==="lt"&&filled;}
+        if(n===null)return false; // the newer comparisons: empty cells, words and lists never count as a number
         const a=Number(values[0]),b=Number(values[1]);
         return {gt:n>a,lt:n<a,eq:n===a,gte:n>=a,lte:n<=a,between:n>=a&&n<=b}[rule.cmp];
       }

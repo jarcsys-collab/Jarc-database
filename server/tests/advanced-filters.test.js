@@ -122,8 +122,11 @@ describe("Against the API: every record of the board, whoever reads", () => {
     const ne = await rows(where({ key: "qtyText", cmp: "ne", values: ["7"] }));
     assert.ok(ne.includes("n05") && ne.includes("nEmpty") && ne.includes("nWords") && !ne.includes("n07"), "ne: everything that isn't 7, empty and words included");
     assert.deepEqual(await rows(where({ key: "qty", cmp: "gt", values: ["6"] })), ["n07", "n10"], "the older gt is unchanged");
-    // Words and empty cells never count as a number (MongoDB orders null below every number: they must not be "less than").
-    for (const [cmp, values] of [["lte", ["7"]], ["lt", ["6"]], ["eq", ["0"]], ["between", ["-1000", "1000"]]]) {
+    // The newer comparisons: words and empty cells never count as a number. The older lt keeps its answer from before (saved
+    // views must not change): a word counts as below every number, an empty cell never matches (rollback-compat compares).
+    const lt = await rows(where({ key: "qtyText", cmp: "lt", values: ["6"] }));
+    assert.ok(lt.includes("n05") && lt.includes("nWords") && !lt.includes("nEmpty") && !lt.includes("filler000"), `lt as before: ${lt.slice(0, 5)}`);
+    for (const [cmp, values] of [["lte", ["7"]], ["eq", ["0"]], ["between", ["-1000", "1000"]]]) {
       const got = await rows(where({ key: "qtyText", cmp, values }));
       assert.ok(!got.includes("nWords") && !got.includes("nEmpty") && !got.includes("filler000"), `${cmp}: ${got.slice(0, 5)}`);
     }

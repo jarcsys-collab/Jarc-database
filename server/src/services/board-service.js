@@ -65,7 +65,11 @@ class BoardService {
       const split = splitSavedViews(raw.savedViews, { board, mine, actorId: actor.userId, now, canEditShared, allowPersonal });
       personal = { mine, views: split.personal, order: split.order };
       body = { ...raw };
-      if (split.sharedChanged) body.savedViews = split.shared.map(({ id: viewId, name, state }) => ({ id: viewId, name, state })); else delete body.savedViews;
+      // No personal views involved (the case before personal views existed, and every case while they're switched off):
+      // the board is written exactly as before — version checked, new version, activity — even if the views didn't change.
+      const involved = Boolean(mine) || split.personal.length > 0;
+      if (split.sharedChanged || !involved) body.savedViews = split.shared.map(({ id: viewId, name, state }) => ({ id: viewId, name, state })); else delete body.savedViews;
+      if (!involved) personal = null;
     }
     let after = board;
     if (!personal || Object.keys(body).some((k) => k !== "expectedVersion")) after = await this.writeBoard(board, body, actor, now, canEditShared);
