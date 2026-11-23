@@ -33,7 +33,9 @@ class BoardModel {
       { type: "phone", label: "Phone", category: "Contact", description: "Phone numbers" },
       { type: "link", label: "Link", category: "Contact", description: "Web addresses" },
       { type: "group", label: "Group", category: "Organization", description: "Sort records into this board's groups" },
-      { type: "files", label: "Files", category: "Files", description: "PDFs and photos (JPEG, PNG, WebP), up to 10 MB each" }
+      { type: "files", label: "Files", category: "Files", description: "PDFs and photos (JPEG, PNG, WebP), up to 10 MB each" },
+      { type: "connect", label: "Connect boards", category: "Boards", description: "Link records of another board (nothing is copied)" },
+      { type: "mirror", label: "Mirror", category: "Boards", description: "Show a column of the linked records, read-only" }
     ];
     // Files columns (resource mode): attachment metadata by ID, and the boards whose attachments are loaded.
     this.attachments = new Map(); this.attachmentIndex = null; this.attachmentBoards = new Set();
@@ -180,6 +182,7 @@ class BoardModel {
   applyRemote(reconcile) {
     if (!reconcile || reconcile.empty) return false;
     this.applyReconcile(reconcile);
+    this.invalidateRelated(); // a live change (here or on a linked board): mirror values are asked for again on the next draw
     if (this.history.length || this.future?.length) { this.history = []; this.future = []; this.undoClearedByRemote = true; }
     return true;
   }
@@ -261,10 +264,15 @@ class BoardModel {
   // the view was saved simply drops out of its conditions.
   get liveViewFilter(){
     const f=this.viewFilter; if(!f||!this.board)return null;
-    const keys=new Set(this.board.columns.map((c)=>c.key)), keep=(rules=[])=>rules.filter((r)=>keys.has(r.key));
-    const rules=keep(f.rules), groups=(f.groups||[]).map((g)=>({op:g.op,rules:keep(g.rules)})).filter((g)=>g.rules.length);
-    if(!rules.length&&!groups.length)return null;
-    return {op:f.op,rules,...(groups.length?{groups}:{})};
+    // Kept while neither the conditions nor the board's columns change (it's read on every redraw and every query).
+    const sig=this.board.columns.map((c)=>`${c.key}:${c.type}`).join("\u0001");
+    if(this.liveFilterCache&&this.liveFilterCache.f===f&&this.liveFilterCache.sig===sig)return this.liveFilterCache.out;
+    const keys=new Set(this.board.columns.map((c)=>c.key));
+    // Nested groups (up to the server's depth) are kept; a group left with nothing drops out.
+    const node=(n)=>{const rules=(n.rules||[]).filter((r)=>keys.has(r.key)),groups=(n.groups||[]).map(node).filter(Boolean);return rules.length||groups.length?{op:n.op,rules,...(groups.length?{groups}:{})}:null;};
+    const out=node(f);
+    this.liveFilterCache={f,sig,out};
+    return out;
   }
   get liveOrderBy(){const keys=new Set([...(this.board?.columns||[]).map((c)=>c.key),"createdAt","updatedAt","position"]);const list=(this.viewOrderBy||[]).filter((s)=>keys.has(s.key));return list.length?list:null;}
   static filterTokens(text){return String(text).split(", ").map((t)=>t.trim());}
@@ -282,11 +290,64 @@ class BoardModel {
       case "notEmpty":return text!=="";
       case "anyToken":return values.some(token);
       case "noToken":return !values.some(token);
+      // The same answers as the server (domain/record-filter.js), so a board filtered here and one filtered there agree.
+      case "equalsText":{const v=String(values[0]??"").trim().toLowerCase();return list.some((t)=>t.toLowerCase()===v);}
+      case "notEqualsText":{const v=String(values[0]??"").trim().toLowerCase();return !list.some((t)=>t.toLowerCase()===v);}
+      case "startsWith":return list.some((t)=>t.toLowerCase().startsWith(String(values[0]??"").toLowerCase()));
+      case "endsWith":return list.some((t)=>t.toLowerCase().endsWith(String(values[0]??"").toLowerCase()));
+      case "gt":case "lt":case "eq":case "gte":case "lte":case "between":{
+        const n=BoardModel.asNumber(raw); if(n===null)return false; // empty cells, words and lists never count as a number
+        const a=Number(values[0]),b=Number(values[1]);
+        return {gt:n>a,lt:n<a,eq:n===a,gte:n>=a,lte:n<=a,between:n>=a&&n<=b}[rule.cmp];
+      }
+      case "ne":return BoardModel.asNumber(raw)!==Number(values[0]);
+      case "before":return list.some((t)=>t!==""&&t<String(values[0]));
+      case "after":return list.some((t)=>t>String(values[0]));
+      case "onOrAfter":return list.some((t)=>t>=String(values[0]));
+      case "dateRange":{const from=String(values[0]),to=String(values[1]??values[0]);return list.some((t)=>t>=from&&t<=to);}
+      case "checked":return raw===true||raw==="true";
+      case "unchecked":return !(raw===true||raw==="true");
+      case "never":return false;
       default:return true;
     }
   }
+  // ---- Advanced filters: the same numbers, dates and "me" as the server (domain/record-filter.js). ----
+  static FILTER_TIME_ZONE="Asia/Manila";
+  // A cell as a number, as MongoDB's $convert to a double: numbers, base-10 numeric text, booleans as 1/0; anything else null.
+  static asNumber(v){if(typeof v==="number")return Number.isFinite(v)?v:null;if(typeof v==="boolean")return v?1:0;if(typeof v==="string"&&/^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(v))return Number(v);return null;}
+  static dayIn(now=new Date(),timeZone=BoardModel.FILTER_TIME_ZONE){const fmt=timeZone===BoardModel.FILTER_TIME_ZONE?(BoardModel.dayFormat||=new Intl.DateTimeFormat("en-US",{timeZone,year:"numeric",month:"2-digit",day:"2-digit"})):new Intl.DateTimeFormat("en-US",{timeZone,year:"numeric",month:"2-digit",day:"2-digit"});const p=Object.fromEntries(fmt.formatToParts(now).map((x)=>[x.type,x.value]));return `${p.year}-${p.month}-${p.day}`;}
+  // Today, worked out at most once a second (a filter is checked against every row).
+  static today(){const now=Date.now();if(!BoardModel.todayAt||now-BoardModel.todayAt>1000){BoardModel.todayValue=BoardModel.dayIn(new Date(now));BoardModel.todayAt=now;}return BoardModel.todayValue;}
+  static addDays(day,n){const d=new Date(`${day}T00:00:00Z`);d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);}
+  static presetRange(preset,n,today){
+    const A=BoardModel.addDays,d=new Date(`${today}T00:00:00Z`),monday=A(today,-((d.getUTCDay()+6)%7));
+    const month=(offset,end)=>new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+offset+(end?1:0),end?0:1)).toISOString().slice(0,10);
+    return {today:[today,today],yesterday:[A(today,-1),A(today,-1)],tomorrow:[A(today,1),A(today,1)],thisWeek:[monday,A(monday,6)],lastWeek:[A(monday,-7),A(monday,-1)],nextWeek:[A(monday,7),A(monday,13)],thisMonth:[month(0),month(0,true)],lastMonth:[month(-1),month(-1,true)],nextMonth:[month(1),month(1,true)],pastDays:[A(today,-n),today],nextDays:[today,A(today,n)]}[preset]||[today,today];
+  }
+  // The view's conditions made concrete for this reading: periods → dates from today; "@me" on a People column → this person
+  // (this.me, set from the server session) or, when unknown, a condition matching nothing. Sent to the server unresolved.
+  resolveFilter(filter,today=BoardModel.dayIn()){
+    const cols=new Map((this.board?.columns||[]).map((c)=>[c.key,c]));
+    const rule=(r)=>{
+      if(r.cmp==="datePreset")return {key:r.key,cmp:"dateRange",values:BoardModel.presetRange(r.values?.[0],Number(r.values?.[1]||0),today)};
+      if(cols.get(r.key)?.type==="owner"&&["in","notIn","anyToken","noToken"].includes(r.cmp)&&(r.values||[]).includes("@me"))return /^user:[0-9a-f]{24}$/.test(String(this.me||""))?{...r,values:r.values.map((v)=>v==="@me"?this.me:v)}:{key:r.key,cmp:"never"};
+      return r;
+    };
+    const node=(n)=>({op:n.op,rules:(n.rules||[]).map(rule),...(n.groups?{groups:n.groups.map(node)}:{})});
+    return node(filter);
+  }
   matchesFilterNode(row,node){const parts=[...(node.rules||[]).map((r)=>this.matchesFilterRule(row,r)),...(node.groups||[]).map((g)=>this.matchesFilterNode(row,g))];return node.op==="or"?parts.some(Boolean):parts.every(Boolean);}
-  matchesViewFilter(row){const f=this.liveViewFilter;return !f||this.matchesFilterNode(row,f);}
+  // A test for one row against the view's conditions, worked out once per redraw (visibleRows) rather than per row. The
+  // resolved conditions are kept while the conditions (liveViewFilter is cached, so the same object), the day and the
+  // reader stay the same: a new day or another reader resolves them again; editing or switching views gives a new object.
+  viewFilterMatcher(){
+    const f=this.liveViewFilter;if(!f)return ()=>true;
+    const today=BoardModel.today(),me=this.me||"",c=this.resolvedFor;
+    if(!c||c.f!==f||c.today!==today||c.me!==me)this.resolvedFor={f,today,me,resolved:this.resolveFilter(f,today)};
+    const resolved=this.resolvedFor.resolved;
+    return (row)=>this.matchesFilterNode(row,resolved);
+  }
+  matchesViewFilter(row){return this.viewFilterMatcher()(row);}
   // What the board shows right now, as one query for the server: the view's conditions, the toolbar's filters, the search
   // text and the sort. A large board always asks the server, so every record counts whether it's loaded here or not.
   serverQuery(){
@@ -330,7 +391,7 @@ class BoardModel {
     const boardId=this.board?.id;
     if(this.screen!=="board"||!boardId||!this.storage.canFilterOnServer||this.boardLoadState(boardId).state!=="partial"){this.serverView=null;return;}
     if(this.boardSearchAvailable!==true&&this.query.trim().length>=2)this.askBoardSearch().then(()=>{if(this.boardSearchAvailable===true){this.syncServerQuery();this.statusChanged?.();}});
-    const query=this.serverQuery(), flat=this.serverViewFlat, key=JSON.stringify([boardId,query,flat]);
+    const query=this.serverQuery(), flat=this.serverViewFlat, key=JSON.stringify([boardId,query,flat,BoardModel.today()]); // a new day (Manila) asks again: "today", "this week"... have moved
     if(this.serverView?.key===key||this.pendingServerKey===key)return;
     const typing=this.serverView&&JSON.stringify([boardId,{...query,q:null},flat])===JSON.stringify([boardId,{...this.serverView.query,q:null},this.serverView.flat]);
     clearTimeout(this.serverViewTimer); this.pendingServerKey=key;
@@ -522,10 +583,10 @@ class BoardModel {
 
   get visibleRows() {
     const query = this.query.trim().toLowerCase();
-    const place = new Map(this.rows.map((row, i) => [row, i])), server = this.serverView, serverOrder = server ? server.order : null, orderBy = this.liveOrderBy;
+    const place = new Map(this.rows.map((row, i) => [row, i])), server = this.serverView, serverOrder = server ? server.order : null, orderBy = this.liveOrderBy, viewMatch = this.viewFilterMatcher();
     return [...this.rows]
       .filter((row) => !server || server.order.has(String(row.id)) || !server.known.has(String(row.id)))
-      .filter((row) => this.matchesViewFilter(row))
+      .filter(viewMatch)
       .filter((row) => this.showArchived ? row.archived : !row.archived)
       .filter((row) => this.status === "All" || !this.statusColumn || row[this.statusColumn.key] === this.status)
       .filter((row) => this.matchesQuickFilter(row))
@@ -577,6 +638,7 @@ class BoardModel {
     // Timing (window.jarcPerf, AppController.notePerf): from here until the board's records are drawn, and where they came from.
     const before = this.boardLoadState(boardId)?.state || "full";
     this.openTiming = { boardId, at: globalThis.performance?.now?.() ?? Date.now(), from: before === "full" || before === "partial" ? "memory" : before === "cached" ? "copy" : "load" };
+    this.invalidateRelated(); // linked names and mirror values are asked for again on opening a board
     this.boardLinkProblem = null; this.currentWorkspaceId=workspaceId; this.currentBoardId=boardId; this.screen="board";
     this.currentView="table"; this.resetMainView(); this.selected.clear(); // Main Table is always the board's first view
     board.openCount=(board.openCount||0)+1;
@@ -771,7 +833,7 @@ class BoardModel {
   renameGroup(oldName, newName) { const clean = newName.trim(); if (!clean || this.board.groups.includes(clean)) return false; this.snapshot("Group rename undone"); this.board.groups = this.board.groups.map((name) => name === oldName ? clean : name); this.rows.forEach((row) => { if (this.groupOf(row) === oldName) row[this.groupField] = clean; }); if(this.board.groupMeta?.[oldName]){this.board.groupMeta[clean]=this.board.groupMeta[oldName];delete this.board.groupMeta[oldName];} const folded=this.collapsedGroups[this.board.id]; if(folded?.includes(oldName))this.collapsedGroups[this.board.id]=folded.map((n)=>n===oldName?clean:n); this.log(`Renamed group ${oldName} to ${clean}`); this.save({op:"updateGroups",boardId:this.board.id,affectsRecords:true,group:{from:oldName,to:clean}}); return true; }
   // deleteRecords: the group's records are deleted with it (otherwise they move to moveTo).
   deleteGroup(name, moveTo, { deleteRecords = false } = {}) { if (this.board.groups.length <= 1 || !this.board.groups.includes(name)) return false; if(!deleteRecords&&(moveTo===name||!this.board.groups.includes(moveTo)))return false; this.snapshot("Group deletion undone"); if(deleteRecords){const doomed=new Set(this.rows.filter((r)=>this.groupOf(r)===name).map((r)=>r.id));this.board.records=this.rows.filter((r)=>!doomed.has(r.id));doomed.forEach((id)=>this.selected.delete(id));delete this.board.groupMeta?.[name];this.board.groups=this.board.groups.filter((g)=>g!==name);this.log(`Deleted group ${name} and its records`);this.save({op:"deleteRecords",boardId:this.board.id,group:{remove:name,moveTo:null}});return true;} this.rows.forEach((row) => { if (this.groupOf(row) === name) row[this.groupField] = moveTo; }); delete this.board.groupMeta?.[name]; this.board.groups = this.board.groups.filter((group) => group !== name); this.log(`Deleted group ${name}`); this.save({op:"updateGroups",boardId:this.board.id,affectsRecords:true,group:{remove:name,moveTo}}); return true; }
-  addColumn({ label, type, required = false, defaultValue = "", options = "", multiple = false }) { const clean=String(label||"").trim(); if(!clean||!this.columnTypes.some((item)=>item.type===type))return false; this.snapshot("Column creation undone"); const key=`custom_${Date.now()}_${Math.random().toString(36).slice(2,8)}`; let optionList=[...new Set((Array.isArray(options)?options:String(options).split(",")).map((item)=>String(item).trim()).filter(Boolean))]; if(!optionList.length)optionList=this.newColumnOptions(type); const column={ key, label:clean, type, visible:true, connection:"", required:Boolean(required), defaultValue:String(defaultValue||""), options:optionList, ...(type==="dropdown"&&multiple?{multiple:true}:{}) }; this.board.columns.push(column); this.rows.forEach((row)=>{row[key]=column.type==="checkbox"?false:this.isMultiColumn(column)?this.valueList(column.defaultValue):column.defaultValue;}); this.log(`Added ${clean} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,affectsRecords:true}); return column; }
+  addColumn({ label, type, required = false, defaultValue = "", options = "", multiple = false, link = null, mirror = null }) { const clean=String(label||"").trim(); if(!clean||!this.columnTypes.some((item)=>item.type===type))return false; this.snapshot("Column creation undone"); const key=`custom_${Date.now()}_${Math.random().toString(36).slice(2,8)}`; let optionList=[...new Set((Array.isArray(options)?options:String(options).split(",")).map((item)=>String(item).trim()).filter(Boolean))]; if(!optionList.length)optionList=this.newColumnOptions(type); if(type==="connect"&&!link?.boardId)return false; if(type==="mirror"&&!(mirror?.via&&mirror?.column))return false; const column={ key, label:clean, type, visible:true, connection:"", required:Boolean(required), defaultValue:String(defaultValue||""), options:optionList, ...((type==="dropdown"||type==="connect")&&multiple?{multiple:true}:{}), ...(type==="connect"?{link:{boardId:String(link.boardId)}}:{}), ...(type==="mirror"?{mirror:{via:mirror.via,column:mirror.column,show:mirror.show||"list"}}:{}) }; this.board.columns.push(column); this.rows.forEach((row)=>{row[key]=column.type==="checkbox"?false:this.isMultiColumn(column)?this.valueList(column.defaultValue):column.defaultValue;}); this.log(`Added ${clean} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,affectsRecords:true}); return column; }
   // Name and description together (one change, one save).
   editColumn(key,{label,description=""}){const column=this.board.columns.find((item)=>item.key===key);const clean=String(label||"").trim();if(!column||!clean)return false;const text=String(description||"").trim().slice(0,500);if(column.label===clean&&(column.description||"")===text)return false;this.snapshot("Column edit undone");column.label=clean;if(text)column.description=text;else delete column.description;this.log(`Edited column ${clean}`);this.save({op:"updateColumns",boardId:this.board.id,columnKey:key});return true;}
   renameColumn(key, label) { const column=this.board.columns.find((item)=>item.key===key); const clean=String(label||"").trim(); if(!column||!clean)return false; this.snapshot("Column rename undone"); column.label=clean; this.log(`Renamed column to ${clean}`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key}); return true; }
@@ -785,7 +847,8 @@ class BoardModel {
   // order or widths simply use the board's).
   applyView(id) { const view = this.board.savedViews.find((item) => String(item.id) === String(this.idOf(id))); if (!view) return; Object.assign(this, { status: view.status||"All", query: view.query||"", grouped: Boolean(view.grouped), groupBy: typeof view.groupBy==="string"?view.groupBy:"", personFilter: typeof view.personFilter==="string"?view.personFilter:"", sortDirection: view.sortDirection||"desc" }); this.currentView=["table","list","kanban","calendar"].includes(view.view)?view.view:"table"; this.viewHidden=this.hiddenFrom(view); this.viewOrder=Array.isArray(view.columnOrder)?[...view.columnOrder]:null; this.viewWidths=view.columnWidths&&typeof view.columnWidths==="object"?Object.fromEntries(Object.entries(view.columnWidths).filter(([,w])=>Number.isFinite(w)&&w>0)):null; this.sortKey=view.sortKey||"";this.quickFilter=view.quickFilter||"all";this.showArchived=false;this.columnFilter=null;this.manualSort=false; this.activeSavedViewId=view.id; this.viewFilter=view.filter||null; this.viewOrderBy=view.orderBy||null; this.selected?.clear?.(); this.save({op:"updateUserState",boardId:this.board.id}); }
   resetMainView() { this.viewFilter=null; this.viewOrderBy=null; this.serverView=null; this.viewHidden=null; this.viewOrder=null; this.viewWidths=null; this.sortKey="";this.quickFilter="all";this.columnFilter=null;this.query=""; this.status="All"; this.grouped=false; this.groupBy=""; this.personFilter=""; this.sortDirection="desc"; this.activeSavedViewId=null; this.showArchived=false; this.manualSort=Boolean(this.board?.manualOrder); }
-  deleteView(id) { this.board.savedViews = this.board.savedViews.filter((view) => view.id !== this.idOf(id)); if(this.activeSavedViewId===this.idOf(id))this.resetMainView(); this.save({op:"updateViews",boardId:this.board.id}); }
+  // Deleting a view removes only the view (its settings); records are never touched.
+  deleteView(id) { if(!this.canManageView(this.board.savedViews.find((view)=>view.id===this.idOf(id))))return false; this.board.savedViews =this.board.savedViews.filter((view) => view.id !== this.idOf(id)); if(this.activeSavedViewId===this.idOf(id))this.resetMainView(); this.save({op:"updateViews",boardId:this.board.id}); }
   toggleRow(id) { this.selected.has(id) ? this.selected.delete(id) : this.selected.add(id); }
   log(text) { if (!this.board) return; const at = new Date().toISOString(); this.board.updatedAt=at; this.board.activity.unshift({ id: Date.now(), text, at }); this.board.activity = this.board.activity.slice(0, 80); if(!this.settings.muteActivity)this.notifications.unshift({ id: Date.now() + 1, text, boardId: this.board.id, workspaceId: this.workspace.id, at, read: false }); this.notifications = this.notifications.slice(0,50); }
   // ---- Views (Phase 5): "Main Table" plus the board's saved views (the existing board.savedViews, shared with
@@ -830,20 +893,34 @@ class BoardModel {
   get viewChanged(){const v=this.activeView;return v?JSON.stringify(this.viewSnapshot())!==JSON.stringify(this.savedSnapshot(v)):false;}
   static VIEW_TYPES=Object.freeze([["table","Table","layout"],["list","List","list"],["kanban","Kanban board","board"],["calendar","Calendar","calendar"]]);
   // A new view starts from Main Table's columns (or from another view's configuration when duplicating).
-  createView(name,type="table",{from=null}={}){
+  // ---- Personal and shared views. A personal view is seen only by the person who made it (the server sends it to nobody
+  // else); a shared view is seen by everyone on the board. Workspace Viewers may keep personal views only; changing a
+  // shared view needs an editor (the server checks the same: routes/resources.js, board-schema normalizeSavedViews).
+  get canEditSharedViews(){return this.workspace?.role!=="VIEWER";}
+  // The server's switch (JARC_FEATURE_PERSONAL_VIEWS); local mode has no personal views.
+  get personalViewsAvailable(){return Boolean(this.serverBacked&&this.features?.personalViews===true);}
+  canManageView(v){return Boolean(v)&&(v.personal===true||this.canEditSharedViews);}
+  // Made by the person reading (a view made here and not yet saved has no creator yet: it is theirs).
+  isOwnView(v){return Boolean(v)&&(!v.createdBy||`user:${v.createdBy}`===String(this.me||"")||String(v.createdBy)===String(this.me||""));}
+  setViewPersonal(id,personal){const v=this.board?.savedViews.find((x)=>String(x.id)===String(this.idOf(id)));if(!v||(personal&&!this.personalViewsAvailable)||!this.isOwnView(v)||(!personal&&!this.canEditSharedViews))return false;if(Boolean(v.personal)===Boolean(personal))return true;if(personal)v.personal=true;else delete v.personal;this.save({op:"updateViews",boardId:this.board.id});return true;}
+  // Back to what the open view has saved (discards changes made on this screen; nothing is saved).
+  revertActiveView(){const v=this.activeView;if(!v)return false;this.applyView(v.id);return true;}
+  // A view by the ID in a link (?view=view_…): its server ID, or the ID it has on this page.
+  viewByLinkId(token){const t=String(token||"");return t?(this.board?.savedViews||[]).find((v)=>String(v.id)===t||this.serverId(v.id)===t)||null:null;}
+  createView(name,type="table",{from=null,personal=false}={}){
     const clean=String(name||"").trim().slice(0,60);
     if(!this.board||!clean||!["table","list","kanban","calendar"].includes(type)||this.board.savedViews.length>=50)return null;
     const base=from?this.savedSnapshot(from):{status:"All",query:"",grouped:false,sortDirection:"desc",sortKey:"",quickFilter:"all",view:type,hiddenColumns:this.board.columns.filter((c)=>c.key!=="serial"&&c.visible===false).map((c)=>c.key)};
-    const view={id:Date.now(),name:clean,...base,view:from?base.view:type};
+    const view={id:Date.now(),name:clean,...base,view:from?base.view:type,...(this.personalViewsAvailable&&(personal||!this.canEditSharedViews)?{personal:true}:{})};
     this.board.savedViews.push(view);this.save({op:"updateViews",boardId:this.board.id});
     this.applyView(view.id);return view;
   }
   duplicateView(id){const v=this.board?.savedViews.find((x)=>String(x.id)===String(this.idOf(id)));return v?this.createView(this.uniqueViewName(`${v.name} copy`),v.view||"table",{from:v}):null;}
   openMainTable(){this.resetMainView();this.currentView="table";this.selected?.clear?.();this.save({op:"updateUserState",boardId:this.board?.id});}
-  renameView(id,name){const v=this.board?.savedViews.find((x)=>String(x.id)===String(this.idOf(id)));const clean=String(name||"").trim().slice(0,60);if(!v||!clean)return false;if(v.name===clean)return true;v.name=clean;this.save({op:"updateViews",boardId:this.board.id});return true;}
+  renameView(id,name){const v=this.board?.savedViews.find((x)=>String(x.id)===String(this.idOf(id)));const clean=String(name||"").trim().slice(0,60);if(!v||!clean||!this.canManageView(v))return false;if(v.name===clean)return true;v.name=clean;this.save({op:"updateViews",boardId:this.board.id});return true;}
   // Saves the open view's configuration into it (shared with the board: a versioned board update, so a colleague's
   // simultaneous change is never silently overwritten).
-  saveActiveView(){const v=this.activeView;if(!v)return false;const snap=this.viewSnapshot();for(const k of ["visibleColumns","columnOrder","columnWidths","density","showArchived"])delete v[k];Object.assign(v,snap);this.save({op:"updateViews",boardId:this.board.id});return true;}
+  saveActiveView(){const v=this.activeView;if(!v||!this.canManageView(v))return false;const snap=this.viewSnapshot();for(const k of ["visibleColumns","columnOrder","columnWidths","density","showArchived"])delete v[k];Object.assign(v,snap);this.save({op:"updateViews",boardId:this.board.id});return true;}
   // Show or hide every column (Item always stays) — in the open view, or in Main Table for everyone.
   setAllColumnsVisible(visible){
     if(this.activeView){this.viewHidden=visible?[]:this.board.columns.filter((c)=>c.key!=="serial").map((c)=>c.key);return true;}
@@ -1115,7 +1192,48 @@ class BoardModel {
   effectiveOptions(column){if(!column)return [];if(column.type==="group")return [...this.board.groups];if(column.options?.length)return [...column.options];return column.type==="status"?["New","In Progress","Waiting","Completed","Cancelled","Review","Defective","Clear"]:column.type==="priority"?["Low","Medium","High","Critical"]:[];}
   hasValue(value){return Array.isArray(value)?value.length>0:value!==undefined&&value!==null&&value!==false&&String(value).trim()!=="";}
   // Several values in one cell: People always, Dropdown when set to "multiple". Stored as a list of strings.
-  isMultiColumn(column){return column?.type==="owner"||(column?.type==="dropdown"&&column.multiple===true);}
+  isMultiColumn(column){return column?.type==="owner"||column?.type==="connect"||(column?.type==="dropdown"&&column.multiple===true);}
+  // ---- Connect boards / Mirror columns (server: services/related-service.js). A Connect cell holds the server IDs of
+  // linked records on another board; their names and the Mirror values are asked for in batches, for the rows on screen,
+  // and kept briefly (RELATED_TTL). Nothing is copied: a change on the linked board shows at the next read. The server
+  // decides what each person may see; a board they can't open comes back "restricted" and shows no names or values.
+  // Reading linked names and mirror values works whenever the server has them; adding or editing links needs the switch
+  // (JARC_FEATURE_CONNECT_BOARDS): while it is off, existing Connect columns are shown read-only.
+  get relationsReadable(){return Boolean(this.serverBacked&&typeof this.storage?.related==="function");}
+  get relationsAvailable(){return this.relationsReadable&&this.features?.connectBoards===true;}
+  static RELATED_TTL=30000;
+  relatedState(){return (this.relatedStore||={values:new Map(),names:new Map(),access:new Map(),wanted:new Set(),pending:new Set(),timer:null});}
+  // A row's mirror values ({ key: value }), or undefined while they're on their way (asked for now if missing or old).
+  relatedFor(row){
+    const s=this.relatedState(),id=this.serverId(row.id),hit=s.values.get(id);
+    if((!hit||Date.now()-hit.at>BoardModel.RELATED_TTL)&&/^[0-9a-f]{24}$/.test(id)&&this.relationsReadable){s.wanted.add(id);if(!s.timer)s.timer=setTimeout(()=>this.flushRelated(),80); /* rows that come into view together (scrolling) share one request */}
+    return hit?.values;
+  }
+  linkedName(id){return this.relatedState().names.get(String(id))||null;}
+  // This board's columns the server didn't fill in for this person: restricted (no access to the linked board) or
+  // unavailable (a mirror of a Connect/Mirror column, or of a column that no longer exists).
+  relatedAccess(key){const a=this.relatedState().access.get(String(this.board?.id));return a?.restricted.has(key)?"restricted":a?.unavailable.has(key)?"unavailable":null;}
+  async flushRelated(){
+    const s=this.relatedState(),board=this.board;s.timer=null;
+    const ids=[...s.wanted].filter((id)=>!s.pending.has(id)).slice(0,200);s.wanted.clear();
+    if(!board||!ids.length||!board.columns.some((c)=>c.type==="connect"))return;
+    ids.forEach((id)=>s.pending.add(id));
+    try{
+      const r=await this.storage.related(board.id,ids),at=Date.now();
+      for(const map of Object.values(r.linked||{}))for(const [id,v] of Object.entries(map))s.names.set(id,v);
+      s.access.set(String(board.id),{restricted:new Set(r.restricted||[]),unavailable:new Set(r.unavailable||[])});
+      for(const id of ids)s.values.set(id,{at,values:r.values?.[id]||{}});
+    }catch{const at=Date.now();for(const id of ids)s.values.set(id,{at,values:{},error:true});}
+    // Only the Connect/Mirror cells on screen are redrawn (AppController.patchRelationCells), not the whole board.
+    finally{ids.forEach((id)=>s.pending.delete(id));if(this.board===board)window.dispatchEvent(new CustomEvent("jarc-related",{detail:{boardId:board.id}}));}
+  }
+  // After a change here or a live change elsewhere: those rows (or everything) are asked for again.
+  invalidateRelated(rowId=null){const s=this.relatedState();if(rowId===null)s.values.clear();else s.values.delete(this.serverId(rowId));}
+  // Records of the linked board for the picker: by name (contains), 20 at a time, straight from the server (nothing cached,
+  // nothing added to the board on screen).
+  async linkableRecords(column,text=""){return this.storage.linkable(column.link.boardId,String(text||"").trim().slice(0,200));}
+  // The boards a Connect column can link to: every board this person can open (the server checks again).
+  get linkableBoards(){return this.workspaces.filter((w)=>!w.archived).flatMap((w)=>w.boards.filter((b)=>!b.archived).map((b)=>({id:this.serverId(b.id),name:b.name,workspace:w.name,columns:b.columns||[]}))).filter((b)=>/^[0-9a-f]{24}$/.test(b.id));}
   valueList(value){return Array.isArray(value)?value.filter((v)=>typeof v==="string"&&v.trim()):this.hasValue(value)&&typeof value!=="boolean"&&value!=="Unassigned"?[String(value)]:[];}
   // A People entry: a signed-in colleague ("user:<id>", named from the directory) or older plain text.
   isUserRef(value){return /^user:[0-9a-f]{24}$/.test(String(value));}
@@ -1123,7 +1241,8 @@ class BoardModel {
   personLabel(value){if(this.isUserRef(value)){const p=this.people.get(value);return p?(p.isYou?`${p.displayName} (you)`:p.displayName):this.peopleLoaded?"Unknown user":"…";}return String(value);}
   personName(value){return this.isUserRef(value)?(this.people.get(value)?.displayName||(this.peopleLoaded?"Unknown user":"…")):String(value);}
   // Text of a cell for search, sorting, export and summaries.
-  valueText(column,value){if(column&&this.isMultiColumn(column)||Array.isArray(value))return this.valueList(value).map((v)=>this.personName(v)).join(", ");if(typeof value==="boolean")return value?"Yes":"";return String(value??"");}
+  valueText(column,value){if(column?.type==="connect")return this.valueList(value).map((id)=>this.linkedName(id)?.name??"linked record").join(", "); // names for search, sorting and export; IDs never shown
+  if(column&&this.isMultiColumn(column)||Array.isArray(value))return this.valueList(value).map((v)=>this.personName(v)).join(", ");if(typeof value==="boolean")return value?"Yes":"";return String(value??"");}
   sortText(column,value){if(column?.type==="checkbox")return value?"1":"0";return this.valueText(column,value);}
   // Is this cell assigned to me? (my user reference, or older text: my initials, name or email)
   isMine(value){const mine=[this.me,this.profile.initials,this.profile.name,this.profile.email].filter(Boolean);return this.valueList(value).some((v)=>mine.includes(v));}

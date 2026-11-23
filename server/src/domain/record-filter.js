@@ -1,7 +1,8 @@
 // Filter conditions for a board's records: what saved views store, and what GET /boards/:id/records?filter= runs against
 // every record of the board (not only those a browser has loaded).
 //
-//   filter   { op: "and" | "or", rules: [{ key, cmp, values? }], groups?: [{ op, rules }] }. One level of groups.
+//   filter   { op: "and" | "or", rules: [{ key, cmp, values? }], groups?: [{ op, rules, groups? }] }. Groups nest up to
+//            MAX.depth levels (a filter saved before nesting existed has one level and reads the same).
 //   cmp      in, notIn          the cell equals (or doesn't equal) one of the values; "" means an empty cell
 //            contains, notContains   the text contains a value, ignoring case
 //            empty, notEmpty    the cell has no value / has a value
@@ -9,7 +10,23 @@
 //                               columns were migrated as display text, such as "Item A, Item B")
 //            equalsText         the text equals a value, ignoring case
 //            gt, lt             numerically greater or less than the value (numbers may be stored as text)
+//            eq, ne, gte, lte   numerically equal / not equal (empty cells count as not equal) / at least / at most
+//            between            numerically within [from, to], both included
+//            startsWith, endsWith   the text starts or ends with a value, ignoring case
+//            notEqualsText      the text isn't the value, ignoring case (the opposite of equalsText; empty cells included)
+//            checked, unchecked a checkbox column is ticked / isn't
+//            datePreset         a date column within a period counted from today when the query runs, in TIME_ZONE:
+//                               ["today" | "yesterday" | "tomorrow" | "thisWeek" | "lastWeek" | "nextWeek" | "thisMonth" |
+//                               "lastMonth" | "nextMonth"] or ["pastDays" | "nextDays", N]: pastDays N = today and the N days
+//                               before it; nextDays N = today and the N days after it. Weeks run Monday to Sunday.
+//   "@me"    in in / notIn / anyToken / noToken on a People column: the person reading, from their session (never a
+//            value sent as an identity). The same saved filter shows each person their own records. With no reader
+//            known, a rule using it matches no record at all (never "everyone"). Elsewhere "@me" is plain text.
 //            before, after, onOrAfter, dateRange   dates, compared as their ISO text; dateRange is [from, to] inclusive
+//   numbers  eq, gte, lte, between, gt and lt match only cells holding a number (numbers kept as text count); an empty or
+//            non-numeric cell never matches them. ne matches every cell that isn't that number, empty ones included.
+//   group    a Group column with in / notIn and group names ("" = no group): the record's group (groupId), not a cell
+//   connect  a Connect boards column: empty / notEmpty only. mirror: never (its values live on other boards)
 //   key      a column; also updatedAt with onOrAfter (a date and time), and __record_id with in (exact record IDs)
 //   orderBy  [{ key, dir }], at most four: a column, or pinned / createdAt / updatedAt / position / __record_id (the record's
 //            permanent ID). _id always breaks ties, so nothing after __record_id changes the order and it is dropped.
@@ -19,11 +36,19 @@
 const { ObjectId } = require("mongodb");
 const { fail, isSafeKey, RECORD_ID_KEY, OBJECT_ID } = require("../validation/common");
 
-const CMPS = Object.freeze(["in", "notIn", "contains", "notContains", "empty", "notEmpty", "anyToken", "noToken", "equalsText", "gt", "lt", "before", "after", "onOrAfter", "dateRange"]);
-const NO_VALUES = new Set(["empty", "notEmpty"]);
+const CMPS = Object.freeze(["in", "notIn", "contains", "notContains", "empty", "notEmpty", "anyToken", "noToken", "equalsText", "gt", "lt", "before", "after", "onOrAfter", "dateRange",
+  "startsWith", "endsWith", "notEqualsText", "eq", "ne", "gte", "lte", "between", "checked", "unchecked", "datePreset"]);
+const NO_VALUES = new Set(["empty", "notEmpty", "checked", "unchecked"]);
+// The numeric comparisons added with Advanced Filters: their values must be numbers. (gt and lt are older and stay as they were.)
+const NUMERIC = new Set(["eq", "ne", "gte", "lte", "between"]);
+const ME = "@me", ME_CMPS = new Set(["in", "notIn", "anyToken", "noToken"]);
+const PRESETS = Object.freeze(["today", "yesterday", "tomorrow", "thisWeek", "lastWeek", "nextWeek", "thisMonth", "lastMonth", "nextMonth", "pastDays", "nextDays"]);
+// Relative dates are counted in this time zone (JARC's people are in the Philippines); the browser uses the same one.
+const TIME_ZONE = "Asia/Manila";
 const META_SORTS = Object.freeze({ pinned: "pinned", createdAt: "createdAt", updatedAt: "updatedAt", position: "position", [RECORD_ID_KEY]: "_id" });
 const META_FILTERS = new Set(["updatedAt", RECORD_ID_KEY]);
-const MAX = Object.freeze({ rules: 25, groups: 10, values: 100, value: 500, orderBy: 4, text: 6000 });
+// rules and groups: across the whole filter, nested groups included (the limits from before nesting, unchanged).
+const MAX = Object.freeze({ rules: 25, groups: 10, depth: 3, values: 100, value: 500, orderBy: 4, text: 6000, days: 3650 });
 const isPlain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const escapeRegex = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -35,23 +60,38 @@ function cleanRule(rule, where) {
   if (NO_VALUES.has(rule.cmp)) return { key: rule.key, cmp: rule.cmp };
   if (!Array.isArray(rule.values) || !rule.values.length || rule.values.length > MAX.values) fail(`${where} needs 1 to ${MAX.values} values.`);
   if (rule.values.some((v) => typeof v !== "string" || v.length > MAX.value)) fail(`${where} has a value that isn't text or is too long.`);
+  if (rule.cmp === "between" && rule.values.length !== 2) fail(`${where} needs a from and a to.`);
+  if (NUMERIC.has(rule.cmp) && rule.values.slice(0, rule.cmp === "between" ? 2 : 1).some((v) => v.trim() === "" || !Number.isFinite(Number(v)))) fail(`${where} needs a number.`);
+  if (rule.cmp === "datePreset") {
+    const [preset, n] = rule.values;
+    if (!PRESETS.includes(preset)) fail(`${where} has an unknown period.`);
+    const counted = preset === "pastDays" || preset === "nextDays";
+    if (counted ? !(rule.values.length === 2 && /^\d{1,4}$/.test(n) && Number(n) >= 1 && Number(n) <= MAX.days) : rule.values.length !== 1) fail(`${where} needs ${counted ? `a number of days from 1 to ${MAX.days}` : "just the period"}.`);
+  }
   return { key: rule.key, cmp: rule.cmp, values: [...rule.values] };
 }
 
 // The stored shape, without looking at any board: a saved view can outlive a column.
 function cleanFilter(raw) {
+  let groups = 0, total = 0;
+  const op = (v) => { if (v !== "and" && v !== "or") fail('A filter\x27s op must be "and" or "or".'); return v; };
+  const node = (n, depth, where) => {
+    if (!isPlain(n)) fail(`${where} must be an object.`);
+    for (const k of Object.keys(n)) if (!["op", "rules", "groups"].includes(k)) fail(`${where} has an unknown field.`);
+    const list = n.rules === undefined ? [] : n.rules, kids = n.groups === undefined ? [] : n.groups;
+    if (!Array.isArray(list)) fail(`${where}'s rules must be a list.`);
+    if (!Array.isArray(kids)) fail(`${where}'s groups must be a list.`);
+    if (kids.length && depth >= MAX.depth) fail(`Groups can be nested at most ${MAX.depth} levels deep.`);
+    groups += kids.length; if (groups > MAX.groups) fail(`A filter can have at most ${MAX.groups} groups.`);
+    const clean = { op: op(n.op), rules: list.map((r, i) => cleanRule(r, `Condition ${i + 1}`)) };
+    total += clean.rules.length; if (total > MAX.rules) fail(`A filter can have at most ${MAX.rules} conditions.`);
+    const cleanKids = kids.map((g) => node(g, depth + 1, "A filter group"));
+    if (cleanKids.length) clean.groups = cleanKids;
+    return clean;
+  };
   if (!isPlain(raw)) fail("The filter must be an object.");
-  for (const k of Object.keys(raw)) if (!["op", "rules", "groups"].includes(k)) fail("The filter has an unknown field.");
-  const op = (v) => { if (v !== "and" && v !== "or") fail('A filter\'s op must be "and" or "or".'); return v; };
-  const rulesOf = (list = [], where) => { if (!Array.isArray(list)) fail(`${where} must be a list.`); return list.map((r, i) => cleanRule(r, `Condition ${i + 1}`)); };
-  const groups = raw.groups === undefined ? [] : raw.groups;
-  if (!Array.isArray(groups) || groups.length > MAX.groups) fail(`A filter can have at most ${MAX.groups} groups.`);
-  const clean = { op: op(raw.op), rules: rulesOf(raw.rules, "rules") };
-  const cleanGroups = groups.map((g) => { if (!isPlain(g)) fail("A filter group must be an object."); for (const k of Object.keys(g)) if (!["op", "rules"].includes(k)) fail("A filter group has an unknown field."); return { op: op(g.op), rules: rulesOf(g.rules, "group rules") }; });
-  if (cleanGroups.length) clean.groups = cleanGroups;
-  const total = clean.rules.length + cleanGroups.reduce((n, g) => n + g.rules.length, 0);
+  const clean = node(raw, 0, "The filter");
   if (!total) fail("A filter needs at least one condition.");
-  if (total > MAX.rules) fail(`A filter can have at most ${MAX.rules} conditions.`);
   return clean;
 }
 
@@ -63,15 +103,28 @@ function cleanOrderBy(raw) {
   });
 }
 
-const rulesIn = (filter) => [...filter.rules, ...(filter.groups || []).flatMap((g) => g.rules)];
-// Against a board: every column must exist. Filtering by the group column isn't a cell comparison, so it is refused.
+const rulesIn = (filter) => [...(filter.rules || []), ...(filter.groups || []).flatMap(rulesIn)];
+// Against a board: every column must exist, and each comparison must suit the column's type (checkRuleType).
 function filterForBoard(raw, board) {
   const filter = cleanFilter(raw), byKey = new Map(board.columns.map((c) => [c.key, c]));
   for (const r of rulesIn(filter)) {
     if (r.key === RECORD_ID_KEY && !byKey.has(r.key)) { if (r.cmp !== "in" || !r.values.every((v) => OBJECT_ID.test(v))) fail("A Record ID filter needs exact record IDs (24 hexadecimal characters)."); continue; }
-    if (META_FILTERS.has(r.key) && !byKey.has(r.key)) { if (r.cmp !== "onOrAfter" || Number.isNaN(Date.parse(r.values?.[0]))) fail("updatedAt can only be filtered from a date."); continue; } const c = byKey.get(r.key); if (!c || c.type === "group") fail(`The filter names a column this board doesn't have (${r.key.slice(0, 40)}).`); }
+    if (META_FILTERS.has(r.key) && !byKey.has(r.key)) { if (r.cmp !== "onOrAfter" || Number.isNaN(Date.parse(r.values?.[0]))) fail("updatedAt can only be filtered from a date."); continue; } const c = byKey.get(r.key); if (!c) fail(`The filter names a column this board doesn't have (${r.key.slice(0, 40)}).`); checkRuleType(r, c); }
   return filter;
 }
+// Which comparisons a column type takes. The comparisons from before stay as permissive as they were (saved views from
+// the monday.com migration use them on text columns); the newer ones are checked against the column's type.
+function checkRuleType(r, c) {
+  const refuse = (what) => fail(`"${String(c.label || c.key).slice(0, 40)}" can't be filtered ${what}.`);
+  if (c.type === "mirror") refuse("(its values come from another board)");
+  if (c.type === "connect" && !["empty", "notEmpty"].includes(r.cmp)) refuse("except by whether it has linked records");
+  if (c.type === "group" && !["in", "notIn"].includes(r.cmp)) refuse("except by is / is not");
+  if ((r.cmp === "checked" || r.cmp === "unchecked") && c.type !== "checkbox") refuse("as checked or unchecked");
+  if (r.cmp === "datePreset" && c.type !== "date") refuse("by a period of dates");
+  if (NUMERIC.has(r.cmp) && !["number", "text"].includes(c.type)) refuse("as a number");
+}
+// "@me" stands for the reader only on a People column compared with is / is not; anywhere else it is just text.
+const meApplies = (rule, column) => column?.type === "owner" && ME_CMPS.has(rule.cmp) && (rule.values || []).includes(ME);
 function orderByForBoard(raw, board) {
   const orderBy = cleanOrderBy(raw), byKey = new Map(board.columns.map((c) => [c.key, c]));
   const out = orderBy.map(({ key, dir }) => {
@@ -98,12 +151,77 @@ function literals(values, column) {
 }
 const tokenPattern = (values) => `(^|, )(${values.map(escapeRegex).join("|")})(, |$)`;
 
-function ruleQuery(rule, byKey) {
+// ---- Values that depend on when and by whom a filter is read ------------------------------------------------------------
+// Today in TIME_ZONE as "YYYY-MM-DD", built from the parts (never from a locale's own format).
+function dayIn(now = new Date(), timeZone = TIME_ZONE) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now).map((p) => [p.type, p.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+// Calendar arithmetic on a "YYYY-MM-DD" day, done in UTC: a day has no time of day, so daylight saving can't shift it.
+const dayDate = (day) => new Date(`${day}T00:00:00Z`);
+const dayText = (date) => date.toISOString().slice(0, 10);
+const addDays = (day, n) => { const d = dayDate(day); d.setUTCDate(d.getUTCDate() + n); return dayText(d); };
+const monthStart = (day, offset) => { const d = dayDate(day); return dayText(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + offset, 1))); };
+const monthEnd = (day, offset) => { const d = dayDate(day); return dayText(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + offset + 1, 0))); };
+// A period counted from today: [from, to], both days included. Weeks run Monday to Sunday.
+function presetRange(preset, n, today) {
+  const monday = addDays(today, -((dayDate(today).getUTCDay() + 6) % 7));
+  switch (preset) {
+    case "today": return [today, today];
+    case "yesterday": return [addDays(today, -1), addDays(today, -1)];
+    case "tomorrow": return [addDays(today, 1), addDays(today, 1)];
+    case "thisWeek": return [monday, addDays(monday, 6)];
+    case "lastWeek": return [addDays(monday, -7), addDays(monday, -1)];
+    case "nextWeek": return [addDays(monday, 7), addDays(monday, 13)];
+    case "thisMonth": return [monthStart(today, 0), monthEnd(today, 0)];
+    case "lastMonth": return [monthStart(today, -1), monthEnd(today, -1)];
+    case "nextMonth": return [monthStart(today, 1), monthEnd(today, 1)];
+    case "pastDays": return [addDays(today, -n), today];
+    case "nextDays": return [today, addDays(today, n)];
+    default: throw new TypeError("Unknown period.");
+  }
+}
+// The filter made concrete for one reading. ctx.me: the reader as "user:<id>", taken by the caller from the authenticated
+// session — never from the request. ctx.today: "YYYY-MM-DD" (default: today in TIME_ZONE).
+//   datePreset → dateRange [from, to]
+//   "@me" on a People column → ctx.me; without a reader the rule becomes "never" (matches no record, whatever the comparison)
+function resolveFilter(filter, ctx, byKey) {
+  const me = typeof ctx?.me === "string" && /^user:[0-9a-f]{24}$/.test(ctx.me) ? ctx.me : null, today = ctx?.today || dayIn();
+  const rule = (r) => {
+    if (r.cmp === "datePreset") return { key: r.key, cmp: "dateRange", values: presetRange(r.values[0], Number(r.values[1] || 0), today) };
+    if (meApplies(r, byKey.get(r.key))) return me ? { ...r, values: r.values.map((v) => (v === ME ? me : v)) } : { key: r.key, cmp: "never" };
+    return r;
+  };
+  const node = (n) => ({ op: n.op, rules: (n.rules || []).map(rule), ...(n.groups ? { groups: n.groups.map(node) } : {}) });
+  return node(filter);
+}
+
+function ruleQuery(rule, byKey, board) {
   const path = `values.${rule.key}`, column = byKey.get(rule.key), values = rule.values || [];
-  const numeric = (op) => ({ $expr: { [op]: [{ $convert: { input: `$${path}`, to: "double", onError: null, onNull: null } }, Number(values[0])] } });
+  // The cell as a number: numbers, and numbers kept as text; anything else (empty, words, a list) is null — and null must not
+  // take part in a comparison, because MongoDB orders null below every number (it would be "less than 7").
+  const asNumber = { $convert: { input: `$${path}`, to: "double", onError: null, onNull: null } };
+  const numeric = (op, value = values[0]) => ({ $expr: { $and: [{ $ne: [asNumber, null] }, { [op]: [asNumber, Number(value)] }] } });
+  if (rule.cmp === "never") return { _id: null }; // every record has an _id: matches nothing
   if (!column && rule.key === "updatedAt") return { updatedAt: { $gte: new Date(values[0]) } };
   if (!column && rule.key === RECORD_ID_KEY) return { _id: { $in: values.map((v) => new ObjectId(v)) } };
+  // A Group column: the record's group by its stable ID (records keep it in groupId, not in a cell). "" = no group.
+  if (column?.type === "group") {
+    const ids = (board?.groups || []).filter((g) => values.includes(g.name)).map((g) => g.id);
+    if (values.includes("")) ids.push(null);
+    return { groupId: { [rule.cmp === "notIn" ? "$nin" : "$in"]: ids } };
+  }
   switch (rule.cmp) {
+    case "startsWith": return { [path]: { $regex: `^${escapeRegex(values[0])}`, $options: "i" } };
+    case "endsWith": return { [path]: { $regex: `${escapeRegex(values[0])}$`, $options: "i" } };
+    case "notEqualsText": return { [path]: { $not: { $regex: `^${escapeRegex(values[0].trim())}$`, $options: "i" } } };
+    case "eq": return numeric("$eq");
+    case "ne": return { $expr: { $ne: [asNumber, Number(values[0])] } }; // an empty or non-numeric cell isn't that number: included
+    case "gte": return numeric("$gte");
+    case "lte": return numeric("$lte");
+    case "between": return { $and: [numeric("$gte", values[0]), numeric("$lte", values[1])] };
+    case "checked": return { [path]: { $in: [true, "true"] } };
+    case "unchecked": return { [path]: { $nin: [true, "true"] } };
     case "equalsText": return { [path]: { $regex: `^${escapeRegex(values[0].trim())}$`, $options: "i" } };
     case "gt": return { $and: [numeric("$gt"), { [path]: { $nin: ["", null] } }] };
     case "lt": return { $and: [numeric("$lt"), { [path]: { $nin: ["", null] } }] };
@@ -122,14 +240,15 @@ function ruleQuery(rule, byKey) {
     default: throw new TypeError("Unknown comparison.");
   }
 }
-function filterQuery(filter, board) {
+// ctx: { me, today } for this reading (see resolveFilter). Without ctx: no reader, today in TIME_ZONE.
+function filterQuery(filter, board, ctx = {}) {
   const byKey = new Map(board.columns.map((c) => [c.key, c]));
   const node = ({ op, rules = [], groups = [] }) => {
-    const parts = [...rules.map((r) => ruleQuery(r, byKey)), ...groups.map(node)];
+    const parts = [...rules.map((r) => ruleQuery(r, byKey, board)), ...groups.map(node)];
     if (parts.length === 1) return parts[0];
     return { [op === "or" ? "$or" : "$and"]: parts };
   };
-  return node(filter);
+  return node(resolveFilter(filter, ctx, byKey));
 }
 
 // Everything after the last row of a page: lexicographic on the sort keys, then _id, with MongoDB's order for missing
@@ -199,4 +318,4 @@ function decodeCursor(text, orderBy) {
 // Sorting by a column: numbers kept as text order numerically, as people expect, and comparisons stay case-sensitive.
 const COLLATION = Object.freeze({ locale: "en", numericOrdering: true });
 
-module.exports = { RECORD_ID_KEY, columnSortStages, SORT_FIELD, cleanFilter, cleanOrderBy, filterForBoard, orderByForBoard, filterQuery, afterQuery, encodeCursor, decodeCursor, rulesIn, escapeRegex, COLLATION, CMPS, MAX };
+module.exports = { TIME_ZONE, ME, PRESETS, dayIn, addDays, presetRange, resolveFilter, RECORD_ID_KEY, columnSortStages, SORT_FIELD, cleanFilter, cleanOrderBy, filterForBoard, orderByForBoard, filterQuery, afterQuery, encodeCursor, decodeCursor, rulesIn, escapeRegex, COLLATION, CMPS, MAX };

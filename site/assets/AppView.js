@@ -25,7 +25,7 @@ Object.assign(svgPaths, {
   hide:'<path d="m3 3 18 18M10.6 6.1A9.8 9.8 0 0 1 12 6c5 0 9 6 9 6a17 17 0 0 1-3 3.5M6.6 6.6A17 17 0 0 0 3 12s4 6 9 6a9 9 0 0 0 4-1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>',
   swap:'<path d="M7 7h13l-4-4M17 17H4l4 4"/>', external:'<path d="M14 4h6v6M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>', expand:'<path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/>', arrowUp:'<path d="M12 19V5m-6 6 6-6 6 6"/>', arrowDown:'<path d="M12 5v14m-6-6 6 6 6-6"/>', move:'<path d="m9 5-5 7 5 7M15 5l5 7-5 7"/>'
 });
-const columnTypeIcons = { text:"text", number:"hash", status:"tag", dropdown:"dropdown", checkbox:"checkbox", priority:"flag", owner:"user", date:"calendar", email:"mail", phone:"phone", link:"link", group:"group", files:"paperclip" };
+const columnTypeIcons = { text:"text", number:"hash", status:"tag", dropdown:"dropdown", checkbox:"checkbox", priority:"flag", owner:"user", date:"calendar", email:"mail", phone:"phone", link:"link", group:"group", files:"paperclip", connect:"link", mirror:"copy" };
 const icon = (name) => `<svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${svgPaths[name]||svgPaths.board}</svg>`;
 
 // Label colours offered for Status, Priority and Dropdown options (the app's pill tones).
@@ -197,7 +197,7 @@ class AppView {
   // board's More menu (or + Views) and show here as a closable tab.
   tabs(model) {
     const views=model.board.savedViews||[], active=model.activeView, icons=Object.fromEntries(VIEW_TYPES.map(([t,,i])=>[t,i])), main=!active&&!model.showArchived;
-    return `<div class="view-tabs" role="tablist" aria-label="Board views"><span class="view-tab ${main?"active":""}"><button role="tab" aria-selected="${main}" data-action="main-table">${icon("layout")} Main Table</button></span>${views.map((v)=>{const on=!model.showArchived&&active&&String(active.id)===String(v.id);return `<span class="view-tab ${on?"active":""}"><button role="tab" aria-selected="${Boolean(on)}" data-action="open-view" data-id="${this.attr(v.id)}">${icon(icons[v.view]||"layout")} ${this.escape(v.name)}</button>${on?`<button class="view-tab-menu" data-action="view-menu" data-id="${this.attr(v.id)}" aria-label="Options for the ${this.attr(v.name)} view" aria-haspopup="menu" title="View options">${icon("chevron")}</button>`:""}</span>`;}).join("")}${model.showArchived?`<span class="view-tab active archived-tab"><button role="tab" aria-selected="true">${icon("archive")} Archived records <small>${model.archivedCount}</small></button><button class="view-tab-menu" data-action="main-table" aria-label="Close archived records" title="Back to Main Table">${icon("close")}</button></span>`:""}<button class="add-view-button" data-action="views-menu" aria-haspopup="menu">${icon("plus")} Views</button><button role="menuitem" data-action="view-filter">${icon("filter")} Filter conditions…</button>${model.viewChanged?`<button class="view-save-button" data-action="save-active-view" title="Save this view's columns, filters and sorting">Save to this view</button>`:""}</div>`;
+    return `<div class="view-tabs" role="tablist" aria-label="Board views"><span class="view-tab ${main?"active":""}"><button role="tab" aria-selected="${main}" data-action="main-table">${icon("layout")} Main Table</button></span>${views.map((v)=>{const on=!model.showArchived&&active&&String(active.id)===String(v.id);return `<span class="view-tab ${on?"active":""}"><button role="tab" aria-selected="${Boolean(on)}" data-action="open-view" data-id="${this.attr(v.id)}"${v.personal?' title="Personal view: only you can see it"':""}>${icon(icons[v.view]||"layout")} ${this.escape(v.name)}${v.personal?' <small class="view-personal-badge">Only you</small>':""}</button>${on?`<button class="view-tab-menu" data-action="view-menu" data-id="${this.attr(v.id)}" aria-label="Options for the ${this.attr(v.name)} view" aria-haspopup="menu" title="View options">${icon("chevron")}</button>`:""}</span>`;}).join("")}${model.showArchived?`<span class="view-tab active archived-tab"><button role="tab" aria-selected="true">${icon("archive")} Archived records <small>${model.archivedCount}</small></button><button class="view-tab-menu" data-action="main-table" aria-label="Close archived records" title="Back to Main Table">${icon("close")}</button></span>`:""}<button class="add-view-button" data-action="views-menu" aria-haspopup="menu">${icon("plus")} Views</button><button role="menuitem" data-action="view-filter">${icon("filter")} Filter conditions…</button>${model.viewChanged?`${model.canManageView(model.activeView)?`<button class="view-save-button" data-action="save-active-view" title="Save this view's columns, filters and sorting">Save to this view</button>`:""}<button class="button secondary small view-revert-button" data-action="revert-view" title="Go back to what this view has saved">Revert</button>`:""}</div>`;
   }
 
   // Board toolbar: New record (with a menu for New group), search, person, status and quick filters, sort, columns,
@@ -229,20 +229,75 @@ class AppView {
     return (model.liveViewFilter?this.viewFilterNote(model):"")+(model.serverView?this.serverViewNotice(model):model.storage?.canFilterOnServer?"":partial)+this.boardRecordsView(model);
   }
   // The conditions of the open view, in words.
-  static FILTER_WORDS={in:"is",notIn:"is not",contains:"contains",notContains:"doesn't contain",empty:"is empty",notEmpty:"has a value",anyToken:"includes",noToken:"doesn't include"};
-  filterRuleText(model,r){const c=model.board.columns.find((x)=>x.key===r.key),v=r.values||[];return `${this.escape(c?.label||r.key)} ${AppView.FILTER_WORDS[r.cmp]||r.cmp}${v.length?` ${this.escape(v.slice(0,3).map((x)=>x===""?"(empty)":x).join(", "))}${v.length>3?` +${v.length-3} more`:""}`:""}`;}
-  viewFilterNote(model){const f=model.liveViewFilter,word=f.op==="or"?" or ":" and ",parts=[...f.rules.map((r)=>this.filterRuleText(model,r)),...(f.groups||[]).map((g)=>`(${g.rules.map((r)=>this.filterRuleText(model,r)).join(g.op==="or"?" or ":" and ")})`)];return `<div class="notice view-filter-note" role="status"><span>${icon("filter")} ${parts.join(word)}</span> <button class="button secondary small" data-action="view-filter">Edit conditions</button></div>`;}
+  static FILTER_WORDS={in:"is",notIn:"is not",contains:"contains",notContains:"doesn't contain",empty:"is empty",notEmpty:"has a value",anyToken:"includes",noToken:"doesn't include",
+    equalsText:"is exactly",notEqualsText:"isn't exactly",startsWith:"starts with",endsWith:"ends with",
+    eq:"=",ne:"≠",gt:">",lt:"<",gte:"≥",lte:"≤",between:"is between",
+    before:"is before",after:"is after",onOrAfter:"is on or after",dateRange:"is from",datePreset:"is within",checked:"is checked",unchecked:"isn't checked"};
+  static FILTER_PRESETS={today:"today",yesterday:"yesterday",tomorrow:"tomorrow",thisWeek:"this week",lastWeek:"last week",nextWeek:"next week",thisMonth:"this month",lastMonth:"last month",nextMonth:"next month",pastDays:"the past … days",nextDays:"the next … days"};
+  // Which comparisons the editor offers for a column type (the server checks the same: domain/record-filter.js).
+  static filterCmpsFor(type){
+    switch(type){
+      case "number":return ["eq","ne","gt","gte","lt","lte","between","empty","notEmpty"];
+      case "date":return ["datePreset","in","before","after","onOrAfter","dateRange","empty","notEmpty"];
+      case "checkbox":return ["checked","unchecked"];
+      case "status":case "priority":case "dropdown":case "owner":return ["in","notIn","anyToken","noToken","empty","notEmpty"];
+      case "group":return ["in","notIn"];
+      case "files":case "connect":return ["empty","notEmpty"];
+      default:return ["contains","notContains","in","notIn","equalsText","notEqualsText","startsWith","endsWith","anyToken","noToken","empty","notEmpty"];
+    }
+  }
+  static FILTER_NO_VALUE=new Set(["empty","notEmpty","checked","unchecked"]);
+  filterRuleText(model,r){
+    const c=model.board.columns.find((x)=>x.key===r.key),v=r.values||[],label=this.escape(c?.label||r.key),word=AppView.FILTER_WORDS[r.cmp]||r.cmp;
+    if(r.cmp==="datePreset"){const[p,n]=v;return `${label} is within ${this.escape(p==="pastDays"?`the past ${n} days`:p==="nextDays"?`the next ${n} days`:AppView.FILTER_PRESETS[p]||p)}`;}
+    if(r.cmp==="between"||r.cmp==="dateRange")return `${label} ${word} ${this.escape(v[0]??"")} to ${this.escape(v[1]??v[0]??"")}`;
+    const shown=v.map((x)=>x===""?"(empty)":x==="@me"?"me":c?.type==="owner"?model.personName(x):x);
+    return `${label} ${word}${v.length?` ${this.escape(shown.slice(0,3).join(", "))}${v.length>3?` +${v.length-3} more`:""}`:""}`;
+  }
+  filterNodeText(model,n,top=true){const parts=[...(n.rules||[]).map((r)=>this.filterRuleText(model,r)),...(n.groups||[]).map((g)=>this.filterNodeText(model,g,false))],text=parts.join(n.op==="or"?" or ":" and ");return top||parts.length<2?text:`(${text})`;}
+  // The open view's conditions in words, with how many records match (a large board's total comes from the server).
+  viewFilterNote(model){const f=model.liveViewFilter,count=model.serverView?"":` · ${model.visibleRows.length.toLocaleString()} matching`;return `<div class="notice view-filter-note" role="status"><span>${icon("filter")} ${this.filterNodeText(model,f)}</span><span class="view-filter-count">${count}</span> <button class="button secondary small" data-action="view-filter">Edit conditions</button></div>`;}
   // A large board's count: the true total, whatever is loaded here. Other layouts load their list a page at a time.
   serverViewNotice(model){const v=model.serverView;if(v.error)return `<div class="notice partial-notice" role="alert"><span>These records didn't arrive, so what's shown may be incomplete.</span> <button class="button secondary" data-action="view-retry">Try again</button></div>`;const text=model.query.trim().length>=2&&!model.boardSearchAvailable;if(v.total===null)return `<div class="records-indicator" role="status">Finding records…</div>`;const flat=v.flat&&!model.serverViewComplete;return `<div class="records-indicator" role="status"><strong>${v.total.toLocaleString()}</strong> record${v.total===1?"":"s"}${text?" · search covers the records loaded so far":""}${flat?` · showing ${v.order.size.toLocaleString()} <button class="button secondary small" data-action="view-load-more">Load more</button>`:""}</div>`;}
-  // Edit the open view's conditions: one list joined by all or any. Groups from a migrated view are kept as they are.
-  showViewFilter(model,draft){
-    const cols=model.board.columns.filter((c)=>c.type!=="group"), words=AppView.FILTER_WORDS, noValue=new Set(["empty","notEmpty"]);
-    const rule=(r,i)=>`<div class="view-filter-rule" data-index="${i}"><select name="key" aria-label="Column">${cols.map((c)=>`<option value="${this.attr(c.key)}" ${c.key===r.key?"selected":""}>${this.escape(c.label)}</option>`).join("")}</select><select name="cmp" aria-label="Comparison">${Object.entries(words).map(([k,w])=>`<option value="${k}" ${k===r.cmp?"selected":""}>${w}</option>`).join("")}</select>${noValue.has(r.cmp)?"":`<textarea name="values" rows="2" aria-label="Values, one per line" placeholder="One value per line">${this.escape((r.values||[]).join("\n"))}</textarea>`}<button type="button" class="icon-button" data-action="view-filter-remove" data-index="${i}" aria-label="Remove this condition">${icon("close")}</button></div>`;
+  // Edit the open view's conditions: a list joined by all or any, with groups of their own (up to three levels, as the
+  // server allows). Each comparison offers the input its column type needs; changing the column or the comparison redraws
+  // the row (AppController.readFilterDraft keeps what was typed). Paths: "r" is the top list, "r.0" its first group, ...
+  static FILTER_DEPTH=3;
+  showViewFilter(model,draft,{error=""}={}){
+    const cols=model.board.columns.filter((c)=>c.type!=="mirror"), words=AppView.FILTER_WORDS, byKey=new Map(cols.map((c)=>[c.key,c]));
+    const sel=(name,label,items,current)=>`<select name="${name}" aria-label="${label}">${items.map(([v,t])=>`<option value="${this.attr(v)}" ${String(v)===String(current)?"selected":""}>${this.escape(t)}</option>`).join("")}</select>`;
+    const valueInput=(r,c)=>{
+      const v=r.values||[],type=c?.type;
+      if(AppView.FILTER_NO_VALUE.has(r.cmp))return "";
+      if(r.cmp==="datePreset"){const p=v[0]||"today",counted=p==="pastDays"||p==="nextDays";return `${sel("preset","Period",Object.entries(AppView.FILTER_PRESETS),p)}${counted?`<input name="days" type="number" min="1" max="3650" step="1" value="${this.attr(v[1]||"7")}" aria-label="Number of days">`:""}`;}
+      if(r.cmp==="between")return `<input name="from" type="number" step="any" value="${this.attr(v[0]??"")}" aria-label="From"><input name="to" type="number" step="any" value="${this.attr(v[1]??"")}" aria-label="To">`;
+      if(r.cmp==="dateRange")return `<input name="from" type="date" value="${this.attr(v[0]??"")}" aria-label="From"><input name="to" type="date" value="${this.attr(v[1]??v[0]??"")}" aria-label="To">`;
+      if(["eq","ne","gt","lt","gte","lte"].includes(r.cmp))return `<input name="value" type="number" step="any" value="${this.attr(v[0]??"")}" aria-label="Number">`;
+      if(type==="date"&&["in","before","after","onOrAfter"].includes(r.cmp))return `<input name="value" type="date" value="${this.attr(v[0]??"")}" aria-label="Date">`;
+      if(["equalsText","notEqualsText","startsWith","endsWith"].includes(r.cmp))return `<input name="value" type="text" maxlength="500" value="${this.attr(v[0]??"")}" aria-label="Text">`;
+      // A list to pick from: labels, groups, people ("me" = whoever is viewing).
+      const pick=type==="group"?model.board.groups.map((g)=>[g,g]):type==="owner"?[["@me","Me (whoever is viewing)"],...[...model.people.entries()].map(([id,p])=>[id,p.displayName||id])]:["status","priority","dropdown"].includes(type)?(c.options||[]).map((o)=>[o,o]):null;
+      if(pick)return `<select name="values" multiple size="${Math.min(6,pick.length+1)}" aria-label="Values">${[["","(empty)"],...pick].map(([val,t])=>`<option value="${this.attr(val)}" ${v.includes(val)?"selected":""}>${this.escape(t)}</option>`).join("")}${v.filter((x)=>x!==""&&!pick.some(([val])=>val===x)).map((x)=>`<option value="${this.attr(x)}" selected>${this.escape(x)}</option>`).join("")}</select>`;
+      return `<textarea name="values" rows="2" aria-label="Values, one per line" placeholder="One value per line">${this.escape(v.join("\n"))}</textarea>`;
+    };
+    const rule=(r,i,path)=>{
+      const c=byKey.get(r.key),cmps=AppView.filterCmpsFor(c?.type);if(!cmps.includes(r.cmp))cmps.unshift(r.cmp); // a saved comparison is never silently changed
+      return `<div class="view-filter-rule" data-path="${path}" data-index="${i}">${sel("key","Column",cols.map((x)=>[x.key,x.label||x.key]),r.key)}${sel("cmp","Comparison",cmps.map((k)=>[k,words[k]||k]),r.cmp)}<span class="view-filter-value">${valueInput(r,c)}</span><button type="button" class="icon-button" data-action="view-filter-remove" data-path="${path}" data-index="${i}" aria-label="Remove this condition">${icon("close")}</button></div>`;
+    };
+    const node=(n,path,depth)=>{
+      const top=depth===0,opSel=`<select name="op" aria-label="${top?"Records must match":"This group matches"}"><option value="and" ${n.op!=="or"?"selected":""}>all of these</option><option value="or" ${n.op==="or"?"selected":""}>any of these</option></select>`;
+      const rules=(n.rules||[]).map((r,i)=>rule(r,i,path)).join(""),groups=(n.groups||[]).map((g,i)=>node(g,`${path}.${i}`,depth+1)).join("");
+      return `<div class="view-filter-node${top?"":" view-filter-group"}" data-path="${path}">
+        ${top?`<label class="field">Records must match${opSel}</label>`:`<div class="view-filter-group-head"><label>Group: ${opSel}</label><button type="button" class="icon-button" data-action="view-filter-remove-group" data-path="${path}" aria-label="Remove this group">${icon("close")}</button></div>`}
+        <div class="view-filter-rules">${rules||(top&&!groups?'<p class="menu-note">No conditions: this view shows every record.</p>':"")}</div>
+        <div class="view-filter-groups">${groups}</div>
+        <div class="view-filter-actions"><button type="button" class="button secondary small" data-action="view-filter-add" data-path="${path}">${icon("plus")} Add condition</button>${depth<AppView.FILTER_DEPTH?`<button type="button" class="button secondary small" data-action="view-filter-add-group" data-path="${path}">${icon("plus")} Add group</button>`:""}</div>
+      </div>`;
+    };
     this.overlay(`<form class="modal view-filter-form" data-action="view-filter-form"><div class="modal-head"><div><div class="eyebrow">${this.escape(model.activeView?.name||"View")}</div><h2>Filter conditions</h2></div>${this.closeButton()}</div>
-      <label class="field">Records must match<select name="op"><option value="and" ${draft.op!=="or"?"selected":""}>all of these</option><option value="or" ${draft.op==="or"?"selected":""}>any of these</option></select></label>
-      <div class="view-filter-rules">${draft.rules.map(rule).join("")||'<p class="menu-note">No conditions: this view shows every record.</p>'}</div>
-      ${draft.groups?.length?`<p class="menu-note">Also keeps ${draft.groups.length} grouped condition${draft.groups.length===1?"":"s"} from this view.</p>`:""}
-      <button type="button" class="button secondary" data-action="view-filter-add">${icon("plus")} Add condition</button>
+      ${node(draft,"r",0)}
+      ${error?`<p class="field-error" role="alert">${this.escape(error)}</p>`:""}
+      <p class="menu-note">Periods such as "this week" are counted from today (Philippine time) whenever the view is opened. Weeks start on Monday.</p>
       <div class="modal-actions"><button type="button" class="button secondary" data-action="close-overlay">Cancel</button><button class="button primary" type="submit">Apply</button></div></form>`);
   }
   loadErrorText(code){const C=(typeof StorageError!=="undefined"&&StorageError.CODES)||{};if(code===C.FORBIDDEN)return "You don't have access to this board's records any more. Ask a workspace admin if you need it.";if(code===C.NOT_FOUND)return "This board no longer exists. Reload to see the latest boards.";return "This board's records didn't arrive, so nothing was changed. Check your connection and try again.";}
@@ -316,10 +371,11 @@ class AppView {
   initials(name){ const parts=String(name||"").trim().split(/\s+/).filter(Boolean); return ((parts[0]?.[0]||"")+(parts.length>1?parts[1][0]:parts[0]?.[1]||"")).toUpperCase()||"?"; }
   person(name){ return `<span class="person"><span class="person-avatar" aria-hidden="true">${this.escape(this.initials(name))}</span><span class="person-name">${this.escape(name)}</span></span>`; }
   isChoiceColumn(column){ return ["status","priority","dropdown","group","owner"].includes(column.type); }
-  cellText(row,column){ const value=row[column.key]; if(column.type==="files"){const n=this.model?.attachmentsFor?.(row.id,column.key).length||0;return n?`${n} file${n===1?"":"s"}`:"";} if(column.type==="checkbox")return value?"checked":"not checked"; if(column.type==="date"&&value)return this.date(value); if(this.model?.isMultiColumn?.(column))return this.model.valueText(column,value); return String(value??"").trim(); }
+  cellText(row,column){ const value=row[column.key]; if(column.type==="connect"){const ids=this.model?.valueList?.(value)||[];return ids.map((id)=>this.model.linkedName(id)?.name||"linked record").join(", ");} if(column.type==="mirror"){const v=this.model?.relatedFor?.(row)?.[column.key];return Array.isArray(v)?v.join(", "):v===null||v===undefined?"":String(v);} if(column.type==="files"){const n=this.model?.attachmentsFor?.(row.id,column.key).length||0;return n?`${n} file${n===1?"":"s"}`:"";} if(column.type==="checkbox")return value?"checked":"not checked"; if(column.type==="date"&&value)return this.date(value); if(this.model?.isMultiColumn?.(column))return this.model.valueText(column,value); return String(value??"").trim(); }
   cellDisplay(row,column,model){
     const value=row[column.key], has=model.hasValue(value), hint=EMPTY_HINT[column.type]||"", empty=(text="")=>`<span class="cell-empty" ${hint?`data-hint="${this.attr(hint)}"`:""}>${text}</span>`;
     if(column.type==="files")return this.filesCell(model,row,column);
+    if(column.type==="connect"||column.type==="mirror")return this.relationDisplay(row,column,model);
     if(model.isMultiColumn(column)&&column.type==="dropdown"){const list=model.valueList(value);return list.length?`<span class="chip-list" title="${this.attr(list.join(", "))}">${list.slice(0,3).map((v)=>this.pill(v,model.optionColor(column,v))).join("")}${list.length>3?`<span class="chip-more">+${list.length-3}</span>`:""}</span>`:empty();}
     if(["status","priority","dropdown"].includes(column.type))return has?this.cellLabel(value,model.optionColor(column,value)):empty();
     if(column.type==="group")return has?this.pill(value):empty();
@@ -437,14 +493,50 @@ class AppView {
   showAddColumn(model) { this.showColumnChooser(model,{mode:"add"}); }
   showColumnChooser(model,{mode="add",key=""}={}) {
     const column=mode==="change"?model.board.columns.find(c=>c.key===key):null;
-    const types=model.columnTypes.filter(t=>t.type!=="files"||(mode!=="change"&&model.filesAvailable()));
+    // Files, Connect and Mirror are added, never converted to; Connect/Mirror need the server, Mirror a Connect column.
+    const types=model.columnTypes.filter(t=>t.type==="files"?(mode!=="change"&&model.filesAvailable()):["connect","mirror"].includes(t.type)?(mode!=="change"&&model.relationsAvailable&&(t.type==="connect"||model.board.columns.some((c)=>c.type==="connect"))):true);
     const categories=[...new Set(types.map(t=>t.category))];
     const option=(t)=>{const current=column?.type===t.type;return `<button type="button" class="chooser-option ${current?"is-current":""}" data-action="${mode==="change"?"choose-new-type":"choose-column-type"}" data-type="${this.attr(t.type)}" data-key="${this.escape(key)}" data-search="${this.escape((t.label+" "+t.description+" "+t.category).toLowerCase())}" ${current?'disabled aria-current="true"':""}><span class="chooser-icon">${icon(columnTypeIcons[t.type]||"text")}</span><span><strong>${t.label}${current?" <em>Current</em>":""}</strong><small>${t.description}</small></span></button>`;};
     this.overlay(`<div class="modal column-chooser"><div class="modal-head"><div><div class="eyebrow">${column?this.escape(column.label):this.escape(model.board.name)}</div><h2>${column?"Change column type":"Add column"}</h2></div>${this.closeButton()}</div><label class="chooser-search">${icon("search")}<input data-action="column-type-search" placeholder="Search column types" aria-label="Search column types" autocomplete="off" autofocus></label><div class="chooser-groups">${categories.map(cat=>`<section class="chooser-group"><h3>${cat}</h3><div class="chooser-grid">${types.filter(t=>t.category===cat).map(option).join("")}</div></section>`).join("")}<p class="chooser-empty" hidden>No column types match your search.</p></div>${column?`<p class="chooser-note">Values that don't fit the new type are only cleared after you confirm. Undo is available afterwards.</p>`:""}</div>`);
   }
+  // A new Connect column: the board it links to (boards this person can open) and one or several links per record. A new
+  // Mirror column: which Connect column, which column of the linked board, and how to show several values.
+  static MIRROR_SHOWS=[["list","Each linked value"],["count","How many"],["sum","Sum"],["avg","Average"],["min","Lowest"],["max","Highest"],["earliest","Earliest date"],["latest","Latest date"]];
+  relationFields(model,type){
+    if(type==="connect"){const boards=model.linkableBoards;return `<label class="full">Link to board<select name="linkBoard" required>${boards.map((b)=>`<option value="${this.attr(b.id)}">${this.escape(b.workspace)} / ${this.escape(b.name)}</option>`).join("")}</select><small>Records stay on their own board; this column holds links to them.</small></label><label class="checkbox-label full"><input type="checkbox" name="multiple" checked> Allow several linked records</label>`;}
+    if(type!=="mirror")return "";
+    const boards=new Map(model.linkableBoards.map((b)=>[b.id,b])),pairs=model.board.columns.filter((c)=>c.type==="connect").flatMap((c)=>(boards.get(c.link?.boardId)?.columns||[]).filter((s)=>!["connect","mirror","files"].includes(s.type)).map((s)=>[`${c.key}|${s.key}`,`${c.label} → ${s.label}`]));
+    return `<label class="full">Show<select name="mirrorPair" required>${pairs.map(([v,t])=>`<option value="${this.attr(v)}">${this.escape(t)}</option>`).join("")}</select><small>A linked board's column, through one of this board's Connect columns. Read-only here; edit it on its own board.</small></label><label class="full">With several linked records<select name="mirrorShow">${AppView.MIRROR_SHOWS.map(([v,t])=>`<option value="${v}">${t}</option>`).join("")}</select></label>`;
+  }
+  // Connect cell: the linked records' names (asked for in the background); Mirror cell: the linked board's values.
+  relationDisplay(row,column,model){
+    const access=model.relatedAccess(column.key);
+    if(access==="restricted")return `<span class="cell-empty relation-locked" title="You can't open the linked board">${icon("lock")}${column.type==="connect"&&model.valueList(row[column.key]).length?` ${model.valueList(row[column.key]).length} linked`:""}</span>`;
+    if(access==="unavailable")return `<span class="cell-empty" title="This mirror can't be shown (it points at a linked or mirrored column, or one that was removed)">—</span>`;
+    if(column.type==="connect"){
+      const ids=model.valueList(row[column.key]);if(!ids.length)return `<span class="cell-empty" data-hint="Link">${icon("link")}</span>`;
+      model.relatedFor(row);const names=ids.map((id)=>model.linkedName(id)?.name||"…");
+      return `<span class="chip-list relation-chips" title="${this.attr(names.join(", "))}">${names.slice(0,3).map((n)=>this.pill(n)).join("")}${ids.length>3?`<span class="chip-more">+${ids.length-3}</span>`:""}</span>`;
+    }
+    const values=model.relatedFor(row);if(values===undefined)return `<span class="cell-empty relation-loading" aria-label="Loading">…</span>`;
+    const v=values[column.key];if(v===null||v===undefined||(Array.isArray(v)&&!v.length))return `<span class="cell-empty"></span>`;
+    if(Array.isArray(v)){const shown=v.map((x)=>model.isUserRef?.(x)?model.personName(x):x);return `<span class="cell-text relation-mirror" title="${this.attr(shown.join(", "))}">${this.escape(shown.join(", "))}</span>`;}
+    return `<span class="cell-number relation-mirror">${this.escape(typeof v==="number"?this.number(String(Math.round(v*100)/100)):String(v))}</span>`;
+  }
+  // Pick linked records: search the linked board by name; chosen records listed first. Saving replaces the cell's links.
+  showConnectPicker(model,draft){
+    const chosen=draft.ids.map((id)=>`<label class="relation-option is-chosen"><input type="checkbox" data-action="connect-toggle" data-link="${this.attr(id)}" checked> ${this.escape(draft.names.get(id)||model.linkedName(id)?.name||id)}</label>`).join("");
+    const results=(draft.results||[]).filter((r)=>!draft.ids.includes(r.id)).map((r)=>`<label class="relation-option"><input type="checkbox" data-action="connect-toggle" data-link="${this.attr(r.id)}"> ${this.escape(r.name||"Untitled")}</label>`).join("");
+    this.overlay(`<form class="modal connect-picker" data-action="connect-picker-form"><div class="modal-head"><div><div class="eyebrow">${this.escape(draft.label)}</div><h2>Linked records</h2></div>${this.closeButton()}</div>
+      <label class="chooser-search">${icon("search")}<input data-action="connect-search" value="${this.attr(draft.query||"")}" placeholder="Search ${this.attr(draft.boardName||"the linked board")} by name" aria-label="Search linked board" autocomplete="off" autofocus></label>
+      <div class="relation-list" role="group" aria-label="Linked records">${chosen||'<p class="menu-note">Nothing linked yet.</p>'}</div>
+      <div class="relation-list relation-results" role="group" aria-label="Records you can link">${draft.loading?'<p class="menu-note">Searching…</p>':draft.error?`<p class="field-error" role="alert">${this.escape(draft.error)}</p>`:results||'<p class="menu-note">No other records match.</p>'}</div>
+      <p class="menu-note">${draft.multiple?"Several records can be linked.":"One record can be linked; choosing another replaces it."} Nothing is copied: the records stay on their own board.</p>
+      <div class="modal-actions"><button type="button" class="button secondary" data-action="close-overlay">Cancel</button><button class="button primary" type="submit">Save links</button></div></form>`);
+  }
   showColumnNameStep(model,type) {
     const meta=model.columnType(type), optionable=["status","dropdown","priority"].includes(type), defaults=model.newColumnOptions(type);
-    this.overlay(`<form class="modal column-chooser column-name-step" data-action="create-column-form"><div class="modal-head"><div><div class="eyebrow">${icon(columnTypeIcons[type]||"text")} ${meta.label} column</div><h2>Name your column</h2></div>${this.closeButton()}</div><input type="hidden" name="type" value="${this.attr(type)}"><div class="form-grid"><label class="full">Column name<input name="label" required maxlength="50" value="${this.escape(model.uniqueColumnLabel(meta.label))}" autofocus></label>${optionable?`<label class="full">Options<input name="options" value="${this.escape(defaults.join(", "))}" placeholder="${type==="dropdown"?"e.g. North, South, East":"Option one, Option two"}"><small>Separate options with commas. You can edit them later from the column menu.</small></label>`:""}${type==="dropdown"?`<label class="checkbox-label full"><input type="checkbox" name="multiple"> Allow several values per record</label>`:""}</div><div class="modal-actions"><button type="button" class="button secondary" data-action="add-column">${icon("left")} Back</button><span class="modal-spacer"></span><button class="button primary">Create column</button></div></form>`);
+    this.overlay(`<form class="modal column-chooser column-name-step" data-action="create-column-form"><div class="modal-head"><div><div class="eyebrow">${icon(columnTypeIcons[type]||"text")} ${meta.label} column</div><h2>Name your column</h2></div>${this.closeButton()}</div><input type="hidden" name="type" value="${this.attr(type)}"><div class="form-grid"><label class="full">Column name<input name="label" required maxlength="50" value="${this.escape(model.uniqueColumnLabel(meta.label))}" autofocus></label>${optionable?`<label class="full">Options<input name="options" value="${this.escape(defaults.join(", "))}" placeholder="${type==="dropdown"?"e.g. North, South, East":"Option one, Option two"}"><small>Separate options with commas. You can edit them later from the column menu.</small></label>`:""}${this.relationFields(model,type)}${type==="dropdown"?`<label class="checkbox-label full"><input type="checkbox" name="multiple"> Allow several values per record</label>`:""}</div><div class="modal-actions"><button type="button" class="button secondary" data-action="add-column">${icon("left")} Back</button><span class="modal-spacer"></span><button class="button primary">Create column</button></div></form>`);
   }
   // ---- Record ID: the system column at the end of every shared board (BoardModel.recordIdShown). Read-only: it shows the record's
   // permanent ID with a copy button, or "Saving…" until a new record has one.
@@ -681,11 +773,13 @@ class AppView {
   }
   showNewView(model,type){
     const meta=VIEW_TYPES.find(([t])=>t===type)||VIEW_TYPES[0], base=type==="table"?"New view":`${meta[1]} view`;
-    this.overlay(`<form class="modal small-modal" data-action="create-view-form"><div class="modal-head"><div><div class="eyebrow">${type==="table"?"New view":`New ${this.escape(meta[1].toLowerCase())} view`}</div><h2>Name this view</h2></div>${this.closeButton()}</div><input type="hidden" name="type" value="${this.attr(meta[0])}"><div class="form-grid"><label class="full">View name<input name="name" required maxlength="60" value="${this.attr(model.uniqueViewName(base))}" autofocus></label><p class="field-note full">It starts with Main Table's columns. Hide columns, filter and sort, then use “Save to this view”. Views show the same records for everyone on this board; nothing is copied or deleted.</p></div><div class="modal-actions"><button type="button" class="button secondary" data-action="close-overlay">Cancel</button><button class="button primary">Create view</button></div></form>`);
+    this.overlay(`<form class="modal small-modal" data-action="create-view-form"><div class="modal-head"><div><div class="eyebrow">${type==="table"?"New view":`New ${this.escape(meta[1].toLowerCase())} view`}</div><h2>Name this view</h2></div>${this.closeButton()}</div><input type="hidden" name="type" value="${this.attr(meta[0])}"><div class="form-grid"><label class="full">View name<input name="name" required maxlength="60" value="${this.attr(model.uniqueViewName(base))}" autofocus></label>${model.personalViewsAvailable?`<label class="full checkbox-field"><input type="checkbox" name="personal" ${model.canEditSharedViews?"":"checked disabled"}> Only me (a personal view nobody else sees)</label>`:""}<p class="field-note full">It starts with Main Table's columns. Hide columns, filter and sort, then use “Save to this view”. ${!model.personalViewsAvailable?"A view is seen by everyone on this board.":model.canEditSharedViews?"A shared view is seen by everyone on this board.":"As a viewer, your views are personal."} Views show the same records; nothing is copied or deleted.</p></div><div class="modal-actions"><button type="button" class="button secondary" data-action="close-overlay">Cancel</button><button class="button primary">Create view</button></div></form>`);
   }
   showViewMenu(model,id){
     const v=model.board.savedViews.find((x)=>String(x.id)===String(id));if(!v)return;
-    document.querySelector("#overlay-root").innerHTML=`<div class="popover view-menu" role="menu" aria-label="${this.attr(v.name)} view"><div class="popover-title"><strong>${this.escape(v.name)}</strong><small>${this.escape((VIEW_TYPES.find(([t])=>t===v.view)||VIEW_TYPES[0])[1])} layout</small></div>${model.viewChanged?`<button role="menuitem" data-action="save-active-view">${icon("work")} Save to this view</button>`:""}<button role="menuitem" data-action="rename-view" data-id="${this.attr(v.id)}">${icon("edit")} Rename</button><button role="menuitem" data-action="duplicate-view" data-id="${this.attr(v.id)}">${icon("copy")} Duplicate</button><div class="menu-separator" role="separator"></div><button role="menuitem" class="danger" data-action="request-delete-view" data-id="${this.attr(v.id)}">${icon("trash")} Delete view</button></div>`;
+    const manage=model.canManageView(v),own=model.isOwnView(v),item=(action,ic,text,extra="")=>`<button role="menuitem" data-action="${action}" data-id="${this.attr(v.id)}"${extra}>${icon(ic)} ${text}</button>`;
+    const share=own&&model.canEditSharedViews&&(v.personal||model.personalViewsAvailable)?(v.personal?item("view-personal","people","Share with the board",' data-personal="0"'):item("view-personal","lock","Make personal (only me)",' data-personal="1"')):"";
+    document.querySelector("#overlay-root").innerHTML=`<div class="popover view-menu" role="menu" aria-label="${this.attr(v.name)} view"><div class="popover-title"><strong>${this.escape(v.name)}</strong><small>${this.escape((VIEW_TYPES.find(([t])=>t===v.view)||VIEW_TYPES[0])[1])} layout · ${v.personal?"only you":"shared with the board"}</small></div>${model.viewChanged&&manage?`<button role="menuitem" data-action="save-active-view">${icon("work")} Save to this view</button>`:""}${model.viewChanged?item("revert-view","refresh","Revert to saved"):""}${manage?item("rename-view","edit","Rename"):""}${item("duplicate-view","copy","Duplicate")}${share}${this.boardLinks?item("copy-view-link","link","Copy view link"):""}${manage?`<div class="menu-separator" role="separator"></div><button role="menuitem" class="danger" data-action="request-delete-view" data-id="${this.attr(v.id)}">${icon("trash")} Delete view</button>`:`<p class="menu-note">Only editors can change shared views. Duplicate it to make your own.</p>`}</div>`;
   }
   showRenameView(model,id){
     const v=model.board.savedViews.find((x)=>String(x.id)===String(id));if(!v)return;

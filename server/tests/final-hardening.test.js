@@ -36,25 +36,27 @@ async function world(mode, { db = null } = {}) {
 describe("Feature switches: configuration", () => {
   const config = (extra) => loadConfig({ ...PROD, ...extra });
   test("the switches are named, and both are off in production unless turned on", () => {
-    assert.deepEqual({ ...FEATURE_SWITCHES }, { nativeForms: "JARC_FEATURE_FORMS", spreadsheetImports: "JARC_FEATURE_IMPORTS" });
-    assert.deepEqual({ ...config({}).features }, { nativeForms: false, spreadsheetImports: false });
-    assert.deepEqual({ ...config({ JARC_FEATURE_FORMS: "", JARC_FEATURE_IMPORTS: "" }).features }, { nativeForms: false, spreadsheetImports: false }, "empty is unset");
+    assert.deepEqual({ ...FEATURE_SWITCHES }, { nativeForms: "JARC_FEATURE_FORMS", spreadsheetImports: "JARC_FEATURE_IMPORTS", personalViews: "JARC_FEATURE_PERSONAL_VIEWS", connectBoards: "JARC_FEATURE_CONNECT_BOARDS" });
+    assert.deepEqual({ ...config({}).features }, { nativeForms: false, spreadsheetImports: false, personalViews: false, connectBoards: false });
+    assert.deepEqual({ ...config({ JARC_FEATURE_FORMS: "", JARC_FEATURE_IMPORTS: "", JARC_FEATURE_PERSONAL_VIEWS: "", JARC_FEATURE_CONNECT_BOARDS: "" }).features }, { nativeForms: false, spreadsheetImports: false, personalViews: false, connectBoards: false }, "empty is unset");
   });
   test("each switch is independent", () => {
-    assert.deepEqual({ ...config({ JARC_FEATURE_FORMS: "true" }).features }, { nativeForms: true, spreadsheetImports: false });
-    assert.deepEqual({ ...config({ JARC_FEATURE_IMPORTS: "true" }).features }, { nativeForms: false, spreadsheetImports: true });
+    assert.deepEqual({ ...config({ JARC_FEATURE_FORMS: "true" }).features }, { nativeForms: true, spreadsheetImports: false, personalViews: false, connectBoards: false });
+    assert.deepEqual({ ...config({ JARC_FEATURE_PERSONAL_VIEWS: "true" }).features }, { nativeForms: false, spreadsheetImports: false, personalViews: true, connectBoards: false });
+    assert.deepEqual({ ...config({ JARC_FEATURE_CONNECT_BOARDS: "true" }).features }, { nativeForms: false, spreadsheetImports: false, personalViews: false, connectBoards: true });
+    assert.deepEqual({ ...config({ JARC_FEATURE_IMPORTS: "true" }).features }, { nativeForms: false, spreadsheetImports: true, personalViews: false, connectBoards: false });
   });
   test("anything but true or false stops startup rather than being guessed", () => {
     for (const bad of ["TRUE", "1", "yes", "on", " true"]) for (const name of Object.values(FEATURE_SWITCHES)) assert.throws(() => config({ [name]: bad }), (e) => e instanceof ConfigError && e.message.includes(name), `${name}=${bad}`);
   });
   test("outside production they default on, and can be turned off", () => {
-    assert.deepEqual({ ...loadConfig({}).features }, { nativeForms: true, spreadsheetImports: true });
-    assert.deepEqual({ ...loadConfig({ JARC_FEATURE_FORMS: "false" }).features }, { nativeForms: false, spreadsheetImports: true });
+    assert.deepEqual({ ...loadConfig({}).features }, { nativeForms: true, spreadsheetImports: true, personalViews: true, connectBoards: true });
+    assert.deepEqual({ ...loadConfig({ JARC_FEATURE_FORMS: "false" }).features }, { nativeForms: false, spreadsheetImports: true, personalViews: true, connectBoards: true });
   });
   test("the app takes the same default: not stated means off in production", () => {
-    assert.deepEqual({ ...resolveFeatures({}, "production") }, { nativeForms: false, spreadsheetImports: false });
-    assert.deepEqual({ ...resolveFeatures({ nativeForms: true }, "production") }, { nativeForms: true, spreadsheetImports: false });
-    assert.deepEqual({ ...resolveFeatures({}, "test") }, { nativeForms: true, spreadsheetImports: true });
+    assert.deepEqual({ ...resolveFeatures({}, "production") }, { nativeForms: false, spreadsheetImports: false, personalViews: false, connectBoards: false });
+    assert.deepEqual({ ...resolveFeatures({ nativeForms: true }, "production") }, { nativeForms: true, spreadsheetImports: false, personalViews: false, connectBoards: false });
+    assert.deepEqual({ ...resolveFeatures({}, "test") }, { nativeForms: true, spreadsheetImports: true, personalViews: true, connectBoards: true });
   });
   test("these switches leave the search setting and every other restricted setting alone", () => {
     const c = config({ RECORD_SEARCH_INDEX: "shadow" });
@@ -137,8 +139,8 @@ describe("Feature switches: the API refuses a hidden feature, however it's asked
     assert.equal((await api(on.url, "GET", `/api/v1/imports/${job.import.id}`)).body.import.fileName, "a.csv");
   });
   test("GET /features tells the browser exactly what's on", async () => {
-    assert.deepEqual((await api(off.url, "GET", "/api/v1/features")).body, { features: { nativeForms: false, spreadsheetImports: false } });
-    assert.deepEqual((await api(formsOnly.url, "GET", "/api/v1/features")).body, { features: { nativeForms: true, spreadsheetImports: false } });
+    assert.deepEqual((await api(off.url, "GET", "/api/v1/features")).body, { features: { nativeForms: false, spreadsheetImports: false, personalViews: true, connectBoards: true } });
+    assert.deepEqual((await api(formsOnly.url, "GET", "/api/v1/features")).body, { features: { nativeForms: true, spreadsheetImports: false, personalViews: true, connectBoards: true } });
   });
   test("existing features don't depend on either switch: records and the legacy import path still answer", async () => {
     assert.equal((await api(off.url, "GET", `/api/v1/boards/${board.id}/records?limit=1`)).status, 200);
@@ -188,7 +190,7 @@ describe("Feature switches: the screens (real app, headless browser)", { skip: B
     assert.equal((await call("POST", `/boards/${board.id}/forms`, { name: "X", fields: [{ key: "serial" }] })).status, 404);
     assert.equal((await call("GET", `/boards/${board.id}/imports`)).status, 404);
     assert.equal((await call("GET", `/workspaces/${ws.id}/imports`)).status, 404);
-    assert.deepEqual((await call("GET", "/features")).body, { features: { nativeForms: false, spreadsheetImports: false } });
+    assert.deepEqual((await call("GET", "/features")).body, { features: { nativeForms: false, spreadsheetImports: false, personalViews: true, connectBoards: true } });
   });
   test("no session: still 401, not a hint about what exists", async () => {
     const r = await fetch(`${base}/api/v1/boards/${board.id}/forms`);

@@ -53,7 +53,7 @@ function boardCreate(raw, { actorId, now }) {
 // Column changes through PATCH are limited to changes that never rewrite record values: add columns, rename labels,
 // reorder, show/hide, width, required, default, options and connection. Removing a column or changing a column's
 // type would change stored values, so those need a dedicated endpoint (later stage) and are rejected here.
-function boardPatch(raw, board, { actorId, now }) {
+function boardPatch(raw, board, { actorId, now, canEditShared = true }) {
   const body = requireBody(raw);
   allowOnly(body, ["expectedVersion", ...Object.keys(BOARD_SIMPLE_FIELDS), "columns", "groups", "savedViews"], "the board update");
   const expectedVersion = version(body.expectedVersion);
@@ -78,7 +78,7 @@ function boardPatch(raw, board, { actorId, now }) {
     removedGroupIds = board.groups.filter((g) => !kept.has(g.id)).map((g) => g.id);
     set.groups = groups;
   }
-  if (body.savedViews !== undefined) set.savedViews = normalizeSavedViews(body.savedViews, { existing: board.savedViews, actorId, now });
+  if (body.savedViews !== undefined) set.savedViews = normalizeSavedViews(body.savedViews, { existing: board.savedViews, actorId, now, canEditShared });
   if (!Object.keys(set).length) fail("Send at least one field to change.");
   return { expectedVersion, set, removedGroupIds };
 }

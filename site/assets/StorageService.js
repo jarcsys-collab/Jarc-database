@@ -316,6 +316,9 @@ class StorageService {
   get canFilterOnServer() { return typeof this.adapter.loadFiltered === "function"; }
   loadFiltered(boardId, options) { return this.adapter.loadFiltered(boardId, options); }
   countFiltered(boardId, options) { return this.adapter.countFiltered(boardId, options); }
+  // Connect / Mirror: linked names and mirror values for some records (resource mode only).
+  get related() { return typeof this.adapter.related === "function" ? (boardId, ids) => this.adapter.related(boardId, ids) : undefined; }
+  linkable(boardId, text) { return this.adapter.linkable(boardId, text); }
   searchStatus() { return this.adapter.searchStatus?.() ?? Promise.resolve({ boardSearch: false }); }
   features() { return this.adapter.features?.() ?? Promise.resolve({ features: {} }); }
   searchBoard(boardId, q) { return this.adapter.searchBoard?.(boardId, q) ?? Promise.resolve({ records: [], more: false }); }

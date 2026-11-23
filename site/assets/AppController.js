@@ -54,6 +54,7 @@ class AppController {
     // A board's saved copy asks to be checked: revalidateBoard. Saves that change shared data are counted by the model
     // (dataSaves) from the start, so a check made before live updates connect is protected too.
     this.model.refreshFailed = new Set(); // boards showing their saved copy whose check failed (server IDs): Retry is offered
+    window.addEventListener("jarc-related", (event) => this.patchRelationCells(event.detail?.boardId));
     window.addEventListener("jarc-board-revalidate", (event) => this.revalidateBoard(event.detail?.boardId, { copy: true }));window.addEventListener("jarc-account-pending",()=>{if(this.entra)this.showEntraGate("pending");});window.addEventListener("jarc-board-status",()=>this.refreshWhenIdle());window.addEventListener("jarc-server-view",(e)=>this.renderServerView(e.detail?.groups||null));this.root.addEventListener("scroll",()=>this.scheduleVirtual(),true);window.addEventListener("jarc-ids-changed",()=>{this.patchRecordIds();this.refreshWhenIdle();});window.addEventListener("jarc-rollback",(event)=>this.onRollback(event.detail));window.addEventListener("jarc-connection",()=>this.saveFeedback());window.addEventListener("online",()=>this.saveFeedback());window.addEventListener("offline",()=>this.saveFeedback());
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>this.view.applyDisplay(this.model));
     // Printing a long board prints all of its records in this view (search, filters and collapsed groups as on screen),
@@ -398,8 +399,26 @@ class AppController {
     }
     const hit = id ? model.findBoardByLink(id) : null;
     if (!hit) { const problem = id ? "missing" : "invalid"; if (model.boardLinkProblem === problem) return false; model.boardLinkProblem = problem; return true; }
-    if (model.screen === "board" && model.board === hit.board && model.workspace === hit.workspace && !model.boardLinkProblem) return false;
-    model.openBoard(hit.board.id, hit.workspace.id); return true;
+    const same = model.screen === "board" && model.board === hit.board && model.workspace === hit.workspace && !model.boardLinkProblem;
+    if (!same) model.openBoard(hit.board.id, hit.workspace.id);
+    return this.applyViewParam({ history: screen !== null }) || !same;
+  }
+  // ?view=view_… on a board link opens that saved view. A view that no longer exists, or someone else's personal view,
+  // opens Main Table with a note (the board itself still opens). On Back/Forward, no ?view= means Main Table.
+  applyViewParam({ history = false } = {}) {
+    const model = this.model, token = new URLSearchParams(window.location.search).get("view");
+    if (!model.board) return false;
+    if (!token) { if (history && model.activeView) { model.openMainTable(); return true; } return false; }
+    const v = model.viewByLinkId(token);
+    if (!v) { setTimeout(() => this.view.toast("That view isn't available: it was deleted, or it is someone's personal view. Showing Main Table."), 0); if (model.activeView) { model.openMainTable(); return true; } return false; }
+    // Already open (compared by server ID: a view saved meanwhile may carry its local or its server ID): unsaved changes stay.
+    if (model.activeView && (model.activeView === v || model.serverId(model.activeView.id) === model.serverId(v.id))) return false;
+    model.applyView(v.id); return true;
+  }
+  // A saved view's shareable address: the board link with ?view= and the view's server ID (null until the view is saved).
+  viewLinkFor(board, v) {
+    const link = this.boardLinkFor(board), id = v ? this.model.serverId(v.id) : "";
+    return link && /^view_[A-Za-z0-9]{6,40}$/.test(id) ? `${link}?view=${encodeURIComponent(id)}` : null;
   }
   // Back/Forward. A fragment link (#main) also fires popstate; then the address still matches the screen and nothing happens.
   onBoardHistory(event) {
@@ -415,12 +434,16 @@ class AppController {
     const model = this.model, start = this.boardUrlStart; this.boardUrlStart = false;
     let wanted = "/";
     if (model.screen === "board" && model.board) { const link = this.boardLinkFor(model.board); if (!link) return; wanted = new URL(link).pathname; }
+    // ?view= follows the open saved view (a view not saved yet has no server ID: the address names the board only).
+    const params = new URLSearchParams(window.location.search), viewId = model.screen === "board" && model.activeView ? model.serverId(model.activeView.id) : "";
+    if (/^view_[A-Za-z0-9]{6,40}$/.test(viewId)) params.set("view", viewId); else params.delete("view");
+    const search = params.toString() ? `?${params}` : "";
     const here = window.location.pathname === "/index.html" ? "/" : window.location.pathname, state = { jarcScreen: model.screen };
-    if (here === wanted) { if (window.history.state?.jarcScreen !== state.jarcScreen) window.history.replaceState(state, "", window.location.href); return; }
+    if (here === wanted && window.location.search === search) { if (window.history.state?.jarcScreen !== state.jarcScreen) window.history.replaceState(state, "", window.location.href); return; }
     // The address already names this board another way (an older link by server ID, upper case, a trailing slash): it becomes
-    // the canonical link in place, without a new history entry.
-    const token = AppController.boardIdInPath(here), same = model.screen === "board" && token && model.findBoardByLink(token)?.board === model.board;
-    window.history[start || same ? "replaceState" : "pushState"](state, "", `${wanted}${window.location.search}`);
+    // the canonical link in place, without a new history entry. Another view of the same board adds a history entry.
+    const token = AppController.boardIdInPath(here), same = here !== wanted && model.screen === "board" && token && model.findBoardByLink(token)?.board === model.board;
+    window.history[start || same ? "replaceState" : "pushState"](state, "", `${wanted}${search}`);
   }
   // Microsoft sign-in screens: "signed-out" | "expired" | "denied" | "error". Shown instead of the app.
   // Someone may use the app now: signed in, and no sign-in gate (an expired, denied or signed-out session) is shown.
@@ -553,7 +576,16 @@ class AppController {
     if(action==="view-load-more"){this.model.loadServerPage(null);return;}
     if(action==="view-retry"){this.model.serverView=null;this.update();return;}
     if(action==="view-filter"){this.view.closeOverlay();this.filterDraft=JSON.parse(JSON.stringify(this.model.viewFilter||{op:"and",rules:[]}));this.view.showViewFilter(this.model,this.filterDraft);return;}
-    if(action==="view-filter-add"||action==="view-filter-remove"){this.readFilterDraft();if(action==="view-filter-add")this.filterDraft.rules.push({key:this.model.board.columns.find((c)=>c.type!=="group")?.key,cmp:"in",values:[""]});else this.filterDraft.rules.splice(Number(target.dataset.index),1);this.view.showViewFilter(this.model,this.filterDraft);return;}
+    if(["view-filter-add","view-filter-remove","view-filter-add-group","view-filter-remove-group"].includes(action)){
+      this.readFilterDraft();
+      const path=(target.dataset.path||"r").split(".").slice(1).map(Number),at=(p)=>p.reduce((n,i)=>n?.groups?.[i],this.filterDraft),node=at(path);
+      const first=this.model.board.columns.find((c)=>c.type!=="group"&&c.type!=="mirror"),fresh=()=>({key:first?.key,cmp:first&&first.type!=="text"?this.view.constructor.filterCmpsFor(first.type)[0]:"in",values:[""]});
+      if(node&&action==="view-filter-add")(node.rules||=[]).push(fresh());
+      if(node&&action==="view-filter-remove")node.rules.splice(Number(target.dataset.index),1);
+      if(node&&action==="view-filter-add-group")(node.groups||=[]).push({op:"and",rules:[fresh()]});
+      if(action==="view-filter-remove-group"&&path.length){const parent=at(path.slice(0,-1));parent?.groups?.splice(path.at(-1),1);}
+      this.view.showViewFilter(this.model,this.filterDraft);return;
+    }
     if(action==="rows-show-more"){this.view.showMoreRows(this.model,target.dataset.key,target.dataset.shown);this.update();return;}
     if(action==="dismiss-hint"){this.model.updateSetting("dismissedHint",true);this.update();return;}
     if(action==="toggle-home-archived"){this.model.updateSetting("homeArchived",!this.model.settings.homeArchived);this.update();return;}
@@ -602,6 +634,9 @@ class AppController {
     if (action === "request-delete-view") { const v=this.model.board.savedViews.find((x)=>String(x.id)===String(target.dataset.id)); if(v)this.view.showConfirm(`Delete the "${v.name}" view?`,"The view is removed for everyone on this board. Its records are not affected.","confirm-delete-view",String(v.id),"Delete view"); return; }
     if (action === "confirm-delete-view") { this.model.deleteView(target.dataset.payload); this.view.closeOverlay(); this.update(); this.view.toast("View deleted"); return; }
     if (action === "save-active-view") { if(this.model.saveActiveView()){this.view.closeOverlay();this.update();this.view.toast("View saved");} return; }
+    if (action === "revert-view") { this.view.closeOverlay(); if(this.model.revertActiveView()){this.update();this.view.toast("Back to the saved view");} return; }
+    if (action === "view-personal") { this.view.closeOverlay(); const personal=target.dataset.personal==="1"; if(this.model.setViewPersonal(target.dataset.id,personal)){this.update();this.view.toast(personal?"Only you can see this view now":"Everyone on this board can see this view now");} return; }
+    if (action === "copy-view-link") { this.view.closeOverlay(); const v=this.model.board?.savedViews.find((x)=>String(x.id)===String(this.model.idOf(target.dataset.id))), link=this.viewLinkFor(this.model.board,v); if(link)this.copyText(link,"View link"); else this.view.toast("This view is still being saved"); return; }
     // New record: quick create (the name, the group, and only what the board requires). The full form stays one click away.
     if (["open-form","new-item"].includes(action)) this.showQuickCreate();
     if (action === "quick-create-more") { const form=target.closest("form"); const name=String(form?.elements.serial?.value||"").trim(), group=form?.elements.group?.value||""; this.view.closeOverlay(); this.view.showRecordForm(this.model,null,{prefill:{serial:name,...(group&&this.model.activeGroups.includes(group)?{[this.model.groupField]:group}:{})}}); return; }
@@ -768,6 +803,7 @@ class AppController {
     if (event.target.dataset.action === "workspace-search") { const term=event.target.value.toLowerCase(); document.querySelectorAll(".workspace-list > button").forEach((button)=>{button.hidden=!button.textContent.toLowerCase().includes(term);}); return; }
     if (event.target.dataset.action === "column-picker-search") { this.view.showColumnPicker(this.model,event.target.value); return; }
     if (event.target.dataset.action === "command-search") { this.command?.onInput(event.target.value); return; }
+    if (event.target.dataset.action === "connect-search") { clearTimeout(this.connectSearchTimer); const text=event.target.value; this.connectSearchTimer=setTimeout(()=>this.searchConnect(text),250); return; }
     if (event.target.dataset.action === "column-type-search") {
       const term=event.target.value.trim().toLowerCase(), modal=event.target.closest(".column-chooser"), options=[...modal.querySelectorAll(".chooser-option")];
       options.forEach((b)=>{b.hidden=Boolean(term)&&!b.dataset.search.includes(term);});
@@ -904,16 +940,66 @@ class AppController {
     if(input&&document.activeElement===input&&!document.querySelector("#overlay-root")?.children.length){const at=input.selectionStart;this.update();const next=document.querySelector('[data-action="search"]');next?.focus();next?.setSelectionRange(at,at);return;}
     this.refreshWhenIdle();
   }
+  // The editor's conditions as a filter, read from the form (groups nested as drawn). A row whose column or comparison was
+  // just changed keeps what it can of its values; one with nothing typed yet keeps [""] so it stays on screen.
   readFilterDraft(){
     const form=document.querySelector(".view-filter-form"); if(!form)return;
-    this.filterDraft.op=form.querySelector('[name="op"]').value==="or"?"or":"and";
-    this.filterDraft.rules=[...form.querySelectorAll(".view-filter-rule")].map((row)=>{const key=row.querySelector('[name="key"]').value,cmp=row.querySelector('[name="cmp"]').value,box=row.querySelector('[name="values"]');const prior=box?box.value.split("\n").map((v)=>v.trim()).filter(Boolean):[];return ["empty","notEmpty"].includes(cmp)?{key,cmp}:{key,cmp,values:prior.length?prior:[""]};});
+    const noValue=this.view.constructor.FILTER_NO_VALUE;
+    const ruleOf=(row)=>{
+      const q=(n)=>row.querySelector(`[name="${n}"]`),key=q("key").value,cmp=q("cmp").value;
+      if(noValue.has(cmp))return {key,cmp};
+      if(cmp==="datePreset"){const preset=q("preset")?.value||"today";return {key,cmp,values:preset==="pastDays"||preset==="nextDays"?[preset,String(q("days")?.value||"7").trim()]:[preset]};}
+      if(q("from")||q("to"))return {key,cmp,values:[String(q("from")?.value??"").trim(),String(q("to")?.value??"").trim()]};
+      const one=q("value"); if(one)return {key,cmp,values:[String(one.value).trim()]};
+      const box=q("values"),list=!box?[]:box.tagName==="SELECT"?[...box.selectedOptions].map((o)=>o.value):box.value.split("\n").map((v)=>v.trim()).filter(Boolean);
+      return {key,cmp,values:list.length?list:[""]};
+    };
+    const nodeOf=(el)=>{
+      const groups=[...el.querySelector(":scope > .view-filter-groups").children].filter((g)=>g.classList.contains("view-filter-node")).map(nodeOf);
+      return {op:el.querySelector(":scope > .field [name='op'], :scope > .view-filter-group-head [name='op']")?.value==="or"?"or":"and",rules:[...el.querySelector(":scope > .view-filter-rules").querySelectorAll(":scope > .view-filter-rule")].map(ruleOf),...(groups.length?{groups}:{})};
+    };
+    const root=form.querySelector(".view-filter-node"); if(root)this.filterDraft=nodeOf(root);
+  }
+  // The draft cleaned for saving: rules without a value dropped (as before), empty groups dropped. Returns { filter } or
+  // { error } with the first problem a person can fix (the server checks the same and refuses anything else).
+  finishFilterDraft(){
+    const noValue=this.view.constructor.FILTER_NO_VALUE,num=(v)=>v!==""&&Number.isFinite(Number(v));let error="";
+    const check=(r)=>{
+      const v=r.values||[];
+      if(noValue.has(r.cmp))return {key:r.key,cmp:r.cmp};
+      // "is" / "is not" / "includes" with nothing chosen keep [""] = "(empty)", as the editor always did.
+      if(["in","notIn","anyToken","noToken"].includes(r.cmp))return v.length?r:null;
+      if(r.cmp==="datePreset"){if(v.length===2&&!(/^\d{1,4}$/.test(v[1])&&Number(v[1])>=1&&Number(v[1])<=3650))error||="Enter a number of days from 1 to 3650.";return r;}
+      if(r.cmp==="between"||r.cmp==="dateRange"){
+        if(v[0]===""&&v[1]==="")return null;
+        if(r.cmp==="between"?!(num(v[0])&&num(v[1])):!(v[0]&&v[1]))error||=r.cmp==="between"?"Enter both numbers for \"is between\".":"Choose both dates for a date range.";
+        return r;
+      }
+      if(v[0]===undefined||v[0]==="")return null; // nothing typed: no condition (contains "" would match everything)
+      if(["eq","ne","gt","lt","gte","lte"].includes(r.cmp)&&!num(v[0]))error||="Enter a number for each number comparison.";
+      return {key:r.key,cmp:r.cmp,values:v.filter((x)=>x!=="")};
+    };
+    const clean=(n)=>{const rules=(n.rules||[]).map(check).filter(Boolean),groups=(n.groups||[]).map(clean).filter(Boolean);return rules.length||groups.length?{op:n.op,rules,...(groups.length?{groups}:{})}:null;};
+    const filter=clean(this.filterDraft);
+    return error?{error}:{filter};
   }
   onChange(event) {
     if (event.target.dataset?.action === "comment-input") return;
     if (event.target.closest?.(".form-fill")) { this.forms?.onChange(event.target); return; }
     if (event.target.closest?.(".form-designer")) return;
     if (event.target.dataset?.action === "cc-filter") { this.command?.onFilterChange(event.target); return; }
+    if (event.target.dataset?.action === "connect-toggle") { this.toggleConnect(event.target); return; }
+    // The condition editor: a new column or comparison (or period) needs other inputs, so the row is drawn again.
+    if (event.target.closest?.(".view-filter-rule") && ["key","cmp","preset"].includes(event.target.name)) {
+      const row=event.target.closest(".view-filter-rule"),path=(row.dataset.path||"r").split(".").slice(1).map(Number),index=Number(row.dataset.index);
+      this.readFilterDraft();
+      const node=path.reduce((n,i)=>n?.groups?.[i],this.filterDraft),r=node?.rules?.[index];
+      if(r&&event.target.name==="key"){const c=this.model.board.columns.find((x)=>x.key===r.key),cmps=this.view.constructor.filterCmpsFor(c?.type);node.rules[index]={key:r.key,cmp:cmps.includes(r.cmp)?r.cmp:cmps[0],values:[""]};}
+      if(r&&event.target.name==="cmp")node.rules[index]={key:r.key,cmp:r.cmp,values:r.cmp==="datePreset"?["today"]:[""]};
+      this.view.showViewFilter(this.model,this.filterDraft);
+      document.querySelector(`.view-filter-rule[data-path="${row.dataset.path}"][data-index="${index}"] [name="${event.target.name}"]`)?.focus();
+      return;
+    }
     if (event.target.dataset?.action === "integration-wizard-workspace") { this.integrations?.onAction("integration-wizard-workspace", event.target); return; }
     if (event.target.dataset?.action?.startsWith("apitok-")) { this.apiTokens?.onChange(event.target); return; }
     if (event.target.dataset?.action === "acct-filter") { this.accounts?.onFilter(event.target); return; }
@@ -973,11 +1059,13 @@ class AppController {
     if (action === "invite-form") { if(this.model.addMember(data)){this.view.closeOverlay();this.update();this.view.toast("Member added");}else this.view.showMessage("Member not added","Use a unique email address."); }
     if (action === "global-search-form") this.globalSearch(data.term);
     if (action === "add-group-form") { if (this.model.addGroup(data.name)) { this.view.showGroupManager(this.model); this.view.toast("Group added"); } else this.view.showMessage("Group not added","Use a unique, non-empty group name."); }
+    if (action === "connect-picker-form") { this.saveConnect(); return; }
     if (action === "view-filter-form") {
       this.readFilterDraft();
-      const noValue=new Set(["empty","notEmpty"]), rules=this.filterDraft.rules.filter((r)=>noValue.has(r.cmp)||r.values?.length);
-      const filter=rules.length||this.filterDraft.groups?.length?{op:this.filterDraft.op,rules,...(this.filterDraft.groups?.length?{groups:this.filterDraft.groups}:{})}:null;
-      this.model.setViewFilter(filter); this.view.closeOverlay(); this.update(); return;
+      const done=this.finishFilterDraft();
+      if(done.error){this.view.showViewFilter(this.model,this.filterDraft,{error:done.error});return;}
+      // A new filter object: the board's cached conditions and their resolved dates are worked out again (no stale filter).
+      this.model.setViewFilter(done.filter); this.view.closeOverlay(); this.update(); return;
     }
     if (action === "column-filter-form") {
       const form=event.target, key=data.key, op=data.op, noValue=["empty","not-empty","checked","unchecked"].includes(op);
@@ -987,13 +1075,13 @@ class AppController {
       else this.model.columnFilter={key,op,value:noValue?"":value};
       this.view.closeOverlay(); this.update(); return;
     }
-    if (action === "create-column-form") { let column; this.runBusy(event.submitter,()=>{column=this.model.addColumn({label:data.label,type:data.type,options:data.options||"",multiple:data.multiple==="on"});return column?undefined:false;},()=>{this.view.closeOverlay();this.update();this.root.querySelector(`th[data-column-key="${CSS.escape(column.key)}"]`)?.scrollIntoView({block:"nearest",inline:"nearest"});this.view.toast(`${column.label} column added`,true);}); }
+    if (action === "create-column-form") { let column; this.runBusy(event.submitter,()=>{const [via,source]=String(data.mirrorPair||"").split("|");column=this.model.addColumn({label:data.label,type:data.type,options:data.options||"",multiple:data.multiple==="on",link:data.linkBoard?{boardId:data.linkBoard}:null,mirror:via&&source?{via,column:source,show:data.mirrorShow||"list"}:null});return column?undefined:false;},()=>{this.view.closeOverlay();this.update();this.root.querySelector(`th[data-column-key="${CSS.escape(column.key)}"]`)?.scrollIntoView({block:"nearest",inline:"nearest"});this.view.toast(`${column.label} column added`,true);}); }
     if (action === "rename-column-form") { this.runBusy(event.submitter,()=>this.model.editColumn(data.key,{label:data.label,description:data.description})?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast("Column updated",true);}); }
     if (action === "column-options-form") { this.pendingOptions={key:data.key,items:[...event.target.querySelectorAll(".option-row")].map((row)=>{const input=row.querySelector(".option-name");return {from:input.dataset.from||null,to:input.value,color:row.querySelector(".option-color")?.value||""};})}; this.applyColumnOptions(false,event.submitter); }
     if (action === "column-width-form") { const width=Number(data.width); if(!Number.isFinite(width))return; this.runBusy(event.submitter,()=>{this.model.resizeColumn(data.key,width);},()=>{this.view.closeOverlay();this.update();this.view.toast(this.model.activeView?"Width changed in this view. Save to this view to keep it.":"Column width saved");}); }
     if (action === "edit-column-form") { const column=this.model.board.columns.find((c)=>c.key===data.key); const description=String(data.description||"").trim().slice(0,500); this.model.renameColumn(data.key,data.label); this.model.updateColumnConfig({[data.key]:{visible:data.key==="serial"?true:Boolean(data.visible),required:data.key==="serial"?true:Boolean(data.required),connection:data.connection||"",...("defaultValue" in data?{defaultValue:data.defaultValue||""}:{}),...(description?{description}:{})}}); if(column&&!description)delete column.description; this.view.closeOverlay(); this.update(); this.view.toast("Column updated"); }
     if (action === "confirm-bulk-delete") { if(String(data.confirm||"").trim().toUpperCase()!=="DELETE"){this.view.showDialogError("Type DELETE to confirm.");return;} const ids=this.pendingBulkDelete||[]; this.pendingBulkDelete=null; this.deleteRecords(ids,event.submitter); return; }
-    if (action === "create-view-form") { const view=this.model.createView(data.name,data.type); if(view){this.view.closeOverlay();this.update();this.view.toast(`View "${view.name}" created`);} return; }
+    if (action === "create-view-form") { const view=this.model.createView(data.name,data.type,{personal:data.personal==="on"}); if(view){this.view.closeOverlay();this.update();this.view.toast(`View "${view.name}" created`);} return; }
     if (action === "rename-view-form") { if(this.model.renameView(data.id,data.name)){this.view.closeOverlay();this.update();this.view.toast("View renamed");} return; }
     if (action === "save-view-form") { if (this.model.saveView(data.name)) { this.view.closeOverlay(); this.update(); this.view.toast("View saved"); } }
     if (action === "profile-form") { data.name=this.auth.username; this.model.updateProfile(data); this.view.closeOverlay(); this.update(); this.view.toast("Profile updated"); }
@@ -1311,6 +1399,16 @@ class AppController {
 
   // ---- Table interaction (Stage 4). Cell edits patch one cell; row inserts refresh only the board view.
   cellButton(id,field){return this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"] [data-action="cell-open"][data-field="${CSS.escape(field)}"]`);}
+  // Linked names / mirror values arrived: redraw just the Connect and Mirror cells of the rows on screen (a table). Other
+  // layouts are redrawn as before.
+  patchRelationCells(boardId){
+    const model=this.model;if(!model.board||String(model.board.id)!==String(boardId)||model.screen!=="board")return;
+    const cols=model.board.columns.filter((c)=>(c.type==="connect"||c.type==="mirror")&&model.columnShown(c));if(!cols.length)return;
+    const trs=[...this.root.querySelectorAll("tr[data-record-context]")];
+    if(!trs.length){model.statusChanged?.();return;}
+    const byId=new Map(model.rows.map((r)=>[String(r.id),r]));
+    for(const tr of trs){const row=byId.get(tr.dataset.recordContext);if(!row)continue;for(const c of cols){const td=tr.querySelector(`td[data-column-key="${CSS.escape(c.key)}"]`);if(td)td.outerHTML=this.view.cell(row,c,model);}}
+  }
   patchCell(id,field,focus=false){
     const row=this.model.rows.find((r)=>r.id===this.model.idOf(id)), column=this.model.board.columns.find((c)=>c.key===field);
     const td=this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"] td[data-column-key="${CSS.escape(field)}"]`);
@@ -1708,11 +1806,43 @@ class AppController {
   }
   // Row order is shared by the whole board, so rows are reordered in Main Table without a sort (never from a view).
   rowDragBlocked(){ if(this.model.activeView)return "Rows can be reordered in Main Table (row order is shared by every view)."; if(this.model.showArchived)return "Archived records can't be reordered."; if(this.model.sortKey&&!this.model.manualSort)return "Clear the sort to reorder rows by hand."; return ""; }
+  // ---- Connect picker: links of one cell, edited as a draft and saved together (one record change; undo as usual).
+  openConnectPicker(row,column){
+    const board=this.model.linkableBoards.find((b)=>b.id===column.link?.boardId);
+    this.connectDraft={rowId:row.id,key:column.key,label:column.label,multiple:column.multiple===true,ids:[...this.model.valueList(row[column.key])],names:new Map(),query:"",results:[],loading:true,boardName:board?.name||"",column};
+    this.view.showConnectPicker(this.model,this.connectDraft);
+    this.searchConnect("");
+  }
+  async searchConnect(text){
+    const d=this.connectDraft;if(!d)return;
+    d.query=text;d.loading=true;d.error="";const token=(this.connectToken=(this.connectToken||0)+1);
+    try{const found=await this.model.linkableRecords(d.column,text);if(token!==this.connectToken||this.connectDraft!==d)return;d.results=found;found.forEach((r)=>d.names.set(r.id,r.name));}
+    catch(error){if(token!==this.connectToken)return;d.results=[];d.error="The linked board's records didn't arrive. You may not be able to open it any more.";}
+    d.loading=false;
+    if(!document.querySelector(".connect-picker"))return;
+    const input=document.querySelector('.connect-picker [data-action="connect-search"]'),at=input?.selectionStart??text.length;
+    this.view.showConnectPicker(this.model,d);
+    const next=document.querySelector('.connect-picker [data-action="connect-search"]');next?.focus();next?.setSelectionRange(at,at);
+  }
+  toggleConnect(input){
+    const d=this.connectDraft,id=input.dataset.link;if(!d||!/^[0-9a-f]{24}$/.test(id||""))return;
+    if(input.checked){d.ids=d.multiple?[...new Set([...d.ids,id])]:[id];}else d.ids=d.ids.filter((x)=>x!==id); // duplicates can't happen
+    this.view.showConnectPicker(this.model,d);
+  }
+  saveConnect(){
+    const d=this.connectDraft;if(!d)return;this.connectDraft=null;
+    const row=this.model.rows.find((r)=>r.id===d.rowId);if(!row){this.view.closeOverlay();return;}
+    for(const id of d.ids){const n=d.names.get(id);if(n!==undefined)this.model.relatedState().names.set(id,{name:n,archived:false});}
+    if(JSON.stringify(this.model.valueList(row[d.key]))!==JSON.stringify(d.ids)){this.model.updateCell(d.rowId,d.key,d.ids);this.model.invalidateRelated(d.rowId);}
+    this.view.closeOverlay();this.update();
+  }
   openCell(button){
     const id=this.model.idOf(button.dataset.id), field=button.dataset.field, row=this.model.rows.find((r)=>r.id===id), column=this.model.board.columns.find((c)=>c.key===field);
     if(!row||!column)return;
     if(column.type==="checkbox"){this.model.updateCell(id,field,!row[field]);this.patchCell(id,field,true);return;}
     if(column.type==="files"){button.scrollIntoView({block:"nearest",inline:"nearest"});this.openFiles(id,field);return;}
+    if(column.type==="mirror"){this.view.toast(this.model.relatedAccess(field)==="restricted"?"You can't open the board this column mirrors":"Mirrored from a linked board: edit it there");return;}
+    if(column.type==="connect"){if(this.model.relatedAccess(field)==="restricted"){this.view.toast("You can't open the board these records are on");return;}if(!this.model.relationsAvailable){this.view.toast("Connect columns are switched off for now: links can't be changed");return;}this.openConnectPicker(row,column);return;}
     if(this.view.isChoiceColumn(column)){
       button.scrollIntoView({block:"nearest",inline:"nearest"});
       const needPeople=column.type==="owner"&&this.model.storage.adapter.loadPeople&&!this.model.peopleLoaded;

@@ -59,7 +59,7 @@ const BOARD_LINK_PATH = /^\/boards\/[^/]{1,200}\/?$/;
 const rootRelative = (html) => html.replace(/(\s(?:href|src))="assets\//g, '$1="/assets/');
 
 // An optional feature not stated is off in production and on elsewhere.
-const resolveFeatures = (features = {}, environment = "development") => { const on = (name) => (typeof features[name] === "boolean" ? features[name] : environment !== "production"); return Object.freeze({ nativeForms: on("nativeForms"), spreadsheetImports: on("spreadsheetImports") }); };
+const resolveFeatures = (features = {}, environment = "development") => { const on = (name) => (typeof features[name] === "boolean" ? features[name] : environment !== "production"); return Object.freeze({ nativeForms: on("nativeForms"), spreadsheetImports: on("spreadsheetImports"), personalViews: on("personalViews"), connectBoards: on("connectBoards") }); };
 
 // dataLayer (optional): { connection, repos, services } from createDataLayer. Without it the server behaves exactly
 // as in Stage 9. Who may use the resource API:
@@ -130,7 +130,7 @@ function createApp({ apiTokens = null, features = {}, repository, environment = 
       api.use(identify, apiTokenRoutes({ tokens: tokenService, access, repos: dataLayer.repos, ...(apiTokens.issuePerHour ? { limiter: createSearchLimiter({ perWindow: apiTokens.issuePerHour, windowMs: 60 * 60 * 1000 }) } : {}) }));
     }
     if (accountService) api.use(identify, accountRoutes({ services: dataLayer.services, repos: dataLayer.repos }));
-    api.use(identify, meRoutes({ repos: dataLayer.repos, mode: auth ? "entra" : "dev", access }), memberRoutes({ services: dataLayer.services, access, repos: dataLayer.repos }), resourceRoutes({ services: dataLayer.services, access }));
+    api.use(identify, meRoutes({ repos: dataLayer.repos, mode: auth ? "entra" : "dev", access }), memberRoutes({ services: dataLayer.services, access, repos: dataLayer.repos }), resourceRoutes({ services: dataLayer.services, access, features: enabled }));
     // Files columns (attachments in GridFS).
     if (dataLayer.services?.files) api.use(identify, fileRoutes({ services: dataLayer.services, access }));
     // Global search across the boards the caller may see.

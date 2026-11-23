@@ -15,12 +15,15 @@ const validate = require("../validation/resources");
 const { Access, forbidden } = require("../auth/access");
 const { workspaceToApi, boardToApi, recordToApi, activityToApi } = require("../api/serialize");
 const { ApiError } = require("../middleware/errors");
+const { RelatedService } = require("../services/related-service");
 
 // Boards synchronized from monday.com are read-only here: their records and schema change only through the sync.
 const readOnly = () => new ApiError(403, "READ_ONLY_BOARD", "This board is synchronized from monday.com and is read-only in JARC.");
 const writable = (board) => { if (board?.source?.readOnly) throw readOnly(); };
 
-function resourceRoutes({ services, access }) {
+// features: { personalViews, connectBoards } (config JARC_FEATURE_PERSONAL_VIEWS / JARC_FEATURE_CONNECT_BOARDS). While a switch is off,
+// nothing new of that kind can be made; what already exists keeps working and stays private (see the deployment notes).
+function resourceRoutes({ services, access, features = { personalViews: true, connectBoards: true } }) {
   const router = express.Router();
   const send = (res, status, body) => res.status(status).set("Cache-Control", "no-store").json(body);
   const deleteQuery = (req) => { allowOnly(req.query, ["expectedVersion"], "the query"); return versionParam(req.query.expectedVersion); };
@@ -36,6 +39,16 @@ function resourceRoutes({ services, access }) {
   // A deleted record, board or workspace takes its discussion with it (column changes never touch comments).
   const purgeComments = (filter) => services.comments?.repos.comments.purge(filter);
   const peopleRule = (req) => ({ everyone: access.shared || req.actor.kind === "development" });
+  // Who is reading, for "@me" filter conditions: only the authenticated actor set by the session middleware (never anything
+  // in the request). No valid user → null, and such conditions match no record.
+  // A board as the signed-in person receives it: shared views plus their own personal views (stored apart; serialize.js).
+  const personalRepo = services?.records?.repos?.personalViews;
+  const boardOut = async (req, doc) => boardToApi(doc, { personal: personalRepo && req.actor?.userId ? await personalRepo.get(doc._id, req.actor.userId) : null });
+  // Connect / Mirror columns: cross-board checks and lookups, always for the person asking (services/related-service.js).
+  const related = new RelatedService({ repos: services?.records?.repos, access }); // services is absent only in start-up checks that fail later
+  const valuesIn = (body) => (isObject(body) ? [body.values, ...(Array.isArray(body.records) ? body.records.map((r) => r?.values) : [])].filter(isObject) : []);
+  const columnsIn = (body) => (isObject(body) ? [...(Array.isArray(body.columns) ? body.columns : []), ...(isObject(body.column) ? [body.column] : []), ...(body.type === "connect" ? [body] : [])].filter(isObject) : []);
+  const reading = (req) => { const id = req.actor?.userId, hex = typeof id?.toHexString === "function" ? id.toHexString() : typeof id === "string" ? id : ""; return { me: /^[0-9a-f]{24}$/.test(hex) ? `user:${hex}` : null }; };
 
   // ---- Workspaces
   // Only the workspaces the caller belongs to (system admins, and everyone under development_shared: all), each with
@@ -69,7 +82,7 @@ function resourceRoutes({ services, access }) {
     // be out of date after a board move.
     const boardIds = (await services.boards.listByWorkspace(workspace._id)).map((b) => b._id);
     const removed = await services.workspaces.delete(workspace._id, deleteQuery(req), req.actor);
-    if (boardIds.length) { await purgeFiles({ boardId: { $in: boardIds } }); await purgeComments({ boardId: { $in: boardIds } }); }
+    if (boardIds.length) { await purgeFiles({ boardId: { $in: boardIds } }); await purgeComments({ boardId: { $in: boardIds } }); await personalRepo?.deleteByBoards(boardIds); }
     send(res, 200, { deleted: true, removed });
   });
 
@@ -77,31 +90,37 @@ function resourceRoutes({ services, access }) {
   router.get("/workspaces/:workspaceId/boards", async (req, res) => {
     const { workspace } = await access.workspace(req.actor, workspaceId(req), "VIEWER");
     noQuery(req);
-    send(res, 200, { items: (await services.boards.listByWorkspace(workspace._id)).map(boardToApi) });
+    const list = await services.boards.listByWorkspace(workspace._id), mine = personalRepo && req.actor?.userId ? await personalRepo.forBoards(list.map((b) => b._id), req.actor.userId) : new Map();
+    send(res, 200, { items: list.map((b) => boardToApi(b, { personal: mine.get(String(b._id)) || null })) });
   });
   router.post("/workspaces/:workspaceId/boards", async (req, res) => {
     const { workspace } = await access.workspace(req.actor, workspaceId(req), "MEMBER");
     noQuery(req);
-    send(res, 201, { board: boardToApi(await services.boards.create(workspace._id, req.body, req.actor)) });
+    await related.checkColumns(req.actor, columnsIn(req.body), [], { allowNew: features.connectBoards });
+    send(res, 201, { board: await boardOut(req, await services.boards.create(workspace._id, req.body, req.actor)) });
   });
   router.get("/boards/:boardId", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "VIEWER");
     noQuery(req);
-    send(res, 200, { board: boardToApi({ ...board, recordCount: await services.boards.recordCount(board._id) }) });
+    send(res, 200, { board: await boardOut(req, { ...board, recordCount: await services.boards.recordCount(board._id) }) });
   });
   // Members edit names, descriptions, columns, groups and views; archiving a board is for workspace admins.
   router.patch("/boards/:boardId", async (req, res) => {
-    const { board, role } = await access.board(req.actor, boardId(req), "MEMBER");
+    // Viewers may change only their own personal saved views (nothing else on the board; board-schema checks the views).
+    const viewsOnly = features.personalViews && isObject(req.body) && Object.keys(req.body).every((k) => k === "expectedVersion" || k === "savedViews");
+    const { board, role } = await access.board(req.actor, boardId(req), viewsOnly ? "VIEWER" : "MEMBER");
     if (board.source?.readOnly && isObject(req.body) && Object.keys(req.body).some((k) => !["expectedVersion", "archived", "savedViews", "position"].includes(k))) throw readOnly(); // only archiving, views and order
     noQuery(req);
+    await related.checkColumns(req.actor, columnsIn(req.body), board.columns, { allowNew: features.connectBoards });
     if (isObject(req.body) && req.body.archived !== undefined && !Access.atLeast(role, "WORKSPACE_ADMIN")) throw forbidden("Only workspace admins can archive or restore boards.");
-    send(res, 200, { board: boardToApi(await services.boards.update(board._id, req.body, req.actor)) });
+    send(res, 200, { board: await boardOut(req, await services.boards.update(board._id, req.body, req.actor, { canEditShared: Access.atLeast(role, "MEMBER"), allowPersonal: features.personalViews })) });
   });
   router.delete("/boards/:boardId", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "WORKSPACE_ADMIN");
     const removed = await services.boards.delete(board._id, deleteQuery(req), req.actor);
     await purgeFiles({ boardId: board._id });
     await purgeComments({ boardId: board._id });
+    await personalRepo?.deleteByBoards([board._id]); // everyone's personal views of it
     if (board.source) await services.integration?.forgetBoard(board._id);
     send(res, 200, { deleted: true, removed });
   });
@@ -109,29 +128,32 @@ function resourceRoutes({ services, access }) {
   // ---- Records (a board's records belong to the board's workspace; batches can only touch that board's records)
   router.get("/boards/:boardId/records", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "VIEWER");
-    const page = await services.records.list(board._id, req.query);
+    const page = await services.records.list(board._id, req.query, reading(req));
     send(res, 200, { items: page.items.map(recordToApi), nextCursor: page.nextCursor, limit: page.limit });
   });
   router.get("/boards/:boardId/records/count", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "VIEWER");
-    send(res, 200, await services.records.count(board._id, req.query));
+    send(res, 200, await services.records.count(board._id, req.query, reading(req)));
   });
   router.post("/boards/:boardId/records", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "MEMBER");
     writable(board);
     noQuery(req);
+    await related.checkLinks(req.actor, board, valuesIn(req.body), { allowWrite: features.connectBoards });
     send(res, 201, { record: recordToApi(await services.records.create(board._id, req.body, req.actor, peopleRule(req))) });
   });
   router.post("/boards/:boardId/records/batch", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "MEMBER");
     writable(board);
     noQuery(req);
+    await related.checkLinks(req.actor, board, valuesIn(req.body), { allowWrite: features.connectBoards });
     send(res, 201, { items: (await services.records.createMany(board._id, req.body, req.actor, peopleRule(req))).map(recordToApi) });
   });
   router.patch("/boards/:boardId/records", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "MEMBER");
     writable(board);
     noQuery(req);
+    await related.checkLinks(req.actor, board, valuesIn(req.body), { allowWrite: features.connectBoards });
     send(res, 200, { items: (await services.records.updateMany(board._id, req.body, req.actor, peopleRule(req))).map(recordToApi) });
   });
   router.post("/boards/:boardId/records/delete", async (req, res) => {
@@ -147,13 +169,14 @@ function resourceRoutes({ services, access }) {
 
   // ---- Board schema changes (each one transaction; ?dryRun=true → { affected })
   const columnKey = (req) => { if (!isSafeKey(req.params.key)) fail("The column key is not valid."); return req.params.key; };
-  const schemaResult = (res, result) => send(res, 200, result.dryRun ? result : { board: boardToApi(result.board), affected: result.affected, recordsChanged: result.recordsChanged });
+  const schemaResult = async (res, result) => send(res, 200, result.dryRun ? result : { board: await boardOut(res.req, result.board), affected: result.affected, recordsChanged: result.recordsChanged });
   router.post("/boards/:boardId/columns", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "MEMBER");
     writable(board);
     noQuery(req);
+    await related.checkColumns(req.actor, columnsIn(req.body), board.columns, { allowNew: features.connectBoards });
     const result = await services.schema.addColumn(board._id, req.body, req.actor);
-    send(res, 201, { board: boardToApi(result.board), recordsChanged: result.recordsChanged });
+    send(res, 201, { board: await boardOut(req, result.board), recordsChanged: result.recordsChanged });
   });
   // Deleting a column or changing its type can lose data: workspace admins only.
   router.delete("/boards/:boardId/columns/:key", async (req, res) => {
@@ -162,12 +185,12 @@ function resourceRoutes({ services, access }) {
     const key = columnKey(req);
     const result = await services.schema.deleteColumn(board._id, key, req.query, req.actor);
     if (!result.dryRun) await purgeFiles({ boardId: board._id, columnKey: key });
-    schemaResult(res, result);
+    await schemaResult(res, result);
   });
   router.post("/boards/:boardId/columns/:key/type", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "WORKSPACE_ADMIN");
     writable(board);
-    schemaResult(res, await services.schema.changeType(board._id, columnKey(req), req.body, req.query, req.actor));
+    await schemaResult(res, await services.schema.changeType(board._id, columnKey(req), req.body, req.query, req.actor));
   });
   // Adding and renaming options: members. Removing an option (which clears values that use it): admins.
   router.put("/boards/:boardId/columns/:key/options", async (req, res) => {
@@ -179,13 +202,13 @@ function resourceRoutes({ services, access }) {
       const column = board.columns.find((c) => c.key === key);
       if (column && optionsPlan(column, items).removed.size) throw forbidden("Only workspace admins can remove options.");
     }
-    schemaResult(res, await services.schema.editOptions(board._id, key, req.body, req.query, req.actor));
+    await schemaResult(res, await services.schema.editOptions(board._id, key, req.body, req.query, req.actor));
   });
   router.delete("/boards/:boardId/groups/:groupId", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "MEMBER");
     writable(board);
     if (!GROUP_ID.test(req.params.groupId)) fail("The group ID is not valid.");
-    schemaResult(res, await services.schema.deleteGroup(board._id, req.params.groupId, req.query, req.actor));
+    await schemaResult(res, await services.schema.deleteGroup(board._id, req.params.groupId, req.query, req.actor));
   });
   // Moving a board needs admin rights in BOTH workspaces; the target is checked like any other workspace.
   router.post("/boards/:boardId/move", async (req, res) => {
@@ -196,7 +219,7 @@ function resourceRoutes({ services, access }) {
     const result = await services.schema.moveBoard(board._id, req.body, req.actor);
     await services.files?.moveBoard(board._id, target);
     await services.comments?.repos.comments.moveBoard(board._id, target);
-    send(res, 200, { board: boardToApi(result.board), recordsMoved: result.records });
+    send(res, 200, { board: await boardOut(req, result.board), recordsMoved: result.records });
   });
   router.get("/boards/:boardId/activity", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "VIEWER");
@@ -210,9 +233,20 @@ function resourceRoutes({ services, access }) {
   });
   router.patch("/records/:recordId", async (req, res) => {
     const { record } = await access.record(req.actor, recordId(req), "MEMBER");
-    writable(await services.records.board(record.boardId));
+    const recordBoard = await services.records.board(record.boardId);
+    writable(recordBoard);
+    await related.checkLinks(req.actor, recordBoard, valuesIn(req.body), { allowWrite: features.connectBoards });
     noQuery(req);
     send(res, 200, { record: recordToApi(await services.records.update(record._id, req.body, req.actor, peopleRule(req))) });
+  });
+  // Connect / Mirror: for up to 200 records of this board (those on screen), the names of their linked records and their
+  // mirror values, from linked boards this person may see. ?ids=<recordId>,<recordId>,…
+  router.get("/boards/:boardId/related", async (req, res) => {
+    const { board } = await access.board(req.actor, boardId(req), "VIEWER");
+    allowOnly(req.query, ["ids"], "the query");
+    const ids = String(queryString(req.query.ids, "ids") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (ids.length > 200 || ids.some((id) => !/^[0-9a-f]{24}$/.test(id))) fail("ids must be up to 200 record IDs, separated by commas.");
+    send(res, 200, await related.resolve(req.actor, board, ids));
   });
   router.delete("/records/:recordId", async (req, res) => {
     const { record } = await access.record(req.actor, recordId(req), "MEMBER");

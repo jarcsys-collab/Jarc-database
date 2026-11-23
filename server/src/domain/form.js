@@ -52,6 +52,8 @@ function cleanField(raw, index, byKey, keys, sectionIds) {
   allowOnly(raw, ["key", "label", "help", "required", "defaultValue", "hidden", "showWhen", "requiredWhen", "section", "placeholder", "suffix", "validation"], `field ${index + 1}`);
   const column = isSafeKey(raw.key) ? byKey.get(raw.key) : null;
   if (!column || column.type === "group") fail(`Field ${index + 1} names a column this board doesn't have.`);
+  // Links to other boards and mirrored values aren't filled in through forms (a form can't check what the person may see).
+  if (column.type === "connect" || column.type === "mirror") fail(`Field ${index + 1} is a Connect or Mirror column, which forms can't fill in.`);
   const field = { key: raw.key };
   if (raw.label !== undefined && raw.label !== "") field.label = text(raw.label, `The label of field ${index + 1}`, { max: MAX.label });
   if (raw.help !== undefined && raw.help !== "") field.help = text(raw.help, `The help of field ${index + 1}`, { max: MAX.help });

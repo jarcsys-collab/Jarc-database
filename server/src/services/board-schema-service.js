@@ -111,6 +111,8 @@ class BoardSchemaService {
       build: async (board, records) => {
         const column = this.column(board, key);
         if (key === PRIMARY_KEY) throw invalid("The Item column's type can't be changed.");
+        // Connect and Mirror columns need their own settings (which board, which column): add a new column instead.
+        if (["connect", "mirror"].includes(type) || ["connect", "mirror"].includes(column.type)) throw invalid("Connect and Mirror columns can't be converted to or from another type. Add a new column instead.");
         // A Dropdown can also switch between one value and several (same type, different "multiple").
         const modeChange = type === "dropdown" && column.type === "dropdown" && multiple !== Boolean(column.multiple);
         if (column.type === type && !modeChange) throw invalid("The column already has this type.");

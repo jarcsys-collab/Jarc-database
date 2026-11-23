@@ -2,16 +2,23 @@
 // stable IDs, saved views and record values. They mirror the current frontend (site/assets/BoardModel.js).
 const crypto = require("crypto");
 const { fail, isObject, isPrimitive, isSafeKey, text, color, bool, RECORD_ID_KEY } = require("../validation/common");
+const { ApiError } = require("../middleware/errors");
 const { cleanFilter, cleanOrderBy } = require("./record-filter");
 
-const COLUMN_TYPES = Object.freeze(["text", "number", "status", "dropdown", "checkbox", "priority", "owner", "date", "email", "phone", "link", "group", "files"]);
+const COLUMN_TYPES = Object.freeze(["text", "number", "status", "dropdown", "checkbox", "priority", "owner", "date", "email", "phone", "link", "group", "files", "connect", "mirror"]);
+// connect: cells hold linked record IDs (24 hex) of one other board, column.link = { boardId }; "multiple" allows several.
+// mirror:  read-only; shows a column of the records linked through one of this board's connect columns, worked out when
+//          read (services/related-service.js): column.mirror = { via: connect column key, column: source column key, show }.
+//          Nothing is stored in its cells. A mirror of a connect or mirror column is refused when read (no chains).
+const MIRROR_SHOWS = Object.freeze(["list", "count", "sum", "avg", "min", "max", "earliest", "latest"]);
+const RECORD_REF = /^[0-9a-f]{24}$/;
 const PRIMARY_KEY = "serial"; // the required Item column; its key never changes (label may)
-const COLUMN_FIELDS = ["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection", "colors", "multiple", "description"];
+const COLUMN_FIELDS = ["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection", "colors", "multiple", "description", "link", "mirror"];
 // Columns whose cells may hold several values (stored as a list of strings): People always (several assignees), and a
 // Dropdown set to "multiple". People entries are "user:<user ID>" for signed-in employees, or (older data) plain text.
 const MAX_MULTI_VALUES = 100;
 const USER_REF = /^user:[0-9a-f]{24}$/;
-const isMultiColumn = (column) => column.type === "owner" || (column.type === "dropdown" && column.multiple === true);
+const isMultiColumn = (column) => column.type === "owner" || column.type === "connect" || (column.type === "dropdown" && column.multiple === true);
 const LIMITS = Object.freeze({ columns: 200, options: 200, optionLength: 200, groups: 200, savedViews: 50, valueLength: 10000, legacyValueLength: 100000, recordFields: 300 });
 const GROUP_ID = /^grp_[A-Za-z0-9]{6,40}$/;
 const VIEW_ID = /^view_[A-Za-z0-9]{6,40}$/;
@@ -64,14 +71,34 @@ function normalizeColumn(column, where = "a column") {
   }
   if (column.multiple !== undefined && column.multiple !== null) {
     const multiple = bool(column.multiple, `multiple on column "${column.key}"`);
-    if (multiple && result.type !== "dropdown") fail(`Only Dropdown columns can allow several values ("${column.key}").`);
+    if (multiple && result.type !== "dropdown" && result.type !== "connect") fail(`Only Dropdown and Connect columns can allow several values ("${column.key}").`);
     if (multiple) result.multiple = true;
   }
   if (column.width !== undefined && column.width !== null) {
     if (typeof column.width !== "number" || !Number.isFinite(column.width) || column.width < 0 || column.width > 5000) fail(`Column "${column.key}" has an invalid width.`);
     result.width = column.width;
   }
+  // Connect: the board it links to (who may link to it is checked by the routes, which know the person).
+  if (column.link !== undefined && column.link !== null) {
+    if (result.type !== "connect") fail(`Only Connect columns link to another board ("${column.key}").`);
+    if (!isObject(column.link) || Object.keys(column.link).some((k) => k !== "boardId") || typeof column.link.boardId !== "string" || !RECORD_REF.test(column.link.boardId)) fail(`Column "${column.key}" needs the ID of the board it links to.`);
+    result.link = { boardId: column.link.boardId };
+  } else if (result.type === "connect") fail(`Connect column "${column.key}" needs the board it links to.`);
+  // Mirror: which connect column it follows, which column of the linked records it shows, and how.
+  if (column.mirror !== undefined && column.mirror !== null) {
+    const m = column.mirror;
+    if (result.type !== "mirror") fail(`Only Mirror columns mirror another board ("${column.key}").`);
+    if (!isObject(m) || Object.keys(m).some((k) => !["via", "column", "show"].includes(k)) || !isSafeKey(m.via) || !isSafeKey(m.column) || !MIRROR_SHOWS.includes(m.show ?? "list")) fail(`Mirror column "${column.key}" needs a Connect column, a column to show and how to show it (${MIRROR_SHOWS.join(", ")}).`);
+    result.mirror = { via: m.via, column: m.column, show: m.show ?? "list" };
+  } else if (result.type === "mirror") fail(`Mirror column "${column.key}" needs a Connect column and a column to show.`);
+  if ((result.type === "connect" || result.type === "mirror") && (result.required || hasValue(result.defaultValue))) fail(`Column "${column.key}" can't be required or have a default value.`);
   return result;
+}
+
+// Each mirror follows a Connect column of the same board.
+function checkMirrors(columns) {
+  const byKey = new Map(columns.map((c) => [c.key, c]));
+  for (const c of columns) if (c.type === "mirror" && byKey.get(c.mirror.via)?.type !== "connect") fail(`Mirror column "${c.key}" must follow a Connect column of this board.`);
 }
 
 function normalizeColumns(columns) {
@@ -87,6 +114,7 @@ function normalizeColumns(columns) {
   const primary = result.find((c) => c.key === PRIMARY_KEY);
   if (!primary) fail(`The board needs its primary "${PRIMARY_KEY}" (Item) column.`);
   if (primary.type !== "text") fail("The primary Item column must be a text column.");
+  checkMirrors(result);
   return result;
 }
 
@@ -112,23 +140,63 @@ function normalizeGroups(groups) {
   });
 }
 
-// Saved views: [{ id, legacyId?, name, state, createdBy, createdAt }]. state holds the view's filters and layout.
-function normalizeSavedViews(views, { existing = [], actorId, now }) {
+// Saved views on the board: [{ id, legacyId?, name, state, createdBy, createdAt }] — SHARED views only, seen by everyone
+// who can see the board. Personal views are stored apart (repositories/mongo/personal-view-repository.js), so nothing that
+// serves a board document can show them to anyone else. state holds the view's filters and layout. A view's ID never
+// changes, and deleting a view never touches records.
+//   canEditShared  false for a workspace Viewer: the shared views must stay exactly as stored (403 otherwise)
+const sameId = (a, b) => Boolean(a && b) && String(a) === String(b);
+function normalizeSavedViews(views, { existing = [], actorId, now, canEditShared = true }) {
   if (!Array.isArray(views)) fail("savedViews must be a list.");
   if (views.length > LIMITS.savedViews) fail(`A board can have at most ${LIMITS.savedViews} saved views.`);
-  const previous = new Map(existing.map((view) => [view.id, view]));
+  const kept = existing.filter((v) => v.personal !== true); // never a personal view in a board document
+  const previous = new Map(kept.map((view) => [view.id, view]));
   const ids = new Set();
-  return views.map((view, index) => {
+  const clean = views.map((view, index) => {
     if (!isObject(view)) fail(`Saved view ${index + 1} must be an object.`);
-    for (const key of Object.keys(view)) if (!["id", "name", "state"].includes(key)) fail(`Saved view ${index + 1} has an unknown field "${key.slice(0, 40)}".`);
-    const id = view.id === undefined ? newViewId() : view.id;
+    for (const key of Object.keys(view)) if (!["id", "name", "state", "personal"].includes(key)) fail(`Saved view ${index + 1} has an unknown field "${key.slice(0, 40)}".`);
+    if (view.personal === true) fail(`Saved view ${index + 1} is personal: personal views are kept apart from the board.`);
+    if (view.personal !== undefined && view.personal !== false) fail(`Saved view ${index + 1}: personal must be true or false.`);
+    const id = view.id === undefined || view.id === null ? newViewId() : view.id;
     if (typeof id !== "string" || !VIEW_ID.test(id) || ids.has(id)) fail(`Saved view ${index + 1} has an invalid or duplicate ID.`);
     ids.add(id);
     const before = previous.get(id);
-    const clean = { id, name: text(view.name, `The name of saved view ${index + 1}`, { max: 200, required: true }), state: viewState(view.state ?? {}, index), createdBy: before ? before.createdBy : actorId, createdAt: before ? before.createdAt : now };
-    if (before?.legacyId !== undefined) clean.legacyId = before.legacyId;
-    return clean;
+    const out = { id, name: text(view.name, `The name of saved view ${index + 1}`, { max: 200, required: true }), state: viewState(view.state ?? {}, index), createdBy: before ? before.createdBy : actorId, createdAt: before ? before.createdAt : now };
+    if (before?.legacyId !== undefined) out.legacyId = before.legacyId;
+    return out;
   });
+  if (!canEditShared && !sameSharedViews(clean, kept)) throw new ApiError(403, "FORBIDDEN", "Viewers can keep personal views, but only editors can change the board's shared views.");
+  return clean;
+}
+const sameSharedViews = (a, b) => JSON.stringify(a.map((v) => [v.id, v.name, v.state])) === JSON.stringify(b.filter((v) => v.personal !== true).map((v) => [v.id, v.name, v.state]));
+
+// A board update's savedViews, as one person sees them (their order, shared and personal mixed), split into
+//   shared    for the board document (then normalizeSavedViews)        personal  this person's personal views (clean)
+//   order     every view ID in their order                                sharedChanged  whether the board must be written
+// mine: their stored personal views of this board (or null). A view keeps being personal unless the page says otherwise
+// (older pages don't send "personal"). Only its creator can make a shared view personal (it would vanish for everyone
+// else); a Viewer can't share one (that changes the shared views). allowPersonal: the feature switch, for new ones.
+function splitSavedViews(views, { board, mine = null, actorId, now, canEditShared = true, allowPersonal = true }) {
+  if (!Array.isArray(views)) fail("savedViews must be a list.");
+  if (views.length > LIMITS.savedViews) fail(`A board can have at most ${LIMITS.savedViews} saved views.`);
+  const minePrev = new Map((mine?.views || []).map((v) => [v.id, v])), sharedPrev = new Map(board.savedViews.filter((v) => v.personal !== true).map((v) => [v.id, v]));
+  const shared = [], personal = [], order = [], ids = new Set();
+  views.forEach((view, index) => {
+    if (!isObject(view)) fail(`Saved view ${index + 1} must be an object.`);
+    if (view.personal !== undefined && typeof view.personal !== "boolean") fail(`Saved view ${index + 1}: personal must be true or false.`);
+    const id = view.id === undefined || view.id === null ? newViewId() : view.id;
+    if (typeof id !== "string" || !VIEW_ID.test(id) || ids.has(id)) fail(`Saved view ${index + 1} has an invalid or duplicate ID.`);
+    ids.add(id); order.push(id);
+    const wasMine = minePrev.get(id), wasShared = sharedPrev.get(id), isPersonal = view.personal === undefined ? Boolean(wasMine) : view.personal;
+    if (!isPersonal) { shared.push({ id, name: view.name, state: view.state }); return; }
+    if (!wasMine && !allowPersonal) fail("Personal views aren't switched on yet.");
+    if (wasShared && !sameId(wasShared.createdBy, actorId)) fail(`Saved view "${String(wasShared.name).slice(0, 60)}" was created by someone else, so it can't be made personal. Duplicate it instead.`);
+    for (const key of Object.keys(view)) if (!["id", "name", "state", "personal"].includes(key)) fail(`Saved view ${index + 1} has an unknown field "${key.slice(0, 40)}".`);
+    const before = wasMine || wasShared;
+    personal.push({ id, name: text(view.name, `The name of saved view ${index + 1}`, { max: 200, required: true }), state: viewState(view.state ?? {}, index), createdAt: before?.createdAt ?? now, ...(before?.legacyId !== undefined ? { legacyId: before.legacyId } : {}) });
+  });
+  const cleanShared = normalizeSavedViews(shared, { existing: board.savedViews, actorId, now, canEditShared });
+  return { shared: cleanShared, personal, order, sharedChanged: !sameSharedViews(cleanShared, board.savedViews) };
 }
 
 // A view's state: primitives, lists of column keys, or a { columnKey: width } map. Nothing deeper.
@@ -154,6 +222,17 @@ function viewState(state, index) {
 function checkValue(column, value, { maxLength = LIMITS.valueLength } = {}) {
   const where = `The value for "${column.label || column.key}"`;
   if (value === null) return;
+  // Mirror cells are worked out from the linked board when read; nothing can be written to them.
+  if (column.type === "mirror") { if (value !== "" && !(Array.isArray(value) && !value.length)) fail(`${where} comes from another board and can't be edited.`); return; }
+  // Connect cells: the IDs of linked records (each once; one only unless the column allows several). Whether they exist on
+  // the linked board, and whether the person may see it, is checked by the routes (services/related-service.js).
+  if (column.type === "connect") {
+    if (value === "") return;
+    if (!Array.isArray(value) || value.some((v) => typeof v !== "string" || !RECORD_REF.test(v))) fail(`${where} must be a list of record IDs.`);
+    if (new Set(value).size !== value.length) fail(`${where} links the same record twice.`);
+    if (value.length > (column.multiple ? MAX_MULTI_VALUES : 1)) fail(column.multiple ? `${where} has too many linked records.` : `${where} can link only one record.`);
+    return;
+  }
   if (Array.isArray(value)) {
     if (!isMultiColumn(column)) fail(`${where} must be a single value.`);
     if (value.length > MAX_MULTI_VALUES) fail(`${where} has too many entries.`);
@@ -248,7 +327,7 @@ function optionsPlan(column, items) {
 }
 
 module.exports = {
-  COLUMN_TYPES, PRIMARY_KEY, LIMITS, GROUP_ID, VIEW_ID, LEGACY_DEFAULT_COLUMNS, LEGACY_DEFAULT_GROUPS, BLANK_BOARD_COLUMNS, OPTION_TYPES, USER_REF,
-  newGroupId, newViewId, normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, viewState, groupColumnOf, checkValue, hasValue,
+  COLUMN_TYPES, MIRROR_SHOWS, RECORD_REF, PRIMARY_KEY, LIMITS, GROUP_ID, VIEW_ID, LEGACY_DEFAULT_COLUMNS, LEGACY_DEFAULT_GROUPS, BLANK_BOARD_COLUMNS, OPTION_TYPES, USER_REF,
+  newGroupId, newViewId, normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, splitSavedViews, viewState, groupColumnOf, checkValue, hasValue,
   valueList, sameValue, isMultiColumn, effectiveOptions, valueFits, convertValue, optionsPlan
 };

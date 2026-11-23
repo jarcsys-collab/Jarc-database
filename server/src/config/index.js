@@ -102,7 +102,9 @@ function loadSlowCommandMs(env) {
 // JARC_FEATURE_FORMS, JARC_FEATURE_IMPORTS: true or false; anything else stops startup rather than being guessed. Unset means off
 // in production and on elsewhere. While off, the feature's API paths don't exist (app.js), its screens are hidden, the import
 // worker doesn't run and its database collections aren't created. Stored forms and imports are kept and return when it's on again.
-const FEATURE_SWITCHES = Object.freeze({ nativeForms: "JARC_FEATURE_FORMS", spreadsheetImports: "JARC_FEATURE_IMPORTS" });
+// JARC_FEATURE_PERSONAL_VIEWS: new personal saved views (stored apart from boards). JARC_FEATURE_CONNECT_BOARDS: new Connect and
+// Mirror columns. While off, existing ones keep working (personal views stay private) but no new ones can be made.
+const FEATURE_SWITCHES = Object.freeze({ nativeForms: "JARC_FEATURE_FORMS", spreadsheetImports: "JARC_FEATURE_IMPORTS", personalViews: "JARC_FEATURE_PERSONAL_VIEWS", connectBoards: "JARC_FEATURE_CONNECT_BOARDS" });
 function loadFeatureSwitches(env, nodeEnv) {
   const out = {};
   for (const [feature, name] of Object.entries(FEATURE_SWITCHES)) {

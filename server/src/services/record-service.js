@@ -39,10 +39,11 @@ class RecordService {
     return board;
   }
 
-  async list(boardId, query) {
+  // reading: { me } — the reader as "user:<id>", from the authenticated session (routes/resources.js), for "@me" conditions.
+  async list(boardId, query, reading = {}) {
     const board = await this.board(boardId);
     const parsed = validate.recordListQuery(query, board);
-    if (parsed.filtered) return this.listFiltered(board, parsed);
+    if (parsed.filtered) return this.listFiltered(board, parsed, reading);
     const { limit, sort, filter, after } = parsed;
     const page = await this.repos.records.listPage(boardId, { sort, limit, after, filter });
     const last = page.items.at(-1);
@@ -50,10 +51,10 @@ class RecordService {
   }
 
   // The conditions as query parts. Text search uses the search index when it is active; otherwise it reads the cells.
-  async filterParts(board, { filter, also, q, archived }) {
-    const parts = [{ archived }];
-    if (filter) parts.push(recordFilter.filterQuery(filter, board));
-    if (also) parts.push(recordFilter.filterQuery(also, board));
+  async filterParts(board, { filter, also, q, archived }, reading = {}) {
+    const parts = [{ archived }], ctx = { me: reading.me || null }; // today: decided once per request, in recordFilter.TIME_ZONE
+    if (filter) parts.push(recordFilter.filterQuery(filter, board, ctx));
+    if (also) parts.push(recordFilter.filterQuery(also, board, ctx));
     if (q) {
       if (this.searchIndex?.active) parts.push({ _id: { $in: await this.searchIndex.boardIds(board._id, recordFilter.escapeRegex(q.toLowerCase()), { maxTimeMS: FILTER_TIME_MS, archived }) } });
       else { const { searchableKeys } = require("./record-search-index"); parts.push({ $or: searchableKeys(board).map((k) => ({ [`values.${k}`]: { $regex: recordFilter.escapeRegex(q), $options: "i" } })) }); }
@@ -62,8 +63,8 @@ class RecordService {
   }
 
   // Every record of the board is considered, not only those a browser has loaded.
-  async listFiltered(board, { limit, filtered: { filter, also, q, orderBy, archived, after, groupId } }) {
-    const parts = await this.filterParts(board, { filter, also, q, archived });
+  async listFiltered(board, { limit, filtered: { filter, also, q, orderBy, archived, after, groupId } }, reading = {}) {
+    const parts = await this.filterParts(board, { filter, also, q, archived }, reading);
     if (groupId !== undefined) parts.push({ groupId });
     const byColumn = orderBy.some((s) => s.path.startsWith("values."));
     if (byColumn) {
@@ -81,9 +82,9 @@ class RecordService {
     } catch (error) { throw filterTimedOut(error); }
   }
 
-  async count(boardId, query) {
+  async count(boardId, query, reading = {}) {
     const board = await this.board(boardId);
-    const parts = await this.filterParts(board, validate.recordCountQuery(query, board));
+    const parts = await this.filterParts(board, validate.recordCountQuery(query, board), reading);
     try { return await this.repos.records.countFiltered(boardId, { query: { $and: parts }, maxTimeMS: FILTER_TIME_MS }); }
     catch (error) { throw filterTimedOut(error); }
   }

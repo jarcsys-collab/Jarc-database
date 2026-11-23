@@ -30,6 +30,7 @@ const { MembershipService } = require("./services/membership-service");
 const { AccountAuditRepository } = require("./repositories/mongo/account-audit-repository");
 const { AccountService } = require("./services/account-service");
 const { ApiTokenRepository } = require("./repositories/mongo/api-token-repository");
+const { PersonalViewRepository } = require("./repositories/mongo/personal-view-repository");
 const { ApiTokenService } = require("./services/api-token-service");
 
 // fileStore: where attachment bytes go (default GridFS in the same database; tests pass a MemoryFileStore).
@@ -58,7 +59,8 @@ function createDataLayer({ connection, logger = console, fileStore = new GridFsF
     comments: new CommentRepository(db),
     storageUsage: new StorageUsageRepository(db),
     accountAudit: new AccountAuditRepository(db),
-    apiTokens: new ApiTokenRepository(db)
+    apiTokens: new ApiTokenRepository(db),
+    personalViews: new PersonalViewRepository(db)
   };
   const defaultProvider = attachments?.defaultProvider || "gridfs";
   const drive = googleDrive?.enabled ? new GoogleDriveService({ repos, config: googleDrive, fetch, logger, activeForUploads: defaultProvider === "gdrive", ...googleDriveOptions }) : null;

@@ -70,8 +70,23 @@ function evalExpr(e, doc, vars = {}) {
     case "$or": return arg.some((x) => val(x));
     case "$and": return arg.every((x) => val(x));
     case "$eq": return compare(val(arg[0]), val(arg[1])) === 0;
+    case "$ne": return compare(val(arg[0]), val(arg[1])) !== 0;
     case "$gt": return compare(val(arg[0]), val(arg[1])) > 0;
+    case "$gte": return compare(val(arg[0]), val(arg[1])) >= 0;
     case "$lt": return compare(val(arg[0]), val(arg[1])) < 0;
+    case "$lte": return compare(val(arg[0]), val(arg[1])) <= 0;
+    // { $convert: { input, to: "double", onError, onNull } }, as MongoDB converts to a double: numbers as they are, base-10
+    // numeric text (no surrounding spaces), booleans as 1 / 0, dates as milliseconds; missing or null → onNull; else → onError.
+    case "$convert": {
+      if (arg.to !== "double") throw new Error(`fake-mongo: unsupported $convert to ${arg.to}`);
+      const input = val(arg.input), fallback = (k) => (k in arg ? val(arg[k]) : null);
+      if (nullish(input)) return fallback("onNull");
+      if (typeof input === "number") return input;
+      if (typeof input === "boolean") return input ? 1 : 0;
+      if (input instanceof Date) return input.getTime();
+      if (typeof input === "string" && /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(input)) return Number(input);
+      return fallback("onError");
+    }
     default: throw new Error(`fake-mongo: unsupported expression operator ${op}`);
   }
 }

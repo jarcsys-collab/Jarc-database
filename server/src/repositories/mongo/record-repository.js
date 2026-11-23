@@ -106,6 +106,13 @@ class RecordRepository extends VersionedRepository {
 
   async countActive(boardId) { return this.collection.countDocuments({ boardId, archived: false }); }
 
+  // Records by their IDs, from one board only (Connect and Mirror columns, services/related-service.js). Served by the _id
+  // index; projection keeps it to the fields asked for.
+  async findByIds(boardId, ids, { projection, maxTimeMS } = {}) {
+    if (!ids.length) return [];
+    return this.collection.find({ _id: { $in: ids }, boardId }, { ...(projection ? { projection } : {}), ...(maxTimeMS ? { maxTimeMS } : {}) }).toArray();
+  }
+
   // Batched per-record updates. Every operation is filtered by _id AND boardId (and version when given), and only
   // uses update documents built by the services. Returns the number of matched documents.
   async bulkUpdate(updates, { session } = {}) {

@@ -103,7 +103,7 @@ class ResourceApiAdapter {
   static BATCH_LIMIT = 5000;       // records per batch request (the server's limit)
   static USER_KEY = "jarc-resource-user";
   static USER_FIELDS = Object.freeze(["currentWorkspaceId", "currentBoardId", "currentView", "screen", "settings", "profile", "notifications", "recentBoards", "recentRecords", "recentCommands", "feedSeenAt", "collapsedGroups"]);
-  static COLUMN_FIELDS = Object.freeze(["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection", "colors", "multiple", "description"]);
+  static COLUMN_FIELDS = Object.freeze(["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection", "colors", "multiple", "description", "link", "mirror"]);
   static OPTION_TYPES = Object.freeze(["status", "dropdown", "priority"]);
   static FALLBACK_OPTIONS = Object.freeze({ status: ["New", "In Progress", "Waiting", "Completed", "Cancelled", "Review", "Defective", "Clear"], priority: ["Low", "Medium", "High", "Critical"] });
   // Deleting shared data is only expected from these operations. Anything else that would delete server data (for
@@ -232,7 +232,7 @@ class ResourceApiAdapter {
   }
   modelBoardFields(b) {
     // nextItemNumber is not shared: the model derives it from the board's "New item N" names when it loads.
-    return { publicId: b.publicId ?? null, source: b.source ? resourceClone(b.source) : null, name: b.name, description: b.description, icon: b.icon, archived: b.archived, manualOrder: b.manualOrder, columns: resourceClone(b.columns), groups: b.groups.map((g) => g.name), groupMeta: Object.fromEntries(b.groups.map((g) => [g.name, { color: g.color || "", archived: Boolean(g.archived) }])), savedViews: b.savedViews.map((v) => ({ ...resourceClone(v.state), id: v.id, name: v.name })), createdAt: b.createdAt, updatedAt: b.updatedAt, recordCount: b.recordCount };
+    return { publicId: b.publicId ?? null, source: b.source ? resourceClone(b.source) : null, name: b.name, description: b.description, icon: b.icon, archived: b.archived, manualOrder: b.manualOrder, columns: resourceClone(b.columns), groups: b.groups.map((g) => g.name), groupMeta: Object.fromEntries(b.groups.map((g) => [g.name, { color: g.color || "", archived: Boolean(g.archived) }])), savedViews: b.savedViews.map((v) => ({ ...resourceClone(v.state), id: v.id, name: v.name, ...(v.personal ? { personal: true } : {}), ...(v.createdBy ? { createdBy: v.createdBy } : {}) })), createdAt: b.createdAt, updatedAt: b.updatedAt, recordCount: b.recordCount };
   }
   modelBoard(b, pref = {}) {
     return { id: b.id, ...this.modelBoardFields(b), records: this.boardRecords(b.id).map((r) => this.modelRow(r, b)), activity: resourceClone(b.load.activity), favorite: Boolean(pref.favorite), ...(pref.lastView ? { lastView: pref.lastView } : {}), openCount: pref.openCount || 0 };
@@ -385,6 +385,20 @@ class ResourceApiAdapter {
     const { total, groups } = await this.background(`/boards/${board.id}/records/count?${query}`);
     const nameOf = new Map(board.groups.map((g) => [g.id, g.name]));
     return { total, groups: Object.fromEntries(Object.entries(groups).map(([id, n]) => [nameOf.get(id) ?? id, n])) };
+  }
+  // Connect picker: up to 20 records of a linked board by name (contains), as { id, name }. Read straight from the server:
+  // nothing is cached here or added to any board on screen.
+  async linkable(boardId, text = "") {
+    const query = new URLSearchParams({ limit: "20", orderBy: JSON.stringify([{ key: "serial", dir: "asc" }]) });
+    if (text) query.set("filter", JSON.stringify({ op: "and", rules: [{ key: "serial", cmp: "contains", values: [text] }] }));
+    const page = await this.background(`/boards/${encodeURIComponent(this.resolve(boardId))}/records?${query}`);
+    return page.items.map((r) => ({ id: r.id, name: String(r.values?.serial ?? "") }));
+  }
+  // Connect / Mirror (GET /boards/:id/related): ids are server record IDs of this board (at most 200).
+  async related(boardId, ids) {
+    const board = this.boards.get(this.resolve(boardId));
+    if (!board) throw new StorageError(StorageError.CODES.NOT_FOUND, "This board no longer exists. Reload to see the latest data.");
+    return this.background(`/boards/${board.id}/related?ids=${ids.slice(0, 200).map(encodeURIComponent).join(",")}`);
   }
   async searchStatus() { return this.background("/search/status"); }
   async features() { return this.background("/features"); }
@@ -763,13 +777,16 @@ class ResourceApiAdapter {
     });
   }
   static groupNames(groups) { return [...new Set((groups || []).map((g) => String(g).trim()).filter(Boolean))]; }
-  static viewState(view) { const { id, name, ...state } = view; return resourceClone(state); }
+  // A view's state: everything but its identity, its name and who may see it (personal / createdBy are fields of their own).
+  static viewState(view) { const { id, name, personal, createdBy, ...state } = view; return resourceClone(state); }
+  // personal is always sent (true or false): the server keeps a stored flag only when a client leaves it out (older pages).
+  static viewPayload(v, id) { return { ...(id ? { id } : {}), name: v.name, state: ResourceApiAdapter.viewState(v), personal: v.personal === true }; }
   async createBoard(workspaceId, b, reconcile) {
     const body = {
       name: String(b.name || "").trim() || "Untitled board", description: b.description || "", icon: typeof b.icon === "string" && b.icon ? b.icon.trim().slice(0, 40) : "D",
       archived: Boolean(b.archived), manualOrder: Boolean(b.manualOrder), columns: this.columnsPayload(b.columns),
       groups: ResourceApiAdapter.groupNames(b.groups).map((name) => ({ name })),
-      savedViews: (b.savedViews || []).map((v) => ({ name: v.name, state: ResourceApiAdapter.viewState(v) }))
+      savedViews: (b.savedViews || []).map((v) => ResourceApiAdapter.viewPayload(v))
     };
     const { board } = await this.request("POST", `/workspaces/${workspaceId}/boards`, body, { kind: "boards" });
     this.boards.set(board.id, this.boardFrom(board, { load: { state: "full", cursor: null, activity: [], recordActivity: {} }, recordCount: 0 }));
@@ -893,8 +910,8 @@ class ResourceApiAdapter {
     if (!resourceSame(targetColumns, serverColumns)) set.columns = targetColumns;
     if (!resourceSame(comparable(phase1), comparable(s.groups))) set.groups = groupsPayload(phase1);
     const knownViews = new Set(s.savedViews.map((v) => v.id));
-    const views = (b.savedViews || []).map((v) => ({ id: knownViews.has(v.id) ? v.id : null, name: v.name, state: ResourceApiAdapter.viewState(v) }));
-    if (!resourceSame(views, s.savedViews.map((v) => ({ id: v.id, name: v.name, state: v.state })))) set.savedViews = views.map((v) => (v.id ? v : { name: v.name, state: v.state }));
+    const views = (b.savedViews || []).map((v) => ResourceApiAdapter.viewPayload(v, knownViews.has(v.id) ? v.id : null));
+    if (!resourceSame(views, s.savedViews.map((v) => ({ id: v.id, name: v.name, state: v.state, personal: v.personal === true })))) set.savedViews = views;
     if (Object.keys(set).length) {
       s = await this.patchBoard(id, set);
       if (set.savedViews) (b.savedViews || []).forEach((v, i) => { if (!knownViews.has(v.id) && s.savedViews[i]) this.alias(v.id, s.savedViews[i].id, reconcile); });
@@ -932,7 +949,7 @@ class ResourceApiAdapter {
     const groupKey = ResourceApiAdapter.groupKey(s.columns);
     return { groupKey, columns: s.columns.filter((c) => c.key !== groupKey), groupIds: new Map(s.groups.map((g) => [g.name, g.id])) };
   }
-  static isMulti(column) { return column.type === "owner" || (column.type === "dropdown" && column.multiple === true); }
+  static isMulti(column) { return column.type === "owner" || column.type === "connect" || (column.type === "dropdown" && column.multiple === true); }
   static coerce(column, value) {
     if (value === null) return null;
     if (ResourceApiAdapter.isMulti(column)) return [...new Set((Array.isArray(value) ? value : [value]).map((v) => String(v ?? "").trim()).filter((v) => v && v !== "Unassigned"))];
@@ -944,7 +961,7 @@ class ResourceApiAdapter {
   recordFields(row, current, { groupKey, columns, groupIds }) {
     const values = {}, changed = {};
     for (const column of columns) {
-      if (row[column.key] === undefined) continue;
+      if (row[column.key] === undefined || column.type === "mirror") continue; // mirror cells are read-only: worked out by the server
       const value = ResourceApiAdapter.coerce(column, row[column.key]);
       values[column.key] = value;
       if (!current || !resourceSame(value, current.values[column.key] ?? (Array.isArray(value) ? undefined : current.values[column.key]))) changed[column.key] = value;

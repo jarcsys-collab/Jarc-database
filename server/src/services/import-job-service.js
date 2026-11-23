@@ -31,7 +31,7 @@ const { activityEntry, appendActivity } = require("./shared");
 const BATCH_ROWS = 100, BATCH_BYTES = 4 * 1024 * 1024, KEEP_MS = 7 * 24 * 3600 * 1000, PREVIEW_ROWS = 500, MAX_ERRORS = 200;
 // A batch costs about 230 database operations. This pace keeps an import well under the Atlas Flex limit of 500 per second.
 const LEASE_MS = 60000, PAUSE_MS = 800, POLL_MS = 15000, MAX_ACTIVE_PER_USER = 3, MAX_ATTEMPTS = 5;
-const UNMAPPABLE = new Set(["files", "group"]);
+const UNMAPPABLE = new Set(["files", "group", "connect", "mirror"]); // connect: record IDs, not spreadsheet text; mirror: read-only
 const REMOVE_BATCH = 200, REMOVE_PAUSE_MS = 500, COUNT_AFTER_END_MS = 10 * 60 * 1000;
 const PROGRESS_FIELDS = Object.freeze(Object.fromEntries(["workspaceId", "boardId", "boardName", "status", "fileName", "sheet", "rowCount", "imported", "skippedDuplicates", "rejected", "removedRecords", "nextBatch", "batchCount", "errors", "lastError", "createdAt", "finishedAt", "updatedAt"].map((field) => [field, 1])));
 const OPEN = ["mapping", "ready", "queued", "running", "paused"], WRITE_PIECES = 20, WRITE_PAUSE_MS = 50, MAX_READING = 2, COLUMN_TYPES = new Set(["text", "number", "date"]);

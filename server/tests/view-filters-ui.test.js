@@ -241,6 +241,24 @@ describe("Saved view conditions (real app, headless browser)", { skip: BROWSER ?
     await openApp(admin); await openBoard(admin); await openView(admin, "Zed work");
     assert.match(await admin.evaluate("document.querySelector('.view-filter-note span').textContent"), /Zed or Engineer is Other/);
   });
+  test("the condition editor: a nested group, inputs that suit the column (labels to pick), the server applies it to every record", async () => {
+    await openApp(admin); await openBoard(admin); await openView(admin, "Zed work");
+    await admin.evaluate("document.querySelector('.view-filter-note [data-action=view-filter]').click()"); await sleep(150);
+    // Saved earlier as "Zed or Other" (Zed's records are archived by now): drop "Zed", match all, add a group "State is Open".
+    await admin.evaluate("document.querySelectorAll('.view-filter-rule [data-action=view-filter-remove]')[0].click()"); await sleep(100);
+    await admin.evaluate("document.querySelector('[data-action=view-filter-add-group][data-path=r]').click()"); await sleep(100);
+    assert.equal(await admin.evaluate("document.querySelectorAll('.view-filter-group').length"), 1);
+    await admin.evaluate(`(() => { const s = document.querySelector('.view-filter-group .view-filter-rule [name=key]'); s.value = 'state'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`); await sleep(150);
+    assert.equal(await admin.evaluate("document.querySelector('.view-filter-group .view-filter-rule [name=values]').tagName"), "SELECT", "a Status column offers its labels");
+    await admin.evaluate(`(() => { const box = document.querySelector('.view-filter-group .view-filter-rule [name=values]'); [...box.options].forEach((o) => { o.selected = o.value === 'Open'; }); document.querySelector('.view-filter-form [name=op]').value = 'and'; document.querySelector('.view-filter-form').requestSubmit(); })()`);
+    assert.ok(await admin.waitFor("/^45 records/.test(document.querySelector('.records-indicator')?.textContent || '')", 8000), `nested: ${await notice(admin)}`);
+    assert.match(await admin.evaluate("document.querySelector('.view-filter-note span').textContent"), /Engineer is Other and State is Open/);
+    assert.equal((await api(admin, "GET", `/boards/${board.id}/records/count?filter=${qs({ op: "and", rules: [{ key: "eng", cmp: "in", values: ["Other"] }], groups: [{ op: "and", rules: [{ key: "state", cmp: "in", values: ["Open"] }] }] })}`)).body.total, 45);
+    // Opening the editor again shows the group as applied.
+    await admin.evaluate("document.querySelector('.view-filter-note [data-action=view-filter]').click()"); await sleep(150);
+    assert.equal(await admin.evaluate("document.querySelectorAll('.view-filter-group .view-filter-rule').length"), 1);
+    await admin.evaluate("document.querySelector('.view-filter-form [data-action=close-overlay]')?.click()"); await sleep(100);
+  });
   test("a column deleted later drops out of a view's conditions without breaking it", async () => {
     const now = (await api(admin, "GET", `/boards/${board.id}`)).body.board;
     const views = now.savedViews.map(({ id, name, state }) => ({ id, name, state })).concat({ name: "By notes", state: { view: "table", filter: { op: "and", rules: [{ key: "notes", cmp: "empty" }] } } });
@@ -252,5 +270,31 @@ describe("Saved view conditions (real app, headless browser)", { skip: BROWSER ?
     await sleep(500); await settled(admin);
     assert.equal(await admin.evaluate("!!document.querySelector('.view-filter-note')"), false);
     assert.ok(await rows(admin) > 0);
+  });
+  test("view links: /boards/{number}?view=… opens that view (also after sign-in); Back/Forward move between views; a missing view opens Main Table", async () => {
+    const now = (await api(admin, "GET", `/boards/${board.id}`)).body.board, view = now.savedViews.find((v) => v.name === "Zed work");
+    const link = `${base}/boards/${now.publicId ?? now.id}`, active = (b) => b.evaluate("document.querySelector('.view-tab.active [role=tab]')?.textContent.replace(/\s+/g, ' ').trim()");
+    await mia.send("Page.navigate", { url: `${link}?view=${view.id}` });
+    assert.ok(await mia.waitFor("!!document.querySelector('.view-tab.active')", 15000));
+    assert.match(await active(mia), /Zed work/, "the linked view is open");
+    assert.equal(await mia.evaluate("new URLSearchParams(location.search).get('view')"), view.id, "the address keeps the view");
+    await mia.evaluate("document.querySelector('[data-action=main-table]').click()"); await sleep(300);
+    assert.equal(await mia.evaluate("location.search"), "", "Main Table: no ?view=");
+    await mia.evaluate("history.back()"); assert.ok(await mia.waitFor("/Zed work/.test(document.querySelector('.view-tab.active [role=tab]')?.textContent || '')", 5000), "Back reopens the view");
+    await mia.evaluate("history.forward()"); assert.ok(await mia.waitFor("/Main Table/.test(document.querySelector('.view-tab.active [role=tab]')?.textContent || '')", 5000), "Forward returns to Main Table");
+    await mia.send("Page.navigate", { url: `${link}?view=view_doesNotExist1` });
+    assert.ok(await mia.waitFor("/Main Table/.test(document.querySelector('.view-tab.active [role=tab]')?.textContent || '')", 15000), "a missing view: the board opens on Main Table");
+    assert.ok(await mia.waitFor("/isn't available/.test(document.body.textContent)", 3000), "with a note");
+  });
+  test("a viewer's view is personal: theirs only, saved for them, unseen by colleagues", async () => {
+    await openApp(cara); await openBoard(cara);
+    await cara.evaluate("document.querySelector('[data-action=views-menu]').click()"); await sleep(120);
+    await cara.evaluate("document.querySelector('[data-action=new-view][data-type=table]').click()"); await sleep(150);
+    assert.equal(await cara.evaluate("document.querySelector('form[data-action=create-view-form] [name=personal]').checked"), true, "a viewer's view is always personal");
+    await cara.evaluate("(() => { const f = document.querySelector('form[data-action=create-view-form]'); f.querySelector('[name=name]').value = 'Cara only'; f.requestSubmit(); })()");
+    assert.ok(await cara.waitFor(`(async () => (await (await fetch("/api/v1/boards/${board.id}")).json()).board.savedViews.some((v) => v.name === "Cara only" && v.personal === true))()`, 8000), "saved on the server, as personal");
+    assert.match(await cara.evaluate("document.querySelector('.view-tab.active')?.textContent || ''"), /Only you/);
+    const seenByAdmin = (await api(admin, "GET", `/boards/${board.id}`)).body.board.savedViews.map((v) => v.name);
+    assert.ok(!seenByAdmin.includes("Cara only"), "colleagues never receive it");
   });
 });

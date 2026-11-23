@@ -1,7 +1,7 @@
 // Boards: always inside an existing workspace. Columns, groups and saved views are embedded; records are not.
 const { ObjectId } = require("mongodb");
 const validate = require("../validation/resources");
-const { normalizeColumns, normalizeGroups, BLANK_BOARD_COLUMNS, LEGACY_DEFAULT_GROUPS } = require("../domain/board-schema");
+const { normalizeColumns, normalizeGroups, splitSavedViews, BLANK_BOARD_COLUMNS, LEGACY_DEFAULT_GROUPS } = require("../domain/board-schema");
 const { ApiError } = require("../middleware/errors");
 const { notFound, conflict, missingOrStale, activityEntry, appendActivity, fieldChanges, sweepAfterCommit } = require("./shared");
 
@@ -53,10 +53,30 @@ class BoardService {
   }
 
   // Groups that still contain records can't be removed (records would point at a missing group).
-  async update(id, raw, actor) {
+  // savedViews arrive as the person sees them; personal ones are stored apart (repositories/mongo/personal-view-repository.js)
+  // and never in the board document. A change to personal views alone doesn't touch the board (no new version, no activity).
+  //   canEditShared: false for a workspace Viewer (personal views only)   allowPersonal: the personal views switch, for new ones
+  async update(id, raw, actor, { canEditShared = true, allowPersonal = true } = {}) {
     const board = await this.get(id);
     const now = new Date();
-    const { expectedVersion, set, removedGroupIds } = validate.boardPatch(raw, board, { actorId: actor.userId, now });
+    let body = raw, personal = null;
+    if (raw && typeof raw === "object" && !Array.isArray(raw) && raw.savedViews !== undefined && this.repos.personalViews) {
+      const mine = await this.repos.personalViews.get(id, actor.userId);
+      const split = splitSavedViews(raw.savedViews, { board, mine, actorId: actor.userId, now, canEditShared, allowPersonal });
+      personal = { mine, views: split.personal, order: split.order };
+      body = { ...raw };
+      if (split.sharedChanged) body.savedViews = split.shared.map(({ id: viewId, name, state }) => ({ id: viewId, name, state })); else delete body.savedViews;
+    }
+    let after = board;
+    if (!personal || Object.keys(body).some((k) => k !== "expectedVersion")) after = await this.writeBoard(board, body, actor, now, canEditShared);
+    if (personal && (personal.mine || personal.views.length) && JSON.stringify([personal.mine?.views || [], personal.mine?.order || []]) !== JSON.stringify([personal.views, personal.order])) {
+      await this.repos.personalViews.put(id, actor.userId, { views: personal.views, order: personal.order }, now);
+    }
+    return after;
+  }
+  async writeBoard(board, raw, actor, now, canEditShared) {
+    const id = board._id;
+    const { expectedVersion, set, removedGroupIds } = validate.boardPatch(raw, board, { actorId: actor.userId, now, canEditShared });
     if (board.version !== expectedVersion) throw conflict("board", board);
     if (removedGroupIds.length) {
       const inUse = await this.repos.records.countInGroups(id, removedGroupIds);

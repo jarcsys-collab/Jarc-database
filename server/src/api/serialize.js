@@ -11,13 +11,25 @@ function workspaceToApi(doc) {
   });
 }
 
-function boardToApi(doc) {
+// Saved views: the board document's shared views, plus — only when given — the reader's OWN personal views (personal: their
+// document from repositories/mongo/personal-view-repository.js, read for the signed-in person by the route). Personal views
+// are never in a board document, so a board served without that document (an API key, a colleague, an older release) can't
+// contain any. personal.order keeps the reader's own order; views it doesn't know yet follow, in board order.
+const viewOut = (v, extra = {}) => ({ id: v.id, ...(v.legacyId === undefined ? {} : { legacyId: v.legacyId }), name: v.name, state: v.state, ...extra, createdBy: hex(v.createdBy), createdAt: iso(v.createdAt) });
+function savedViewsOut(doc, personal) {
+  const shared = (doc.savedViews || []).filter((v) => v.personal !== true).map((v) => viewOut(v));
+  if (!personal?.views?.length) return shared;
+  const mine = personal.views.map((v) => viewOut({ ...v, createdBy: personal.userId }, { personal: true }));
+  const rank = new Map((personal.order || []).map((id, i) => [id, i])), all = [...shared, ...mine];
+  return all.map((v, i) => [v, rank.has(v.id) ? rank.get(v.id) : 100000 + i]).sort((a, b) => a[1] - b[1]).map(([v]) => v);
+}
+function boardToApi(doc, { personal = null } = {}) {
   return withLegacy(doc, {
     id: hex(doc._id), ...(doc.publicId === undefined ? {} : { publicId: doc.publicId }), workspaceId: hex(doc.workspaceId), name: doc.name, description: doc.description, icon: doc.icon,
     archived: doc.archived, position: doc.position, manualOrder: doc.manualOrder,
     columns: doc.columns.map((c) => ({ ...c, options: [...c.options] })),
     groups: doc.groups.map(({ id, name, color, archived, position }) => ({ id, name, color, archived: Boolean(archived), position })),
-    savedViews: doc.savedViews.map((v) => ({ id: v.id, ...(v.legacyId === undefined ? {} : { legacyId: v.legacyId }), name: v.name, state: v.state, createdBy: hex(v.createdBy), createdAt: iso(v.createdAt) })),
+    savedViews: savedViewsOut(doc, personal),
     ...(doc.nextItemNumber === undefined ? {} : { nextItemNumber: doc.nextItemNumber }),
     ...(doc.recordCount === undefined ? {} : { recordCount: doc.recordCount }),
     ...(doc.source ? { source: { provider: doc.source.provider, sourceBoardId: doc.source.sourceBoardId, readOnly: Boolean(doc.source.readOnly) } } : {}),
