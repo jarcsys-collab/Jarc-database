@@ -34,7 +34,10 @@ const { importRoutes } = require("./routes/imports");
 const { preferenceRoutes } = require("./routes/preferences");
 const { accountRoutes } = require("./routes/accounts");
 const { apiTokenRoutes } = require("./routes/api-tokens");
-const { externalApiRoutes } = require("./routes/external-api");
+const { externalApiRoutes, windowLimiter, FAILED_AUTH } = require("./routes/external-api");
+const { externalFabricRoutes } = require("./routes/external-fabric");
+const { fabricApiTokenRoutes } = require("./routes/fabric-api-tokens");
+const { fabricDataRouter, requireFabricDataRead, canReadFabric, canReadFabricSensitive, canReadFabricCost, canManageFabricApi, DATASET_NAMES } = require("./fabric");
 const { version } = require("../package.json");
 
 // Larger than any state the frontend can produce today: browser storage caps at roughly 5 MB, and backup and CSV
@@ -56,6 +59,11 @@ function resourceModeIndex(siteDir) {
 // Direct board links: /boards/{boardId} is the same page as /. Its stylesheets, fonts and scripts are named relative to the
 // page ("assets/…"), which from /boards/ would mean /boards/assets/…, so here they are named from the site root.
 const BOARD_LINK_PATH = /^\/boards\/[^/]{1,200}\/?$/;
+// Fabric Data pages (only while JARC_FEATURE_FABRIC_DATA is on): the same page; the app shows the Fabric view.
+// /fabric/inventory, /fabric/sales, /fabric/api and /fabric/{inventory|sales}/records/{id}; the invoice pages only with
+// FABRIC_INVOICE_VIEWS.
+const FABRIC_LINK_PATH = /^\/fabric\/((inventory|sales)(\/records\/[^/]{1,64})?|api)\/?$/;
+const FABRIC_INVOICE_LINK_PATH = /^\/fabric\/invoices(\/[^/]{1,400}\/[^/]{1,400})?\/?$/;
 const rootRelative = (html) => html.replace(/(\s(?:href|src))="assets\//g, '$1="/assets/');
 
 // An optional feature not stated is off in production and on elsewhere.
@@ -70,7 +78,9 @@ const resolveFeatures = (features = {}, environment = "development") => { const 
 // auth/accounts.js) { mode: off | staged | enforced, superAdmin }; Entra sign-in only. features: the optional features switched
 // on, { nativeForms, spreadsheetImports } (config/index.js); anything not stated is off in production and on elsewhere.
 // apiTokens: { key, perMinute? } turns on API tokens for other systems (config/index.js); Entra sign-in only. Without it their paths don't exist.
-function createApp({ apiTokens = null, features = {}, repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console, slowRequestMs = 0, monitor = defaultMonitor } = {}) {
+// fabricData: { config, service, limiter? } (config.fabricData with the switch on, and a FabricService from src/fabric) turns on Fabric Data;
+// Entra sign-in only. Without it (or with the switch off) its paths don't exist and /features doesn't mention it.
+function createApp({ fabricData = null, apiTokens = null, features = {}, repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console, slowRequestMs = 0, monitor = defaultMonitor } = {}) {
   if (environment === "production" && (enableDevStateApi || enableDevResourceApi)) {
     throw new Error("Development (pre-auth) APIs can't be enabled in production.");
   }
@@ -81,6 +91,9 @@ function createApp({ apiTokens = null, features = {}, repository, environment = 
   // Production: observation mode (staged) only until enforcement is separately approved (config refuses it too).
   if (accountMode === "enforced" && environment === "production") throw new Error("ACCOUNT_MANAGEMENT=enforced is not approved for production yet.");
   const enabled = resolveFeatures(features, environment);
+  const fabric = fabricData?.config?.enabled ? fabricData : null;
+  if (fabric && !auth) throw new Error("Fabric Data needs Microsoft Entra ID sign-in.");
+  if (fabric && !fabric.service) throw new Error("createApp needs the Fabric service when Fabric Data is on.");
   const app = express();
   app.disable("x-powered-by");
   app.use((req, res, next) => { res.set("X-Content-Type-Options", "nosniff"); next(); });
@@ -125,10 +138,41 @@ function createApp({ apiTokens = null, features = {}, repository, environment = 
     // for the JARC API administrators only (apiTokens.adminObjectIds, JARC_API_ADMIN_OIDS in this tenant), never decided by
     // open access, workspace roles or JARC.Admin.
     const tokenService = auth && apiTokens ? dataLayer.services.apiTokens.configure({ key: apiTokens.key, access, tenantId: auth.entra.tenantId, adminObjectIds: apiTokens.adminObjectIds || [], ...(apiTokens.maxActive ? { maxActive: apiTokens.maxActive } : {}) }) : null;
+    // Fabric Data (src/fabric): readers are FABRIC_DATA_READER_OIDS within this tenant only, never JARC.Admin, open access or
+    // workspace roles. app.locals.fabric gives the Fabric API token routes the same service and permission checks.
+    // /features fabricData: read, sensitive (cost: its alias for one release), apiAdmin, the datasets a reader may read and whether
+    // the invoice views are mounted.
+    const fabricAccessFor = fabric ? (actor) => {
+      const read = canReadFabric(actor, fabric.config, auth.entra.tenantId);
+      const sensitive = canReadFabricSensitive(actor, fabric.config, auth.entra.tenantId);
+      return { read, sensitive, cost: sensitive, apiAdmin: canManageFabricApi(actor, fabric.config, auth.entra.tenantId), datasets: read ? [...DATASET_NAMES] : [], invoiceViews: read && fabric.config.invoiceViews === true };
+    } : null;
+    if (fabric) app.locals.fabric = Object.freeze({ service: fabric.service, config: fabric.config, tenantId: auth.entra.tenantId, router: fabricDataRouter, canReadFabric, canReadFabricSensitive, canReadFabricCost, canManageFabricApi });
+    // Fabric API tokens (only with both switches on): the same token system as the board API (secret, digest, expiry, revocation,
+    // audit), told apart by product "fabric" and the fabric.sales.read / fabric.inventory.read / fabric.sensitive.read scopes. A
+    // Fabric token never reads boards (board authorize needs "read") and a board token never reads Fabric (403 INSUFFICIENT_SCOPE).
+    // Who may issue them: FABRIC_API_ADMIN_OIDS ∩ readers.
+    const fabricTokens = fabric && tokenService ? { permissions: {
+      isApiAdmin: (identity) => canManageFabricApi(identity, fabric.config, auth.entra.tenantId),
+      isReader: (identity) => canReadFabric(identity, fabric.config, auth.entra.tenantId),
+      isSensitiveReader: (identity) => canReadFabricSensitive(identity, fabric.config, auth.entra.tenantId),
+      // The earlier name of the same check (the token service accepts either; remove once nothing reads it).
+      isCostReader: (identity) => canReadFabricSensitive(identity, fabric.config, auth.entra.tenantId) }, failures: windowLimiter(apiTokens.failedAuth || FAILED_AUTH) } : null;
     if (tokenService) {
-      external.use(externalApiRoutes({ tokens: tokenService, repos: dataLayer.repos, environment, ...(apiTokens.perMinute ? { rate: { perWindow: apiTokens.perMinute, windowMs: 60 * 1000 } } : {}), ...(apiTokens.failedAuth ? { failedAuth: apiTokens.failedAuth } : {}) }));
+      // /external/fabric first, so its requests never reach the board token middleware (it ends with its own JSON 404). Failed
+      // sign-in attempts are counted once per address across both APIs.
+      if (fabricTokens) external.use("/fabric", externalFabricRoutes({ tokens: tokenService, fabricPermissions: fabricTokens.permissions, fabricDataRouter: fabricDataRouter({ service: fabric.service, logger, invoiceViews: false }), environment, rate: { perWindow: fabric.config.apiRatePerMinute, windowMs: 60 * 1000 }, failures: fabricTokens.failures }));
+      external.use(externalApiRoutes({ tokens: tokenService, repos: dataLayer.repos, environment, ...(apiTokens.perMinute ? { rate: { perWindow: apiTokens.perMinute, windowMs: 60 * 1000 } } : {}), ...(apiTokens.failedAuth ? { failedAuth: apiTokens.failedAuth } : {}), ...(fabricTokens ? { failures: fabricTokens.failures } : {}) }));
       api.use(identify, apiTokenRoutes({ tokens: tokenService, access, repos: dataLayer.repos, ...(apiTokens.issuePerHour ? { limiter: createSearchLimiter({ perWindow: apiTokens.issuePerHour, windowMs: 60 * 60 * 1000 }) } : {}) }));
     }
+    // Fabric API token management (session + CSRF; Fabric API administrators only), before the GET-only data router.
+    // With API tokens off those paths don't exist: a JSON 404 for any method (never the data router's 405 or a fall-through).
+    if (fabricTokens) api.use("/fabric/api-tokens", identify, fabricApiTokenRoutes({ tokens: tokenService, fabricPermissions: fabricTokens.permissions }), apiNotFound);
+    else if (fabric) api.use("/fabric/api-tokens", identify, apiNotFound);
+    // Fabric Data routes: GET/HEAD only, session only (a bearer token here is 401), readers only (403 FABRIC_DATA_FORBIDDEN).
+    // The v1 invoice views only with FABRIC_INVOICE_VIEWS=true (never under /external/fabric). Ends in its own JSON 404:
+    // nothing under /api/v1/fabric falls through to the routers below.
+    if (fabric) api.use("/fabric", identify, requireFabricDataRead({ config: fabric.config, tenantId: auth.entra.tenantId }), fabricDataRouter({ service: fabric.service, logger, invoiceViews: fabric.config.invoiceViews === true, ...(fabric.limiter ? { limiter: fabric.limiter } : {}) }), apiNotFound);
     if (accountService) api.use(identify, accountRoutes({ services: dataLayer.services, repos: dataLayer.repos }));
     api.use(identify, meRoutes({ repos: dataLayer.repos, mode: auth ? "entra" : "dev", access }), memberRoutes({ services: dataLayer.services, access, repos: dataLayer.repos }), resourceRoutes({ services: dataLayer.services, access, features: enabled }));
     // Files columns (attachments in GridFS).
@@ -141,7 +185,11 @@ function createApp({ apiTokens = null, features = {}, repository, environment = 
     if (enabled.spreadsheetImports && dataLayer.services?.importJobs) api.use(identify, importRoutes({ services: dataLayer.services, access }));
     // What this server has switched on, so the browser shows only what will work. The routes above are what enforce it.
     // apiTokenAdmin: whether THIS caller is a JARC API administrator (only to show or hide the Developer sections).
-    api.get("/features", identify, (req, res) => res.status(200).set("Cache-Control", "no-store").json({ features: tokenService ? { ...enabled, apiTokens: true, apiTokenAdmin: tokenService.isAdmin(req.actor) } : enabled }));
+    // fabricData (only while it's on): what THIS caller may do there; apiTokens: whether Fabric API tokens can exist at all.
+    api.get("/features", identify, (req, res) => {
+      const fabricFlags = fabricAccessFor ? { fabricData: { ...fabricAccessFor(req.actor), apiTokens: Boolean(tokenService) } } : {};
+      res.status(200).set("Cache-Control", "no-store").json({ features: tokenService ? { ...enabled, apiTokens: true, apiTokenAdmin: tokenService.isAdmin(req.actor), ...fabricFlags } : { ...enabled, ...fabricFlags } });
+    });
     api.use(identify, preferenceRoutes({ repos: dataLayer.repos }));
     if (dataLayer.services?.integration) api.use(identify, integrationRoutes({ integration: dataLayer.services.integration, access }));
     if (googleDrive) api.use(identify, googleDriveRoutes({ drive: googleDrive, canManage: (actor) => actorCanManageDrive(actor, googleDrive.config, auth.entra.tenantId) }));
@@ -166,6 +214,12 @@ function createApp({ apiTokens = null, features = {}, repository, environment = 
   }
   // GET (and HEAD) only, one path segment only; the page itself checks the ID and whether this person may see the board.
   app.get(BOARD_LINK_PATH, (req, res, next) => {
+    try { boardLinkHtml ??= rootRelative(fs.readFileSync(path.join(siteDir, "index.html"), "utf8")); } catch { return next(); }
+    res.set("Cache-Control", "no-cache").type("html").send(boardLinkHtml);
+  });
+  // Fabric Data links (/fabric/inventory, /fabric/sales, /fabric/api, …/records/{id}; the invoice pages only with the invoice
+  // views): only while it's on. The page itself checks whether this person may read Fabric Data.
+  if (fabric) app.get(fabric.config.invoiceViews === true ? [FABRIC_LINK_PATH, FABRIC_INVOICE_LINK_PATH] : FABRIC_LINK_PATH, (req, res, next) => {
     try { boardLinkHtml ??= rootRelative(fs.readFileSync(path.join(siteDir, "index.html"), "utf8")); } catch { return next(); }
     res.set("Cache-Control", "no-cache").type("html").send(boardLinkHtml);
   });

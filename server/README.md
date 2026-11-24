@@ -345,6 +345,47 @@ Reading, with `Authorization: Bearer <token>` only: `GET /api/v1/external/` + `m
 
 Full usage, with Power BI, Power Automate, n8n, JavaScript and cURL examples, is in JARC under **Developer → Documentation** (profile menu). **Developer → Boards & Columns** lists every board's and column's API ID and address, the board and column menus have **API Information**, and the API Explorer previews responses through the person's own session (`GET /api/v1/me/api-explorer/boards/:boardId`). Tokens belong in a secure backend or approved secret store, never in public JavaScript.
 
+## Fabric Data (read-only sales and inventory data)
+
+Two datasets from a **separate** MongoDB (Microsoft Fabric's), read only (`src/fabric/`): `sales` (the `FactSales` collection) and `inventory` (`FactInventory`). The names are a constant allow-list in `src/fabric/datasets.js`; no other collection in that database is ever named, listed, counted, queried or returned, and none is used for sign-in or permissions (those stay with Microsoft Entra ID and the OID lists below). Nothing lists collections. Each dataset returns only its verified fields, in the source's order (fields added upstream later are never returned). It is off in every environment until switched on. While off, none of the `FABRIC_*` variables are checked (they may be set), its paths don't exist, `/api/v1/features` doesn't mention it and no database client is created.
+
+| Variable | Values | Effect |
+|---|---|---|
+| `JARC_FEATURE_FABRIC_DATA` | `true` or `false`, default off | Needs `AUTH_MODE=entra`. |
+| `FABRIC_MONGODB_URI` | Required when on. `mongodb://` or `mongodb+srv://` | A secret: never logged or returned. Must not be `MONGODB_URI` or share a host with it, and may not name another database in its path. The login must have **only** the `read` role on the Fabric database: on first connect JARC checks `connectionStatus`, and any other role or action switches Fabric Data off (`FABRIC_UNSAFE_CREDENTIALS`) until the server restarts. |
+| `FABRIC_MONGODB_DB_NAME` | Required when on. Letters, digits, `_`, `-` (at most 64) | Never `jarc_database` (or `MONGODB_DB_NAME`). Use the name exactly as it exists on the Fabric cluster. |
+| `FABRIC_DATA_READER_OIDS` | Entra object IDs (GUIDs; commas, semicolons or spaces), at most 50 | Who may read Fabric Data (both datasets), within `ENTRA_TENANT_ID`. Empty: nobody. `JARC.Admin`, open access, beta open editing and workspace roles grant nothing here. |
+| `FABRIC_DATA_COST_READER_OIDS` | GUIDs, at most 50; each must also be a reader | (Name kept for compatibility.) Who also sees the **sensitive financial and inventory fields**: sales `landed_cost`, and `Text`, `Custom`, `custom_1` and `Custom.2` until their business meaning is confirmed; inventory `Cost_Amount_Expected`, `Cost_Amount_Actual`, `Cost_Amount_Non_Invtbl`, their `_ACY` versions, `landed_cost`, `distributors_price` and `trade_price` (and, in the invoice views, cost, profit and margin). For everyone else they are never projected or returned, are left out of `/schema`, and naming one is refused exactly like a field that doesn't exist. `Sales_Amount_*` are not sensitive. |
+| `FABRIC_API_ADMIN_OIDS` | GUIDs, at most 20; each must also be a reader | Who may issue and revoke Fabric API tokens (also needs `JARC_FEATURE_API_TOKENS=true`). |
+| `FABRIC_API_RATE_PER_MINUTE` | 1 to 600, default 60 | Requests per minute for each Fabric API token. |
+| `FABRIC_QUERY_TIME_MS` | 1000 to 30000, default 8000 | `maxTimeMS` of every Fabric query (a timeout is `503 FABRIC_TIMEOUT`). The driver also drops a socket silent for this + 2 s (`503 FABRIC_TIMEOUT`). |
+| `FABRIC_POOL_SIZE` | 1 to 10, default 5 | Connections to the Fabric database. At most this − 1 (at least 1) Fabric operations run at once in the process; others wait up to 1 s, and each person or token may have at most 3 Fabric requests running. Beyond that: `503 FABRIC_BUSY` with `Retry-After`. A request waiting over 2 s for a pooled connection is also `FABRIC_BUSY`. |
+| `FABRIC_MAX_WINDOW_ROWS` | 1000 to 200000, default 50000 | The most source rows one invoice list may group, and the most rows a records request with `q` or any filter other than `company` may look through (counted with the query's index over its date window and company; `422 FABRIC_RANGE_TOO_LARGE` above it). |
+| `FABRIC_UNINDEXED_SCAN_MAX` | 0 to 50000, default 20000 | **Small-collection mode:** a dataset with at most this many documents (`estimatedDocumentCount`, from metadata, re-read right before every unindexed query) may be read without its index — still with `maxTimeMS`, an inclusion projection and a limit, sorted in memory over the projected fields only. Above it, a missing index is `503 FABRIC_INDEX_REQUIRED`. `0`: never without an index. (Today FactInventory, about 5,700 documents, is in this mode; FactSales is not.) |
+| `FABRIC_INVOICE_VIEWS` | `true` or `false`, default `false` | Mounts the v1 invoice endpoints (`/invoices…`, grouping, totals, cost KPIs) on the **session** API until their business semantics are approved. Never under `/external/fabric`. |
+
+**The Fabric database login (Atlas → Database Access):** give it the built-in role `read` on the Fabric database itself (Specific Privileges → `read@<FABRIC_MONGODB_DB_NAME>`). Atlas's "Only read any database" (`readAnyDatabase`), `readWrite`, `atlasAdmin`, custom roles and any second role are all refused as unsafe. The check runs once per process, on the first Fabric request: after changing the login's roles (either way), restart JARC.
+
+The connection is made on the first Fabric request, apart from JARC's (its own pool, `secondaryPreferred`, no retryable writes), and is never part of `/api/v1/health/ready`: JARC starts and stays ready whether Fabric is reachable or not.
+
+**Indexes:** JARC's reader can't create them. A query uses the index for its sort (`hint`); without it, a dataset above `FABRIC_UNINDEXED_SCAN_MAX` answers `503 FABRIC_INDEX_REQUIRED` before any query is sent, and `GET /api/v1/fabric/status` lists what's missing. The data owner creates (Atlas → Collections → … → Indexes; if the pipeline drops and reloads a collection, it must recreate them):
+
+- FactSales `fabric_invoice_date`: `{ invoice_date: -1, Company: 1, invoice_id: 1, _id: 1 }` — sales records (exactly this one or its reverse) and the invoice list.
+- FactSales `fabric_invoice_detail`: `{ Company: 1, invoice_id: 1, Line_No: 1, _id: 1 }` — the invoice views only (an invoice, its lines and a line).
+- FactInventory `fabric_inventory_date`: `{ Posting_Date: -1, Company: 1, Entry_No: 1, _id: 1 }` — inventory records sorted by date.
+- FactInventory `fabric_inventory_entry`: `{ Company: 1, Entry_No: 1, _id: 1 }` — inventory records sorted by entry number. Because this index isn't led by the date, `sort=entryNo` always needs `company` (`~` for none) and refuses `dateFrom` / `dateTo` (400): it lists one company in entry order (`/schema` says so per sort: `requiresCompany`, `dateRange`).
+
+**Date window:** `dateFrom` / `dateTo` (UTC days, inclusive). Without them, the 30 days ending at the dataset's **latest date** (from the index, or one bounded aggregate in small mode; cached 60 s), or today when that isn't known. At most 92 days, except inventory in small mode, which may also be read with no dates at all (the whole collection, page by page). Inventory `Expiration_Date` values before 1900 (Business Central's blank `0001-01-01`) are returned as `null`.
+
+Routes (GET/HEAD only, `Cache-Control: no-store`, 30 requests per 10 s per person), under `/api/v1/fabric` (session) and `/api/v1/external/fabric` (Fabric API token; the token's dataset scopes decide which datasets it reads, otherwise `403 INSUFFICIENT_SCOPE`):
+
+- `GET /status` — per dataset: mode (`indexed`, `small` or `unavailable`), estimate, missing indexes, earliest and latest date.
+- `GET /:dataset/schema` — fields (name, type, filterable, sortable, searchable), filters, sorts, default columns, date field, record key.
+- `GET /:dataset/records` — `dateFrom`, `dateTo`, `company` (`~` = none), `q`, the dataset's filters (sales: `salesDataSource`, `salesType`, `customerId`, `invoiceNo`; inventory: `entryType`, `documentType`, `locationCode`, `itemNo`, `open`), `sort` (sales `date`; inventory `date`, `entryNo`), `dir`, `limit` (1–200, default 100), `cursor`, `fields` (default: the default columns). No totals. Cursors are signed with a key made when the server starts and bound to the dataset, window, filters, search, sort and direction: a changed, forged or pre-restart cursor is `400 VALIDATION_ERROR` ("start again from the first page").
+- `GET /:dataset/records/:id` — every permitted field; `404 FABRIC_RECORD_NOT_FOUND` once the source has been refreshed.
+
+`:dataset` is `sales` or `inventory`; anything else (another collection's name, `FactSales`, `Sales`, …) is the same `404 NOT_FOUND`, which never repeats the name. With `FABRIC_INVOICE_VIEWS=true` the session API also has `/invoices`, `/invoices/:company/:invoiceNo` (`~` = no company), `…/lines` and `…/lines/:lineId`; `/sales-lines` was replaced by `/sales/records`. Fabric paths and queries are never written to the server log. The pages `/fabric/inventory`, `/fabric/sales`, `/fabric/api` and `/fabric/{inventory|sales}/records/:id` (and `/fabric/invoices…` with the invoice views) serve the app while it's on.
+
 ## Limits on large selections
 
 Nothing processes part of a selection without saying so.

@@ -73,6 +73,8 @@ function loadConfig(env = process.env) {
     features: loadFeatureSwitches(env, nodeEnv),
     // API tokens for other systems: { enabled, perMinute } and a key kept out of logs and inspection.
     apiTokens: loadApiTokenConfig(env, authMode),
+    // Fabric Data (read-only sales data from a separate MongoDB, src/fabric/): off everywhere unless JARC_FEATURE_FABRIC_DATA=true.
+    fabricData: loadFabricDataConfig(env, authMode),
     // Requests slower than this are logged by route pattern (middleware/slow-requests.js). 0 turns it off.
     slowRequestMs: loadSlowRequestMs(env),
     // MongoDB commands at least this slow are listed on the System Health page (monitoring/monitor.js). Unset: 500.
@@ -144,6 +146,83 @@ function loadApiAdminObjectIds(env) {
   const unique = Object.freeze([...new Set(ids)]);
   if (unique.length > MAX_API_ADMINS) throw new ConfigError(`JARC_API_ADMIN_OIDS can list at most ${MAX_API_ADMINS} people.`);
   return unique;
+}
+
+// A list of Microsoft Entra object IDs (GUIDs separated by commas, semicolons or spaces), lowercased and de-duplicated.
+function loadObjectIdList(env, name, max) {
+  const ids = String(env[name] || "").split(/[\s,;]+/).filter(Boolean).map((id) => id.toLowerCase());
+  if (ids.some((id) => !GUID.test(id))) throw new ConfigError(`${name} must list Microsoft Entra object IDs (GUIDs), separated by commas.`);
+  const unique = Object.freeze([...new Set(ids)]);
+  if (unique.length > max) throw new ConfigError(`${name} can list at most ${max} people.`);
+  return unique;
+}
+
+// Fabric Data (src/fabric/): read-only access to two collections of a SEPARATE MongoDB (Microsoft Fabric's mirror): the datasets
+// "sales" (FactSales) and "inventory" (FactInventory), named only in src/fabric/datasets.js. No other collection is ever read.
+//   JARC_FEATURE_FABRIC_DATA       true or false (anything else stops startup). Unset: off in every environment. While off, none of
+//                                  the FABRIC_* variables below are looked at (production holds them with the switch off), the
+//                                  paths don't exist, /features doesn't mention it and no client is created.
+//   FABRIC_MONGODB_URI             required when on: mongodb:// or mongodb+srv://, a different cluster from MONGODB_URI. A secret:
+//                                  non-enumerable, never logged or returned.
+//   FABRIC_MONGODB_DB_NAME         required when on: letters, digits, "_" and "-", never JARC's own database.
+//   FABRIC_DATA_READER_OIDS        who may read it, both datasets (at most 50). FABRIC_DATA_COST_READER_OIDS (name kept for
+//                                  compatibility): who also sees the sensitive financial and inventory fields (landed cost, cost
+//                                  amounts, prices; at most 50, each must be a reader). FABRIC_API_ADMIN_OIDS: who issues and revokes Fabric API
+//                                  tokens (at most 20, each must be a reader). Empty or unset: nobody. Matched within ENTRA_TENANT_ID.
+//   FABRIC_API_RATE_PER_MINUTE (1–600, 60), FABRIC_QUERY_TIME_MS (1000–30000, 8000), FABRIC_POOL_SIZE (1–10, 5),
+//   FABRIC_MAX_WINDOW_ROWS (1000–200000, 50000): the most source rows one invoice list may group or one search may cover.
+//   FABRIC_UNINDEXED_SCAN_MAX (0–50000, 20000): a dataset with at most this many documents (estimatedDocumentCount) may be
+//                                  read without its index ("small-collection mode": still maxTimeMS, a projection and a limit).
+//                                  Above it, a missing index is 503 FABRIC_INDEX_REQUIRED. 0: never without an index.
+//   FABRIC_INVOICE_VIEWS           true or false (default false): mounts the v1 invoice endpoints (/invoices…) on the session API
+//                                  only (never under /external/fabric) until their business semantics are approved.
+const FABRIC_DB_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+function loadFabricDataConfig(env, authMode) {
+  const value = env.JARC_FEATURE_FABRIC_DATA;
+  if (value !== undefined && value !== "" && value !== "true" && value !== "false") throw new ConfigError("JARC_FEATURE_FABRIC_DATA must be true or false.");
+  const hide = (config, uri) => Object.freeze(Object.defineProperty(config, "uri", { value: uri, enumerable: false }));
+  if (value !== "true") return hide({ enabled: false, dbName: null, readerObjectIds: Object.freeze([]), costReaderObjectIds: Object.freeze([]), apiAdminObjectIds: Object.freeze([]), apiRatePerMinute: 60, queryTimeMs: 8000, poolSize: 5, maxWindowRows: 50000, unindexedScanMax: 20000, invoiceViews: false }, null);
+  if (authMode !== "entra") throw new ConfigError("JARC_FEATURE_FABRIC_DATA=true needs AUTH_MODE=entra.");
+  const missing = ["FABRIC_MONGODB_URI", "FABRIC_MONGODB_DB_NAME"].filter((name) => !env[name]);
+  if (missing.length) throw new ConfigError(`JARC_FEATURE_FABRIC_DATA=true needs ${missing.join(" and ")}.`);
+  const dbName = env.FABRIC_MONGODB_DB_NAME;
+  if (!FABRIC_DB_NAME.test(dbName)) throw new ConfigError("FABRIC_MONGODB_DB_NAME must be 1 to 64 letters, digits, \"_\" or \"-\".");
+  if ([JARC_DB_NAME, env.MONGODB_DB_NAME].filter(Boolean).some((name) => name.toLowerCase() === dbName.toLowerCase())) throw new ConfigError("FABRIC_MONGODB_DB_NAME must not be JARC's own database.");
+  const uri = env.FABRIC_MONGODB_URI;
+  const fabricHosts = mongoHosts(uri);
+  if (!fabricHosts) throw new ConfigError("FABRIC_MONGODB_URI must be a mongodb:// or mongodb+srv:// connection string.");
+  let pathDb;
+  try { pathDb = decodeURIComponent((/^mongodb(?:\+srv)?:\/\/[^/?#]+(\/[^?#]*)?/.exec(uri)[1] || "/").slice(1)); } catch { throw new ConfigError("FABRIC_MONGODB_URI is not a valid connection string."); }
+  if (pathDb && pathDb !== dbName) throw new ConfigError("FABRIC_MONGODB_URI names a different database in its path. Remove it; the database always comes from FABRIC_MONGODB_DB_NAME.");
+  if (env.MONGODB_URI) {
+    if (uri === env.MONGODB_URI) throw new ConfigError("FABRIC_MONGODB_URI must not be JARC's MONGODB_URI.");
+    const jarcHosts = mongoHosts(env.MONGODB_URI) || [];
+    if (fabricHosts.some((host) => jarcHosts.includes(host))) throw new ConfigError("FABRIC_MONGODB_URI must point to a different cluster from MONGODB_URI.");
+  }
+  const readerObjectIds = loadObjectIdList(env, "FABRIC_DATA_READER_OIDS", 50);
+  const costReaderObjectIds = loadObjectIdList(env, "FABRIC_DATA_COST_READER_OIDS", 50);
+  const apiAdminObjectIds = loadObjectIdList(env, "FABRIC_API_ADMIN_OIDS", 20);
+  if (costReaderObjectIds.some((id) => !readerObjectIds.includes(id))) throw new ConfigError("Everyone in FABRIC_DATA_COST_READER_OIDS must also be in FABRIC_DATA_READER_OIDS.");
+  if (apiAdminObjectIds.some((id) => !readerObjectIds.includes(id))) throw new ConfigError("Everyone in FABRIC_API_ADMIN_OIDS must also be in FABRIC_DATA_READER_OIDS.");
+  const invoiceViews = env.FABRIC_INVOICE_VIEWS;
+  if (invoiceViews !== undefined && invoiceViews !== "" && invoiceViews !== "true" && invoiceViews !== "false") throw new ConfigError("FABRIC_INVOICE_VIEWS must be true or false.");
+  return hide({
+    enabled: true, dbName, readerObjectIds, costReaderObjectIds, apiAdminObjectIds,
+    apiRatePerMinute: wholeNumberSetting(env, "FABRIC_API_RATE_PER_MINUTE", 60, 1, 600),
+    queryTimeMs: wholeNumberSetting(env, "FABRIC_QUERY_TIME_MS", 8000, 1000, 30000),
+    poolSize: wholeNumberSetting(env, "FABRIC_POOL_SIZE", 5, 1, 10),
+    maxWindowRows: wholeNumberSetting(env, "FABRIC_MAX_WINDOW_ROWS", 50000, 1000, 200000),
+    unindexedScanMax: wholeNumberSetting(env, "FABRIC_UNINDEXED_SCAN_MAX", 20000, 0, 50000),
+    invoiceViews: invoiceViews === "true"
+  }, uri);
+}
+// The lowercased host names (without ports or credentials) of a MongoDB connection string, or null when it isn't one.
+function mongoHosts(uri) {
+  const match = /^mongodb(\+srv)?:\/\/([^/?#]+)/.exec(String(uri || ""));
+  if (!match) return null;
+  const authority = match[2].slice(match[2].lastIndexOf("@") + 1);
+  const hosts = authority.split(",").map((h) => h.trim().toLowerCase().replace(/:\d+$/, "")).filter(Boolean);
+  return hosts.length ? hosts : null;
 }
 
 function loadRecordSearchMode(env) {
@@ -383,4 +462,4 @@ function assertMongoUri(uri) {
   if (pathDb && pathDb !== JARC_DB_NAME) throw new ConfigError(`MONGODB_URI names a different database in its path. Remove it (or use "${JARC_DB_NAME}"); the database always comes from MONGODB_DB_NAME.`);
 }
 
-module.exports = { FEATURE_SWITCHES, loadConfig, loadAccountConfig, loadMondayConfig, loadGoogleDriveConfig, loadMidAttachmentsConfig, loadAttachmentConfig, loadApiAdminObjectIds, assertJarcDatabaseName, ConfigError, JARC_DB_NAME, ACCESS_POLICIES };
+module.exports = { FEATURE_SWITCHES, loadConfig, loadAccountConfig, loadMondayConfig, loadGoogleDriveConfig, loadMidAttachmentsConfig, loadAttachmentConfig, loadApiAdminObjectIds, loadFabricDataConfig, assertJarcDatabaseName, ConfigError, JARC_DB_NAME, ACCESS_POLICIES };

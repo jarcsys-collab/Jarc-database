@@ -68,8 +68,11 @@ class EntraAuth {
     return this.app;
   }
 
-  // The pages JARC itself serves, the only places a sign-in may return to: the app (/ or /index.html) and a direct board link.
-  static isAppPath(pathname) { return /^\/(?:index\.html)?$/.test(pathname) || /^\/boards\/[^/]{1,200}\/?$/.test(pathname); }
+  // The pages JARC itself serves, the only places a sign-in may return to: the app (/ or /index.html), a direct board link and
+  // the Fabric Data pages (/fabric/{inventory|sales}[/records/{id}] and /fabric/api, as the server serves them; plus the older
+  // /fabric/invoices[/{company}/{invoiceNo}] and /fabric/sales-lines, which the page itself turns into Sales when needed).
+  static FABRIC_PATH = /^\/fabric\/(?:(?:inventory|sales)(?:\/records\/[A-Fa-f0-9]{24})?|api|sales-lines|invoices(?:\/[^/]{1,400}\/[^/]{1,400})?)\/?$/;
+  static isAppPath(pathname) { return /^\/(?:index\.html)?$/.test(pathname) || /^\/boards\/[^/]{1,200}\/?$/.test(pathname) || EntraAuth.FABRIC_PATH.test(pathname); }
   // Back from Microsoft: put the original path and query (e.g. /boards/{id} or ?storage=resource) back in the address bar.
   // Only a page of this app on this origin; anything else leaves the URL as it is.
   restoreReturnUrl() {

@@ -36,6 +36,7 @@ const { accountOf } = require("../auth/accounts");
 const { allowOnly, parseId, requireBody, text, fail } = require("../validation/common");
 const { generateToken, digestOf, publicIdOf, sameDigest, displayPrefix } = require("../auth/api-token");
 const { hex, iso } = require("../api/serialize");
+const { FABRIC_PRODUCT } = require("../repositories/mongo/api-token-repository");
 
 const SCOPES = Object.freeze(["read"]);
 // The least real membership that may issue a read-only token.
@@ -109,11 +110,18 @@ class ApiTokenService {
   // ---- Authority
   // The stored person as an actor, or null when they may not hold or use tokens. Never takes anything from a session.
   async ownerActor(userId) {
+    const owner = await this.ownerRecord(userId);
+    if (!owner) return null;
+    const { user, account } = owner;
+    return Object.freeze({ userId: user._id, kind: "api_token_owner", isSystemAdmin: false, account, displayName: user.displayName || user.email || null });
+  }
+  // The stored person and their account, when they may hold or use tokens at all (active, this tenant, not blocked), or null.
+  async ownerRecord(userId) {
     const user = await this.repos.users.findById(userId);
     if (!user || user.status !== "active" || user.tenantId !== this.tenantId) return null;
     const account = this.access.accountMode === "off" ? null : accountOf(user);
     if (account && !account.legacy && account.status === "blocked") return null;
-    return Object.freeze({ userId: user._id, kind: "api_token_owner", isSystemAdmin: false, account, displayName: user.displayName || user.email || null });
+    return { user, account };
   }
   // A real membership role, or VIEWER through shared organizational access (open access in effect), or null.
   async roleOf(actor, workspaceId) { return (await this.access.roleIn(actor, workspaceId, { membershipOnly: true })) || this.sharedRole(); }
@@ -402,8 +410,177 @@ class ApiTokenService {
     if (now - (this.audited.get(key) || 0) < AUDIT_THROTTLE_MS) return;
     this.audited.set(key, now);
     if (this.audited.size > 5000) this.audited.clear();
-    this.repos.apiTokens.appendAudit({ action, tokenId: doc._id, ownerUserId: doc.ownerUserId, workspaceId: doc.workspaceId, workspaceIds: doc.workspaceIds, reason }).catch((error) => this.logger?.error?.(`[api-tokens] couldn't record an audit entry: ${error.name}`));
+    this.repos.apiTokens.appendAudit({ action, tokenId: doc._id, ownerUserId: doc.ownerUserId, workspaceId: doc.workspaceId, workspaceIds: doc.workspaceIds, reason, ...(doc.product === FABRIC_PRODUCT ? { product: FABRIC_PRODUCT } : {}) }).catch((error) => this.logger?.error?.(`[api-tokens] couldn't record an audit entry: ${error.name}`));
   }
 }
 
-module.exports = { ApiTokenService, SCOPES, LIMITS, ISSUER_ROLE, addUtcYears, latestExpiry, workspacesOf };
+// ---- Fabric Data API tokens (product: "fabric")
+// The same documents, digest, publicId, display prefix, expiry rules (latestExpiry), revocation, recordUse and audit as board tokens,
+// through the ApiTokenService above; only who may issue and use them differs. A Fabric token is
+//   { ..., product: "fabric", scopes: [one or both dataset scopes, optionally "fabric.sensitive.read"], boardIds: [] }
+// with no workspace fields, so the board API refuses it (authorize() needs "read") and it never reaches a board. One token is
+// never both: the board create accepts only ["read"] and this one only the fabric.* scopes.
+//
+// SCOPES (all read-only; any other string, including the earlier fabric_data.* names, is refused when issuing and at use):
+//   fabric.sales.read      the sales dataset
+//   fabric.inventory.read  the inventory dataset
+//   fabric.sensitive.read  the sensitive fields of the datasets the token reads: only together with at least one dataset scope,
+//                          and only issued by an administrator who is a sensitive reader
+// A Fabric token always has at least one dataset scope. Scopes are stored in the order sales, inventory, sensitive.
+//
+// Authority never comes from workspace roles, open access (development_shared, beta open editing) or JARC.Admin. It comes from the
+// injected permissions, each given a verified Microsoft Entra identity { kind: "entra", tenantId, entraObjectId }:
+//   isApiAdmin(identity)         may issue, list and revoke Fabric tokens and read their activity (FABRIC_API_ADMIN_OIDS ∩ readers)
+//   isReader(identity)           may read both Fabric datasets (FABRIC_DATA_READER_OIDS)
+//   isSensitiveReader(identity)  may also read the sensitive fields (FABRIC_DATA_COST_READER_OIDS); isCostReader is accepted as
+//                                the earlier name of the same check
+// For a session the identity is the session actor (verified at sign-in); for a token it is the OWNER as stored in the users
+// collection now (tenant + Entra object ID, as ownerActor uses), re-checked on every request.
+const FABRIC_SCOPES = Object.freeze({ sales: "fabric.sales.read", inventory: "fabric.inventory.read", sensitive: "fabric.sensitive.read" });
+// Dataset scope → dataset name.
+const FABRIC_DATASET_SCOPES = Object.freeze({ [FABRIC_SCOPES.sales]: "sales", [FABRIC_SCOPES.inventory]: "inventory" });
+const FABRIC_SCOPE_ORDER = Object.freeze([FABRIC_SCOPES.sales, FABRIC_SCOPES.inventory, FABRIC_SCOPES.sensitive]);
+// The datasets a list of scopes grants, in a fixed order; [] for anything that isn't an array.
+const fabricDatasetsOf = (scopes) => (Array.isArray(scopes) ? Object.keys(FABRIC_DATASET_SCOPES).filter((s) => scopes.includes(s)).map((s) => FABRIC_DATASET_SCOPES[s]) : []);
+
+// The injected checks, with isSensitiveReader taken from isCostReader when only the earlier name is given.
+function fabricPermissionsOf(permissions) {
+  const checks = { isApiAdmin: permissions?.isApiAdmin, isReader: permissions?.isReader, isSensitiveReader: permissions?.isSensitiveReader ?? permissions?.isCostReader };
+  for (const [name, check] of Object.entries(checks)) if (typeof check !== "function") throw new Error(`Fabric API tokens need permissions.${name}.`);
+  return Object.freeze(checks);
+}
+
+class FabricTokenService {
+  constructor({ tokens, permissions }) {
+    if (!(tokens instanceof ApiTokenService)) throw new Error("Fabric API tokens need the API token service.");
+    this.tokens = tokens; this.permissions = fabricPermissionsOf(permissions);
+  }
+  get repos() { return this.tokens.repos; }
+
+  // A stored person's verified identity, as the permission checks take it.
+  static identityOf(user) { return Object.freeze({ kind: "entra", tenantId: user.tenantId, entraObjectId: user.entraObjectId }); }
+  sessionIdentity(sessionActor) {
+    return sessionActor?.kind === "entra" ? Object.freeze({ kind: "entra", tenantId: sessionActor.tenantId, entraObjectId: sessionActor.entraObjectId }) : null;
+  }
+  isAdmin(sessionActor) {
+    const identity = this.sessionIdentity(sessionActor);
+    return Boolean(identity && this.permissions.isApiAdmin({ ...sessionActor, ...identity }));
+  }
+  requireAdmin(sessionActor) {
+    if (!this.isAdmin(sessionActor)) throw new ApiError(403, "FABRIC_API_ADMIN_REQUIRED", "Only Fabric API administrators can manage Fabric API tokens.");
+  }
+
+  // At least one of fabric.sales.read and fabric.inventory.read, optionally fabric.sensitive.read, each once, and nothing else
+  // (in any order; returned in the stored order).
+  parseScopes(value) {
+    const valid = Array.isArray(value) && value.every((s) => typeof s === "string" && FABRIC_SCOPE_ORDER.includes(s)) && new Set(value).size === value.length
+      && fabricDatasetsOf(value).length >= 1;
+    if (!valid) fail(`scopes must include "${FABRIC_SCOPES.sales}" and/or "${FABRIC_SCOPES.inventory}", optionally with "${FABRIC_SCOPES.sensitive}", each once: Fabric API tokens are read-only.`);
+    return FABRIC_SCOPE_ORDER.filter((s) => value.includes(s));
+  }
+
+  // { name, description?, scopes, expiresAt } → { token, secret } (the secret this once; only its digest is stored).
+  async create(sessionActor, raw) {
+    this.requireAdmin(sessionActor);
+    const body = requireBody(raw);
+    allowOnly(body, ["name", "description", "scopes", "expiresAt"], "the token");
+    const name = text(body.name, "name", { max: 100, required: true });
+    const description = body.description === undefined || body.description === null ? "" : text(body.description, "description", { max: 500 });
+    const scopes = this.parseScopes(body.scopes);
+    const now = new Date();
+    const expiresAt = this.tokens.parseExpiry(body.expiresAt, now);
+    if (scopes.includes(FABRIC_SCOPES.sensitive) && !this.permissions.isSensitiveReader(this.sessionIdentity(sessionActor))) {
+      throw new ApiError(403, "FABRIC_SENSITIVE_ACCESS_REQUIRED", "Only a Fabric API administrator who can read sensitive fields can issue a token that reads them.");
+    }
+    const actor = await this.tokens.ownerActor(sessionActor.userId);
+    if (!actor) throw new ApiError(403, "FORBIDDEN", "Your JARC account can't manage API tokens.");
+    const { maxActive } = this.tokens;
+    if (await this.repos.apiTokens.countActive(actor.userId, now, { product: FABRIC_PRODUCT }) >= maxActive) throw conflict("TOKEN_LIMIT_REACHED", `You can have ${maxActive} active Fabric API tokens. Revoke one you no longer need.`);
+    const { publicId, token, digest } = generateToken(this.tokens.key);
+    const doc = { _id: new ObjectId(), publicId, digest, name, ...(description ? { description } : {}), ownerUserId: actor.userId, product: FABRIC_PRODUCT, boardIds: [], scopes, createdAt: now, expiresAt, revokedAt: null, lastUsedAt: null, requestCount: 0 };
+    await this.tokens.connection.withTransaction(async (session) => {
+      await this.repos.apiTokens.insert(doc, { session });
+      await this.repos.apiTokens.appendAudit({ action: "token.created", tokenId: doc._id, ownerUserId: actor.userId, actorUserId: actor.userId, actorName: actor.displayName, product: FABRIC_PRODUCT, at: now }, { session });
+    });
+    return { token: await this.describe(doc), secret: token };
+  }
+
+  // Whether the owner may read Fabric data right now (and the sensitive fields), from the stored person; null when they can't use
+  // tokens at all.
+  async ownerAccess(userId) {
+    const owner = await this.tokens.ownerRecord(userId);
+    if (!owner) return null;
+    const identity = FabricTokenService.identityOf(owner.user);
+    const read = Boolean(this.permissions.isReader(identity));
+    return { read, sensitive: read && Boolean(this.permissions.isSensitiveReader(identity)) };
+  }
+
+  // Never the digest. status: revoked, expired, no_access (the owner can't read Fabric data now) or active. datasets and sensitive
+  // are what the scopes grant (at use, sensitive also needs the owner to be a sensitive reader then).
+  async describe(doc, { people = null, owner } = {}) {
+    const named = people || await this.tokens.peopleNamed([doc.ownerUserId, doc.revokedByUserId]);
+    const access = owner === undefined ? await this.ownerAccess(doc.ownerUserId) : owner;
+    const status = doc.revokedAt ? "revoked" : doc.expiresAt <= new Date() ? "expired" : access?.read ? "active" : "no_access";
+    return {
+      id: hex(doc._id), name: doc.name, description: doc.description || "", prefix: displayPrefix(doc.publicId), status, scopes: [...doc.scopes],
+      datasets: fabricDatasetsOf(doc.scopes), sensitive: doc.scopes.includes(FABRIC_SCOPES.sensitive),
+      owner: { id: hex(doc.ownerUserId), name: named.get(hex(doc.ownerUserId)) ?? null },
+      createdAt: iso(doc.createdAt), expiresAt: iso(doc.expiresAt), lastUsedAt: iso(doc.lastUsedAt), revokedAt: iso(doc.revokedAt),
+      revokedBy: doc.revokedByUserId ? { id: hex(doc.revokedByUserId), name: named.get(hex(doc.revokedByUserId)) ?? null } : null,
+      requestCount: doc.requestCount || 0
+    };
+  }
+
+  // Every owner's Fabric tokens (only those), newest first.
+  async list(sessionActor) {
+    this.requireAdmin(sessionActor);
+    const docs = await this.repos.apiTokens.listAll({ product: FABRIC_PRODUCT });
+    const people = await this.tokens.peopleNamed(docs.flatMap((d) => [d.ownerUserId, d.revokedByUserId]));
+    const owners = new Map();
+    await Promise.all([...new Set(docs.map((d) => hex(d.ownerUserId)))].map(async (id) => owners.set(id, await this.ownerAccess(new ObjectId(id)))));
+    return Promise.all(docs.map((doc) => this.describe(doc, { people, owner: owners.get(hex(doc.ownerUserId)) ?? null })));
+  }
+
+  // Any Fabric token, by a Fabric API administrator, who is recorded on it. Repeating it changes nothing. A board token's ID is
+  // "doesn't exist" here (and a Fabric token's ID is "doesn't exist" on the board routes).
+  async revoke(sessionActor, tokenId) {
+    this.requireAdmin(sessionActor);
+    const now = new Date();
+    const revoked = await this.repos.apiTokens.revokeAny(tokenId, sessionActor.userId, now, { product: FABRIC_PRODUCT });
+    if (revoked) await this.repos.apiTokens.appendAudit({ action: "token.revoked", tokenId, ownerUserId: revoked.ownerUserId, actorUserId: sessionActor.userId, actorName: sessionActor.displayName ?? null, product: FABRIC_PRODUCT, at: now });
+    const doc = revoked || await this.repos.apiTokens.findById(tokenId, { product: FABRIC_PRODUCT });
+    if (!doc) throw new ApiError(404, "NOT_FOUND", "This token doesn't exist.");
+    return { token: await this.describe(doc) };
+  }
+
+  // The newest audit entries about Fabric tokens only.
+  async activity(sessionActor) {
+    this.requireAdmin(sessionActor);
+    const entries = await this.repos.apiTokens.listAudit({ limit: 200, product: FABRIC_PRODUCT });
+    const tokens = new Map((await this.repos.apiTokens.findManyByIds([...new Set(entries.map((e) => hex(e.tokenId)).filter(Boolean))].map((id) => new ObjectId(id)))).map((t) => [hex(t._id), t]));
+    const people = await this.tokens.peopleNamed(entries.flatMap((e) => [e.ownerUserId, e.actorUserId]));
+    const person = (id, fallback = null) => (id ? { id: hex(id), name: people.get(hex(id)) ?? fallback } : null);
+    return {
+      items: entries.map((e) => { const t = tokens.get(hex(e.tokenId)); return {
+        action: e.action, at: iso(e.at), reason: e.reason || null,
+        token: e.tokenId ? { id: hex(e.tokenId), name: t?.name ?? null, prefix: t ? displayPrefix(t.publicId) : null } : null,
+        actor: person(e.actorUserId, e.actorName || null), owner: person(e.ownerUserId)
+      }; })
+    };
+  }
+
+  // ---- Using a token (after tokens.verify and the rate limit): the scope, then the OWNER's Fabric access right now.
+  // → { datasets, sensitive }: datasets = a Set of the token's datasets ("sales", "inventory"); sensitive = the token has
+  // fabric.sensitive.read AND the owner is a sensitive reader now. A token with no dataset scope (a board token, or anything
+  // else) is refused; the data router refuses a dataset that isn't in the set.
+  async authorize(doc) {
+    const datasets = doc.product === FABRIC_PRODUCT ? fabricDatasetsOf(doc.scopes) : [];
+    if (!datasets.length) throw new ApiError(403, "INSUFFICIENT_SCOPE", "This API token doesn't allow reading Fabric data.");
+    const access = await this.ownerAccess(doc.ownerUserId);
+    if (!access) { this.tokens.auditOnce(doc, "token.use_refused", "owner disabled"); throw new ApiError(403, "TOKEN_OWNER_DISABLED", "The person who created this API token can no longer use JARC."); }
+    if (!access.read) { this.tokens.auditOnce(doc, "token.use_refused", "owner lost access"); throw new ApiError(403, "TOKEN_ACCESS_REVOKED", "The person who created this API token can no longer read Fabric data."); }
+    return { datasets: new Set(datasets), sensitive: doc.scopes.includes(FABRIC_SCOPES.sensitive) && access.sensitive };
+  }
+}
+
+module.exports = { ApiTokenService, FabricTokenService, SCOPES, FABRIC_SCOPES, FABRIC_DATASET_SCOPES, LIMITS, ISSUER_ROLE, addUtcYears, latestExpiry, workspacesOf };

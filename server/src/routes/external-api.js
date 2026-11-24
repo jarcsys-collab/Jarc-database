@@ -135,12 +135,10 @@ function bearerToken(req) {
 // The address the client connected from: only for counting failed attempts, and never stored.
 const clientKey = (req) => String(req.get("x-forwarded-for") || req.ip || "unknown").split(",")[0].trim().slice(0, 64);
 
-function externalApiRoutes({ tokens, repos, environment = "development", rate = RATE, failedAuth = FAILED_AUTH }) {
-  const router = express.Router();
-  const limiter = windowLimiter(rate), failures = windowLimiter(failedAuth);
-  const send = (res, body) => res.status(200).json(body);
-
-  router.use((req, res, next) => {
+// ---- Shared by every token-authenticated API (this one and routes/external-fabric.js).
+// The method (GET/HEAD only), HTTPS in production, and no token in the query string. Sets Cache-Control: no-store.
+function readOnlyGuard({ environment = "development" } = {}) {
+  return (req, res, next) => {
     res.set("Cache-Control", "no-store");
     if (req.method !== "GET" && req.method !== "HEAD") { res.set("Allow", "GET, HEAD"); return sendError(res, 405, "METHOD_NOT_ALLOWED", "This API is read-only."); }
     // Railway's edge ends TLS and forwards the original scheme; a direct connection to the app isn't encrypted at all.
@@ -151,24 +149,45 @@ function externalApiRoutes({ tokens, repos, environment = "development", rate = 
     // A token in a URL ends up in logs and browser history, so it isn't accepted even alongside a valid header.
     if (Object.entries(req.query).some(([name, value]) => TOKEN_QUERY_NAMES.has(name.toLowerCase()) || LOOKS_LIKE_TOKEN.test(String(value)))) return sendError(res, 400, "TOKEN_IN_QUERY", "Don't put API tokens in the URL. Send the Authorization header, and if this token has been shared, revoke it.");
     return next();
-  });
+  };
+}
+// The bearer token's document (tokens.verify: existence, secret, revocation, expiry), or null once a 429 has been sent because
+// this address has failed too often. Other refusals are thrown (401).
+async function verifiedToken(req, res, { tokens, failures }) {
+  res.set("WWW-Authenticate", "Bearer");
+  let doc;
+  try { doc = await tokens.verify(bearerToken(req)); }
+  catch (error) {
+    if (error instanceof ApiError && error.status === 401 && !failures(clientKey(req)).allowed) { sendError(res, 429, "RATE_LIMITED", "Too many failed attempts. Wait a minute and try again."); return null; }
+    throw error;
+  }
+  res.removeHeader("WWW-Authenticate");
+  return doc;
+}
+// Counts this request against the token's limit and sets the X-RateLimit-* headers. False once a 429 has been sent.
+function withinTokenLimit(res, { limiter, tokens, doc }) {
+  const usage = limiter(doc.publicId);
+  res.set({ "X-RateLimit-Limit": String(usage.limit), "X-RateLimit-Remaining": String(usage.remaining), "X-RateLimit-Reset": String(usage.resetSeconds) });
+  if (usage.allowed) return true;
+  tokens.auditOnce(doc, "token.rate_limited", "over the request limit");
+  res.set("Retry-After", String(usage.resetSeconds));
+  sendError(res, 429, "RATE_LIMITED", `This API token is limited to ${usage.limit} requests per minute. Wait ${usage.resetSeconds} seconds and try again.`);
+  return false;
+}
+
+// failures: optionally a failed-attempt limiter shared with another token API (routes/external-fabric.js), so that both count
+// against the same budget per address.
+function externalApiRoutes({ tokens, repos, environment = "development", rate = RATE, failedAuth = FAILED_AUTH, failures = windowLimiter(failedAuth) }) {
+  const router = express.Router();
+  const limiter = windowLimiter(rate);
+  const send = (res, body) => res.status(200).json(body);
+
+  router.use(readOnlyGuard({ environment }));
 
   router.use(async (req, res, next) => {
-    res.set("WWW-Authenticate", "Bearer");
-    let doc;
-    try { doc = await tokens.verify(bearerToken(req)); }
-    catch (error) {
-      if (error instanceof ApiError && error.status === 401 && !failures(clientKey(req)).allowed) return sendError(res, 429, "RATE_LIMITED", "Too many failed attempts. Wait a minute and try again.");
-      throw error;
-    }
-    res.removeHeader("WWW-Authenticate");
-    const usage = limiter(doc.publicId);
-    res.set({ "X-RateLimit-Limit": String(usage.limit), "X-RateLimit-Remaining": String(usage.remaining), "X-RateLimit-Reset": String(usage.resetSeconds) });
-    if (!usage.allowed) {
-      tokens.auditOnce(doc, "token.rate_limited", "over the request limit");
-      res.set("Retry-After", String(usage.resetSeconds));
-      return sendError(res, 429, "RATE_LIMITED", `This API token is limited to ${usage.limit} requests per minute. Wait ${usage.resetSeconds} seconds and try again.`);
-    }
+    const doc = await verifiedToken(req, res, { tokens, failures });
+    if (!doc) return undefined;
+    if (!withinTokenLimit(res, { limiter, tokens, doc })) return undefined;
     // Refuses when the owner has lost access to every workspace of the token, whatever the token says; otherwise names the
     // token's workspaces the owner can read right now. Only those are ever reached.
     const { workspaceIds } = await tokens.authorize(doc);
@@ -297,4 +316,4 @@ function externalApiRoutes({ tokens, repos, environment = "development", rate = 
   return router;
 }
 
-module.exports = { externalApiRoutes, windowLimiter, columnsOf, groupsOf, boardSummary, cellToExternal, parseColumns, projectionFor, recordToExternal, PAGE, RATE, QUERY_TIME_MS };
+module.exports = { externalApiRoutes, windowLimiter, readOnlyGuard, verifiedToken, withinTokenLimit, bearerToken, clientKey, FAILED_AUTH, columnsOf, groupsOf, boardSummary, cellToExternal, parseColumns, projectionFor, recordToExternal, PAGE, RATE, QUERY_TIME_MS };

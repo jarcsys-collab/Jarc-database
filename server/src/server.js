@@ -33,12 +33,16 @@ async function main() {
   // Entra mode: the sign-in ID token is checked once against this tenant's published signing keys, then a server
   // session cookie is used. No client secret is involved.
   const auth = config.authMode === "entra" ? { mode: "entra", entra: config.entra, verify: createEntraVerifier(config.entra) } : null;
-  const app = createApp({ features: config.features, apiTokens: config.apiTokens.enabled ? { key: config.apiTokens.key, perMinute: config.apiTokens.perMinute, adminObjectIds: config.apiTokens.adminObjectIds } : null, slowRequestMs: config.slowRequestMs, repository, environment: config.nodeEnv, enableDevStateApi: config.enableDevStateApi, dataLayer, devActor, auth, enableDevResourceApi: config.enableDevResourceApi, accessPolicy: config.accessPolicy, betaOpenEditing: config.betaOpenEditing, accounts: config.accounts });
+  // Fabric Data: its own client for the separate Fabric database, created only while the switch is on and connected lazily on the
+  // first Fabric request (never at startup, never part of /health/ready), so JARC serves normally whether Fabric is up or not.
+  const fabricData = config.fabricData.enabled ? require("./fabric").createFabricData({ config: config.fabricData }) : null;
+  const app = createApp({ features: config.features, fabricData, apiTokens: config.apiTokens.enabled ? { key: config.apiTokens.key, perMinute: config.apiTokens.perMinute, adminObjectIds: config.apiTokens.adminObjectIds } : null, slowRequestMs: config.slowRequestMs, repository, environment: config.nodeEnv, enableDevStateApi: config.enableDevStateApi, dataLayer, devActor, auth, enableDevResourceApi: config.enableDevResourceApi, accessPolicy: config.accessPolicy, betaOpenEditing: config.betaOpenEditing, accounts: config.accounts });
   const server = app.listen(config.port, config.host, () => {
     const { port } = server.address();
     console.log(`JARC Database server (${config.nodeEnv}) on http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${port}/`);
-    console.log(`Optional features: native forms ${config.features.nativeForms ? "on" : "off"}, Excel and CSV imports ${config.features.spreadsheetImports ? "on" : "off"}, personal views ${config.features.personalViews ? "on" : "off"}, Connect/Mirror columns ${config.features.connectBoards ? "on" : "off"}, API tokens ${config.apiTokens.enabled ? "on" : "off"}, Google Drive ${config.googleDrive.enabled ? "on" : "off"}. New attachments go to ${config.attachments.defaultProvider}.`);
+    console.log(`Optional features: native forms ${config.features.nativeForms ? "on" : "off"}, Excel and CSV imports ${config.features.spreadsheetImports ? "on" : "off"}, personal views ${config.features.personalViews ? "on" : "off"}, Connect/Mirror columns ${config.features.connectBoards ? "on" : "off"}, API tokens ${config.apiTokens.enabled ? "on" : "off"}, Fabric data ${config.fabricData.enabled ? "on" : "off"}, Google Drive ${config.googleDrive.enabled ? "on" : "off"}. New attachments go to ${config.attachments.defaultProvider}.`);
     if (config.apiTokens.enabled) console.log(`API token administrators configured: ${config.apiTokens.adminObjectIds.length}${config.apiTokens.adminObjectIds.length ? "" : " (nobody can create, list or revoke API tokens until JARC_API_ADMIN_OIDS is set; existing tokens keep working)"}.`);
+    if (config.fabricData.enabled) console.log(`Fabric data readers configured: ${config.fabricData.readerObjectIds.length} (sensitive fields: ${config.fabricData.costReaderObjectIds.length}, Fabric API administrators: ${config.fabricData.apiAdminObjectIds.length}); datasets sales and inventory; invoice views ${config.fabricData.invoiceViews ? "on" : "off"}. It connects on first use.`);
     if (config.googleDrive.enabled) console.log(`Google Drive administrators configured: ${config.googleDrive.adminObjectIds.length}${config.googleDrive.adminObjectIds.length ? "" : " (nobody can connect or disconnect Google Drive until GOOGLE_DRIVE_ADMIN_OIDS is set)"}.`);
     if (config.midAttachments.enabled) console.warn(`MID_ATTACHMENTS_MIGRATION=true: the Machine Installation Database attachment import can be managed by Google Drive administrators (${config.midAttachments.concurrency} file(s) at a time). Remove this setting when the import is finished.`);
     if (config.enableDevStateApi) console.log("Development state API enabled: data is kept in memory only and is cleared when the server restarts.");
@@ -82,6 +86,7 @@ async function main() {
     stopping = true;
     server.close(async () => {
       await connection?.close().catch(() => {});
+      await fabricData?.close().catch(() => {});
       process.exit(0);
     });
   };

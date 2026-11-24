@@ -25,9 +25,13 @@ function sendError(res, status, code, message, details) {
 function apiNotFound(req, res) { sendError(res, 404, "NOT_FOUND"); }
 
 // Logged request path: search text (q and filter values) is personal and never written to the server log; neither is the query
-// of the token API, where a mistaken client may have put a token.
+// of the token API, where a mistaken client may have put a token. Fabric Data paths and queries hold invoice numbers and company
+// names: only the route prefix is logged. Case-insensitive, like Express routing (/api/v1/FABRIC/… reaches the same routes).
+const FABRIC_PATH = /^\/api\/v1\/(external\/)?fabric(?=[/?#]|$)/i;
 const loggedUrl = (req) => {
   const url = String(req.originalUrl || "");
+  const fabric = FABRIC_PATH.exec(url);
+  if (fabric) return `${fabric[0]}/[redacted]`;
   return (url.startsWith("/api/v1/search") || url.startsWith("/api/v1/external")) && url.includes("?") ? `${url.split("?")[0]}?[redacted]` : url;
 };
 
@@ -55,4 +59,4 @@ function errorHandler(logger) {
   };
 }
 
-module.exports = { ApiError, sendError, apiNotFound, errorHandler };
+module.exports = { ApiError, sendError, apiNotFound, errorHandler, loggedUrl };

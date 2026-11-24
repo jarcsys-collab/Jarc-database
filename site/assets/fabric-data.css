@@ -1,0 +1,133 @@
+/* Fabric Data (FabricDataPanel.js, FabricApiPanel.js). Colours come only from the theme variables, so dark mode and high
+   contrast follow the rest of JARC. Tables become cards on phones (≤ 620 px), like the account tables. */
+.sidebar .sidebar-settings.nav-fabric.active { background: var(--sidebar-active, var(--selected)); font-weight: var(--weight-semibold, 600); }
+.fabric-page { padding: 0 28px 48px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; min-width: 0; }
+/* minmax(0, 1fr): a wide child (the table, a long index name) never widens the column past the page. */
+.fabric-root, #fabric-detail, #fabric-api-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; min-width: 0; }
+.fabric-head h1 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.fabric-readonly { font-size: 11px; vertical-align: middle; }
+.fabric-tabs { margin-bottom: 0; }
+.fabric-tabs .icon { width: 15px; height: 15px; vertical-align: -3px; }
+.fabric-tabs button:focus-visible, .fabric-sort:focus-visible, .fabric-link:focus-visible, .fabric-scroll:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.fabric-filters .fabric-search { flex: 2 1 240px; }
+.fabric-help { margin: 0; flex: 1 0 100%; font-size: var(--fs-xs, 12px); color: var(--muted); }
+.fabric-help.is-error { color: var(--danger); font-weight: 600; }
+.fabric-check { display: flex !important; align-items: center; gap: 8px; font-size: var(--fs-sm, 13px); color: var(--text); }
+.fabric-check input { width: auto; min-height: 0; }
+.fabric-check small { display: block; }
+.fabric-scopes { border: 1px solid var(--line); border-radius: var(--radius-sm, 8px); padding: 10px 12px; display: grid; gap: 8px; }
+.fabric-scopes legend { font-size: var(--fs-xs, 12px); color: var(--muted); padding: 0 4px; }
+
+.fabric-banner { margin: 0; }
+.fabric-banner details { margin-top: 6px; font-size: var(--fs-xs, 12px); }
+.fabric-banner ul { margin: 4px 0 0; padding-left: 18px; }
+.fabric-alert { display: grid; gap: 4px; margin: 0; }
+.fabric-alert small code { font-size: 12px; }
+.fabric-alert-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.fabric-denied { display: grid; gap: 10px; }
+.fabric-empty { display: flex; align-items: center; flex-wrap: wrap; }
+.fabric-empty > span { display: grid; flex: 1 1 220px; }
+
+.fabric-totals { margin: 0; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.fabric-totals small { color: var(--muted); }
+.fabric-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-md, 10px); background: var(--surface); }
+.fabric-table { width: 100%; border-collapse: collapse; font-size: 13px; color: var(--text); }
+.fabric-table th, .fabric-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.fabric-table thead th { position: sticky; top: 0; background: var(--surface-2); color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; z-index: 1; }
+.fabric-table tbody tr:hover { background: var(--row-hover, var(--hover)); }
+.fabric-table tbody tr.is-selected { background: var(--row-selected, var(--selected)); }
+.fabric-table tbody tr:last-child td { border-bottom: 0; }
+.fabric-table td small { display: block; color: var(--muted); font-size: 11px; }
+.fabric-table .fabric-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.fabric-lines td:first-child, .fabric-invoices td:nth-child(2) { position: sticky; left: 0; background: var(--surface); }
+.fabric-fields td:first-child code { font-size: 12px; overflow-wrap: anywhere; }
+.fabric-fields td:nth-child(2) { overflow-wrap: anywhere; }
+.fabric-sort { all: unset; cursor: pointer; display: inline-flex; gap: 4px; align-items: center; border-radius: 4px; }
+.fabric-sort:hover { color: var(--text); }
+.fabric-sort-mark { font-size: 9px; min-width: 9px; }
+.fabric-link { color: var(--accent-text); font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
+.fabric-link:hover { text-decoration: underline; }
+.fabric-nodetail { font-size: 11px; padding: 2px 8px; }
+.fabric-pager { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; font-size: var(--fs-sm, 13px); color: var(--muted); }
+.fabric-pager-buttons { display: flex; gap: 8px; }
+.fabric-pager .icon { width: 14px; height: 14px; }
+
+.fabric-breadcrumb { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: var(--fs-sm, 13px); color: var(--muted); }
+.fabric-breadcrumb a { color: var(--accent-text); text-decoration: none; display: inline-flex; align-items: center; gap: 4px; font-weight: 600; }
+.fabric-breadcrumb a .icon { width: 14px; height: 14px; }
+.fabric-breadcrumb [aria-current] { overflow-wrap: anywhere; }
+.fabric-invoice-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.fabric-invoice-head h2 { margin: 0; font-size: 20px; overflow-wrap: anywhere; }
+.fabric-invoice-head > span { color: var(--muted); }
+.fabric-kpis { margin: 0; }
+.fabric-cost-note { margin: -4px 0 0; }
+.fabric-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.fabric-group h3 { margin: 0 0 8px; font-size: var(--fs-md, 15px); }
+.fabric-facts dd { overflow-wrap: anywhere; }
+.fabric-field-tools { display: flex; gap: 10px 14px; flex-wrap: wrap; align-items: flex-end; }
+.fabric-field-tools label { display: grid; gap: 4px; font-size: var(--fs-xs, 12px); color: var(--muted); }
+.fabric-field-tools input[type="search"], .fabric-field-tools select { min-height: var(--control-h, 34px); padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm, 8px); background: var(--surface); color: var(--text); font: inherit; font-size: var(--fs-sm, 13px); max-width: 100%; }
+.fabric-keys { display: grid; gap: 8px; margin: 0; }
+.fabric-keys > div { display: grid; grid-template-columns: minmax(180px, 280px) minmax(0, 1fr); gap: 10px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm, 8px); background: var(--surface); }
+.fabric-keys dt { color: var(--muted); font-size: 12px; }
+.fabric-keys dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+.fabric-api-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.fabric-api-head p { margin: 0; }
+.fabric-api-intro { margin: 0; }
+
+/* Inventory and Sales explorer (FabricExplorer.js): the table scrolls inside its frame both ways, so the header row and the
+   first column stay in view (sticky), like the board tables. */
+.fabric-explorer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
+.fabric-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; font-size: var(--fs-sm, 13px); color: var(--muted); }
+.fabric-toolbar-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.fabric-toolbar .icon { width: 14px; height: 14px; vertical-align: -2px; }
+.fabric-explorer-scroll { overflow: auto; max-height: min(70vh, 760px); overscroll-behavior: contain; }
+.fabric-explorer-table { width: max-content; min-width: 100%; }
+.fabric-explorer-table th, .fabric-explorer-table td { white-space: nowrap; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+.fabric-explorer-table thead th { z-index: 2; }
+.fabric-explorer-table tbody td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface); box-shadow: 1px 0 0 var(--line); }
+.fabric-explorer-table thead th:first-child { position: sticky; left: 0; top: 0; z-index: 3; box-shadow: 1px 0 0 var(--line); }
+.fabric-explorer-table tbody tr:hover td:first-child { background: var(--row-hover, var(--hover)); }
+.fabric-sensitive { font-size: 10px; padding: 1px 6px; }
+.fabric-chooser { display: grid; gap: 10px; }
+.fabric-chooser-head { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+.fabric-chooser-head label { display: grid; gap: 4px; font-size: var(--fs-xs, 12px); color: var(--muted); flex: 1 1 200px; }
+.fabric-chooser-head input[type="search"] { min-height: var(--control-h, 34px); padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm, 8px); background: var(--surface); color: var(--text); font: inherit; font-size: var(--fs-sm, 13px); }
+.fabric-chooser-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 4px 14px; max-height: 320px; overflow: auto; padding: 2px; }
+.fabric-chooser-list code { font-size: 12px; overflow-wrap: anywhere; }
+.fabric-record-key { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; }
+.fabric-record-key > div { display: grid; gap: 2px; padding: 6px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm, 8px); background: var(--surface); }
+.fabric-record-key dt { color: var(--muted); font-size: 11px; }
+.fabric-record-key dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.fabric-filters code, .fabric-help code { font-size: 11px; }
+
+/* Loading skeleton (unscoped: the board skeletons only work inside .board-surface). */
+.fabric-skeleton { display: block; height: 10px; width: 70%; border-radius: 6px; background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3, var(--line)) 50%, var(--surface-2) 75%); background-size: 200% 100%; animation: fabric-shimmer 1.4s ease-in-out infinite; }
+.fabric-skeleton.is-wide { width: 90%; height: 18px; margin-top: 6px; }
+.fabric-loading .fabric-table td { border-bottom-color: var(--line-subtle, var(--line)); }
+@keyframes fabric-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .fabric-skeleton { animation: none; } }
+:root[data-motion="off"] .fabric-skeleton { animation: none; }
+
+@media (max-width: 760px) {
+  .fabric-page { padding: 0 16px 40px; }
+  .fabric-keys > div { grid-template-columns: 1fr; gap: 2px; }
+}
+@media (max-width: 620px) {
+  .fabric-scroll { border: 0; background: none; overflow: visible; }
+  .fabric-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+  .fabric-table, .fabric-table tbody, .fabric-table tr, .fabric-table td { display: block; width: 100%; }
+  .fabric-table tr { padding: 10px 12px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+  .fabric-table td { border: 0; padding: 4px 0; display: flex; justify-content: space-between; gap: 12px; text-align: right; position: static !important; background: none !important; }
+  .fabric-table td::before { content: attr(data-label); color: var(--muted); font-size: 12px; text-align: left; flex: none; }
+  .fabric-table td[data-label=""]::before { content: none; }
+  .fabric-table td > small { text-align: right; }
+  .fabric-table td { flex-wrap: wrap; }
+  .fabric-table .fabric-num { white-space: normal; }
+  .fabric-explorer-scroll { max-height: none; }
+  .fabric-explorer-table { width: 100%; }
+  .fabric-explorer-table th, .fabric-explorer-table td { white-space: normal; max-width: none; overflow: visible; box-shadow: none !important; overflow-wrap: anywhere; }
+  .fabric-pager { flex-direction: column; align-items: stretch; }
+  .fabric-pager-buttons { justify-content: space-between; }
+}

@@ -4,6 +4,7 @@ class AppController {
     this.view.boardLinks = this.boardLinksEnabled; window.addEventListener("popstate", (event) => this.onBoardHistory(event));
     this.integrations = typeof IntegrationsPanel === "function" ? new IntegrationsPanel(this) : null; this.view.integrations = this.integrations;
     this.health = typeof SystemHealthPanel === "function" ? new SystemHealthPanel(this) : null; this.view.healthPanel = this.health;
+    this.fabric = typeof FabricDataPanel === "function" ? new FabricDataPanel(this) : null; this.view.fabricPanel = this.fabric; // Fabric Data (FabricDataPanel.js)
     this.accounts = typeof AccountsPanel === "function" ? new AccountsPanel(this) : null; this.view.accountsPanel = this.accounts;
     this.apiTokens = typeof ApiTokensPanel === "function" ? new ApiTokensPanel(this) : null; this.view.apiTokensPanel = this.apiTokens;
     this.groupActions = typeof BoardGroupActions === "function" ? new BoardGroupActions(this) : null;
@@ -128,6 +129,7 @@ class AppController {
     document.body.classList.toggle("workspace-section-collapsed", window.jarcStorage.getPreference("workspaceSectionCollapsed")==="1");
     // A direct board link (/boards/{id}, kept through Microsoft sign-in by EntraAuth): open that board before anything is drawn,
     // so the default screen never shows first. The board list is complete by now (only boards this person may see).
+    if (this.model.screen === "fabric" && !this.fabric?.visible) this.model.screen = "home"; // a saved Fabric screen, no longer permitted
     this.applyBoardUrl(); this.boardUrlStart = true;
     this.root.onclick = null; this.ready = true; this.update(); this.integrations?.afterStart(); this.appearance?.afterStart();
     this.loadPeople(); this.loadFeed(); this.startLive(); this.startBoardRefresh();
@@ -392,6 +394,9 @@ class AppController {
     if (!this.boardLinksEnabled) return false;
     const id = AppController.boardIdInPath(window.location.pathname), model = this.model;
     if (id === undefined) {
+      // Fabric Data paths (/fabric/…): only for its readers; anyone else gets the usual screen (and the address becomes /).
+      const fabric = this.fabric && typeof FabricDataPanel === "function" ? FabricDataPanel.parsePath(window.location.pathname, window.location.search) : undefined;
+      if (fabric !== undefined && this.fabric.visible) { const changed = this.fabric.applyRoute(fabric); if (model.screen !== "fabric" || model.boardLinkProblem) { model.openScreen("fabric"); return true; } return changed; }
       if (screen === null) return false; // startup at /: the usual start screen
       const target = AppController.HISTORY_SCREENS.has(screen) ? screen : "home";
       if (model.screen === target && !model.boardLinkProblem) return false;
@@ -432,25 +437,29 @@ class AppController {
   syncBoardUrl() {
     if (!this.ready || !this.boardLinksEnabled || !this.signedIn || this.model.boardLinkProblem) return;
     const model = this.model, start = this.boardUrlStart; this.boardUrlStart = false;
-    let wanted = "/";
-    if (model.screen === "board" && model.board) { const link = this.boardLinkFor(model.board); if (!link) return; wanted = new URL(link).pathname; }
+    let wanted = "/", fabricSearch = null;
+    if (model.screen === "fabric" && this.fabric?.visible) { const u = this.fabric.urlFor(); wanted = u.path; fabricSearch = u.search; }
+    else if (model.screen === "board" && model.board) { const link = this.boardLinkFor(model.board); if (!link) return; wanted = new URL(link).pathname; }
     // ?view= follows the open saved view (a view not saved yet has no server ID: the address names the board only).
-    const params = new URLSearchParams(window.location.search), viewId = model.screen === "board" && model.activeView ? model.serverId(model.activeView.id) : "";
+    const params = new URLSearchParams(this.fabric && FabricDataPanel.parsePath(window.location.pathname) !== undefined ? "" : window.location.search), viewId = model.screen === "board" && model.activeView ? model.serverId(model.activeView.id) : "";
     if (/^view_[A-Za-z0-9]{6,40}$/.test(viewId)) params.set("view", viewId); else params.delete("view");
-    const search = params.toString() ? `?${params}` : "";
-    const here = window.location.pathname === "/index.html" ? "/" : window.location.pathname, state = { jarcScreen: model.screen };
+    const search = fabricSearch ?? (params.toString() ? `?${params}` : "");
+    // Fabric Data: the same page spelled differently (percent-encoding, the old /fabric/sales-lines) is rewritten in place, and a
+    // filter change replaces the entry: neither adds to the history.
+    const here = window.location.pathname === "/index.html" ? "/" : window.location.pathname, fabricHere = fabricSearch !== null && FabricDataPanel.samePath(here, wanted);
+    const state = { jarcScreen: model.screen };
     if (here === wanted && window.location.search === search) { if (window.history.state?.jarcScreen !== state.jarcScreen) window.history.replaceState(state, "", window.location.href); return; }
     // The address already names this board another way (an older link by server ID, upper case, a trailing slash): it becomes
     // the canonical link in place, without a new history entry. Another view of the same board adds a history entry.
     const token = AppController.boardIdInPath(here), same = here !== wanted && model.screen === "board" && token && model.findBoardByLink(token)?.board === model.board;
-    window.history[start || same ? "replaceState" : "pushState"](state, "", `${wanted}${search}`);
+    window.history[start || same || fabricHere ? "replaceState" : "pushState"](state, "", `${wanted}${search}`);
   }
   // Microsoft sign-in screens: "signed-out" | "expired" | "denied" | "error". Shown instead of the app.
   // Someone may use the app now: signed in, and no sign-in gate (an expired, denied or signed-out session) is shown.
   get signedIn() { return Boolean(this.auth.authenticated) && !this.entraGate; }
   // A gate means the person's session ended: search results, recents and filters of the Command Center are dropped
   // before the gate shows, so the next person at this computer can't open them.
-  showEntraGate(state, options = {}) { this.entraGate = state; this.command?.reset(); this.navOpen = false; this.applyNav(); this.view.renderEntraGate(state, this.model, options); }
+  showEntraGate(state, options = {}) { this.entraGate = state; this.command?.reset(); this.fabric?.forget(); this.navOpen = false; this.applyNav(); this.view.renderEntraGate(state, this.model, options); }
   entraSignIn() {
     this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true });
     this.entra.signIn().catch(() => this.showEntraGate("error", { message: "Microsoft sign-in couldn't start. Check your connection, then try again." }));
@@ -550,6 +559,7 @@ class AppController {
     if (window.jarcStorage?.connection === "offline" && ["cell-open","set-cell-option","inline-add","open-form","new-item","new-board","add-column","create-workspace","import"].includes(action)) { this.view.toast(StorageError.describe(StorageError.CODES.OFFLINE).message); return; }
     if (action.startsWith("integration-") && this.integrations) { if (target.tagName !== "SELECT") this.integrations.onAction(action, target); return; }
     if (action.startsWith("health-") && this.health) { if (target.tagName !== "FORM") this.health.onAction(action, target); return; }
+    if (action.startsWith("fabric-") && this.fabric) { if (!["SELECT", "INPUT", "FORM"].includes(target.tagName)) this.fabric.onAction(action, target, event); return; }
     if (action.startsWith("apitok-") && this.apiTokens) { if (!["SELECT", "INPUT", "FORM"].includes(target.tagName)) this.apiTokens.onAction(action, target); return; }
     if (action.startsWith("acct-") && this.accounts) { if (!["SELECT", "INPUT", "FORM"].includes(target.tagName)) this.accounts.onAction(action, target); return; }
     if ((action.startsWith("appearance-") || (["icon-picker", "icon-tab", "icon-choose"].includes(action))) && this.appearance) { if (target.tagName !== "INPUT") this.appearance.onAction(action, target); return; }
@@ -798,6 +808,7 @@ class AppController {
     if (event.target.dataset?.action === "comment-input") { this.comments?.onInput(event.target); return; }
     if (event.target.dataset?.action === "acct-search") { this.accounts?.onSearch(event.target); return; }
     if (event.target.dataset?.action?.startsWith("apitok-")) { this.apiTokens?.onInput(event.target); return; }
+    if (event.target.dataset?.action?.startsWith("fabric-")) { this.fabric?.onInput(event.target); return; }
     if (event.target.dataset.action === "files-filter") { const term=event.target.value.trim().toLowerCase(), panel=event.target.closest(".files-popover"); let shown=0; panel?.querySelectorAll(".file-list > li:not([data-upload])").forEach((li)=>{const hit=!term||li.textContent.toLowerCase().includes(term);li.hidden=!hit;if(hit)shown+=1;}); const empty=panel?.querySelector(".file-filter-empty"); if(empty)empty.hidden=shown>0; return; }
     if (event.target.dataset.action === "cell-option-search") { this.view.filterOptions(event.target.closest(".cell-options-popover"),event.target.value); return; }
     if (event.target.dataset.action === "workspace-search") { const term=event.target.value.toLowerCase(); document.querySelectorAll(".workspace-list > button").forEach((button)=>{button.hidden=!button.textContent.toLowerCase().includes(term);}); return; }
@@ -1002,6 +1013,7 @@ class AppController {
     }
     if (event.target.dataset?.action === "integration-wizard-workspace") { this.integrations?.onAction("integration-wizard-workspace", event.target); return; }
     if (event.target.dataset?.action?.startsWith("apitok-")) { this.apiTokens?.onChange(event.target); return; }
+    if (event.target.dataset?.action?.startsWith("fabric-")) { this.fabric?.onChange(event.target); return; }
     if (event.target.dataset?.action === "acct-filter") { this.accounts?.onFilter(event.target); return; }
     if (event.target.dataset?.action === "acct-ws-role") { this.accounts?.onChange(event.target); return; }
     // Display columns: show/hide one column, or all of them (Item always stays).
@@ -1038,6 +1050,7 @@ class AppController {
     if (action?.startsWith("integration-")) { this.integrations?.onSubmit(action, data, event.target); return; }
     if (action?.startsWith("health-")) { this.health?.onSubmit(action, data, event.target); return; }
     if (action?.startsWith("apitok-")) { this.apiTokens?.onSubmit(action, event.target); return; }
+    if (action?.startsWith("fabric-")) { this.fabric?.onSubmit(action, event.target); return; }
     if (action?.startsWith("acct-")) { this.accounts?.onSubmit(action, data, event.target); return; }
     if ((action === "group-form" || action === "group-delete-form") && this.groupActions) { this.groupActions.onSubmit(action, data, event.target); return; }
     if (action === "workspace-form") { this.runBusy(event.submitter,()=>this.model.createWorkspace(data)?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast("Workspace created");}); return; }
@@ -1614,8 +1627,19 @@ class AppController {
     if(!space||space.archived){this.view.toast("That workspace is no longer available.");return;}
     try{this.model.openBoard(boardId,workspaceId);}catch{this.view.toast("That board is no longer available.");return;}
     this.update();
+    // The board this result opened: if the person moves to another board while we wait, stop (never poll or look up records on
+    // the wrong board). Each wait below stays bounded (10 s, then 8 s).
+    const openedId=this.model.board?.id;
+    const target=String(this.model.serverId(boardId));
+    const openedScreen=this.model.screen;
+    const stillOnTarget=()=>this.model.screen===openedScreen&&Boolean(this.model.board)&&(this.model.board.id===openedId||String(this.model.serverId(this.model.board.id))===target);
     const find=()=>this.model.rows.find((r)=>String(r.id)===String(recordId)||String(this.model.serverId(r.id))===String(recordId));
-    for(let i=0;i<100&&!find()&&["loading","none"].includes(this.model.boardLoadState().state);i+=1)await new Promise((r)=>setTimeout(r,100));
+    for(let i=0;i<100&&!find()&&["loading","none"].includes(this.model.boardLoadState().state);i+=1){await new Promise((r)=>setTimeout(r,100));if(!stillOnTarget())return;}
+    // This browser's saved copy of the board (state "cached") may still hold a record deleted since it was saved: the server's
+    // answer (revalidateBoard, usually a few hundred ms) is awaited before the record is trusted, unless that check failed.
+    const copyKey=target;
+    for(let i=0;i<80&&this.model.boardLoadState().state==="cached"&&!this.model.refreshFailed?.has(copyKey);i+=1){await new Promise((r)=>setTimeout(r,100));if(!stillOnTarget())return;}
+    if(!stillOnTarget())return;
     const row=find();
     if(row){
       this.update();this.view.showRecordForm(this.model,row,{tab});
