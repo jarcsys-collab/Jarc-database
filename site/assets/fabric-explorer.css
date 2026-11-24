@@ -118,8 +118,10 @@
 .fx-app .fx-explorer .fx-grid__empty { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 16px; border: 1px solid var(--fx-border-strong, #a7b9cc); background: var(--fx-surface, #fff); color: var(--fx-muted, #4b6178); }
 .fx-app .fx-explorer .fx-grid__empty > span { display: grid; flex: 1 1 220px; }
 
-/* ---- Footer: page, rows, window and filter summary (no totals) */
-.fx-app .fx-explorer .fx-gridfoot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex: none; min-height: 30px; padding: 2px 8px; border: 1px solid var(--fx-border-strong, #a7b9cc); border-top: 0; background: var(--fx-panel, #f4f7fa); font-size: var(--fx-text-sm, 12px); color: var(--fx-muted, #4b6178); }
+/* ---- Footer: page, rows, window and filter summary (no totals). flex-direction: row is explicit: the footer also carries the
+   legacy .fabric-pager class, whose phone rule (fabric-data.css, loaded later) turns it into a column; column + wrap with an
+   auto height puts every part in its own side-by-side column and pushes Previous/Next off the screen. */
+.fx-app .fx-explorer .fx-gridfoot { display: flex; flex-direction: row; align-items: center; gap: 10px; flex-wrap: wrap; flex: none; min-height: 30px; padding: 2px 8px; border: 1px solid var(--fx-border-strong, #a7b9cc); border-top: 0; background: var(--fx-panel, #f4f7fa); font-size: var(--fx-text-sm, 12px); color: var(--fx-muted, #4b6178); }
 .fx-app .fx-explorer .fx-gridfoot__range { color: var(--fx-text-c, #1d2b38); font-variant-numeric: tabular-nums; }
 .fx-app .fx-explorer .fx-gridfoot__ctx { display: inline-flex; gap: 10px; flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .fx-app .fx-explorer .fx-gridfoot__filters { overflow: hidden; text-overflow: ellipsis; }
@@ -140,6 +142,10 @@
   /* The toolbar wraps onto a second row: primary tools first; Clear filters and Rows per page go together at the end. */
   .fx-app .fx-explorer__toolbar { row-gap: 4px; }
   .fx-app .fx-explorer__toolbar .fx-search { flex: 1 1 200px; }
+  /* Column chooser on tablets: anchored to the toolbar's right edge (not the Columns button, which can sit past the middle of
+     the toolbar), never wider than the toolbar less 8px each side, so it always stays on screen; only its list scrolls. */
+  .fx-app .fx-explorer .fx-colpop { position: static; }
+  .fx-app .fx-explorer__chooser { left: auto; right: 8px; width: min(440px, calc(100% - 16px)); max-width: none; }
 }
 @media (max-width: 620px) {
   .fx-app .fx-explorer { min-height: auto; }
@@ -155,9 +161,13 @@
   .fx-app .fx-explorer .fx-grid__table tbody tr.is-selected { background: var(--fx-selected, #c5daf0) !important; }
   .fx-app .fx-explorer .fx-grid__table tbody :is(th, td) { position: static; height: auto; min-height: 24px; padding: 3px 0; display: flex; justify-content: space-between; gap: 12px; border: 0 !important; background: none !important; text-align: right; white-space: normal; max-width: none; overflow: visible; overflow-wrap: anywhere; }
   .fx-app .fx-explorer .fx-grid__table tbody :is(th, td)::before { content: attr(data-label); color: var(--fx-label, #3b5068); text-align: left; flex: none; max-width: 50%; }
-  .fx-app .fx-explorer .fx-gridfoot { border: 0; padding: 4px 0; }
-  .fx-app .fx-explorer .fx-gridfoot__ctx { flex-basis: 100%; white-space: normal; flex-wrap: wrap; }
-  .fx-app .fx-explorer .fx-gridfoot__page { width: 100%; justify-content: space-between; }
+  /* Footer on phones, three rows: page + rows; window + filters; Previous / Next as a full-width pair. */
+  .fx-app .fx-explorer .fx-gridfoot { border: 0; padding: 4px 0; row-gap: 6px; }
+  .fx-app .fx-explorer .fx-gridfoot__range { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
+  .fx-app .fx-explorer .fx-gridfoot__ctx { flex: 1 1 100%; white-space: normal; flex-wrap: wrap; row-gap: 2px; }
+  .fx-app .fx-explorer .fx-gridfoot__ctx > * { min-width: 0; overflow-wrap: anywhere; }
+  .fx-app .fx-explorer .fx-gridfoot__page { flex: 1 1 100%; width: 100%; margin-left: 0; gap: 8px; justify-content: stretch; }
+  .fx-app .fx-explorer .fx-gridfoot__page .fx-btn { flex: 1 1 0; min-width: 0; min-height: 36px; justify-content: center; }
 }
 @media (prefers-reduced-motion: reduce) { .fx-app .fx-explorer .fx-grid.is-busy { transition: none; } }
 @media (forced-colors: active) {

@@ -296,4 +296,22 @@ describe("Fabric explorer list view", () => {
     const css = read("fabric-explorer.css").replace(/\/\*[\s\S]*?\*\//g, "");
     for (const block of css.split("}")) { const sel = block.split("{").at(-2)?.replace(/\([^)]*\)/g, "()").trim() ?? ""; if (!sel || sel.startsWith("@")) continue; for (const s of sel.split(",")) { const t = s.trim().replace(/^@media[^{]*/, ""); if (t) assert.ok(t.startsWith(".fx-app"), `scoped: ${t}`); } }
   });
+
+  test("responsive stabilization: the footer stays a row (the legacy .fabric-pager phone rule can't make it a column); the chooser is clamped on tablets", () => {
+    const css = read("fabric-explorer.css").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rule = (sel, scope = css) => { const i = scope.indexOf(`${sel} {`); assert.ok(i >= 0, sel); return scope.slice(i, scope.indexOf("}", i)); };
+    const block = (q) => { const i = css.indexOf(`@media ${q} {`); assert.ok(i >= 0, q); return css.slice(i, css.indexOf("\n}", i)); };
+    // fabric-data.css (loaded later) turns .fabric-pager into a column on phones; the footer's own rule says row and outranks it.
+    assert.match(read("fabric-data.css"), /\.fabric-pager \{ flex-direction: column;/);
+    assert.match(rule(".fx-app .fx-explorer .fx-gridfoot"), /flex-direction: row;/);
+    const phone = block("(max-width: 620px)");
+    assert.match(rule(".fx-app .fx-explorer .fx-gridfoot__page", phone), /flex: 1 1 100%/);
+    assert.match(rule(".fx-app .fx-explorer .fx-gridfoot__page .fx-btn", phone), /flex: 1 1 0;.*min-height: 36px/);
+    const tablet = block("(max-width: 1024px)");
+    assert.match(rule(".fx-app .fx-explorer .fx-colpop", tablet), /position: static/);
+    assert.match(rule(".fx-app .fx-explorer__chooser", tablet), /right: 8px; width: min\(440px, calc\(100% - 16px\)\)/);
+    // Desktop (the first, unconditional rules): the chooser still opens under the Columns button, 440px wide.
+    assert.match(rule(".fx-app .fx-explorer .fx-colpop"), /position: relative/);
+    assert.match(rule(".fx-app .fx-explorer__chooser"), /top: calc\(100% \+ 4px\); left: 0;.*width: 440px/);
+  });
 });

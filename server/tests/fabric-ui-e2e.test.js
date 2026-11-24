@@ -545,4 +545,62 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     assert.equal(await has(".fx-app"), false);
     await noErrors("back to the board");
   });
+
+  test("8. responsive: Previous/Next reachable on phones without sideways scroll; Columns chooser on screen on tablets; desktop unchanged", async () => {
+    await signIn(people.reader);
+    const open = async (w, h) => {
+      await b.open(`${base}/fabric/inventory`, { width: w, height: h });
+      assert.ok(await wait("document.querySelectorAll('.fabric-explorer-table tbody tr').length > 0", 15000), `rows @ ${w}`);
+      assert.ok(await wait(`!document.querySelector('[data-action="fabric-x-page"][data-dir="next"]')?.disabled`), `Next enabled @ ${w}`);
+    };
+    const boxes = () => json(`(() => { const box = (el) => { if (!el) return null; const r = el.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, w: r.width, h: r.height }; };
+      const foot = document.querySelector(".fx-gridfoot"), body = document.querySelector(".fx-app__body"), grid = document.querySelector(".fx-grid");
+      const centers = foot ? [...foot.children].map((c) => { const r = c.getBoundingClientRect(); return (r.top + r.bottom) / 2; }) : [];
+      return { innerWidth, doc: document.documentElement.scrollWidth, body: body.scrollWidth, gridScrolls: grid ? grid.scrollWidth > grid.clientWidth : null,
+        prev: box(document.querySelector('[data-action="fabric-x-page"][data-dir="prev"]')), next: box(document.querySelector('[data-action="fabric-x-page"][data-dir="next"]')),
+        footSpread: centers.length ? Math.max(...centers) - Math.min(...centers) : null, chooser: box(document.querySelector("#fabric-inventory-chooser")),
+        cols: box(document.querySelector('[data-action="fabric-x-columns"][data-focus-key="cols"]')) }; })()`);
+    const inside = (bx, w) => bx && bx.w > 0 && bx.left >= -0.5 && bx.right <= w + 0.5;
+    const openChooser = async () => {
+      await click('[data-action="fabric-x-columns"][data-ds="inventory"][data-focus-key="cols"]');
+      assert.ok(await wait(`!!document.querySelector("#fabric-inventory-chooser")`), "chooser opens");
+    };
+
+    for (const [w, h] of [[320, 700], [390, 844], [430, 932]]) {
+      await open(w, h);
+      const m = await boxes();
+      assert.ok(inside(m.prev, w) && inside(m.next, w), `Previous/Next inside the viewport @ ${w}: ${JSON.stringify(m)}`);
+      assert.ok(m.prev.h >= 32 && m.next.h >= 32, `touch-size Previous/Next @ ${w}: ${m.prev.h}/${m.next.h}`);
+      assert.ok(m.body <= w + 1, `.fx-app__body doesn't scroll sideways @ ${w}: ${m.body}`);
+      assert.ok(m.doc <= w + 1, `page doesn't scroll sideways @ ${w}: ${m.doc}`);
+      await click('[data-action="fabric-x-page"][data-dir="next"]');
+      assert.ok(await wait(`/Rows 101/.test(document.querySelector(".fabric-pager")?.textContent || "")`), `Next works @ ${w}`);
+    }
+
+    for (const [w, h] of [[768, 1024], [1024, 768]]) {
+      await open(w, h);
+      await openChooser();
+      const m = await boxes();
+      assert.ok(inside(m.chooser, w) && m.chooser.bottom <= h + 0.5, `chooser inside the viewport @ ${w}: ${JSON.stringify(m.chooser)}`);
+      assert.ok(m.doc <= w + 1 && m.body <= w + 1, `no sideways scroll with the chooser open @ ${w}: doc ${m.doc}, body ${m.body}`);
+      assert.ok(m.gridScrolls, `the grid scrolls sideways inside its own frame @ ${w}`);
+      assert.ok(inside(m.prev, w) && inside(m.next, w), `Previous/Next inside the viewport @ ${w}`);
+      // Escape inside the chooser closes it and returns focus to Columns.
+      await b.evaluate(`document.querySelector("#fabric-inventory-col-filter").focus()`);
+      await b.key("Escape");
+      assert.ok(await wait(`!document.querySelector("#fabric-inventory-chooser") && document.activeElement?.matches('[data-action="fabric-x-columns"][data-focus-key="cols"]')`), `Escape closes the chooser @ ${w}`);
+    }
+
+    await open(1440, 900);
+    let m = await boxes();
+    assert.ok(m.footSpread !== null && m.footSpread <= 6, `desktop footer on one row: spread ${m.footSpread}`);
+    assert.ok(inside(m.prev, 1440) && inside(m.next, 1440) && m.next.right > 1300, "Previous/Next at the right end of the footer");
+    await openChooser();
+    m = await boxes();
+    assert.ok(Math.abs(m.chooser.left - m.cols.left) <= 1 && Math.round(m.chooser.w) === 440, `desktop chooser anchored under Columns, 440 px: ${JSON.stringify({ chooser: m.chooser, cols: m.cols })}`);
+    assert.ok(m.chooser.top >= m.cols.bottom && m.chooser.top <= m.cols.bottom + 8, "directly under the button");
+    await click('[data-action="fabric-x-columns"][data-focus-key="cols-done"]');
+    assert.ok(await wait(`!document.querySelector("#fabric-inventory-chooser")`), "Done closes the chooser");
+    await noErrors("responsive");
+  });
 });
