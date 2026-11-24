@@ -1,0 +1,239 @@
+/* Fabric Data application: the app-module layout (AppModules.js) and the Fabric design system (VISUAL-SPEC.md).
+   1. Module layout: applies only while an app module is open (.app-shell[data-layout=module]); JARC pages are unchanged.
+   2. --fx- tokens, light by default, dark under :root[data-theme=dark] .fx-app.
+   3. Shared components: fx-app, fx-appbar, fx-tabs, fx-toolbar, fx-btn, fx-sep, fx-search, fx-chip, fx-status, fx-statusbar,
+      fx-dialog, focus. Everything below section 1 is scoped under .fx-app. */
+
+/* ---- 1. App-module layout: the global header stays; primary navigation is a drawer at every width (no workspace tree is
+   drawn); the module fills the rest of the viewport and the page itself never scrolls. */
+.app-shell[data-layout="module"], body.nav-collapsed .app-shell[data-layout="module"] { display: block; }
+.app-shell[data-layout="module"] .sidebar { transform: translateX(-100%); width: 236px; visibility: hidden; transition: transform .18s ease, visibility 0s linear .18s; }
+.app-shell[data-layout="module"] .sidebar.open { transform: none; visibility: visible; z-index: 40; overscroll-behavior: contain; transition: transform .18s ease, visibility 0s; }
+.app-shell[data-layout="module"] .sidebar-collapse-top { display: none; }
+.app-shell[data-layout="module"] .sidebar.open .brand { width: 48px; }
+.app-shell[data-layout="module"] .sidebar.open .brand-copy { display: none !important; }
+.app-shell[data-layout="module"] .sidebar .nav-text, .app-shell[data-layout="module"] .sidebar .sidebar-settings span { position: static; width: auto; height: auto; margin: 0; clip: auto; clip-path: none; overflow: visible; }
+/* A desktop "collapsed sidebar" preference doesn't shrink the drawer: it opens full width with its labels. */
+body.nav-collapsed .app-shell[data-layout="module"] .sidebar { width: 236px; padding: 18px 12px 10px; }
+body.nav-collapsed .app-shell[data-layout="module"] .sidebar :is(.nav-text, .nav-count, .nav-shortcut) { display: inline; }
+body.nav-collapsed .app-shell[data-layout="module"] .sidebar :is(.nav-item, .sidebar-settings) { justify-content: flex-start; padding: 8px 10px; }
+.app-shell[data-layout="module"] .topbar { left: 0; border-top-left-radius: 0; }
+html.nav-drawer-open .app-shell[data-layout="module"] .topbar { z-index: 45; }
+.app-shell[data-layout="module"] .topbar .nav-toggle { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; margin-left: -6px; }
+.app-shell[data-layout="module"] .nav-toggle[aria-expanded="true"] .nav-toggle-open { display: none; }
+.app-shell[data-layout="module"] .nav-toggle[aria-expanded="true"] .nav-toggle-close { display: inline; }
+html.nav-drawer-open .app-shell[data-layout="module"] .nav-backdrop { display: block; position: fixed; inset: 0; z-index: 35; background: rgb(8 13 22 / .45); touch-action: none; }
+.app-shell[data-layout="module"] .workspace { box-sizing: border-box; height: 100vh; height: 100dvh; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border-radius: 0; }
+/* The page is exactly the viewport: hidden helpers after the shell (file inputs, live regions) are clipped by the body
+   instead of sitting 1 px below the viewport and making the page scrollable. */
+html:has(.app-shell[data-layout="module"]) { height: 100%; overflow: hidden; }
+html:has(.app-shell[data-layout="module"]) body { height: 100%; overflow: hidden; position: relative; }
+.module-body { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.module-exit { display: inline-flex; align-items: center; gap: 4px; min-height: 32px; padding: 0 8px 0 4px; border-radius: 6px; color: var(--text); font-weight: 600; max-width: 40vw; }
+.module-exit .icon { width: 16px; height: 16px; flex: none; }
+.module-exit-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.module-exit:hover { background: var(--hover); }
+.module-exit:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.top-context .module-title { white-space: nowrap; }
+/* ≤1024 px: a compact module header on one line. Back keeps its icon and a short visible "Back" (the full "Back to …" stays
+   the accessible name and the tooltip); the module name is shown in full, never cut. */
+@media (max-width: 1024px) {
+  .app-shell[data-layout="module"] .topbar { flex-wrap: nowrap; }
+  .app-shell[data-layout="module"] .top-context { max-width: none; flex: 0 1 auto; overflow: visible; }
+  .app-shell[data-layout="module"] .top-context .module-title { display: inline; overflow: visible; text-overflow: clip; flex: none; }
+  .app-shell[data-layout="module"] .top-context .context-divider { display: inline; }
+  .app-shell[data-layout="module"] .module-exit { max-width: none; flex: none; }
+  .app-shell[data-layout="module"] .module-exit-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+  .app-shell[data-layout="module"] .module-exit::after { content: "Back"; content: "Back" / ""; }
+  .app-shell[data-layout="module"] .global-search-button { min-width: 0; }
+  .app-shell[data-layout="module"] .global-search-button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+@media (max-width: 620px) {
+  .module-exit { min-width: 40px; min-height: 40px; justify-content: center; padding: 0 6px 0 2px; }
+  /* The app bar names the module just below: the header keeps the menu and Back. */
+  .app-shell[data-layout="module"] .top-context .context-divider, .app-shell[data-layout="module"] .top-context .module-title { display: none; }
+  .app-shell[data-layout="module"] .top-context { flex: none; }
+  /* The global search collapses to an icon button (it still opens the Command Center); nothing wraps. */
+  .app-shell[data-layout="module"] .global-search-button { flex: none; width: 40px; min-width: 40px; height: 40px; padding: 0; margin-left: auto; justify-content: center; overflow: hidden; position: relative; }
+  .app-shell[data-layout="module"] .global-search-button > span, .app-shell[data-layout="module"] .global-search-button > kbd { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+  .app-shell[data-layout="module"] .global-search-button .icon { width: 18px; height: 18px; }
+}
+/* Very short screens: the module body may scroll as a whole rather than hide its content. */
+@media (max-height: 480px) { .module-body { overflow: auto; } }
+@media (prefers-reduced-motion: reduce) { .app-shell[data-layout="module"] .sidebar { transition: none !important; } }
+
+/* ---- 2. Tokens */
+.fx-app {
+  --fx-font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+  --fx-font-mono: ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
+  --fx-text-sm: 12px; --fx-text: 13px; --fx-text-title: 15px; --fx-lh: 1.35;
+  --fx-h-appbar: 44px; --fx-h-tabs: 32px; --fx-h-toolbar: 34px;
+  --fx-h-btn: 26px; --fx-h-input: 26px; --fx-h-row: 28px; --fx-h-head: 30px; --fx-h-status: 24px;
+  --fx-w-nav: 240px; --fx-radius: 3px; --fx-radius-sm: 2px; --fx-gap: 8px;
+  --fx-window: #dde5ed; --fx-panel: #f4f7fa; --fx-surface: #ffffff;
+  --fx-titlebar: linear-gradient(#e9f0f7, #d3dfeb);
+  --fx-head: linear-gradient(#f3f6f9, #dbe4ec);
+  --fx-btn: linear-gradient(#fbfcfd, #e1e8ef); --fx-btn-hover: linear-gradient(#ffffff, #e8eef4);
+  --fx-btn-active: #d3dfeb; --fx-tab: #d6e0ea; --fx-tab-active: var(--fx-panel);
+  --fx-border-strong: #a7b9cc; --fx-border: #b9c8d7; --fx-border-light: #d3dde7;
+  --fx-border-row: #dde5ed; --fx-border-head: #9fb3c8; --fx-border-input: #7f95ac;
+  --fx-text-c: #1d2b38; --fx-label: #3b5068; --fx-muted: #4b6178; --fx-heading: #1f3d5c;
+  --fx-null: #5f7185; --fx-link: #0a4f8f;
+  --fx-field-ro: #eef1f4; --fx-field-key: #ffffcc;
+  --fx-zebra: #f7f9fb; --fx-hover: #e3ecf5; --fx-selected: #c5daf0; --fx-selected-frozen: #b9d1ea;
+  --fx-frozen: #f8fafc; --fx-frozen-zebra: #f1f5f9;
+  --fx-ok: #2e7d32; --fx-info: #1f6fb2; --fx-warn-bg: #fff9dd; --fx-warn-bd: #e0c56b; --fx-warn-fg: #5a4a12;
+  --fx-err-bg: #fdecec; --fx-err-bd: #e0a3a3; --fx-err-fg: #8a1c1c;
+  --fx-focus: #1f6fb2;
+  --fx-focus-ring: 0 0 0 2px var(--fx-surface), 0 0 0 4px var(--fx-focus);
+  --fx-scroll-track: #e3eaf1; --fx-scroll-thumb: #a9bccf;
+}
+:root[data-theme="dark"] .fx-app {
+  --fx-window: #161c23; --fx-panel: #1c242d; --fx-surface: #212a34;
+  --fx-titlebar: linear-gradient(#26313d, #1f2832);
+  --fx-head: linear-gradient(#2a3540, #222c36);
+  --fx-btn: linear-gradient(#2c3846, #25303c); --fx-btn-hover: linear-gradient(#334152, #2b3745);
+  --fx-btn-active: #1d2630; --fx-tab: #232d38; --fx-tab-active: var(--fx-panel);
+  --fx-border-strong: #4a5d71; --fx-border: #3a4a5b; --fx-border-light: #2c3946;
+  --fx-border-row: #2a3542; --fx-border-head: #4a5d71; --fx-border-input: #6b8097;
+  --fx-text-c: #e3e9ef; --fx-label: #b4c2d0; --fx-muted: #9aabbc; --fx-heading: #cfe0f1;
+  --fx-null: #8394a6; --fx-link: #8cc1f5;
+  --fx-field-ro: #283340; --fx-field-key: #3a3517;
+  --fx-zebra: #252f3a; --fx-hover: #2c3a48; --fx-selected: #24405e; --fx-selected-frozen: #2a4a6c;
+  --fx-frozen: #232c37; --fx-frozen-zebra: #27313c;
+  --fx-ok: #66bb6a; --fx-info: #4da3ff; --fx-warn-bg: #3a3214; --fx-warn-bd: #8a7531; --fx-warn-fg: #f1dea0;
+  --fx-err-bg: #3d1f22; --fx-err-bd: #8f4a4f; --fx-err-fg: #f4c2c2;
+  --fx-focus: #4da3ff;
+  --fx-scroll-track: #1c242d; --fx-scroll-thumb: #4a5d71;
+}
+/* Touch and narrow screens: bigger targets (never below 24 px, WCAG 2.5.8). */
+@media (pointer: coarse), (max-width: 1024px) { .fx-app { --fx-h-btn: 34px; --fx-h-input: 34px; --fx-h-row: 34px; } }
+
+/* ---- 3. Components */
+/* fx-app: the root, a flex column filling the module body. Children: appbar, status, then .fx-app__body (#fabric-root), which
+   takes the remaining height. Content inside the body should be a flex column too: give the region that scrolls (the grid)
+   flex: 1 1 auto; min-height: 0; overflow: auto. The body itself scrolls only if its content is taller than it. */
+.fx-app { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: var(--fx-window); color: var(--fx-text-c); font-family: var(--fx-font); font-size: var(--fx-text); line-height: var(--fx-lh); }
+.fx-app :where(button, input, select, textarea) { font-family: inherit; }
+.fx-app .icon { width: 14px; height: 14px; flex: none; }
+/* scrollbar-gutter: the body's scrollbar space is always reserved, so headers and buttons don't move sideways when a tab or
+   page becomes tall enough to scroll. */
+.fx-app__body { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: var(--fx-gap); padding: var(--fx-gap); overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+@media (max-width: 620px) { .fx-app__body { scrollbar-gutter: auto; } }
+.fx-app__body > * { flex: none; min-width: 0; }
+.fx-app__status:empty { display: none; }
+.fx-app__status { padding: 4px var(--fx-gap) 0; }
+.fx-app__notice { margin: 0; }
+
+/* Focus: visible on every control. Inside grids use outline-offset: -2px (see fabric-explorer.css). */
+.fx-app :focus-visible { outline: 2px solid var(--fx-focus); outline-offset: 1px; }
+
+/* fx-appbar: 44 px; icon + name, module tabs, chips. Wraps to two rows on narrow screens (tabs scroll inside their row). */
+.fx-appbar { display: flex; align-items: center; gap: 10px; min-height: var(--fx-h-appbar); padding: 0 10px; background: var(--fx-titlebar); border-bottom: 1px solid var(--fx-border-strong); flex: none; flex-wrap: wrap; }
+.fx-appbar__icon { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: var(--fx-radius); background: var(--fx-info); color: #fff; flex: none; }
+.fx-appbar__icon .icon { width: 15px; height: 15px; }
+.fx-appbar__title { margin: 0; font-size: var(--fx-text-title); font-weight: 700; color: var(--fx-heading); white-space: nowrap; letter-spacing: 0; }
+.fx-appbar__tabs { display: flex; align-items: stretch; gap: 2px; align-self: stretch; min-width: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.fx-appbar__tabs::-webkit-scrollbar { display: none; }
+.fx-appbar__tab { display: inline-flex; align-items: center; gap: 6px; height: var(--fx-h-tabs); align-self: center; padding: 0 12px; border-radius: var(--fx-radius) var(--fx-radius) 0 0; color: var(--fx-label); white-space: nowrap; border-bottom: 2px solid transparent; }
+.fx-appbar__tab:hover { background: var(--fx-hover); color: var(--fx-text-c); }
+.fx-appbar__tab.is-active, .fx-appbar__tab[aria-selected="true"] { background: var(--fx-surface); color: var(--fx-heading); font-weight: 700; border-bottom-color: var(--fx-focus); }
+.fx-appbar__chips { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
+.fx-appbar__conn { display: contents; }
+@media (max-width: 620px) {
+  .fx-appbar { gap: 6px; padding: 4px 8px 0; }
+  .fx-appbar__tabs { order: 3; flex: 1 1 100%; }
+  .fx-appbar__chips { gap: 4px; }
+}
+
+/* fx-tabs: section tabs inside a page (object page). 28 px, merged 1 px into the pane. Arrow keys belong to their owner. */
+.fx-tabs { display: flex; gap: 2px; align-items: flex-end; border-bottom: 1px solid var(--fx-border-strong); overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.fx-tabs::-webkit-scrollbar { display: none; }
+.fx-tab { height: 28px; padding: 0 14px; border: 1px solid var(--fx-border-strong); border-bottom: 0; border-radius: var(--fx-radius) var(--fx-radius) 0 0; background: var(--fx-tab); color: var(--fx-label); white-space: nowrap; position: relative; top: 1px; }
+.fx-tab:hover { color: var(--fx-text-c); }
+.fx-tab.is-active, .fx-tab[aria-selected="true"] { background: var(--fx-tab-active); color: var(--fx-heading); font-weight: 700; }
+
+/* fx-toolbar: 34 px row of buttons, separators, search and right-aligned context. */
+.fx-toolbar { display: flex; align-items: center; gap: 6px; min-height: var(--fx-h-toolbar); padding: 0 8px; border-bottom: 1px solid var(--fx-border-light); background: var(--fx-panel); flex-wrap: wrap; }
+.fx-toolbar__spacer { flex: 1 1 auto; }
+.fx-toolbar__context { color: var(--fx-muted); font-size: var(--fx-text-sm); white-space: nowrap; }
+.fx-toolbar__context strong { color: var(--fx-text-c); }
+
+/* fx-btn */
+.fx-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: var(--fx-h-btn); padding: 0 10px; border: 1px solid var(--fx-border-input); border-radius: var(--fx-radius); background: var(--fx-btn); color: var(--fx-text-c); font-size: var(--fx-text); white-space: nowrap; cursor: pointer; }
+.fx-btn:hover { background: var(--fx-btn-hover); }
+.fx-btn:active, .fx-btn[aria-pressed="true"] { background: var(--fx-btn-active); box-shadow: inset 0 1px 2px rgb(0 0 0 / .15); }
+.fx-btn:disabled, .fx-btn[aria-disabled="true"] { opacity: .55; background: var(--fx-panel); cursor: not-allowed; box-shadow: none; }
+.fx-btn--icon { width: 28px; padding: 0; border-color: transparent; background: transparent; }
+.fx-btn--icon:hover { border-color: var(--fx-border); background: var(--fx-btn-hover); }
+.fx-btn--primary { background: var(--fx-info); border-color: var(--fx-info); color: #fff; }
+.fx-btn--primary:hover { background: color-mix(in srgb, var(--fx-info) 88%, #000); }
+.fx-btn--danger { background: var(--fx-err-bg); border-color: var(--fx-err-bd); color: var(--fx-err-fg); }
+.fx-btn--danger:hover { background: color-mix(in srgb, var(--fx-err-bg) 80%, var(--fx-err-bd)); }
+.fx-sep { width: 1px; height: 20px; background: var(--fx-border); flex: none; }
+
+/* fx-search: 26 px input with a leading icon and a clear button. */
+.fx-search { position: relative; display: inline-flex; align-items: center; width: clamp(180px, 24vw, 280px); min-width: 0; }
+.fx-search > .icon { position: absolute; left: 7px; color: var(--fx-muted); pointer-events: none; }
+.fx-search input { width: 100%; height: var(--fx-h-input); min-height: 0; padding: 0 28px 0 26px; border: 1px solid var(--fx-border-input); border-radius: var(--fx-radius-sm); background: var(--fx-surface); color: var(--fx-text-c); font-size: var(--fx-text); }
+.fx-search .fx-btn--icon { position: absolute; right: 1px; height: calc(var(--fx-h-input) - 2px); width: 24px; }
+@media (max-width: 620px) { .fx-search { flex: 1 1 auto; width: auto; } }
+
+/* fx-chip: 20 px; read-only (lock), connection (dot glyph + text: never colour alone), filter (with a remove button). */
+.fx-chip { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 8px; border: 1px solid var(--fx-border); border-radius: 10px; background: var(--fx-surface); color: var(--fx-label); font-size: var(--fx-text-sm); white-space: nowrap; line-height: 1; }
+.fx-chip .icon { width: 12px; height: 12px; }
+.fx-chip__dot { display: inline-grid; place-items: center; width: 12px; height: 12px; border-radius: 50%; font-size: 9px; font-weight: 700; color: #fff; background: var(--fx-muted); }
+.fx-chip--conn.is-ok .fx-chip__dot { background: var(--fx-ok); }
+.fx-chip--conn.is-info .fx-chip__dot { background: var(--fx-info); }
+.fx-chip--conn.is-warn { background: var(--fx-warn-bg); border-color: var(--fx-warn-bd); color: var(--fx-warn-fg); }
+.fx-chip--conn.is-warn .fx-chip__dot { background: var(--fx-warn-fg); color: var(--fx-warn-bg); }
+.fx-chip--conn.is-error { background: var(--fx-err-bg); border-color: var(--fx-err-bd); color: var(--fx-err-fg); }
+.fx-chip--conn.is-error .fx-chip__dot { background: var(--fx-err-fg); color: var(--fx-err-bg); }
+.fx-chip--filter { height: 22px; padding-right: 2px; }
+.fx-chip__remove { display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; color: var(--fx-muted); }
+.fx-chip__remove:hover { background: var(--fx-hover); color: var(--fx-text-c); }
+@media (pointer: coarse) { .fx-chip__remove { width: 32px; height: 32px; margin: -6px -8px -6px -4px; } }
+@media (max-width: 620px) { .fx-chip--readonly > span:not(.sr-only) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); } }
+
+/* fx-status: compact inline status, one line, optional collapsed technical details. --block: a status in the content area
+   (errors, waits) with its actions. Warn and error are tinted; ok and info are text and icon only. */
+.fx-status { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-height: var(--fx-h-status); padding: 2px 8px; border: 1px solid transparent; border-radius: var(--fx-radius); font-size: var(--fx-text-sm); color: var(--fx-text-c); }
+.fx-status__icon { display: inline-grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; font-size: 10px; font-weight: 700; color: #fff; background: var(--fx-muted); flex: none; }
+.fx-status__text { flex: 1 1 240px; min-width: 0; }
+.fx-status__ref code { font-family: var(--fx-font-mono); font-size: 11px; }
+.fx-status__actions { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.fx-status--ok .fx-status__icon { background: var(--fx-ok); }
+.fx-status--info .fx-status__icon { background: var(--fx-info); }
+.fx-status--warn { background: var(--fx-warn-bg); border-color: var(--fx-warn-bd); color: var(--fx-warn-fg); }
+.fx-status--warn .fx-status__icon { background: var(--fx-warn-fg); color: var(--fx-warn-bg); }
+.fx-status--error { background: var(--fx-err-bg); border-color: var(--fx-err-bd); color: var(--fx-err-fg); }
+.fx-status--error .fx-status__icon { background: var(--fx-err-fg); color: var(--fx-err-bg); }
+.fx-status--block { padding: 6px 8px; }
+.fx-status__toggle { padding: 0 4px; height: 20px; border-radius: var(--fx-radius-sm); color: inherit; text-decoration: underline; font-size: var(--fx-text-sm); }
+.fx-status__toggle:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
+.fx-status__details { flex: 1 1 100%; margin: 2px 0 0; max-height: 160px; overflow: auto; padding: 6px 8px; border: 1px solid var(--fx-border-light); border-radius: var(--fx-radius-sm); background: var(--fx-surface); color: var(--fx-text-c); font-family: var(--fx-font-mono); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.fx-status__details[hidden] { display: none; }
+
+/* fx-statusbar: the 24 px bar at the bottom (counts left, context right). */
+.fx-statusbar { display: flex; align-items: center; gap: 10px; min-height: var(--fx-h-status); padding: 0 8px; border-top: 1px solid var(--fx-border-strong); background: var(--fx-window); color: var(--fx-muted); font-size: var(--fx-text-sm); flex: none; }
+.fx-statusbar__right { margin-left: auto; }
+
+/* Loading: placeholder rows in place (no overlay). */
+.fx-loading { border: 1px solid var(--fx-border-light); border-radius: var(--fx-radius); background: var(--fx-surface); overflow: hidden; }
+.fx-loading__table { width: 100%; border-collapse: collapse; }
+.fx-loading__table td { padding: 8px; border-bottom: 1px solid var(--fx-border-row); }
+
+/* fx-dialog: native <dialog>, 480 px. */
+.fx-dialog { width: 480px; max-width: 92vw; padding: 0; border: 1px solid var(--fx-border-strong); border-radius: var(--fx-radius); background: var(--fx-surface); color: var(--fx-text-c); box-shadow: 0 8px 24px rgb(0 0 0 / .25); font-family: var(--fx-font); font-size: var(--fx-text); }
+.fx-dialog::backdrop { background: rgb(8 13 22 / .45); }
+.fx-dialog__head { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 6px 0 12px; background: var(--fx-titlebar); border-bottom: 1px solid var(--fx-border-strong); font-weight: 700; color: var(--fx-heading); }
+.fx-dialog__head > :first-child { flex: 1 1 auto; margin: 0; font-size: var(--fx-text); }
+.fx-dialog__body { padding: 12px; display: grid; gap: 10px; }
+.fx-dialog__body :where(input, select, textarea) { border: 1px solid var(--fx-border-input); border-radius: var(--fx-radius-sm); background: var(--fx-surface); color: var(--fx-text-c); }
+.fx-dialog__foot { display: flex; justify-content: flex-end; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--fx-border-light); background: var(--fx-panel); }
+
+@media (prefers-reduced-motion: reduce) { .fx-app *, .fx-dialog * { transition-duration: .01ms !important; animation-duration: .01ms !important; } }
+@media (forced-colors: active) {
+  .fx-chip, .fx-btn, .fx-status, .fx-appbar__tab.is-active, .fx-tab { border-color: CanvasText; }
+  .fx-appbar__tab.is-active { border-bottom: 2px solid Highlight; }
+}

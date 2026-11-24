@@ -155,7 +155,7 @@ class FabricDataPanel {
     this.list = FabricDataPanel.slot(); this.detail = FabricDataPanel.slot(); this.lines = FabricDataPanel.slot(); this.line = FabricDataPanel.slot();
     this.status = null; this.statusLoading = false; this.statusError = null;
     this.companies = []; this.detailTab = "overview"; this.selectedLine = ""; this.fieldFilter = ""; this.hideEmpty = false;
-    this.denied = false; this.searchTimer = null; this.announced = "";
+    this.denied = false; this.searchTimer = null; this.announced = ""; this.statusOpen = false;
   }
   static slot() { return { key: null, data: null, loading: false, error: null, seq: 0 }; }
   forget() { clearTimeout(this.searchTimer); this.reset(); this.api?.forget(); }
@@ -212,20 +212,86 @@ class FabricDataPanel {
   syncUrl() { this.c.syncBoardUrl?.(); }
 
   // ---- The page
+  // The Fabric application (an app module, AppModules.js): a compact app bar (icon, name, section tabs, Read-only, connection
+  // status, Refresh), then .fx-app__body (#fabric-root), which fills the rest of the viewport. The explorer, record page and
+  // API Management draw inside the body; only their own inner regions scroll (fabric-ui.css).
   html() {
-    if (!this.visible) return `<section class="page-head"><div><div class="eyebrow">Fabric Data</div><h1>Fabric Data</h1></div></section><div class="fabric-page"><div class="integration-card"><p>Fabric Data is available only to the people a JARC administrator has named.</p></div></div>`;
+    if (!this.visible) return `<div class="fx-app fx-app--closed"><header class="fx-appbar"><span class="fx-appbar__icon" aria-hidden="true">${icon("database")}</span><h1 class="fx-appbar__title">Fabric Data</h1></header><div class="fx-app__body"><div class="fx-status fx-status--info fx-app__notice" role="status"><span class="fx-status__text">Fabric Data is available only to the people a JARC administrator has named.</span></div></div></div>`;
     if (!this.sections().some(([id]) => id === (this.route.view === "invoice" ? "invoices" : this.route.view))) this.route = { view: this.defaultView(), company: null, invoiceNo: "" };
     this.scheduleEnsure();
-    const v = this.route.view, active = v === "invoice" ? "invoices" : v, x = this.explorer;
-    const tabs = this.sections().map(([id, label, ic]) => { const on = id === active; return `<button type="button" role="tab" id="fabric-tab-${id}" data-action="fabric-section" data-section="${id}" aria-selected="${on}" aria-controls="fabric-root" tabindex="${on ? 0 : -1}" class="${on ? "active" : ""}">${icon(ic)} ${label}</button>`; }).join("");
-    const title = x ? `${this.esc(x.label)}${x.recordId ? " record" : ""}` : v === "invoice" ? `Invoice ${this.esc(this.route.invoiceNo)}` : v === "api" ? "API Management" : "Invoices";
-    const text = x ? (x.recordId ? "Every field of one row, as the Fabric data has it now." : `Rows from the Fabric ${v === "inventory" ? "inventory" : "sales"} data. Choose the columns, filter, sort and page through them. Dates are UTC days.`) : v === "api" ? "Read-only API tokens for Power BI, Power Automate, n8n and scripts that read Fabric Data." : v === "invoice" ? "One invoice from the Fabric sales data, with its lines and fields." : "Invoices from the Fabric sales data, grouped from their lines. Dates are UTC days.";
-    return `<section class="page-head fabric-head"><div><div class="eyebrow">Fabric Data</div><h1>${title} <span class="account-badge fabric-readonly" title="Nothing here can be changed">Read-only</span></h1><p>${text}</p></div><div class="page-actions"><button type="button" class="button secondary" data-action="fabric-refresh" data-focus-key="refresh">${icon("refresh")}<span>Refresh</span></button></div></section>
-      <div class="fabric-page"><div class="apitok-tabs fabric-tabs" role="tablist" aria-label="Fabric Data sections">${tabs}</div><p id="fabric-live" class="sr-only" role="status" aria-live="polite">${this.esc(this.announced)}</p><div id="fabric-root" class="fabric-root" role="tabpanel" aria-labelledby="fabric-tab-${active}">${this.body()}</div></div>`;
+    const v = this.route.view, active = v === "invoice" ? "invoices" : v;
+    const tabs = this.sections().map(([id, label, ic]) => { const on = id === active; return `<button type="button" role="tab" id="fabric-tab-${id}" data-action="fabric-section" data-section="${id}" aria-selected="${on}" aria-controls="fabric-root" tabindex="${on ? 0 : -1}" class="fx-appbar__tab${on ? " is-active active" : ""}">${icon(ic)}<span>${label}</span></button>`; }).join("");
+    return `<div class="fx-app" data-fx-view="${this.attr(v)}"><header class="fx-appbar"><span class="fx-appbar__icon" aria-hidden="true">${icon("database")}</span><h1 class="fx-appbar__title">Fabric Data</h1>
+      <nav class="fx-appbar__tabs" role="tablist" aria-label="Fabric Data sections">${tabs}</nav>
+      <div class="fx-appbar__chips"><span class="fx-chip fx-chip--readonly" title="Nothing here can be changed">${icon("lock")}<span>Read-only</span></span><span id="fabric-conn" class="fx-appbar__conn">${this.connectionHtml()}</span><button type="button" class="fx-btn fx-btn--icon" data-action="fabric-refresh" data-focus-key="refresh" aria-label="Refresh" title="Refresh">${icon("refresh")}</button></div></header>
+      <div id="fabric-status" class="fx-app__status">${this.statusHtml()}</div><p id="fabric-live" class="sr-only" role="status" aria-live="polite">${this.esc(this.announced)}</p><div id="fabric-root" class="fx-app__body fabric-root" role="tabpanel" aria-labelledby="fabric-tab-${active}" data-module-scroll data-focus-key="fabric-body">${this.body()}</div></div>`;
   }
-  // Redraws only the section (#fabric-root), keeping focus and the caret where they were.
+
+  // ---- Status (GET /fabric/status, once per section entry and on Refresh): the app bar's connection chip and, under the bar,
+  // one compact fx-status line with its technical details collapsed. The explorers read statusFor(dataset).
+  // { mode, available, reason, missingIndexes, window } for a dataset, or null before /status answered. mode: "indexed" | "small"
+  // | "indexrequired" | "sourcemissing" | "unavailable" | "" (what the server said, lower case, without - or _).
+  statusFor(dataset) {
+    const s = this.status;
+    if (!s || typeof s !== "object") return null;
+    const d = s.datasets?.[dataset] && typeof s.datasets[dataset] === "object" ? s.datasets[dataset] : {};
+    let mode = String(d.mode || "").toLowerCase().replace(/[-_]/g, "");
+    const reason = typeof d.reason === "string" && d.reason ? d.reason : s.available === false ? (typeof s.reason === "string" && s.reason ? s.reason : "FABRIC_UNAVAILABLE") : null;
+    if (mode === "unavailable" && reason === "FABRIC_INDEX_REQUIRED") mode = "indexrequired";
+    if (mode === "unavailable" && reason === "FABRIC_SOURCE_MISSING") mode = "sourcemissing";
+    if (s.available === false && !mode) mode = reason === "FABRIC_SOURCE_MISSING" ? "sourcemissing" : "unavailable";
+    return { mode, available: s.available !== false && d.available !== false && !["indexrequired", "sourcemissing", "unavailable"].includes(mode), reason, missingIndexes: Array.isArray(d.missingIndexes) ? d.missingIndexes : [], window: d.window && typeof d.window === "object" ? d.window : null };
+  }
+  // The connection state shown in the app bar: { tone: ok|info|warn|error, label, text }.
+  connection() {
+    if (this.denied) return { tone: "error", label: "Access denied", text: FabricDataPanel.MESSAGES.FABRIC_DATA_FORBIDDEN[1] };
+    if (this.statusError) return this.statusError.kind === "unavailable" ? { tone: "error", label: "Unavailable", text: this.statusError.message } : { tone: "warn", label: "Status unknown", text: `The Fabric Data status couldn't be checked: ${this.statusError.message}` };
+    if (!this.status) return { tone: "info", label: "Checking…", text: "Checking the Fabric Data connection." };
+    const ds = this.isDataset(this.route.view) ? this.route.view : null, st = ds ? this.statusFor(ds) : null;
+    const mode = st ? st.mode : this.status.available === false ? (this.status.reason === "FABRIC_SOURCE_MISSING" ? "sourcemissing" : "unavailable") : "";
+    if (mode === "sourcemissing") return { tone: "warn", label: "Refreshing upstream", text: FabricDataPanel.MESSAGES.FABRIC_SOURCE_MISSING[1] };
+    if (mode === "indexrequired") return { tone: "warn", label: "Index required", text: FabricDataPanel.MESSAGES.FABRIC_INDEX_REQUIRED[1] };
+    if (mode === "unavailable") return { tone: "error", label: "Unavailable", text: FabricDataPanel.MESSAGES[st?.reason || this.status.reason]?.[1] || FabricDataPanel.MESSAGES.FABRIC_UNAVAILABLE[1] };
+    return { tone: "ok", label: "Connected", text: "Connected to the Fabric data." };
+  }
+  connectionHtml() {
+    const c = this.connection(), glyph = { ok: "✓", info: "…", warn: "!", error: "×" }[c.tone];
+    return `<span class="fx-chip fx-chip--conn is-${c.tone}" title="${this.attr(c.text)}"><span class="fx-chip__dot" aria-hidden="true">${glyph}</span><span class="sr-only">Connection: </span><span>${this.esc(c.label)}</span></span>`;
+  }
+  // The one status line under the app bar (nothing when all is well): a problem (warn / error), or the info that a dataset is
+  // browsed without its recommended indexes. Technical details (mode, reason, index names, the check time) stay collapsed.
+  statusHtml() {
+    if (!this.visible) return "";
+    const c = this.connection(), ds = this.isDataset(this.route.view) ? this.route.view : null, st = ds ? this.statusFor(ds) : null;
+    const missing = st?.missingIndexes || [];
+    let tone = null, text = "";
+    if (c.tone === "warn" || c.tone === "error") { tone = c.tone; text = c.text; }
+    else if (c.tone === "ok" && missing.length) { tone = "info"; text = st.mode === "small" ? "Indexes recommended: this dataset is small enough to browse without them; some searches and sorts may be slower." : "Indexes recommended: some searches or sorts wait for the data team to add them."; }
+    if (!tone || this.denied) return "";
+    const lines = [];
+    if (st?.mode) lines.push(`Mode: ${st.mode}`);
+    if (st?.reason || this.status?.reason) lines.push(`Reason: ${st?.reason || this.status.reason}`);
+    if (this.statusError?.code) lines.push(`Code: ${this.statusError.code}`);
+    if (this.statusError?.reference) lines.push(`Reference: ${this.statusError.reference}`);
+    if (typeof this.status?.checkedAt === "string") lines.push(`Checked: ${this.status.checkedAt}`);
+    for (const m of missing) { const name = typeof m === "string" ? m : m?.name; if (name) lines.push(`Index: ${name}`); }
+    const open = Boolean(this.statusOpen), details = lines.length ? `<button type="button" class="fx-status__toggle" data-action="fabric-status-details" data-focus-key="status-details" aria-expanded="${open}" aria-controls="fabric-status-details">Details</button><pre id="fabric-status-details" class="fx-status__details" ${open ? "" : "hidden"}>${this.esc(lines.join("\n"))}</pre>` : "";
+    return `<div class="fx-status fx-status--${tone}" role="status"><span class="fx-status__icon" aria-hidden="true">${tone === "info" ? "i" : "!"}</span><span class="fx-status__text">${this.esc(text)}</span>${details}</div>`;
+  }
+  // The app bar's chip and the status line, redrawn on their own (the rest of the page is untouched); focus stays on Details.
+  redrawStatus() {
+    if (typeof document === "undefined") return;
+    const conn = document.querySelector("#fabric-conn"), line = document.querySelector("#fabric-status");
+    if (conn) conn.innerHTML = this.connectionHtml();
+    if (!line) return;
+    const focused = document.activeElement && line.contains(document.activeElement);
+    line.innerHTML = this.statusHtml();
+    if (focused) line.querySelector("[data-focus-key='status-details']")?.focus?.({ preventScroll: true });
+  }
+  // Redraws only the section (#fabric-root) and the status, keeping focus and the caret where they were.
   redraw() {
     if (typeof document === "undefined") return;
+    this.redrawStatus();
     const root = document.querySelector("#fabric-root");
     if (!root) return;
     const active = document.activeElement, inside = active && root.contains(active);
@@ -243,7 +309,7 @@ class FabricDataPanel {
     if (this.denied) return this.deniedHtml();
     const v = this.route.view;
     if (v === "api") return this.api ? this.api.html() : "";
-    if (this.isDataset(v)) return (this.statusError && this.statusError.kind !== "denied" ? `<p class="integration-note fabric-banner">The Fabric Data status couldn't be checked: ${this.esc(this.statusError.message)}</p>` : "") + this.explorers[v].html();
+    if (this.isDataset(v)) return this.explorers[v].html(); // a status problem shows once, under the app bar (statusHtml)
     const banners = this.bannersHtml(v);
     if (v === "invoice") return banners + this.invoiceHtml();
     return banners + this.invoicesHtml();
@@ -339,18 +405,21 @@ class FabricDataPanel {
   companyLabel(c) { return c === null || c === undefined || c === "~" ? "No company" : c; }
 
   // ---- States
+  // Loading: light placeholder rows in the space the content will take (no overlay, no layout jump).
   skeleton(cols, rows = 6) {
     const cells = Array.from({ length: cols }, () => `<td><span class="fabric-skeleton"></span></td>`).join("");
-    return `<div class="fabric-loading" role="status" aria-busy="true"><span class="sr-only">Loading…</span><table class="fabric-table" aria-hidden="true"><tbody>${Array.from({ length: rows }, () => `<tr>${cells}</tr>`).join("")}</tbody></table></div>`;
+    return `<div class="fabric-loading fx-loading" role="status" aria-busy="true"><span class="sr-only">Loading…</span><table class="fabric-table fx-loading__table" aria-hidden="true"><tbody>${Array.from({ length: rows }, () => `<tr>${cells}</tr>`).join("")}</tbody></table></div>`;
   }
   // attrs: extra attributes for the button (the explorer's data-ds="…", a fixed dataset name).
   errorHtml(info, retry = "fabric-retry", extra = "", attrs = "") {
     const title = { denied: "No access to Fabric Data", forbidden: "No access to this dataset", index: "Waiting for indexes", source: "Data is being refreshed", unavailable: "Fabric Data is unavailable", range: "Too much data for one request", line: "This line has changed", record: "This record has changed", busy: "Fabric Data is busy", missing: "Invoice not found" }[info.kind] || "Fabric Data couldn't be loaded";
-    const button = info.kind === "line" ? `<button type="button" class="button secondary small" data-action="fabric-reload-invoice" data-focus-key="reload">${icon("refresh")} Reload the invoice</button>` : info.kind === "record" ? `<button type="button" class="button secondary small" data-action="fabric-x-reload" ${attrs} data-focus-key="reload">${icon("refresh")} Reload the list</button>` : info.kind === "range" || info.kind === "forbidden" ? "" : `<button type="button" class="button secondary small" data-action="${retry}" ${attrs} data-focus-key="retry">${icon("refresh")} Try again</button>`;
-    return `<div class="integration-alert fabric-alert is-${this.attr(info.kind)}" role="alert"><strong>${title}</strong><span>${this.esc(info.message)}</span>${info.reference ? `<small>Reference <code>${this.esc(info.reference)}</code></small>` : ""}<div class="fabric-alert-actions">${button}${extra}</div></div>`;
+    const button = info.kind === "line" ? `<button type="button" class="fx-btn" data-action="fabric-reload-invoice" data-focus-key="reload">${icon("refresh")}<span>Reload the invoice</span></button>` : info.kind === "record" ? `<button type="button" class="fx-btn" data-action="fabric-x-reload" ${attrs} data-focus-key="reload">${icon("refresh")}<span>Reload the list</span></button>` : info.kind === "range" || info.kind === "forbidden" ? "" : `<button type="button" class="fx-btn" data-action="${retry}" ${attrs} data-focus-key="retry">${icon("refresh")}<span>Try again</span></button>`;
+    // Compact: one fx-status block in the content area (warn for waits, error for failures), the reference as small mono text.
+    const tone = ["index", "source", "busy", "range", "line", "record"].includes(info.kind) ? "warn" : "error";
+    return `<div class="fx-status fx-status--${tone} fx-status--block fabric-alert is-${this.attr(info.kind)}" role="alert"><span class="fx-status__icon" aria-hidden="true">!</span><span class="fx-status__text"><strong>${title}</strong> ${this.esc(info.message)}${info.reference ? ` <small class="fx-status__ref">Reference <code>${this.esc(info.reference)}</code></small>` : ""}</span><span class="fx-status__actions fabric-alert-actions">${button}${extra}</span></div>`;
   }
   deniedHtml() {
-    return `<div class="integration-card fabric-denied"><div class="integration-alert" role="alert"><strong>No access to Fabric Data</strong><span>${this.esc(FabricDataPanel.MESSAGES.FABRIC_DATA_FORBIDDEN[1])}</span></div><div class="fabric-alert-actions"><button type="button" class="button secondary" data-action="fabric-check-again">Check again</button><button type="button" class="button secondary" data-action="nav" data-screen="home">Go to Home</button></div></div>`;
+    return `<div class="fx-status fx-status--error fx-status--block fabric-denied" role="alert"><span class="fx-status__icon" aria-hidden="true">!</span><span class="fx-status__text"><strong>No access to Fabric Data</strong> ${this.esc(FabricDataPanel.MESSAGES.FABRIC_DATA_FORBIDDEN[1])}</span><span class="fx-status__actions fabric-alert-actions"><button type="button" class="fx-btn" data-action="fabric-check-again">Check again</button><button type="button" class="fx-btn" data-action="nav" data-screen="home">Go to Home</button></span></div>`;
   }
   emptyHtml(title, text) {
     return `<div class="quiet-empty fabric-empty">${icon("search")}<span><strong>${title}</strong><small>${text}</small></span><button type="button" class="button secondary small" data-action="fabric-clear-filters">Clear filters</button></div>`;
@@ -540,7 +609,9 @@ class FabricDataPanel {
     const plain = !event || (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && (event.button === undefined || event.button === 0));
     if (target.tagName === "A" && !plain) return;
     if (target.tagName === "A") event?.preventDefault?.();
-    if (action.startsWith("fabric-x-")) { this.explorerFor(target)?.onAction(action, target, event); return; }
+    // fabric-x-…: the explorer; fabric-r-…: the record page (FabricRecordView, through its explorer). Both name data-ds.
+    if (action.startsWith("fabric-x-") || action.startsWith("fabric-r-")) { this.explorerFor(target)?.onAction(action, target, event); return; }
+    if (action === "fabric-status-details") { this.statusOpen = !this.statusOpen; this.redrawStatus(); return; }
     if (action === "fabric-section") { this.openSection(target.dataset.section); return; }
     if (action === "fabric-open-invoice") { const c = target.dataset.company; this.openInvoice(c === "~" ? null : c, target.dataset.invoice); return; }
     if (action === "fabric-back") { this.openSection("invoices"); return; }
@@ -607,10 +678,10 @@ class FabricDataPanel {
     this.ensure();
     if (typeof document !== "undefined") document.querySelector("#fabric-root [data-focus-key='results']")?.scrollIntoView?.({ block: "nearest" });
   }
-  onInput(target) {
+  onInput(target, event) {
     const action = target.dataset?.action;
     if (action?.startsWith("fabric-api-")) { this.api?.onInput?.(target); return; }
-    if (action?.startsWith("fabric-x-")) { this.explorerFor(target)?.onInput(target); return; }
+    if (action?.startsWith("fabric-x-") || action?.startsWith("fabric-r-")) { this.explorerFor(target)?.onInput(target, event); return; }
     if (action === "fabric-search") {
       const view = "invoices";
       this.drafts[view] = target.value;
@@ -637,7 +708,7 @@ class FabricDataPanel {
   onChange(target) {
     const action = target.dataset?.action;
     if (action?.startsWith("fabric-api-")) { this.api?.onChange?.(target); return; }
-    if (action?.startsWith("fabric-x-")) { this.explorerFor(target)?.onChange(target); return; }
+    if (action?.startsWith("fabric-x-") || action?.startsWith("fabric-r-")) { this.explorerFor(target)?.onChange(target); return; }
     if (action === "fabric-filter") {
       const view = "invoices";
       const name = target.dataset.filter;
@@ -655,9 +726,13 @@ class FabricDataPanel {
     if (action === "fabric-filter-form") { this.commitSearch("invoices"); }
   }
   // Arrow keys, Home and End move between the tabs of this section (role="tablist"), and open the one reached.
+  // Other keys inside the section go to the open explorer (its grid and record page keys), when it handles keys.
   onKeydown(event) {
-    const tab = event.target?.closest?.('.fabric-tabs [role="tab"]');
-    if (!tab || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    const tab = event.target?.closest?.('.fx-appbar__tabs [role="tab"], .fabric-tabs [role="tab"]');
+    if (!tab || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      if (!tab && this.c.model?.screen === "fabric" && event.target?.closest?.("#fabric-root")) this.explorer?.onKeydown?.(event);
+      return;
+    }
     const tabs = [...tab.closest('[role="tablist"]').querySelectorAll('[role="tab"]')], i = tabs.indexOf(tab);
     const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (i + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
     event.preventDefault();

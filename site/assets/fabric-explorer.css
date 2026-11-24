@@ -1,0 +1,166 @@
+/* Fabric Data explorer list view (FabricExplorer.js): compact toolbar, collapsible filter bar with chips, object navigation,
+   enterprise grid and grid footer. Scoped under .fx-app; tokens (--fx-*) come from fabric-ui.css (VISUAL-SPEC §2), with
+   fallbacks so the page stays usable on its own. Only the grid scrolls: the explorer fills the module body. */
+
+.fx-app .fx-explorer { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; min-width: 0; gap: 0; font-family: var(--fx-font, "Segoe UI", system-ui, sans-serif); font-size: var(--fx-text, 13px); line-height: var(--fx-lh, 1.35); color: var(--fx-text-c, #1d2b38); }
+.fx-app .fx-explorer > .fx-status { margin: 6px 8px 0; }
+.fx-app .fx-explorer .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.fx-app .fx-explorer .icon { width: 14px; height: 14px; flex: none; }
+
+/* ---- Toolbar. flex: none: a toolbar that wraps to a second row keeps its full height (an explicit min-height would otherwise
+   let the explorer's flex column shrink it and hide the wrapped controls under the grid). */
+.fx-app .fx-explorer__toolbar { position: relative; z-index: 5; display: flex; align-items: center; gap: 6px; min-height: var(--fx-h-toolbar, 34px); padding: 4px 8px; flex: none; flex-wrap: wrap; border-bottom: 1px solid var(--fx-border-light, #d3dde7); background: var(--fx-panel, #f4f7fa); }
+.fx-app .fx-explorer > .fx-filterbar, .fx-app .fx-explorer__head > * { flex: none; }
+.fx-app .fx-explorer .fx-toolbar__sort { display: inline-flex; align-items: center; gap: 6px; }
+.fx-app .fx-explorer .fx-toolbar__field select { flex: none; min-width: 64px; }
+.fx-app .fx-explorer .fx-btn { display: inline-flex; align-items: center; gap: 6px; height: var(--fx-h-btn, 26px); padding: 0 10px; border: 1px solid var(--fx-border-input, #7f95ac); border-radius: var(--fx-radius, 3px); background: var(--fx-btn, linear-gradient(#fbfcfd, #e1e8ef)); color: var(--fx-text-c, #1d2b38); font: inherit; font-size: var(--fx-text-sm, 12px); white-space: nowrap; cursor: pointer; }
+.fx-app .fx-explorer .fx-btn:hover:not(:disabled) { background: var(--fx-btn-hover, linear-gradient(#ffffff, #e8eef4)); }
+.fx-app .fx-explorer .fx-btn:active:not(:disabled), .fx-app .fx-explorer .fx-btn[aria-expanded="true"], .fx-app .fx-explorer .fx-btn[aria-pressed="true"] { background: var(--fx-btn-active, #d3dfeb); box-shadow: inset 0 1px 2px rgba(0, 0, 0, .12); }
+.fx-app .fx-explorer .fx-btn:disabled { opacity: .55; background: none; cursor: default; }
+.fx-app .fx-explorer .fx-btn--icon { width: 28px; padding: 0; justify-content: center; }
+.fx-app .fx-explorer .fx-btn__count { color: var(--fx-muted, #4b6178); font-size: 11px; }
+.fx-app .fx-explorer .fx-badge { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--fx-info, #1f6fb2); color: #fff; font-size: 11px; font-weight: 600; }
+.fx-app .fx-explorer .fx-sep { width: 1px; height: 20px; background: var(--fx-border, #b9c8d7); flex: none; }
+.fx-app .fx-explorer .fx-toolbar__spacer { flex: 1 1 auto; }
+.fx-app .fx-explorer .fx-toolbar__field { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fx-text-sm, 12px); color: var(--fx-label, #3b5068); white-space: nowrap; }
+.fx-app .fx-explorer .fx-toolbar__text { font-size: var(--fx-text-sm, 12px); color: var(--fx-muted, #4b6178); white-space: nowrap; }
+.fx-app .fx-explorer .fx-toolbar__text strong { color: var(--fx-text-c, #1d2b38); }
+.fx-app .fx-explorer select, .fx-app .fx-explorer input[type="date"], .fx-app .fx-explorer .fx-filterbar input[type="search"], .fx-app .fx-explorer .fabric-chooser input[type="search"] { height: var(--fx-h-input, 26px); min-height: 0; padding: 0 6px; border: 1px solid var(--fx-border-input, #7f95ac); border-radius: var(--fx-radius-sm, 2px); background: var(--fx-surface, #fff); color: var(--fx-text-c, #1d2b38); font: inherit; font-size: var(--fx-text-sm, 12px); max-width: 100%; }
+.fx-app .fx-explorer .fx-search { position: relative; display: inline-flex; align-items: center; flex: 0 1 260px; min-width: 160px; margin: 0; }
+.fx-app .fx-explorer .fx-search__icon { position: absolute; left: 7px; display: inline-flex; color: var(--fx-muted, #4b6178); pointer-events: none; }
+.fx-app .fx-explorer .fx-search__input { width: 100%; height: var(--fx-h-input, 26px); padding: 0 30px 0 26px; border: 1px solid var(--fx-border-input, #7f95ac); border-radius: var(--fx-radius-sm, 2px); background: var(--fx-surface, #fff); color: var(--fx-text-c, #1d2b38); font: inherit; font-size: var(--fx-text-sm, 12px); }
+.fx-app .fx-explorer .fx-search__input::-webkit-search-cancel-button { display: none; }
+.fx-app .fx-explorer .fx-search__clear { position: absolute; right: 1px; height: 22px; width: 24px; border: 0; background: none; }
+
+/* ---- Filter bar (collapsed by default) and the info bar of active-filter chips */
+.fx-app .fx-explorer .fx-filterbar { border-bottom: 1px solid var(--fx-border-light, #d3dde7); background: var(--fx-panel, #f4f7fa); }
+.fx-app .fx-explorer .fx-filterbar.is-empty { display: none; }
+.fx-app .fx-explorer .fx-filterbar__panel { margin: 6px 8px; padding: 8px 10px; border: 1px solid var(--fx-border-strong, #a7b9cc); border-radius: var(--fx-radius, 3px); background: var(--fx-surface, #fff); }
+.fx-app .fx-explorer .fx-filterbar__panel[hidden] { display: none; }
+.fx-app .fx-explorer .fx-filterbar__form { display: grid; gap: 8px; margin: 0; }
+.fx-app .fx-explorer .fx-filterbar__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 6px 12px; }
+.fx-app .fx-explorer .fx-filterbar__item { display: grid; gap: 3px; font-size: var(--fx-text-sm, 12px); color: var(--fx-label, #3b5068); min-width: 0; }
+.fx-app .fx-explorer .fx-filterbar__foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.fx-app .fx-explorer .fx-filterbar__foot .fabric-help { flex: 1 1 260px; margin: 0; font-size: var(--fx-text-sm, 12px); color: var(--fx-muted, #4b6178); }
+.fx-app .fx-explorer .fx-filterbar__foot .fabric-help.is-error { color: var(--fx-err-fg, #8a1c1c); font-weight: 600; }
+.fx-app .fx-explorer .fx-filterbar__info { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-height: 30px; padding: 3px 8px; }
+.fx-app .fx-explorer .fx-chip--filter { display: inline-flex; align-items: center; gap: 2px; height: 22px; max-width: 320px; padding: 0 2px 0 8px; border: 1px solid var(--fx-border, #b9c8d7); border-radius: 11px; background: var(--fx-surface, #fff); font-size: var(--fx-text-sm, 12px); }
+.fx-app .fx-explorer .fx-chip__text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-app .fx-explorer .fx-chip__label { color: var(--fx-label, #3b5068); }
+.fx-app .fx-explorer .fx-chip__remove { display: inline-grid; place-items: center; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fx-muted, #4b6178); font: inherit; font-size: 14px; line-height: 1; cursor: pointer; position: relative; }
+.fx-app .fx-explorer .fx-chip__remove::after { content: ""; position: absolute; inset: -4px; } /* 24px hit area */
+.fx-app .fx-explorer .fx-chip__remove:hover { background: var(--fx-hover, #e3ecf5); color: var(--fx-text-c, #1d2b38); }
+
+/* ---- Column chooser: a popover under the Columns button, above the grid. Bounded to the space below the toolbar; only its
+   list scrolls (never the page or the module body). */
+.fx-app .fx-explorer .fx-colpop { position: relative; display: inline-flex; }
+.fx-app .fx-explorer__chooser { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; display: flex; flex-direction: column; gap: 6px; width: 440px; max-width: calc(100vw - 32px); max-height: min(520px, calc(100dvh - 240px)); min-height: 180px; box-sizing: border-box; margin: 0; padding: 8px 10px 10px; border: 1px solid var(--fx-border-strong, #a7b9cc); border-radius: var(--fx-radius, 3px); background: var(--fx-surface, #fff); box-shadow: 0 6px 18px rgb(0 0 0 / .18); font-size: var(--fx-text-sm, 12px); color: var(--fx-text-c, #1d2b38); white-space: normal; }
+.fx-app .fx-explorer__chooser .fx-chooser__head { display: flex; align-items: center; gap: 6px; flex: none; }
+.fx-app .fx-explorer__chooser .fx-chooser__search { flex: 1 1 auto; min-width: 0; width: auto; }
+.fx-app .fx-explorer .fx-explorer__chooser .fx-chooser__search input.fx-search__input { padding: 0 6px 0 26px; }
+.fx-app .fx-explorer__chooser .fabric-help { flex: none; margin: 0; color: var(--fx-muted, #4b6178); font-size: 11px; }
+.fx-app .fx-explorer__chooser .fabric-chooser-list { flex: 1 1 auto; min-height: 0; max-height: none; overflow: auto; overscroll-behavior: contain; margin: 0 -10px -10px; padding: 2px 10px 8px; border-top: 1px solid var(--fx-border-light, #d3dde7); }
+.fx-app .fx-explorer__chooser .fabric-check { display: flex !important; align-items: center; gap: 6px; min-height: 24px; padding: 0 2px; font-size: var(--fx-text-sm, 12px); color: var(--fx-text-c, #1d2b38); border-radius: var(--fx-radius-sm, 2px); }
+.fx-app .fx-explorer__chooser .fabric-check:hover { background: var(--fx-hover, #e3ecf5); }
+.fx-app .fx-explorer__chooser .fabric-check[hidden] { display: none !important; }
+.fx-app .fx-explorer__chooser .fabric-check code { font-family: var(--fx-font-mono, ui-monospace, Consolas, monospace); font-size: 11px; color: var(--fx-muted, #4b6178); }
+.fx-app .fx-explorer__chooser .fabric-check small { display: inline; margin-left: auto; color: var(--fx-muted, #4b6178); font-size: 11px; }
+.fx-app .fx-explorer > .fabric-notice { margin: 6px 8px 0; }
+/* The toolbar, filter bar and chooser are redrawn as one region; it adds no box of its own. */
+.fx-app .fx-explorer__head { display: contents; }
+
+/* ---- Body: object navigation + main (grid + footer) */
+.fx-app .fx-explorer__split { display: flex; flex: 1 1 auto; min-height: 0; min-width: 0; gap: 8px; padding: 8px; }
+.fx-app .fx-explorer__main { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; min-height: 0; }
+.fx-app .fx-explorer__main > .fabric-loading, .fx-app .fx-explorer__main > .fabric-alert, .fx-app .fx-explorer__main > .fx-status { flex: none; }
+.fx-app .fx-explorer__msg { margin: 0; }
+
+.fx-app .fx-explorer__nav { display: flex; flex-direction: column; flex: 0 0 220px; width: 220px; min-height: 0; border: 1px solid var(--fx-border-strong, #a7b9cc); background: var(--fx-surface, #fff); font-size: var(--fx-text-sm, 12px); }
+.fx-app .fx-explorer__nav.is-collapsed { flex-basis: 32px; width: 32px; }
+.fx-app .fx-explorer__nav .fx-nav__caption { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-height: 28px; padding: 0 2px 0 8px; background: var(--fx-head, linear-gradient(#f3f6f9, #dbe4ec)); border-bottom: 1px solid var(--fx-border-head, #9fb3c8); font-weight: 700; color: var(--fx-heading, #1f3d5c); }
+.fx-app .fx-explorer__nav.is-collapsed .fx-nav__caption { padding: 0; justify-content: center; border-bottom: 0; }
+.fx-app .fx-explorer__nav .fx-nav__collapse { width: 24px; height: 22px; border-color: transparent; background: none; }
+.fx-app .fx-explorer__nav .fx-nav__tree, .fx-app .fx-explorer__nav .fx-nav__group { list-style: none; margin: 0; padding: 0; }
+.fx-app .fx-explorer__nav .fx-nav__tree { flex: 1 1 auto; overflow: auto; padding: 2px 0; }
+.fx-app .fx-explorer__nav .fx-nav__rowtitle { display: flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 6px; font-weight: 600; color: var(--fx-heading, #1f3d5c); }
+.fx-app .fx-explorer__nav .fx-nav__row { display: block; width: 100%; min-height: 26px; padding: 3px 6px 3px 28px; border: 0; background: none; color: var(--fx-text-c, #1d2b38); font: inherit; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.fx-app .fx-explorer__nav .fx-nav__row:hover { background: var(--fx-hover, #e3ecf5); }
+.fx-app .fx-explorer__nav .fx-nav__row.is-current { background: var(--fx-selected, #c5daf0); font-weight: 600; }
+.fx-app .fx-explorer__nav .fx-nav__subhead { padding: 8px 8px 2px 22px; font-size: 11px; font-weight: 600; color: var(--fx-muted, #4b6178); text-transform: none; }
+.fx-app .fx-explorer__nav .fx-nav__hint { font-weight: 400; }
+.fx-app .fx-explorer__nav .fx-nav__foot { padding: 6px 8px; border-top: 1px solid var(--fx-border-light, #d3dde7); color: var(--fx-muted, #4b6178); font-size: 11px; }
+
+/* ---- Grid: scrolls both ways inside its frame; sticky header; frozen first column */
+.fx-app .fx-explorer .fx-grid { flex: 1 1 auto; min-height: 120px; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--fx-border-strong, #a7b9cc); background: var(--fx-surface, #fff); max-height: none; scrollbar-color: var(--fx-scroll-thumb, #a9bccf) var(--fx-scroll-track, #e3eaf1); }
+.fx-app .fx-explorer .fx-grid.is-busy { opacity: .6; transition: opacity .12s; }
+.fx-app .fx-explorer .fx-grid__table { width: max-content; min-width: 100%; border-collapse: separate; border-spacing: 0; font-size: var(--fx-text-sm, 12px); color: var(--fx-text-c, #1d2b38); }
+.fx-app .fx-explorer .fx-grid__table th, .fx-app .fx-explorer .fx-grid__table td { height: var(--fx-h-row, 28px); padding: 0 8px; border-bottom: 1px solid var(--fx-border-row, #dde5ed); border-right: 1px solid var(--fx-border-row, #dde5ed); text-align: left; vertical-align: middle; white-space: nowrap; max-width: 360px; overflow: hidden; text-overflow: ellipsis; font-weight: 400; background: inherit; box-shadow: none; }
+.fx-app .fx-explorer .fx-grid__table thead th { position: sticky; top: 0; z-index: 2; height: var(--fx-h-head, 30px); background: var(--fx-head, linear-gradient(#f3f6f9, #dbe4ec)); border-right-color: #c3d0dd; border-bottom: 1px solid var(--fx-border-head, #9fb3c8); color: var(--fx-heading, #1f3d5c); font-weight: 700; }
+.fx-app .fx-explorer .fx-grid__table tbody tr { background: var(--fx-surface, #fff); cursor: default; }
+.fx-app .fx-explorer .fx-grid__table tbody tr:nth-child(even) { background: var(--fx-zebra, #f7f9fb); }
+.fx-app .fx-explorer .fx-grid__table tbody tr:hover { background: var(--fx-hover, #e3ecf5); }
+.fx-app .fx-explorer .fx-grid__table tbody tr.is-selected, .fx-app .fx-explorer .fx-grid__table tbody tr:focus-within { background: var(--fx-selected, #c5daf0); }
+.fx-app .fx-explorer .fx-grid__frozen { position: sticky; left: 0; z-index: 1; border-right: 2px solid var(--fx-border-head, #9fb3c8) !important; }
+.fx-app .fx-explorer .fx-grid__table tbody .fx-grid__frozen { background: var(--fx-frozen, #f8fafc); }
+.fx-app .fx-explorer .fx-grid__table tbody tr:nth-child(even) .fx-grid__frozen { background: var(--fx-frozen-zebra, #f1f5f9); }
+.fx-app .fx-explorer .fx-grid__table tbody tr:hover .fx-grid__frozen { background: var(--fx-hover, #e3ecf5); }
+.fx-app .fx-explorer .fx-grid__table tbody tr.is-selected .fx-grid__frozen, .fx-app .fx-explorer .fx-grid__table tbody tr:focus-within .fx-grid__frozen { background: var(--fx-selected-frozen, #b9d1ea); }
+.fx-app .fx-explorer .fx-grid__table thead .fx-grid__frozen { z-index: 3; }
+.fx-app .fx-explorer .fx-grid__num { text-align: right; font-variant-numeric: tabular-nums; }
+.fx-app .fx-explorer .fx-grid__sort { all: unset; display: inline-flex; align-items: center; gap: 3px; cursor: pointer; border-radius: 2px; }
+.fx-app .fx-explorer .fx-grid__num .fx-grid__sort { flex-direction: row; }
+.fx-app .fx-explorer .fx-sort-mark { font-size: 9px; min-width: 9px; color: var(--fx-info, #1f6fb2); }
+/* A later key of the sort in use: a small "2nd"/"3rd" badge right after the label (explained in the Sort control's tooltip). */
+.fx-app .fx-explorer .fx-sort-then { display: inline-flex; align-items: center; height: 15px; margin-left: 4px; padding: 0 4px; border: 1px solid var(--fx-border, #b9c8d7); border-radius: 8px; background: var(--fx-surface, #fff); color: var(--fx-muted, #4b6178); font-size: 10px; font-weight: 600; line-height: 1; vertical-align: 1px; white-space: nowrap; }
+.fx-app .fx-explorer .fx-grid__sort .fx-sort-then { margin-left: 1px; }
+.fx-app .fx-explorer .fx-link { color: var(--fx-link, #0a4f8f); text-decoration: underline; font-weight: 400; }
+.fx-app .fx-explorer .fx-null { color: var(--fx-null, #5f7185); font-style: italic; }
+.fx-app .fx-explorer .fx-grid__empty { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 16px; border: 1px solid var(--fx-border-strong, #a7b9cc); background: var(--fx-surface, #fff); color: var(--fx-muted, #4b6178); }
+.fx-app .fx-explorer .fx-grid__empty > span { display: grid; flex: 1 1 220px; }
+
+/* ---- Footer: page, rows, window and filter summary (no totals) */
+.fx-app .fx-explorer .fx-gridfoot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex: none; min-height: 30px; padding: 2px 8px; border: 1px solid var(--fx-border-strong, #a7b9cc); border-top: 0; background: var(--fx-panel, #f4f7fa); font-size: var(--fx-text-sm, 12px); color: var(--fx-muted, #4b6178); }
+.fx-app .fx-explorer .fx-gridfoot__range { color: var(--fx-text-c, #1d2b38); font-variant-numeric: tabular-nums; }
+.fx-app .fx-explorer .fx-gridfoot__ctx { display: inline-flex; gap: 10px; flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.fx-app .fx-explorer .fx-gridfoot__filters { overflow: hidden; text-overflow: ellipsis; }
+.fx-app .fx-explorer .fx-gridfoot__page { display: inline-flex; gap: 6px; margin-left: auto; }
+
+/* ---- Focus */
+.fx-app .fx-explorer :is(button, a, select, input, [tabindex]):focus-visible { outline: 2px solid var(--fx-focus, #1f6fb2); outline-offset: 1px; }
+.fx-app .fx-explorer .fx-grid :is(button, a, [tabindex]):focus-visible, .fx-app .fx-explorer .fx-grid:focus-visible { outline-offset: -2px; }
+
+/* ---- Touch and narrow screens */
+@media (pointer: coarse), (max-width: 1024px) {
+  .fx-app .fx-explorer .fx-btn { height: 34px; }
+  .fx-app .fx-explorer .fx-grid__table th, .fx-app .fx-explorer .fx-grid__table td { height: 34px; }
+  .fx-app .fx-explorer .fx-chip__remove::after { inset: -8px; } /* 32px hit area */
+}
+@media (max-width: 1024px) {
+  .fx-app .fx-explorer__nav { display: none; }
+  /* The toolbar wraps onto a second row: primary tools first; Clear filters and Rows per page go together at the end. */
+  .fx-app .fx-explorer__toolbar { row-gap: 4px; }
+  .fx-app .fx-explorer__toolbar .fx-search { flex: 1 1 200px; }
+}
+@media (max-width: 620px) {
+  .fx-app .fx-explorer { min-height: auto; }
+  .fx-app .fx-explorer__toolbar .fx-search { flex: 1 1 100%; }
+  .fx-app .fx-explorer .fx-colpop { position: static; }
+  .fx-app .fx-explorer__chooser { left: 8px; right: 8px; width: auto; max-width: none; max-height: min(440px, calc(100dvh - 260px)); }
+  .fx-app .fx-explorer__toolbar .fx-toolbar__spacer, .fx-app .fx-explorer__toolbar .fx-sep { display: none; }
+  .fx-app .fx-explorer__split { padding: 8px 0; }
+  .fx-app .fx-explorer .fx-grid { overflow: visible; border: 0; background: none; min-height: 0; }
+  .fx-app .fx-explorer .fx-grid__table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+  .fx-app .fx-explorer .fx-grid__table, .fx-app .fx-explorer .fx-grid__table tbody, .fx-app .fx-explorer .fx-grid__table tr, .fx-app .fx-explorer .fx-grid__table th, .fx-app .fx-explorer .fx-grid__table td { display: block; width: 100%; }
+  .fx-app .fx-explorer .fx-grid__table tbody tr { margin-bottom: 8px; padding: 6px 10px; border: 1px solid var(--fx-border-strong, #a7b9cc); border-radius: var(--fx-radius, 3px); background: var(--fx-surface, #fff) !important; }
+  .fx-app .fx-explorer .fx-grid__table tbody tr.is-selected { background: var(--fx-selected, #c5daf0) !important; }
+  .fx-app .fx-explorer .fx-grid__table tbody :is(th, td) { position: static; height: auto; min-height: 24px; padding: 3px 0; display: flex; justify-content: space-between; gap: 12px; border: 0 !important; background: none !important; text-align: right; white-space: normal; max-width: none; overflow: visible; overflow-wrap: anywhere; }
+  .fx-app .fx-explorer .fx-grid__table tbody :is(th, td)::before { content: attr(data-label); color: var(--fx-label, #3b5068); text-align: left; flex: none; max-width: 50%; }
+  .fx-app .fx-explorer .fx-gridfoot { border: 0; padding: 4px 0; }
+  .fx-app .fx-explorer .fx-gridfoot__ctx { flex-basis: 100%; white-space: normal; flex-wrap: wrap; }
+  .fx-app .fx-explorer .fx-gridfoot__page { width: 100%; justify-content: space-between; }
+}
+@media (prefers-reduced-motion: reduce) { .fx-app .fx-explorer .fx-grid.is-busy { transition: none; } }
+@media (forced-colors: active) {
+  .fx-app .fx-explorer .fx-grid__table :is(th, td), .fx-app .fx-explorer .fx-chip--filter, .fx-app .fx-explorer .fx-btn { border-color: CanvasText; }
+  .fx-app .fx-explorer .fx-grid__table tbody tr.is-selected { outline: 2px solid Highlight; outline-offset: -2px; }
+}

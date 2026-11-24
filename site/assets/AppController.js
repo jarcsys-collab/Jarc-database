@@ -17,6 +17,10 @@ class AppController {
     window.addEventListener("jarc-board-changed", (event) => { const boardId = event.detail?.boardId; if (!boardId || !this.model.storage?.canFilterOnServer) return; (this.remoteQueue ??= []).push({ action: "board.updated", boardId: this.model.serverId(boardId), workspaceId: this.model.serverId(this.model.workspace?.id) }); this.processRemote(); });
     this.view.onRecordDrawer = (row) => this.comments?.open(row.id);
     this.command = typeof CommandCenter === "function" ? new CommandCenter(this) : null;
+    // App modules (AppModules.js): the view asks the controller which module is open and where "Back to …" goes.
+    this.view.moduleController = this; this.view.moduleExitLabel = () => this.moduleReturnLabel();
+    // Search needs JARC's data: started from a module's own link, it loads first (loadJarc), then opens as usual.
+    if (this.command) { const open = this.command.open.bind(this.command); this.command.open = (query = "") => { if (this.shellOnly) { this.loadJarc().then((ok) => { if (ok) { this.update(); open(query); } }); return; } open(query); }; }
     root.addEventListener("click", (event) => this.guard(()=>this.onClick(event)));
     root.addEventListener("input", (event) => this.onInput(event));
     root.addEventListener("change", (event) => this.guard(()=>this.onChange(event)));
@@ -31,6 +35,7 @@ class AppController {
     // Keyboard shortcuts: one registry (KeyboardShortcuts.js), its help list, and Quick search (Ctrl/⌘ + B).
     this.shortcuts = typeof KeyboardShortcuts === "function" ? new KeyboardShortcuts(this) : null; this.view.keyboard = this.shortcuts;
     this.quickSearch = typeof QuickSearch === "function" ? new QuickSearch(this) : null;
+    if (this.quickSearch) { const open = this.quickSearch.open.bind(this.quickSearch); this.quickSearch.open = (...args) => { if (this.shellOnly) { this.loadJarc().then((ok) => { if (ok) { this.update(); open(...args); } }); return; } return open(...args); }; }
     window.addEventListener("resize", () => { cancelAnimationFrame(this.fitFrame); this.fitFrame = requestAnimationFrame(() => this.view.fitBoard()); });
     this.uploads = new Map(); this.filesConfirm = null; this.filesNotice = null; this.freshFiles = new Set(); this.fileSeq = new Map();
     root.addEventListener("keyup", (event) => { if (event.target.dataset?.action === "password-input") { const warning=document.querySelector("#caps-warning"); if(warning) warning.hidden=!event.getModifierState("CapsLock"); } });
@@ -109,20 +114,20 @@ class AppController {
       }
     }
     this.loadStartedAt = new Date().toISOString(); // live updates replay anything saved while loading
-    try { await this.model.init({ prefetch: !(this.boardLinksEnabled && AppController.boardIdInPath(window.location.pathname) !== undefined) }); await this.model.loadFeatures(); }
+    // A direct app-module link (/fabric/…) for someone who may open it: the module starts on its own (session, /features and this
+    // browser's own per-person settings only). Workspaces, boards, records, people, the activity feed and live updates load
+    // when the person goes back to JARC (loadJarc). Every other address starts exactly as before.
+    const moduleLink = this.boardLinksEnabled && typeof AppModules === "function" && typeof this.model.storage.adapter.readUserState === "function" ? AppModules.forPath(window.location.pathname) : null;
+    try {
+      if (moduleLink) await this.model.loadFeatures();
+      if (moduleLink && AppModules.isVisible(moduleLink, this)) this.startShellOnly();
+      else { await this.model.init({ prefetch: !(this.boardLinksEnabled && AppController.boardIdInPath(window.location.pathname) !== undefined) }); if (!moduleLink) await this.model.loadFeatures(); }
+    }
     catch (error) {
-      if (this.entra && error?.code === StorageError.CODES.UNAUTHENTICATED) { this.showEntraGate("expired"); return; }
-      if (this.entra && error?.code === StorageError.CODES.ACCOUNT_DISABLED) { this.showEntraGate("denied"); return; }
-      if (this.entra && error?.code === StorageError.CODES.ACCOUNT_PENDING) { this.showEntraGate("pending"); return; }
+      if (this.startFailed(error)) return;
       renderStartupRecovery(this.root, error, () => this.start()); return;
     }
-    // The profile shows the Microsoft account's name and email (kept in this browser, per account).
-    if (this.entra) {
-      const accountRole = { SUPER_ADMIN: "Super Admin", ADMIN: "Admin", EDITOR: "Editor", VIEWER: "Viewer" }[this.model.permissions?.account?.role];
-      const role = accountRole && this.model.permissions?.accountManagement?.enforced ? `JARC ${accountRole}` : this.auth.isSystemAdmin ? "JARC administrator" : this.auth.sharedAccess ? "JARC employee · shared access" : "Microsoft work account";
-      if (this.model.profile.name !== this.auth.username || this.model.profile.email !== this.auth.email || this.model.profile.role !== role) this.model.updateProfile({ name: this.auth.username, email: this.auth.email, role });
-    }
-    if (this.entra && this.auth.userId) this.model.me = `user:${this.auth.userId}`;
+    this.syncEntraProfile();
     // Sidebar choices are saved per account, and the account is only known now: read them again (the first read, at startup,
     // couldn't find a signed-in person's choice, so a collapsed sidebar used to reopen after every reload).
     document.body.classList.toggle("nav-collapsed", window.jarcStorage.getPreference("navCollapsed")==="1");
@@ -132,8 +137,134 @@ class AppController {
     if (this.model.screen === "fabric" && !this.fabric?.visible) this.model.screen = "home"; // a saved Fabric screen, no longer permitted
     this.applyBoardUrl(); this.boardUrlStart = true;
     this.root.onclick = null; this.ready = true; this.update(); this.integrations?.afterStart(); this.appearance?.afterStart();
+    if (!this.shellOnly) this.startBackground();
+  }
+  // What the app keeps current in the background once JARC's data is loaded (at start-up, or after loadJarc).
+  startBackground() {
     this.loadPeople(); this.loadFeed(); this.startLive(); this.startBoardRefresh();
     if (!this.feedTimer && this.model.storage.adapter.loadActivityFeed) this.feedTimer = setInterval(() => { if (this.ready && document.visibilityState === "visible") this.loadFeed(); }, 60000);
+  }
+  // A start-up (or loadJarc) failure that ends the session shows its sign-in gate. Returns whether it did.
+  startFailed(error) {
+    if (this.entra && error?.code === StorageError.CODES.UNAUTHENTICATED) { this.showEntraGate("expired"); return true; }
+    if (this.entra && error?.code === StorageError.CODES.ACCOUNT_DISABLED) { this.showEntraGate("denied"); return true; }
+    if (this.entra && error?.code === StorageError.CODES.ACCOUNT_PENDING) { this.showEntraGate("pending"); return true; }
+    return false;
+  }
+  // The profile shows the Microsoft account's name and email (kept in this browser, per account).
+  syncEntraProfile() {
+    if (this.entra) {
+      const accountRole = { SUPER_ADMIN: "Super Admin", ADMIN: "Admin", EDITOR: "Editor", VIEWER: "Viewer" }[this.model.permissions?.account?.role];
+      const role = accountRole && this.model.permissions?.accountManagement?.enforced ? `JARC ${accountRole}` : this.auth.isSystemAdmin ? "JARC administrator" : this.auth.sharedAccess ? "JARC employee · shared access" : "Microsoft work account";
+      if (this.model.profile.name !== this.auth.username || this.model.profile.email !== this.auth.email || this.model.profile.role !== role) this.model.updateProfile({ name: this.auth.username, email: this.auth.email, role });
+    }
+    if (this.entra && this.auth.userId) this.model.me = `user:${this.auth.userId}`;
+  }
+
+  // ---- App modules (AppModules.js): a module started from its own link, without JARC's data ----------------------------
+  // Only this browser's per-person settings (appearance, profile, notifications) are read, from the device: no request. The
+  // model holds no workspaces meanwhile, so nothing of the person's per-user state is saved (BoardModel.save keeps it in
+  // memory, shellDirty); loadJarc merges what changed meanwhile (a theme picked in the header) and saves it then.
+  static SHELL_USER_FIELDS = ["settings", "profile", "notifications", "feedSeenAt"];
+  startShellOnly() {
+    let stored = {};
+    try { stored = this.model.storage.adapter.readUserState() || {}; } catch { stored = {}; }
+    const user = Object.fromEntries(AppController.SHELL_USER_FIELDS.filter((k) => stored[k] !== undefined).map((k) => [k, stored[k]]));
+    this.model.applyState({ ...user, workspaces: [] });
+    this.model.markPersisted();
+    this.model.shellOnly = true; this.model.shellDirty = false; this.shellOnly = true;
+  }
+  // JARC's own data (workspaces, board lists, the open board's records, people, feed, live updates), loaded once when the person
+  // leaves the module or uses something that needs it (Command Center, Quick search, Settings, a board link). Resolves when done.
+  loadJarc({ prefetch = true } = {}) {
+    if (!this.shellOnly) return Promise.resolve(true);
+    if (this.jarcLoading) return this.jarcLoading;
+    this.root.querySelector(".app-shell")?.setAttribute("aria-busy", "true");
+    this.jarcLoading = (async () => {
+      const m = this.model, screen = m.screen;
+      this.loadStartedAt = new Date().toISOString(); // live updates replay anything saved while loading
+      // Still shell-only while loading: a save meanwhile (a theme picked, preferences arriving) stays in memory instead of
+      // writing this model's empty workspace list over the stored per-user state.
+      try { await m.init({ prefetch }); }
+      catch (error) {
+        this.jarcLoading = null; this.root.querySelector(".app-shell")?.removeAttribute("aria-busy");
+        // Back on the module's screen if its page is still shown, so later updates don't retry and toast again.
+        const mod = typeof AppModules === "function" ? AppModules.forPath?.(window.location.pathname) : null;
+        if (mod) m.screen = mod.screen;
+        if (!this.startFailed(error)) this.view.toast(StorageError.describe?.(error)?.message || "JARC couldn't load your workspaces. Try again in a moment.");
+        return false;
+      }
+      const dirty = m.shellDirty, keep = m.shellKeep;
+      m.shellOnly = false;
+      if (dirty && keep) Object.assign(m, keep);
+      m.screen = screen; this.shellOnly = false; m.shellDirty = false; m.shellKeep = null; this.jarcLoading = null;
+      this.syncEntraProfile();
+      if (dirty) m.save({ op: "updateUserState" });
+      this.startBackground();
+      if (this.imports?.trackerOn) this.imports.refreshTracker?.(true); // the workspaces are known now: their imports too
+      return true;
+    })();
+    return this.jarcLoading;
+  }
+  // Actions that work while JARC's data isn't loaded yet; anything else loads it first (then runs as usual).
+  static SHELL_ACTIONS = new Set(["toggle-nav","collapse-nav","close-overlay","notifications","notification-filter","mark-notifications","profile-menu","theme","shortcuts","request-logout","confirm-logout","lock-session","retry-save","dismiss-hint","entra-sign-in","entra-sign-out"]);
+  shellAction(action, target) {
+    if (action.startsWith("fabric-") || AppController.SHELL_ACTIONS.has(action)) return true;
+    return action === "nav" && Boolean(AppModules.forScreen(target.dataset.screen));
+  }
+
+  // ---- App modules: entering and leaving. On entry from JARC, where the person was (screen, workspace, board, saved view) is
+  // remembered in memory and in this tab's sessionStorage (IDs only; it survives a refresh, never another tab or person). "Back
+  // to …" returns there; a board deleted meanwhile, or no snapshot (a direct link), falls back to the current board, then Home.
+  static MODULE_RETURN_KEY = "jarc-module-return";
+  get inModule() { return typeof AppModules === "function" && Boolean(AppModules.active(this)); }
+  enterModule(id) {
+    const mod = AppModules.byId(id);
+    if (!mod || !AppModules.isVisible(mod, this)) return false;
+    if (!AppModules.forScreen(this.model.screen)) this.rememberReturn();
+    if (this.model.screen !== mod.screen || this.model.boardLinkProblem) this.model.openScreen(mod.screen);
+    return true;
+  }
+  rememberReturn() {
+    const m = this.model;
+    if (this.shellOnly) return;
+    const snap = { screen: m.boardLinkProblem ? "home" : m.screen, workspaceId: m.currentWorkspaceId ?? null, boardId: m.screen === "board" ? (m.currentBoardId ?? null) : null, savedViewId: m.screen === "board" ? (m.activeSavedViewId ?? null) : null };
+    this.moduleReturn = snap; this.returnCleared = false;
+    try { window.sessionStorage?.setItem(AppController.MODULE_RETURN_KEY, JSON.stringify({ screen: snap.screen, workspaceId: this.model.serverId?.(snap.workspaceId) ?? snap.workspaceId, boardId: snap.boardId === null ? null : (this.model.serverId?.(snap.boardId) ?? snap.boardId), savedViewId: snap.savedViewId === null ? null : (this.model.serverId?.(snap.savedViewId) ?? snap.savedViewId) })); } catch { /* storage blocked: memory only */ }
+  }
+  storedReturn() {
+    try {
+      const v = JSON.parse(window.sessionStorage?.getItem(AppController.MODULE_RETURN_KEY) || "null");
+      return v && typeof v === "object" && typeof v.screen === "string" ? v : null;
+    } catch { return null; }
+  }
+  clearModuleReturn() { this.moduleReturn = null; this.returnCleared = true; try { window.sessionStorage?.removeItem(AppController.MODULE_RETURN_KEY); } catch { /* blocked */ } }
+  // Where "Back to …" goes: { screen: "board", workspace, board, savedViewId } or { screen }. Board IDs compare as server IDs.
+  moduleReturnTarget() {
+    const m = this.model, snap = this.moduleReturn || this.storedReturn();
+    const find = (id) => { if (id === null || id === undefined || id === "") return null; const key = String(m.serverId?.(id) ?? id); for (const w of m.workspaces || []) for (const b of w.boards || []) if (!b.archived && (String(b.id) === String(id) || String(m.serverId?.(b.id) ?? b.id) === key)) return { workspace: w, board: b }; return null; };
+    if (snap && snap.screen !== "board") return { screen: AppController.HISTORY_SCREENS.has(snap.screen) || snap.screen === "system-health" ? snap.screen : "home" };
+    const hit = find(snap?.boardId) || (snap ? null : find(m.currentBoardId));
+    if (hit) return { screen: "board", ...hit, savedViewId: snap?.savedViewId ?? null };
+    return { screen: "home" };
+  }
+  moduleReturnLabel() {
+    if (this.shellOnly) return "Back to JARC";
+    const t = this.moduleReturnTarget();
+    return t.screen === "board" ? `Back to ${t.board.name}` : "Back to JARC";
+  }
+  exitModule() {
+    if (this.shellOnly) { this.loadJarc({ prefetch: false }).then((ok) => { if (ok) { this.exitModule(); this.update(); } }); return; }
+    const m = this.model, t = this.moduleReturnTarget();
+    this.clearModuleReturn();
+    if (t.screen !== "board") { m.openScreen(t.screen); return; }
+    // The board's view stays as it was (still in memory): no openBoard, which would reset it to Main Table.
+    m.currentWorkspaceId = t.workspace.id; m.currentBoardId = t.board.id; m.openScreen("board");
+    m.ensureBoardRecords?.(t.board.id);
+    if (t.savedViewId !== null && t.savedViewId !== undefined && String(m.serverId?.(m.activeSavedViewId) ?? m.activeSavedViewId) !== String(t.savedViewId)) {
+      const v = (t.board.savedViews || []).find((x) => String(x.id) === String(t.savedViewId) || String(m.serverId?.(x.id) ?? x.id) === String(t.savedViewId));
+      if (v) m.applyView(v.id);
+    }
   }
   // ---- Live updates (resource mode): other people's saved changes appear without a reload --------------------------
   startLive() {
@@ -358,6 +489,11 @@ class AppController {
     if (this.model.screen === "board" && this.model.board && this.model.activeSavedViewId !== null && this.model.activeSavedViewId !== undefined && !this.model.activeView) this.model.openMainTable();
     if (this.entra && (this.entraGate || !this.auth.authenticated)) { this.navOpen = false; this.applyNav(); this.view.renderEntraGate(this.entraGate || "signed-out", this.model); return; }
     if (!this.auth.authenticated) this.navOpen = false; // sign-in screens have no drawer
+    // Started at a module's own link: a JARC screen (from any path: a shortcut, Back, a button) waits for JARC's data first.
+    if (this.shellOnly && this.jarcLoading) return; // whatever asked for JARC's data draws once it's there
+    if (this.shellOnly && this.ready && typeof AppModules === "function" && !AppModules.active(this)) { this.loadJarc().then((ok) => { if (ok) this.update(); }); return; }
+    // Left the module some other way (a board from search, a sidebar screen): the way back is no longer needed.
+    if ((this.moduleReturn || !this.returnCleared) && this.ready && !this.shellOnly && typeof AppModules === "function" && !AppModules.forScreen(this.model.screen)) this.clearModuleReturn();
     const focus = this.focusedControl(), scroll = this.scrollState();
     this.auth.authenticated ? this.view.render(this.model) : this.view.renderLogin(this.auth,this.model); this.applyNav(); this.saveFeedback();
     // A different screen or board starts at the top; re-renders of the same one keep their scroll position.
@@ -394,9 +530,16 @@ class AppController {
     if (!this.boardLinksEnabled) return false;
     const id = AppController.boardIdInPath(window.location.pathname), model = this.model;
     if (id === undefined) {
-      // Fabric Data paths (/fabric/…): only for its readers; anyone else gets the usual screen (and the address becomes /).
-      const fabric = this.fabric && typeof FabricDataPanel === "function" ? FabricDataPanel.parsePath(window.location.pathname, window.location.search) : undefined;
-      if (fabric !== undefined && this.fabric.visible) { const changed = this.fabric.applyRoute(fabric); if (model.screen !== "fabric" || model.boardLinkProblem) { model.openScreen("fabric"); return true; } return changed; }
+      // App module paths (/fabric/… for Fabric Data): only for the people who may open the module; anyone else gets the usual
+      // screen (and the address becomes /). Arriving from a JARC screen (Back/Forward) remembers the way back.
+      const modules = typeof AppModules === "function" ? AppModules.all() : (this.fabric && typeof FabricDataPanel === "function" ? [{ id: "fabric", screen: "fabric", visible: (c) => Boolean(c.fabric?.visible), parsePath: (p, s) => FabricDataPanel.parsePath(p, s), applyRoute: (c, r) => c.fabric.applyRoute(r) }] : []);
+      for (const mod of modules) {
+        let route; try { route = mod.parsePath(window.location.pathname, window.location.search); } catch { route = undefined; }
+        if (route === undefined || !mod.visible(this)) continue;
+        const changed = Boolean(mod.applyRoute(this, route));
+        if (model.screen !== mod.screen || model.boardLinkProblem) { if (this.ready && !this.shellOnly && typeof AppModules === "function" && !AppModules.forScreen(model.screen)) this.rememberReturn?.(); model.openScreen(mod.screen); return true; }
+        return changed;
+      }
       if (screen === null) return false; // startup at /: the usual start screen
       const target = AppController.HISTORY_SCREENS.has(screen) ? screen : "home";
       if (model.screen === target && !model.boardLinkProblem) return false;
@@ -428,6 +571,8 @@ class AppController {
   // Back/Forward. A fragment link (#main) also fires popstate; then the address still matches the screen and nothing happens.
   onBoardHistory(event) {
     if (!this.ready || !this.boardLinksEnabled || !this.signedIn) return;
+    // Back/Forward to a JARC address while only the module is loaded: JARC's data first.
+    if (this.shellOnly && typeof AppModules === "function" && !AppModules.forPath(window.location.pathname)) { this.loadJarc().then((ok) => { if (ok) { this.applyBoardUrl({ screen: event.state?.jarcScreen || "home" }); this.view.closeOverlay(); this.update(); } }); return; }
     if (!this.applyBoardUrl({ screen: event.state?.jarcScreen || "home" })) return;
     this.view.closeOverlay(); this.update();
   }
@@ -438,7 +583,8 @@ class AppController {
     if (!this.ready || !this.boardLinksEnabled || !this.signedIn || this.model.boardLinkProblem) return;
     const model = this.model, start = this.boardUrlStart; this.boardUrlStart = false;
     let wanted = "/", fabricSearch = null;
-    if (model.screen === "fabric" && this.fabric?.visible) { const u = this.fabric.urlFor(); wanted = u.path; fabricSearch = u.search; }
+    const mod = typeof AppModules === "function" ? AppModules.active(this) : (model.screen === "fabric" && this.fabric?.visible ? { urlFor: (c) => c.fabric.urlFor() } : null);
+    if (mod) { const u = mod.urlFor(this); wanted = u.path; fabricSearch = u.search; }
     else if (model.screen === "board" && model.board) { const link = this.boardLinkFor(model.board); if (!link) return; wanted = new URL(link).pathname; }
     // ?view= follows the open saved view (a view not saved yet has no server ID: the address names the board only).
     const params = new URLSearchParams(this.fabric && FabricDataPanel.parsePath(window.location.pathname) !== undefined ? "" : window.location.search), viewId = model.screen === "board" && model.activeView ? model.serverId(model.activeView.id) : "";
@@ -459,7 +605,7 @@ class AppController {
   get signedIn() { return Boolean(this.auth.authenticated) && !this.entraGate; }
   // A gate means the person's session ended: search results, recents and filters of the Command Center are dropped
   // before the gate shows, so the next person at this computer can't open them.
-  showEntraGate(state, options = {}) { this.entraGate = state; this.command?.reset(); this.fabric?.forget(); this.navOpen = false; this.applyNav(); this.view.renderEntraGate(state, this.model, options); }
+  showEntraGate(state, options = {}) { this.entraGate = state; this.command?.reset(); this.fabric?.forget(); this.clearModuleReturn?.(); this.navOpen = false; this.applyNav(); this.view.renderEntraGate(state, this.model, options); }
   entraSignIn() {
     this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true });
     this.entra.signIn().catch(() => this.showEntraGate("error", { message: "Microsoft sign-in couldn't start. Check your connection, then try again." }));
@@ -493,7 +639,7 @@ class AppController {
   setupNavDrawer() {
     this.navOpen = false; this.tapping = false;
     this.drawerMedia = window.matchMedia ? window.matchMedia(AppController.DRAWER_QUERY) : null;
-    this.drawerMedia?.addEventListener?.("change", () => { if (!this.drawerMedia.matches) this.setNav(false, { restoreFocus: false }); });
+    this.drawerMedia?.addEventListener?.("change", () => { if (!this.drawerMedia.matches && !this.inModule) this.setNav(false, { restoreFocus: false }); });
     let release = null;
     const endTap = (delay) => { clearTimeout(release); release = setTimeout(() => { this.tapping = false; this.flushRefresh(); }, delay); };
     document.addEventListener("pointerdown", () => { clearTimeout(release); this.tapping = true; }, true);
@@ -504,7 +650,8 @@ class AppController {
     this.root.addEventListener("click", (event) => { if (this.navOpen && !event.target.closest('#sidebar,[data-action="toggle-nav"]')) this.setNav(false); });
   }
   setNav(open, { restoreFocus = true } = {}) {
-    open = Boolean(open) && Boolean(this.drawerMedia ? this.drawerMedia.matches : true);
+    // An app module shows primary navigation as a drawer on every width (it has no sidebar column).
+    open = Boolean(open) && Boolean((this.drawerMedia ? this.drawerMedia.matches : true) || this.inModule);
     const changed = open !== this.navOpen;
     this.navOpen = open; this.applyNav();
     if (!changed) return;
@@ -523,8 +670,13 @@ class AppController {
     if (toggle) { toggle.setAttribute("aria-expanded", String(open)); toggle.setAttribute("aria-label", open ? "Close navigation" : "Open navigation"); }
   }
   // Scroll positions (page and the records table) survive a re-render.
-  scrollState() { const wrap = this.root.querySelector(".table-wrap"); return { x: window.scrollX, y: window.scrollY, left: wrap?.scrollLeft || 0, top: wrap?.scrollTop || 0 }; }
-  restoreScroll(s) { if (!s) return; const wrap = this.root.querySelector(".table-wrap"); if (wrap) { wrap.scrollLeft = s.left; wrap.scrollTop = s.top; } if (window.scrollX !== s.x || window.scrollY !== s.y) window.scrollTo(s.x, s.y); }
+  // App modules scroll inside their own regions ([data-module-scroll], by its data-focus-key or position), never the page.
+  scrollState() { const wrap = this.root.querySelector(".table-wrap"), inner = [...(this.root.querySelectorAll?.("[data-module-scroll]") || [])].map((el, i) => [el.dataset.focusKey || el.id || String(i), el.scrollLeft, el.scrollTop]); return { x: window.scrollX, y: window.scrollY, left: wrap?.scrollLeft || 0, top: wrap?.scrollTop || 0, inner }; }
+  restoreScroll(s) {
+    if (!s) return; const wrap = this.root.querySelector(".table-wrap"); if (wrap) { wrap.scrollLeft = s.left; wrap.scrollTop = s.top; }
+    if (s.inner?.length) { const els = [...this.root.querySelectorAll("[data-module-scroll]")]; for (const [key, left, top] of s.inner) { const el = els.find((e, i) => (e.dataset.focusKey || e.id || String(i)) === key); if (el) { el.scrollLeft = left; el.scrollTop = top; } } }
+    if (window.scrollX !== s.x || window.scrollY !== s.y) window.scrollTo(s.x, s.y);
+  }
   // The focused button, described so the same control can be focused again after a re-render.
   focusedControl() {
     const active = document.activeElement;
@@ -541,7 +693,7 @@ class AppController {
   // With no workspaces (a new shared database) the full layout is shown, but most actions need a workspace. These work
   // without one; anything else opens "Create workspace" instead of acting on a workspace that doesn't exist.
   static READ_ONLY_BLOCKED = new Set(["add-column","add-group-column","add-group-form","cell-open","set-cell-option","inline-add","open-form","new-item","import","choose-import-file","duplicate-record","duplicate-column","delete","archive-item","pin-item","rename-column","edit-column-options","column-editor","edit-description","manage-groups","request-delete-column","request-delete-group","move-record-board","move-column","edit","files-input","request-remove-file","board-title-inline"]);
-  static NO_WORKSPACE_ACTIONS = new Set(["create-workspace","close-overlay","nav","toggle-nav","collapse-nav","toggle-workspace-section","command-palette","run-command","retry-save","dismiss-hint","notifications","notification-filter","mark-notifications","profile-menu","profile-settings","developer","choose-avatar","remove-avatar","settings","settings-section","setting","theme","shortcuts","request-logout","confirm-logout","lock-session"]);
+  static NO_WORKSPACE_ACTIONS = new Set(["create-workspace","close-overlay","nav","module-exit","toggle-nav","collapse-nav","toggle-workspace-section","command-palette","run-command","retry-save","dismiss-hint","notifications","notification-filter","mark-notifications","profile-menu","profile-settings","developer","choose-avatar","remove-avatar","settings","settings-section","setting","theme","shortcuts","request-logout","confirm-logout","lock-session"]);
   static NO_WORKSPACE_COMMANDS = new Set(["home","mywork","theme","settings","appearance","notifications","shortcuts"]);
   needsWorkspace(allowed) {
     if (this.model.workspaces.length || allowed) return false;
@@ -553,9 +705,11 @@ class AppController {
     if((event.ctrlKey||event.metaKey)&&!event.altKey&&this.signedIn&&this.model.screen==="board"){const th=event.target.closest?.(".editable-table thead th[data-column-key]");if(th&&!event.target.closest("input,select,textarea,.column-resizer")){event.preventDefault();this.addSortColumn(th.dataset.columnKey);return;}}
     const target = event.target.closest("[data-action]"); if (!target) return;
     const action = target.dataset.action;
+    // Started at a module's own link: anything that needs JARC's data loads it first, then runs as usual.
+    if (this.shellOnly && this.signedIn && !this.shellAction(action, target)) { this.loadJarc({ prefetch: action !== "module-exit" }).then((ok) => { if (ok) this.guard(() => this.onClick(event)); }); return; }
     if (action === "quick-search-open") { this.quickSearch?.openAt(Number(target.dataset.index)); return; }
     if (action === "entra-sign-in" && this.entra) { this.entraSignIn(); return; }
-    if (action === "entra-sign-out" && this.entra) { this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true, signingOut: true }); this.entra.signOut(); return; }
+    if (action === "entra-sign-out" && this.entra) { this.clearModuleReturn(); this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true, signingOut: true }); this.entra.signOut(); return; }
     if (window.jarcStorage?.connection === "offline" && ["cell-open","set-cell-option","inline-add","open-form","new-item","new-board","add-column","create-workspace","import"].includes(action)) { this.view.toast(StorageError.describe(StorageError.CODES.OFFLINE).message); return; }
     if (action.startsWith("integration-") && this.integrations) { if (target.tagName !== "SELECT") this.integrations.onAction(action, target); return; }
     if (action.startsWith("health-") && this.health) { if (target.tagName !== "FORM") this.health.onAction(action, target); return; }
@@ -575,7 +729,7 @@ class AppController {
     if(action==="login-theme-choice"){this.model.updateSetting("theme",target.dataset.theme);this.view.applyDisplay(this.model);this.root.querySelectorAll('[data-action="login-theme-choice"]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.theme===target.dataset.theme)));return;}
     this.lastTrigger=target;
     // On a desktop the menu button only shows while the sidebar is collapsed (there is no icon rail): it brings the sidebar back.
-    if(action==="toggle-nav"&&!(this.drawerMedia?this.drawerMedia.matches:true)){if(document.body.classList.contains("nav-collapsed")){this.toggleSidebar();this.root.querySelector('#sidebar [data-action="collapse-nav"]')?.focus({preventScroll:true});}return;}
+    if(action==="toggle-nav"&&!(this.drawerMedia?this.drawerMedia.matches:true)&&!this.inModule){if(document.body.classList.contains("nav-collapsed")){this.toggleSidebar();this.root.querySelector('#sidebar [data-action="collapse-nav"]')?.focus({preventScroll:true});}return;}
     if(action==="toggle-nav"){this.setNav(!this.navOpen);return;}
     // Choosing anything in the drawer (a screen, board, workspace, settings…) closes it first.
     if(this.navOpen&&target.closest("#sidebar")&&action!=="toggle-workspace-section")this.setNav(false,{restoreFocus:false});
@@ -610,7 +764,8 @@ class AppController {
     if(action==="adjacent-record"){const list=this.model.visibleRows;const index=list.findIndex(r=>r.id===this.model.idOf(target.dataset.id));const row=list[(index+Number(target.dataset.direction)+list.length)%list.length];if(row)this.view.showRecordForm(this.model,row);return;}
     if(["rename-board","duplicate-board","delete-board","archive-board","move-board","favorite-board","open-board"].includes(action)&&this.boardMenuWorkspace){this.model.currentWorkspaceId=this.boardMenuWorkspace;this.boardMenuWorkspace=null;}
     if (action === "toggle-password") { const input=document.querySelector('[name="password"]'); const showing=input.type === "text"; input.type=showing?"password":"text"; target.textContent=showing?"Show":"Hide"; target.setAttribute("aria-label",showing?"Show password":"Hide password"); target.setAttribute("aria-pressed",String(!showing));input.focus(); }
-    if (action === "nav") { this.model.openScreen(target.dataset.screen); this.update(); }
+    if (action === "nav") { const mod = typeof AppModules === "function" ? AppModules.forScreen(target.dataset.screen) : null; if (mod) this.enterModule(mod.id); else this.model.openScreen(target.dataset.screen); this.update(); }
+    if (action === "module-exit") { this.view.closeOverlay(); this.exitModule(); this.update(); return; }
     if (action === "open-board") { this.view.closeOverlay();this.model.openBoard(target.dataset.id); this.update(); }
     if (action === "open-record-board") { this.model.openBoard(target.dataset.board,target.dataset.workspace); this.update(); }
     if (action === "collapse-nav") { document.body.classList.toggle("nav-collapsed"); window.jarcStorage.setPreference("navCollapsed",document.body.classList.contains("nav-collapsed")?"1":"0"); if(document.body.classList.contains("nav-collapsed"))this.root.querySelector('.topbar [data-action="toggle-nav"]')?.focus({preventScroll:true}); }
@@ -770,10 +925,10 @@ class AppController {
     if (action === "theme") { this.model.updateSetting("theme",target.dataset.theme); this.model.updateSetting("palette","default"); this.appearance?.save(); this.view.applyDisplay(this.model); this.view.showSettings(this.model); this.markPanel("settings"); }
     if (action === "invite") this.view.showInvite();
     if (action === "profile-menu") this.togglePanel("profile",()=>this.view.showProfileMenu(this.model,this.auth));
-    if (action === "lock-session") { this.command?.reset(); this.auth.lock(); this.update(); }
+    if (action === "lock-session") { this.command?.reset(); this.clearModuleReturn(); this.auth.lock(); this.update(); }
     if (action === "request-logout") this.view.showConfirm("Sign out of Jarc?",this.entra?"The copies of boards saved in this browser for faster opening are deleted when you sign out.":"Your local board data will remain on this browser.","confirm-logout");
     if (action === "retry-board-refresh") { const id=this.model.board?.id; if(id)this.revalidateBoard(id,{copy:true}); this.update(); return; }
-    if (action === "confirm-logout") { this.command?.reset(); this.auth.logout(); this.update(); }
+    if (action === "confirm-logout") { this.command?.reset(); this.clearModuleReturn(); this.auth.logout(); this.update(); }
     if (action === "profile-settings") this.view.showProfileSettings(this.model);
     if (action === "choose-avatar") document.querySelector("#avatar-file").click();
     if (action === "remove-avatar") { this.model.setAvatar(""); this.view.showProfileSettings(this.model); }
@@ -808,7 +963,7 @@ class AppController {
     if (event.target.dataset?.action === "comment-input") { this.comments?.onInput(event.target); return; }
     if (event.target.dataset?.action === "acct-search") { this.accounts?.onSearch(event.target); return; }
     if (event.target.dataset?.action?.startsWith("apitok-")) { this.apiTokens?.onInput(event.target); return; }
-    if (event.target.dataset?.action?.startsWith("fabric-")) { this.fabric?.onInput(event.target); return; }
+    if (event.target.dataset?.action?.startsWith("fabric-")) { this.fabric?.onInput(event.target, event); return; }
     if (event.target.dataset.action === "files-filter") { const term=event.target.value.trim().toLowerCase(), panel=event.target.closest(".files-popover"); let shown=0; panel?.querySelectorAll(".file-list > li:not([data-upload])").forEach((li)=>{const hit=!term||li.textContent.toLowerCase().includes(term);li.hidden=!hit;if(hit)shown+=1;}); const empty=panel?.querySelector(".file-filter-empty"); if(empty)empty.hidden=shown>0; return; }
     if (event.target.dataset.action === "cell-option-search") { this.view.filterOptions(event.target.closest(".cell-options-popover"),event.target.value); return; }
     if (event.target.dataset.action === "workspace-search") { const term=event.target.value.toLowerCase(); document.querySelectorAll(".workspace-list > button").forEach((button)=>{button.hidden=!button.textContent.toLowerCase().includes(term);}); return; }

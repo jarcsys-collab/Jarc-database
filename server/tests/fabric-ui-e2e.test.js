@@ -39,8 +39,10 @@ function salesRows() {
 
 // Records page script: console errors, uncaught errors and every /api/v1/fabric request (URL, status, and for record lists the
 // window and row count the server answered).
+// window.__all: every /api/ request the page makes (fetch and XHR), to check what a direct /fabric link loads.
 const PROBE = `(() => {
-  window.__errors = []; window.__calls = [];
+  window.__errors = []; window.__calls = []; window.__all = [];
+  const ox = XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open = function (m, u) { window.__all.push(String(u).replace(/^https?:\\/\\/[^/]+/, "")); return ox.apply(this, arguments); };
   const oe = console.error.bind(console);
   console.error = (...a) => { window.__errors.push(a.map((x) => (x && x.stack) || String(x)).join(" ")); oe(...a); };
   addEventListener("error", (e) => window.__errors.push("uncaught: " + (e.message || e.type)));
@@ -50,9 +52,10 @@ const PROBE = `(() => {
     let url = typeof input === "string" ? input : input.url;
     // window.__staleCursor: the next cursor sent is one this server never signed (what a restart or deploy leaves behind).
     if (window.__staleCursor && /[?&]cursor=/.test(url)) { window.__staleCursor = false; url = url.replace(/([?&]cursor=)[^&]*/, "$1eyJiIjoic3RhbGUiLCJ2IjpbXX0"); input = url; }
+    if (url.includes("/api/")) window.__all.push(url.replace(/^https?:\\/\\/[^/]+/, ""));
     const res = await of(input, init);
     if (url.includes("/api/v1/fabric")) {
-      const entry = { url: url.replace(/^https?:\\/\\/[^/]+/, ""), status: res.status };
+      const entry = { url: url.replace(/^https?:\\/\\/[^/]+/, ""), status: res.status, method: String((init && init.method) || "GET").toUpperCase() };
       window.__calls.push(entry);
       if (/\\/records(\\?|$)/.test(url)) res.clone().json().then((j) => { entry.window = j.window; entry.count = Array.isArray(j.items) ? j.items.length : null; entry.hasMore = j.pagination && j.pagination.hasMore; }).catch(() => {});
     }
@@ -106,7 +109,20 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
   const setValue = (sel, value, event = "change") => b.evaluate(`(() => { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) return false; if (el.type === "checkbox") el.checked = ${JSON.stringify(Boolean(value))}; else el.value = ${JSON.stringify(String(value))}; el.dispatchEvent(new Event(${JSON.stringify(event)}, { bubbles: true })); return true; })()`);
   const calls = () => json("window.__calls || []");
   const lastRecords = async (ds) => (await calls()).filter((c) => c.url.startsWith(`/api/v1/fabric/${ds}/records?`)).at(-1);
-  const headers = () => json(`[...document.querySelectorAll(".fabric-explorer-table thead th")].map((th) => th.querySelector(".fabric-sort") ? th.querySelector(".fabric-sort").childNodes[0].textContent.trim() : th.textContent.replace(/\\s*S$/, "").trim())`);
+  // Headers show friendly labels; each header's title starts with the field name it stands for ("Posting_Date · date …").
+  const headers = () => json(`[...document.querySelectorAll(".fabric-explorer-table thead th")].map((th) => (th.getAttribute("title") || "").split(" ")[0])`);
+  const th = (field) => `[...document.querySelectorAll(".fabric-explorer-table thead th")].find((h) => (h.getAttribute("title") || "").split(" ")[0] === ${JSON.stringify(field)})`;
+  // A row's cell for a field, by its header's position (cells carry only the friendly label, for the phone card).
+  const cell = (tr, field) => `${tr}.children[[...document.querySelectorAll(".fabric-explorer-table thead th")].findIndex((h) => (h.getAttribute("title") || "").split(" ")[0] === ${JSON.stringify(field)})]`;
+  // What a header says about the sort: aria-sort, the primary arrow, the "then" marker of a later key.
+  const sortState = (field) => json(`(() => { const h = ${th(field)}; return h ? { aria: h.getAttribute("aria-sort"), mark: h.querySelector(".fx-sort-mark")?.textContent || "", then: h.querySelector(".fx-sort-then")?.textContent || "", button: h.querySelector('[data-action="fabric-x-sort"]')?.dataset.sort || null } : null; })()`);
+  const jarcCalls = async () => (await json("window.__all || []")).filter((u) => /^\/api\/v1\/(workspaces|boards)\b/.test(u));
+  const api = (method, url, body) => b.evaluate(`(async () => { const { csrfToken } = await (await fetch("/api/v1/auth/session")).json(); const r = await fetch(${JSON.stringify(url)}, { method: ${JSON.stringify(method)}, headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: ${JSON.stringify(JSON.stringify(body))} }); return JSON.stringify(await r.json()); })()`).then(JSON.parse);
+  // Nothing in the Fabric module creates, edits, deletes, imports or exports data.
+  const noWriteControls = async (label) => {
+    const found = await json(`[...document.querySelectorAll(".fx-app [data-action], .fx-app button, .fx-app a, .fx-app [contenteditable]")].filter((el) => /export|download|create|edit|delete|import|archive|save|upload/i.test(el.dataset.action || "") || /^(export|download|new record|add|edit|delete|import|save)\\b/i.test((el.textContent || "").trim()) || el.isContentEditable).map((el) => (el.dataset.action || el.tagName) + ":" + (el.textContent || "").trim().slice(0, 30))`);
+    assert.deepEqual(found, [], `${label}: no create/edit/export controls`);
+  };
   const rowCount = () => b.evaluate(`document.querySelectorAll(".fabric-explorer-table tbody tr").length`);
   const noErrors = async (label) => { const errors = await json("window.__errors || []"); assert.deepEqual(errors, [], `${label}: console errors`); };
   let current = null;
@@ -153,8 +169,32 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
   test("2. Inventory: default columns and rows, search, filter, sort, next page, Refresh, column chooser, record page", async () => {
     await signIn(people.reader);
     await openInventoryList();
+    // A direct /fabric/inventory load: the module layout (no workspace tree, "Back to JARC"), and none of JARC's data.
+    assert.equal(await b.evaluate("document.querySelector('.app-shell').dataset.layout"), "module");
+    assert.equal(await has(".nav-tree"), false, "no workspace tree");
+    assert.match(await text(".module-exit"), /Back to JARC/);
+    assert.deepEqual(await jarcCalls(), [], "no /workspaces or /boards request");
+    assert.equal(await text(".fx-appbar__title"), "Fabric Data");
+    assert.equal(await b.evaluate(`document.querySelector("#fabric-tab-inventory").getAttribute("aria-selected")`), "true");
+    // The page itself doesn't scroll; the grid does.
+    const box = await json(`(() => { const g = document.querySelector('[data-grid="inventory"]'); g.scrollTop = 600; return { page: document.scrollingElement.scrollHeight, view: innerHeight, scrollY, gridScroll: g.scrollHeight > g.clientHeight, gridTop: g.scrollTop }; })()`);
+    assert.ok(box.page <= box.view + 1, `the page doesn't scroll: ${JSON.stringify(box)}`);
+    assert.ok(box.gridScroll && box.gridTop > 0 && box.scrollY === 0, `the grid scrolls: ${JSON.stringify(box)}`);
+    // The small-collection index advice shows once, compact, under the app bar, never a second time in the list.
+    assert.equal((await b.evaluate("document.body.innerText")).split("small enough to browse without").length - 1, 1, "the index advice appears once");
+    assert.match(await text("#fabric-status"), /small enough to browse without/);
+    assert.equal(await has("#fabric-root .fabric-banner"), false, "no duplicate banner in the explorer");
+    assert.equal(await b.evaluate(`document.querySelector("#fabric-status .fx-status__details").hidden`), true, "details collapsed");
+    await noWriteControls("inventory list");
     assert.deepEqual(await headers(), INV_DEFAULTS, "the schema's default columns, in order");
     assert.equal(await rowCount(), 100, "a page of 100 (default limit)");
+    assert.equal(await b.evaluate(`document.querySelector(".fabric-explorer-table tbody tr").firstElementChild.tagName`), "TH", "the first column is the row header");
+    // The default sort (date: Posting_Date, then Company, then Entry_No): the arrow and aria-sort on the primary key only, a
+    // small "2nd"/"3rd" badge on the later keys. Company has no sort of its own.
+    assert.deepEqual(await sortState("Posting_Date"), { aria: "descending", mark: "▼", then: "", button: "date" });
+    assert.deepEqual(await sortState("Company"), { aria: null, mark: "", then: "2nd", button: null });
+    assert.deepEqual(await sortState("Entry_No"), { aria: null, mark: "", then: "3rd", button: "entryNo" });
+    assert.equal(await b.evaluate(`document.querySelectorAll(".fabric-explorer-table thead th[aria-sort]").length`), 1);
     let last = await lastRecords("inventory");
     assert.equal(new URLSearchParams(last.url.split("?")[1]).get("fields"), INV_DEFAULTS.join(","));
     assert.match(ascii(await text(".fabric-window")), /Showing all dates/, "small mode: no window");
@@ -190,13 +230,27 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     await click('[data-action="fabric-x-clear"][data-focus-key="clear-top"]');
     assert.ok(await wait("document.querySelectorAll('.fabric-explorer-table tbody tr').length === 100"));
 
-    // A filter from the schema (entryType).
+    // A filter from the schema (entryType). The filter bar is collapsed by default (no chips); Filters opens it.
+    assert.equal(await b.evaluate(`document.querySelector("#fabric-inventory-filters").hidden`), true, "filter bar collapsed by default");
+    assert.ok(await has(".fx-filterbar.is-collapsed"));
+    assert.equal(await has(".fx-chip--filter"), false, "no chips without a filter");
+    assert.equal(await b.evaluate(`document.querySelector('[data-action="fabric-x-filters"]').getAttribute("aria-expanded")`), "false");
+    await click('[data-action="fabric-x-filters"]');
+    assert.ok(await wait(`document.querySelector("#fabric-inventory-filters")?.hidden === false`), "Filters opens the bar");
     assert.ok(await has("#fabric-inventory-f-entryType"), "entryType filter rendered");
     await setValue("#fabric-inventory-f-entryType", "Sale");
     assert.ok(await wait(`(window.__calls || []).some((c) => c.url.includes("entryType=Sale"))`));
-    assert.ok(await wait(`(() => { const rows = [...document.querySelectorAll(".fabric-explorer-table tbody tr")]; return rows.length > 0 && rows.every((tr) => tr.querySelector('td[data-label="Entry_Type"]').textContent === "Sale"); })()`), "only Sale rows");
-    await click('[data-action="fabric-x-clear"][data-focus-key="clear-top"]');
-    assert.ok(await wait("document.querySelectorAll('.fabric-explorer-table tbody tr').length === 100"));
+    assert.ok(await wait(`(() => { const rows = [...document.querySelectorAll(".fabric-explorer-table tbody tr")]; return rows.length > 0 && rows.every((tr) => ${cell("tr", "Entry_Type")}.textContent === "Sale"); })()`), "only Sale rows");
+    // A chip for the active filter, kept when the bar is closed again; the Filters button counts it.
+    assert.ok(await wait(`[...document.querySelectorAll(".fx-chip--filter")].some((c) => /Sale/.test(c.textContent))`), "a chip for the filter");
+    assert.match(await text('[data-action="fabric-x-filters"] .fx-badge'), /1/);
+    await click('[data-action="fabric-x-filters"]');
+    assert.ok(await wait(`document.querySelector("#fabric-inventory-filters")?.hidden === true`), "the bar closes");
+    assert.ok(await has(".fx-chip--filter"), "the chip stays visible");
+    const beforeChip = (await calls()).length;
+    await click('.fx-chip--filter [data-action="fabric-x-chip"]');
+    assert.ok(await wait(`(window.__calls || []).slice(${beforeChip}).some((c) => c.url.includes("/inventory/records?") && !c.url.includes("entryType="))`), "removing the chip drops the filter");
+    assert.ok(await wait("document.querySelectorAll('.fabric-explorer-table tbody tr').length === 100 && !document.querySelector('.fx-chip--filter')"));
 
     // Sort header (Entry_No → the entryNo sort).
     assert.ok(await has('[data-action="fabric-x-sort"][data-sort="entryNo"]'), "Entry_No is sortable");
@@ -212,7 +266,11 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     assert.ok((await calls()).filter((c) => c.url.includes("sort=entryNo")).every((c) => !c.url.includes("dateFrom")));
     assert.ok(await wait(`document.querySelector('[data-sort="entryNo"]')?.closest("th")?.getAttribute("aria-sort") === "descending"`));
     assert.ok(await wait("document.querySelectorAll('.fabric-explorer-table tbody tr').length > 0"));
-    const entries = await json(`[...document.querySelectorAll(".fabric-explorer-table tbody tr")].map((tr) => [tr.querySelector('td[data-label="Company"]').textContent, Number(tr.querySelector('td[data-label="Entry_No"]').textContent.replace(/\\D/g, ""))])`);
+    // entryNo is Company, then Entry_No: Entry_No is the primary key (arrow, aria-sort), Company a later key.
+    assert.deepEqual(await sortState("Entry_No"), { aria: "descending", mark: "▼", then: "", button: "entryNo" });
+    assert.deepEqual(await sortState("Company"), { aria: null, mark: "", then: "2nd", button: null });
+    assert.deepEqual(await sortState("Posting_Date"), { aria: null, mark: "", then: "", button: "date" });
+    const entries = await json(`[...document.querySelectorAll(".fabric-explorer-table tbody tr")].map((tr) => [${cell("tr", "Company")}.textContent, Number(${cell("tr", "Entry_No")}.textContent.replace(/\\D/g, ""))])`);
     assert.ok(entries.every(([c]) => c === "Synthetic Co A"), "one company");
     assert.ok(entries.every(([, n], i) => i === 0 || entries[i - 1][1] > n), "entry numbers descending");
     await click('[data-action="fabric-x-sort"][data-sort="entryNo"]');
@@ -244,18 +302,56 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     assert.ok(await wait(`(() => { const c = (window.__calls || []).slice(${before}); return c.some((x) => x.url === "/api/v1/fabric/status") && c.some((x) => x.url.includes("/inventory/records?")); })()`), "Refresh re-requests");
     assert.ok(await wait("document.querySelectorAll('.fabric-explorer-table tbody tr').length === 100"));
 
-    // Record page.
-    const id = await b.evaluate(`document.querySelector(".fabric-explorer-table a.fabric-link").dataset.id`);
+    // Record page (FabricRecordView): the object page with Overview / All fields / Keys.
+    const pageIds = await json(`[...document.querySelectorAll(".fabric-explorer-table a.fabric-link")].map((a) => a.dataset.id)`);
+    assert.equal(pageIds.length, 100);
+    const id = pageIds[0];
+    const listRequests = async () => (await calls()).filter((c) => c.url.startsWith("/api/v1/fabric/inventory/records?")).length;
+    const listsBefore = await listRequests();
     await click(".fabric-explorer-table a.fabric-link");
-    assert.ok(await wait(`document.querySelectorAll("#fabric-inventory-field-rows tr").length > 0`), "record fields");
+    assert.ok(await wait(`document.querySelectorAll("#fx-rrows-inventory tr").length > 0`), "record fields");
     assert.equal(await b.evaluate("location.pathname"), `/fabric/inventory/records/${id}`);
-    const fields = await json(`[...document.querySelectorAll("#fabric-inventory-field-rows tr td:first-child code")].map((c) => c.textContent)`);
+    const fields = await json(`[...document.querySelectorAll("#fx-rrows-inventory tr code.fx-allfields__name")].map((c) => c.textContent)`);
     assert.equal(fields.length, 78);
     assert.equal(fields[0], "Entry_No");
     for (const f of SENSITIVE_INV) assert.ok(!fields.includes(f), f);
     assert.ok(!fields.includes("upstream_new_field"));
-    assert.match(await text(".fabric-record-key"), /Company/);
-    assert.match(await text(".fabric-record-key"), /Entry_No/);
+    const keyNames = await json(`[...document.querySelectorAll('[data-keys="record"] dt')].map((dt) => dt.title)`);
+    assert.ok(keyNames.includes("Company") && keyNames.includes("Entry_No"), `record key: ${keyNames}`);
+    await noWriteControls("inventory record");
+    // Tabs: Overview first; All fields and Keys switch the panel (click and arrow keys).
+    const tabState = () => json(`[...document.querySelectorAll('[data-action="fabric-r-tab"][data-ds="inventory"]')].map((t) => [t.textContent.trim(), t.getAttribute("aria-selected"), document.getElementById(t.getAttribute("aria-controls")).hidden])`);
+    assert.deepEqual(await tabState(), [["Overview", "true", false], ["All fields (78)", "false", true], ["Keys", "false", true]]);
+    await click('[data-action="fabric-r-tab"][data-tab="fields"]');
+    assert.ok(await wait(`document.querySelector("#fx-rpanel-inventory-fields")?.hidden === false`), "All fields tab");
+    assert.deepEqual((await tabState()).map(([, s]) => s), ["false", "true", "false"]);
+    await b.evaluate(`document.querySelector("#fx-rtab-inventory-fields").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }))`);
+    assert.ok(await wait(`document.querySelector("#fx-rpanel-inventory-keys")?.hidden === false && document.activeElement?.id === "fx-rtab-inventory-keys"`), "ArrowRight moves to Keys");
+    await click('[data-action="fabric-r-tab"][data-tab="overview"]');
+    assert.ok(await wait(`document.querySelector("#fx-rpanel-inventory-overview")?.hidden === false`));
+    // Previous / Next move only among the rows of the page already loaded: first row → no Previous; last row → no Next.
+    assert.equal(await b.evaluate(`(() => { const p = document.querySelector('[data-ds="inventory"] [data-focus-key="record-prev"]'); return p.tagName + ":" + p.disabled; })()`), "BUTTON:true");
+    assert.equal(await b.evaluate(`document.querySelector('[data-ds="inventory"] [data-focus-key="record-next"]').dataset.id`), pageIds[1]);
+    assert.match(await text(".fx-object__pos"), /1 \/ 100/);
+    assert.equal(await b.evaluate(`document.querySelectorAll(".fx-object__nav [data-action='fabric-r-open']").length`), 100, "the row list is the page");
+    await click('[data-ds="inventory"] a[data-focus-key="record-next"]');
+    assert.ok(await wait(`location.pathname === "/fabric/inventory/records/${pageIds[1]}" && /2 \\/ 100/.test(document.querySelector(".fx-object__pos")?.textContent || "") && !document.querySelector('.fx-object[aria-busy="true"]')`), "Next opens the second row");
+    await click(`.fx-object__nav a[data-id="${pageIds[99]}"]`);
+    assert.ok(await wait(`location.pathname === "/fabric/inventory/records/${pageIds[99]}" && /100 \\/ 100/.test(document.querySelector(".fx-object__pos")?.textContent || "")`), "the last row of the page");
+    assert.equal(await b.evaluate(`(() => { const n = document.querySelector('[data-ds="inventory"] [data-focus-key="record-next"]'); return n.tagName + ":" + n.disabled; })()`), "BUTTON:true", "no Next past the page");
+    assert.equal(await listRequests(), listsBefore, "moving between records loads no list page");
+    // Refresh: the record again (with the schema it is drawn from), never a list page.
+    await b.waitFor("false", 300);
+    const beforeRefresh = (await calls()).length;
+    await click('[data-action="fabric-r-refresh"]');
+    assert.ok(await wait(`(window.__calls || []).slice(${beforeRefresh}).some((c) => c.url === "/api/v1/fabric/inventory/records/${pageIds[99]}" && c.status === 200)`), "Refresh asks for the record again");
+    await b.waitFor("false", 500);
+    const refreshed = (await calls()).slice(beforeRefresh).map((c) => `${c.method} ${c.url}`).sort();
+    assert.ok(refreshed.every((c) => c === `GET /api/v1/fabric/inventory/records/${pageIds[99]}` || c === "GET /api/v1/fabric/inventory/schema"), `record refresh: ${refreshed}`);
+    assert.equal(refreshed.filter((c) => c.endsWith(pageIds[99])).length, 1, "one record request");
+    // Back to the list.
+    await click('[data-action="fabric-r-back"]');
+    assert.ok(await wait(`location.pathname === "/fabric/inventory" && document.querySelectorAll('.fabric-explorer-table tbody tr').length === 100 && !document.querySelector(".fx-object")`), "Back to list");
     await noErrors("inventory");
   });
 
@@ -269,10 +365,11 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     for (const f of SENSITIVE_INV) assert.ok(chooser.includes(f), f);
     await setValue('#fabric-inventory-col-list input[data-name="Cost_Amount_Actual"]', true);
     assert.ok(await wait(`(window.__calls || []).some((c) => c.url.includes("/inventory/records?") && c.url.includes("Cost_Amount_Actual") && c.status === 200)`), "sensitive field requested and allowed");
-    assert.ok(await wait(`[...document.querySelectorAll(".fabric-explorer-table thead th")].some((th) => /Cost_Amount_Actual/.test(th.textContent) && th.querySelector(".fabric-sensitive"))`), "column shown with its Sensitive badge");
+    assert.ok(await wait(`[...document.querySelectorAll(".fabric-explorer-table thead th")].some((th) => /^Cost_Amount_Actual\\b/.test(th.getAttribute("title") || "") && th.querySelector(".fabric-sensitive"))`), "column shown with its Sensitive badge");
     await click(".fabric-explorer-table a.fabric-link");
-    assert.ok(await wait(`document.querySelectorAll("#fabric-inventory-field-rows tr").length === 87`), "every field incl. sensitive");
-    assert.match(await text("#fabric-inventory-field-rows"), /Cost_Amount_Actual/);
+    assert.ok(await wait(`document.querySelectorAll("#fx-rrows-inventory tr").length === 87`), "every field incl. sensitive");
+    assert.match(await text("#fx-rrows-inventory"), /Cost_Amount_Actual/);
+    assert.ok(await b.evaluate(`[...document.querySelectorAll("#fx-rrows-inventory tr")].some((tr) => tr.querySelector("code.fx-allfields__name")?.textContent === "Cost_Amount_Actual" && tr.querySelector(".fx-chip--restricted"))`), "the sensitive field is marked");
     // Clean up the choice for the next person in this browser.
     await b.evaluate(`localStorage.removeItem("jarc.fabric.columns.inventory")`);
     await noErrors("sensitive inventory");
@@ -283,7 +380,12 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     await openApp("/fabric/sales");
     assert.ok(await wait("!!document.querySelector('#fabric-root .fabric-alert.is-index')", 15000), "index-required alert");
     assert.match(await text("#fabric-root"), /Waiting for indexes/);
-    assert.match(await text("#fabric-root"), /fabric_invoice_date/, "the recommended index is named");
+    // The status line under the app bar: the connection chip and the index name in its collapsed technical details.
+    assert.match(await text("#fabric-conn"), /Index required/);
+    assert.match(await text("#fabric-status .fx-status__details"), /fabric_invoice_date/, "the recommended index is named");
+    assert.equal(await b.evaluate(`document.querySelector("#fabric-status .fx-status__details").hidden`), true, "details collapsed");
+    await click('[data-action="fabric-status-details"]');
+    assert.ok(await wait(`document.querySelector("#fabric-status .fx-status__details")?.hidden === false`), "Details opens");
     assert.equal(await has(".fabric-explorer-table"), false);
     assert.equal((await calls()).filter((c) => c.url.includes("/sales/records")).length, 0, "no records request is sent");
     await noErrors("sales index required");
@@ -355,39 +457,57 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     assert.equal(await has('.fabric-api-tokens [data-action="fabric-api-revoke"]'), false);
     const after = await b.evaluate(`fetch("/api/v1/external/fabric/sales/schema", { credentials: "omit", headers: { Authorization: "Bearer ${secret}" } }).then((r) => r.status)`);
     assert.equal(after, 401, "a revoked token stops working");
+    // Tabs: Keys · Activity · Documentation. Activity → Refresh is one GET of the activity, nothing else.
+    assert.deepEqual(await json(`[...document.querySelectorAll('[data-action="fabric-api-tab"]')].map((t) => t.textContent.replace(/\\s*\\(\\d+\\)$/, "").trim())`), ["Keys", "Activity", "Documentation"]);
+    await click("#fabric-atab-activity");
+    assert.ok(await wait(`document.querySelector("#fabric-atab-activity")?.getAttribute("aria-selected") === "true" && !!document.querySelector(".fabric-api-activity tbody tr")`), "Activity tab");
+    assert.match(await text(".fabric-api-activity"), /Created/);
+    await b.waitFor("false", 300);
+    const beforeActivity = (await calls()).length;
+    await click('[data-action="fabric-api-activity-refresh"]');
+    assert.ok(await wait(`(window.__calls || []).length > ${beforeActivity} && !document.querySelector('[data-action="fabric-api-activity-refresh"][disabled]')`), "activity refreshed");
+    await b.waitFor("false", 500);
+    assert.deepEqual((await calls()).slice(beforeActivity).map((c) => `${c.method} ${c.url} ${c.status}`), ["GET /api/v1/fabric/api-tokens/activity 200"], "a single GET");
+    await click("#fabric-atab-docs");
+    assert.ok(await wait(`document.querySelector("#fabric-atab-docs")?.getAttribute("aria-selected") === "true" && /\\/api\\/v1\\/external\\/fabric/.test(document.querySelector("#fabric-api-body")?.textContent || "")`), "Documentation tab");
     await noErrors("api management");
   });
 
   test("5. deep links load directly; Back and Forward move between list and record", async () => {
     await signIn(people.reader);
     await openInventoryList("/fabric/inventory");
-    assert.match(await text(".fabric-head h1"), /Inventory/);
+    assert.equal(await text(".fx-appbar__title"), "Fabric Data");
+    assert.equal(await b.evaluate(`document.querySelector("#fabric-tab-inventory").getAttribute("aria-selected")`), "true", "the Inventory tab");
     // A sales record link, opened directly.
     await openApp("/fabric/sales");
     assert.ok(await wait("document.querySelectorAll('.fabric-explorer-table tbody tr').length > 0", 15000));
     const id = await b.evaluate(`document.querySelector(".fabric-explorer-table a.fabric-link").dataset.id`);
     await openApp(`/fabric/sales/records/${id}`);
-    assert.ok(await wait(`document.querySelectorAll("#fabric-sales-field-rows tr").length > 0`, 15000), "sales record loads directly");
-    const fields = await json(`[...document.querySelectorAll("#fabric-sales-field-rows tr td:first-child code")].map((c) => c.textContent)`);
+    assert.ok(await wait(`document.querySelectorAll("#fx-rrows-sales tr").length > 0`, 15000), "sales record loads directly");
+    assert.deepEqual(await jarcCalls(), [], "a direct record link loads no /workspaces or /boards");
+    const fields = await json(`[...document.querySelectorAll("#fx-rrows-sales tr code.fx-allfields__name")].map((c) => c.textContent)`);
     assert.equal(fields.length, 80, "85 sales fields minus the 5 restricted ones");
     for (const f of ["landed_cost", "Text", "Custom", "custom_1", "Custom.2"]) assert.ok(!fields.includes(f), f);
-    assert.match(await text(".fabric-record-key"), /invoice_id/);
+    assert.ok((await json(`[...document.querySelectorAll('[data-keys="record"] dt')].map((dt) => dt.title)`)).includes("invoice_id"));
     assert.equal(await b.evaluate("location.pathname"), `/fabric/sales/records/${id}`);
     assert.ok((await calls()).some((c) => c.url === `/api/v1/fabric/sales/records/${id}` && c.status === 200));
+    // Loaded directly, the record isn't on a loaded page: Previous / Next are off (they never load a page).
+    assert.equal(await b.evaluate(`[...document.querySelectorAll('[data-ds="sales"] [data-focus-key="record-prev"], [data-ds="sales"] [data-focus-key="record-next"]')].map((x) => x.tagName + ":" + x.disabled).join(",")`), "BUTTON:true,BUTTON:true");
+    assert.equal((await calls()).filter((c) => c.url.startsWith("/api/v1/fabric/sales/records?")).length, 0, "no list page for a record link");
     // Back from a record to the list, then Forward.
-    await click('.fabric-breadcrumb a[data-action="fabric-x-back"]');
+    await click('[data-action="fabric-r-back"]');
     assert.ok(await wait(`location.pathname === "/fabric/sales" && document.querySelectorAll('.fabric-explorer-table tbody tr').length > 0`), "back to the list");
     await click(".fabric-explorer-table a.fabric-link");
-    assert.ok(await wait(`/^\\/fabric\\/sales\\/records\\//.test(location.pathname) && document.querySelectorAll("#fabric-sales-field-rows tr").length > 0`));
+    assert.ok(await wait(`/^\\/fabric\\/sales\\/records\\//.test(location.pathname) && document.querySelectorAll("#fx-rrows-sales tr").length > 0`));
     await b.evaluate("history.back()");
-    assert.ok(await wait(`location.pathname === "/fabric/sales" && document.querySelectorAll('.fabric-explorer-table tbody tr').length > 0 && !document.querySelector("#fabric-sales-field-rows")`), "Back shows the list");
+    assert.ok(await wait(`location.pathname === "/fabric/sales" && document.querySelectorAll('.fabric-explorer-table tbody tr').length > 0 && !document.querySelector("#fx-rrows-sales")`), "Back shows the list");
     await b.evaluate("history.forward()");
-    assert.ok(await wait(`/^\\/fabric\\/sales\\/records\\//.test(location.pathname) && document.querySelectorAll("#fabric-sales-field-rows tr").length > 0`), "Forward shows the record again");
+    assert.ok(await wait(`/^\\/fabric\\/sales\\/records\\//.test(location.pathname) && document.querySelectorAll("#fx-rrows-sales tr").length > 0`), "Forward shows the record again");
     // Switching tabs, then Back.
     await click("#fabric-tab-inventory");
     assert.ok(await wait(`location.pathname === "/fabric/inventory" && document.querySelectorAll('.fabric-explorer-table tbody tr').length > 0`));
     await b.evaluate("history.back()");
-    assert.ok(await wait(`/^\\/fabric\\/sales\\/records\\//.test(location.pathname) && document.querySelectorAll("#fabric-sales-field-rows tr").length > 0`), "Back returns to the sales record");
+    assert.ok(await wait(`/^\\/fabric\\/sales\\/records\\//.test(location.pathname) && document.querySelectorAll("#fx-rrows-sales tr").length > 0`), "Back returns to the sales record");
     await noErrors("deep links");
   });
 
@@ -404,5 +524,25 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     const widths = await json(`({ page: document.documentElement.scrollWidth, view: window.innerWidth, wide: [...document.querySelectorAll("body *")].filter((el) => el.getBoundingClientRect().right > window.innerWidth + 1 && !el.closest(".fabric-scroll")).slice(0, 5).map((el) => el.tagName + "." + el.className), chain: (() => { const out = []; let el = document.querySelector(".fabric-banner"); while (el && el !== document.body) { const r = el.getBoundingClientRect(); out.push(el.tagName + "." + String(el.className).slice(0, 30) + ":" + Math.round(r.left) + "-" + Math.round(r.right) + " sw" + el.scrollWidth); el = el.parentElement; } return out; })() })`);
     assert.ok(widths.page <= widths.view, `no sideways scroll: ${JSON.stringify(widths)}`);
     await noErrors("dark theme");
+  });
+
+  test("7. from a board into Fabric Data: the module layout hides the workspace tree; Back to the board restores it", async () => {
+    await signIn(people.reader);
+    const ws = await api("POST", "/api/v1/workspaces", { name: "Synthetic Fabric WS" });
+    await api("POST", `/api/v1/workspaces/${ws.workspace.id}/boards`, { name: "Synthetic Fabric board" });
+    await openApp("/");
+    assert.ok(await wait("!!document.querySelector('.nav-tree [data-action=\"open-board\"]')", 15000), "JARC loaded with a board");
+    await click('.nav-tree [data-action="open-board"]');
+    assert.ok(await wait("/^\\/boards\\/\\d+$/.test(location.pathname)"), "a board is open");
+    const boardPath = await b.evaluate("location.pathname");
+    await click(".sidebar-footer .nav-fabric");
+    assert.ok(await wait("document.querySelector('.app-shell')?.dataset.layout === 'module' && location.pathname === '/fabric/inventory'"), "Fabric opened in the module layout");
+    assert.equal(await has(".nav-tree"), false, "no workspace tree");
+    assert.match(await text(".module-exit"), /Back to Synthetic Fabric board/);
+    assert.ok(await wait("document.querySelectorAll('.fabric-explorer-table tbody tr').length > 0", 15000));
+    await click(".module-exit");
+    assert.ok(await wait(`location.pathname === ${JSON.stringify(boardPath)} && !document.querySelector('.app-shell').dataset.layout && !!document.querySelector('.nav-tree')`), "back on the same board");
+    assert.equal(await has(".fx-app"), false);
+    await noErrors("back to the board");
   });
 });

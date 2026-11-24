@@ -80,7 +80,10 @@ class AppView {
     document.documentElement.dataset.density = model.settings.density;
     // The full layout always renders. A new shared server starts with no workspaces (local mode always has at least
     // one): the sidebar and main area then show the "create your first workspace" state (see noWorkspaces).
-    this.root.innerHTML = `<div class="app-shell">${this.sidebar(model)}<div class="nav-backdrop" aria-hidden="true"></div><main class="workspace">${this.topbar(model)}${this.content(model)}</main></div><input id="import-file" class="sr-only" type="file" accept="application/json,.json,text/csv,.csv" data-action="import-file"><input id="avatar-file" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp" data-action="avatar-file"><div id="overlay-root"></div>`;
+    // An app module (AppModules.js, e.g. Fabric Data) open: the module layout, marked with data attributes (the shell's class
+    // stays "app-shell"): no workspace tree, primary navigation as a drawer, the module filling the rest of the viewport.
+    const mod = this.moduleFor(model), layout = mod ? ` data-layout="module" data-module="${this.attr(mod.id)}"` : "";
+    this.root.innerHTML = `<div class="app-shell"${layout}>${this.sidebar(model, { module: mod })}<div class="nav-backdrop" aria-hidden="true"></div><main class="workspace">${this.topbar(model, { module: mod })}${this.content(model)}</main></div><input id="import-file" class="sr-only" type="file" accept="application/json,.json,text/csv,.csv" data-action="import-file"><input id="avatar-file" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp" data-action="avatar-file"><div id="overlay-root"></div>`;
     this.afterRender(model);
   }
 
@@ -113,37 +116,58 @@ class AppView {
     requestAnimationFrame(()=>this.root.querySelector('[autofocus]')?.focus());
   }
 
-  sidebar(model) {
+  sidebar(model, { module = null } = {}) {
     return `<aside class="sidebar" id="sidebar"><div class="brand"><span class="brand-mark">J</span><div class="brand-copy"><strong>Jarc</strong><small>Operations Database</small></div><button class="sidebar-collapse-top" data-action="collapse-nav" aria-label="Collapse sidebar" title="Collapse sidebar">${icon("chevron")}</button></div><nav aria-label="Primary navigation">
       <button class="nav-item ${model.screen === "home" ? "active" : ""}" data-action="nav" data-screen="home" data-tooltip="Home">${icon("home")}<span class="nav-text">Home</span></button>
       <button class="nav-item ${model.screen === "mywork" ? "active" : ""}" data-action="nav" data-screen="mywork" data-tooltip="My work">${icon("work")}<span class="nav-text">My work</span><span class="nav-count">${model.myWork.length}</span></button>
       <button class="nav-item ${model.screen === "integrations" ? "active" : ""}" data-action="nav" data-screen="integrations" data-tooltip="Integrations">${icon("link")}<span class="nav-text">Integrations</span></button>
       ${this.healthPanel?.visible ? `<button class="nav-item ${model.screen === "system-health" ? "active" : ""}" data-action="nav" data-screen="system-health" data-tooltip="System Health" ${model.screen === "system-health" ? 'aria-current="page"' : ""}>${icon("refresh")}<span class="nav-text">System Health</span></button>` : ""}
       <button class="nav-item" data-action="command-palette" data-place="nav" data-tooltip="Search">${icon("search")}<span class="nav-text">Search</span><span class="nav-shortcut">${this.shortcutLabel()}</span></button>
-      <div class="workspace-heading"><p class="nav-label">Workspaces</p><button class="mini-button" data-action="create-workspace" aria-label="Create workspace" title="Create workspace">${icon("plus")}</button></div>
+      ${module ? "" : this.workspaceNav(model)}
+    </nav><div class="sidebar-footer">${this.moduleNav(model)}<button class="sidebar-settings" data-action="settings" title="Settings">${icon("settings")}<span>Settings</span></button><button class="sidebar-settings" data-action="shortcuts" title="Keyboard shortcuts (?)">${icon("command")}<span>Keyboard shortcuts</span></button></div></aside>`;
+  }
+  // The Workspaces heading, the workspace switch, Favorites and the board tree. Not drawn while an app module is open: the
+  // module has the screen to itself, and primary navigation stays in the drawer.
+  workspaceNav(model) {
+    return `<div class="workspace-heading"><p class="nav-label">Workspaces</p><button class="mini-button" data-action="create-workspace" aria-label="Create workspace" title="Create workspace">${icon("plus")}</button></div>
       ${model.workspace?`<button class="workspace-switch" data-action="workspace-menu" data-tooltip="${this.escape(model.workspace.name)}"><span class="workspace-icon ${this.isCustomIcon(model.workspace.icon)?"has-custom-icon":""}" style="background:${this.cssColor(model.workspace.color)}">${this.workspaceIcon(model.workspace)}</span><span class="workspace-name"><strong>${this.escape(model.workspace.name)}</strong><small>${model.workspace.boards.length} boards</small></span>${icon("chevron")}</button><button class="workspace-collapse" data-action="toggle-workspace-section" aria-label="Collapse workspace boards" title="Collapse workspace boards">${icon("chevron")}</button>
       ${model.favoriteBoards.length?`<div class="favorite-nav"><p class="nav-label">Favorites</p>${model.favoriteBoards.map(b=>`<button class="tree-item" data-action="open-record-board" data-board="${this.attr(b.id)}" data-workspace="${this.attr(b.workspaceId)}" title="${this.escape(b.name)}">${icon("star")}<span class="nav-text">${this.escape(b.name)}</span></button>`).join("")}</div>`:""}<div class="nav-tree">${model.workspace.boards.filter(b=>!b.archived).map((board) => `<div data-board-context="${this.attr(board.id)}" class="board-nav ${model.screen === "board" && model.currentBoardId === board.id ? "selected" : ""}"><button class="tree-item" data-action="open-board" data-id="${this.attr(board.id)}" data-tooltip="${this.escape(board.name)}"><span class="nav-text">${this.escape(board.name)}</span>${model.settings.showBoardCounts?`<small class="nav-count">${Number(model.boardRecordCount(board)).toLocaleString()}</small>`:""}</button><button class="board-menu-button" data-action="board-menu" data-id="${this.attr(board.id)}" aria-label="Board options" title="Board options">${icon("more")}</button></div>`).join("")||'<p class="nav-text nav-empty">No boards yet</p>'}</div>`:`<div class="nav-empty-workspaces"><p class="nav-text nav-empty">No workspaces yet</p><button class="new-board-nav" data-action="create-workspace" data-tooltip="Create workspace">${icon("plus")} <span class="nav-text">Create workspace</span></button></div>`}
-    </nav><div class="sidebar-footer">${this.fabricNav(model)}<button class="sidebar-settings" data-action="settings" title="Settings">${icon("settings")}<span>Settings</span></button><button class="sidebar-settings" data-action="shortcuts" title="Keyboard shortcuts (?)">${icon("command")}<span>Keyboard shortcuts</span></button></div></aside>`;
+    `;
   }
 
-  // Fabric Data, directly above Settings: only for the people the server names as Fabric readers (/features fabricData.read).
-  fabricNav(model) {
-    if (!this.fabricPanel?.visible) return "";
-    const on = model.screen === "fabric";
-    return `<button class="sidebar-settings nav-fabric ${on ? "active" : ""}" data-action="nav" data-screen="fabric" data-tooltip="Fabric Data" title="Fabric Data" ${on ? 'aria-current="page"' : ""}>${icon("database")}<span>Fabric Data</span></button>`;
+  // ---- App modules (AppModules.js). The controller is the host (AppController sets view.moduleHost); without one (tests that
+  // draw a view on its own) the Fabric panel attached to this view stands in.
+  moduleHost(model) { return this.moduleController || { fabric: this.fabricPanel, model }; }
+  // The app module open now (its screen, and this person may open it), or null.
+  moduleFor(model) { return typeof AppModules === "function" ? AppModules.active(this.moduleHost(model)) : null; }
+  // The modules' sidebar buttons, directly above Settings: only those this person may open (Fabric Data: the people the server
+  // names as Fabric readers, /features fabricData.read). Fabric keeps its nav-fabric class.
+  moduleNav(model) {
+    const host = this.moduleHost(model);
+    const list = typeof AppModules === "function" ? AppModules.visibleFor(host) : (this.fabricPanel?.visible ? [{ id: "fabric", screen: "fabric", label: "Fabric Data", icon: "database" }] : []);
+    return list.map((m) => { const on = model.screen === m.screen; return `<button class="sidebar-settings nav-module nav-${this.attr(m.id)} ${on ? "active" : ""}" data-action="nav" data-screen="${this.attr(m.screen)}" data-tooltip="${this.attr(m.label)}" title="${this.attr(m.label)}" ${on ? 'aria-current="page"' : ""}>${icon(m.icon)}<span>${this.escape(m.label)}</span></button>`; }).join("");
+  }
+  fabricNav(model) { return this.moduleNav(model); } // the earlier name
+  // "Back to …" in the header while a module is open: the board that was open before (AppController.moduleReturnLabel), else JARC.
+  moduleExit(module) {
+    const label = this.moduleExitLabel?.() || "Back to JARC";
+    return `<button type="button" class="module-exit" data-action="module-exit" data-module="${this.attr(module.id)}" title="${this.attr(label)}">${icon("left")}<span class="module-exit-label">${this.escape(label)}</span></button><span class="context-divider" aria-hidden="true">/</span><strong class="module-title">${this.escape(module.label)}</strong>`;
   }
 
-  topbar(model) {
+  topbar(model, { module = null } = {}) {
     const avatar=this.safeImage(model.profile.avatar)?`<img src="${this.attr(this.safeImage(model.profile.avatar))}" alt="">`:this.escape(model.profile.initials);
-    return `<header class="topbar"><div class="top-context"><button class="icon-button mobile-only nav-toggle" data-action="toggle-nav" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false"><span class="nav-toggle-open">${icon("menu")}</span><span class="nav-toggle-close">${icon("close")}</span></button><span>${this.escape(model.workspace?.name||"JARC Database")}</span><span class="context-divider">/</span><strong>${!model.workspace?"Get started":model.screen==="home"?"Home":model.screen==="mywork"?"My work":model.screen==="system-health"?"System Health":model.screen==="integrations"?"Integrations":model.screen==="fabric"&&this.fabricPanel?.visible?"Fabric Data":this.escape(model.board?.name||"Boards")}</strong></div><button class="global-search-button" data-action="command-palette" data-place="topbar">${icon("search")}<span>Search JARC</span><kbd>${this.shortcutLabel()}</kbd></button><div class="top-actions"><button class="save-state" data-action="retry-save" title="Data is saved in this browser" aria-live="polite"><i></i> Saved locally</button><button class="notification-button icon-button" data-action="notifications" aria-label="Notifications">${icon("bell")}${model.unreadCount?`<b>${model.unreadCount}</b>`:""}</button><button class="profile profile-button" data-action="profile-menu" style="background:${this.cssColor(model.profile.color,"#0f9489")}" aria-label="Open profile">${avatar}</button></div></header>`;
+    const context = module ? this.moduleExit(module) : `<span>${this.escape(model.workspace?.name||"JARC Database")}</span><span class="context-divider">/</span><strong>${!model.workspace?"Get started":model.screen==="home"?"Home":model.screen==="mywork"?"My work":model.screen==="system-health"?"System Health":model.screen==="integrations"?"Integrations":this.escape(model.board?.name||"Boards")}</strong>`;
+    return `<header class="topbar"><div class="top-context"><button class="icon-button mobile-only nav-toggle" data-action="toggle-nav" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false"><span class="nav-toggle-open">${icon("menu")}</span><span class="nav-toggle-close">${icon("close")}</span></button>${context}</div><button class="global-search-button" data-action="command-palette" data-place="topbar">${icon("search")}<span>Search JARC</span><kbd>${this.shortcutLabel()}</kbd></button><div class="top-actions"><button class="save-state" data-action="retry-save" title="Data is saved in this browser" aria-live="polite"><i></i> Saved locally</button><button class="notification-button icon-button" data-action="notifications" aria-label="Notifications">${icon("bell")}${model.unreadCount?`<b>${model.unreadCount}</b>`:""}</button><button class="profile profile-button" data-action="profile-menu" style="background:${this.cssColor(model.profile.color,"#0f9489")}" aria-label="Open profile">${avatar}</button></div></header>`;
   }
 
   content(model) {
     if (model.boardLinkProblem) return this.boardLinkProblem(model.boardLinkProblem);
     if (model.screen === "integrations" && this.integrations) return this.integrations.html();
     if (model.screen === "system-health" && this.healthPanel) return this.healthPanel.html();
-    // Fabric Data works without any workspace; for anyone else a saved "fabric" screen shows Home.
-    if (model.screen === "fabric") { if (this.fabricPanel?.visible) return this.fabricPanel.html(); if (model.workspace) return this.home(model); }
+    // App modules (Fabric Data) work without any workspace; for anyone else a saved module screen shows Home. The module body
+    // fills the rest of the viewport; data-module-scroll marks it for AppController's scroll keeping.
+    const mod = typeof AppModules === "function" ? AppModules.forScreen(model.screen) : (model.screen === "fabric" ? { id: "fabric", render: (v) => v.fabricPanel.html() } : null);
+    if (mod) { if (this.moduleFor(model) || (typeof AppModules !== "function" && this.fabricPanel?.visible)) return `<div class="module-body" data-module-body="${this.attr(mod.id)}">${mod.render(this, model)}</div>`; if (model.workspace) return this.home(model); }
     if (!model.workspace) return this.noWorkspaces(model);
     if (model.screen === "home") return this.home(model);
     if (model.screen === "mywork") return this.myWork(model);
@@ -827,7 +851,7 @@ class AppView {
   skeletonRows(model,count=6){const cols=model.visibleColumns.length;return `<section class="data-region skeleton-region" aria-busy="true"><div class="group-title"><span class="skeleton skeleton-text" style="width:110px"></span></div><div class="table-wrap skeleton-table" role="status" aria-label="Loading records">${Array.from({length:count},(_,i)=>`<div class="skeleton-row">${Array.from({length:Math.min(cols,6)},(_,j)=>`<span class="skeleton skeleton-text" style="width:${[70,55,40,62,48,35][(i+j)%6]}%"></span>`).join("")}</div>`).join("")}</div><span class="sr-only">Loading records…</span></section>`;}
   showDensityMenu(model){document.querySelector("#overlay-root").innerHTML=`<div class="popover density-popover"><div class="popover-title"><strong>Table density</strong></div><button data-action="set-density" data-value="comfortable" class="${model.settings.density==="comfortable"?"selected":""}">Comfortable</button><button data-action="set-density" data-value="compact" class="${model.settings.density==="compact"?"selected":""}">Compact</button></div>`;}
   showViewOverflow(model){document.querySelector("#overlay-root").innerHTML=`<div class="popover view-overflow"><button data-action="manage-columns">${icon("columns")} Columns</button><button data-action="density-menu">${icon("list")} Density</button><button data-action="import">${icon("import")} Import records</button><button data-action="export" ${model.rows.length?"":"disabled"}>${icon("export")} Export records</button><button data-action="views-menu">${icon("layout")} Views</button><button data-action="archived-view">${icon("archive")} Archived records</button><button data-action="manage-groups">${icon("group")} Manage groups</button><button data-action="undo" ${model.canUndo?"":"disabled"}>Undo last change</button><button data-action="clear-filters">Reset view</button></div>`;}
-  closeOverlay() { const root=document.querySelector("#overlay-root"); if(root) { this.exitGhost(root); root.innerHTML = ""; delete root.dataset.open; } }
+  closeOverlay() { const root=document.querySelector("#overlay-root"); if(root) { const secret=root.querySelector("#fabric-api-secret"); if(secret) { secret.value=""; secret.removeAttribute("value"); } this.exitGhost(root); root.innerHTML = ""; delete root.dataset.open; } }
   // action: true shows Undo (calls onUndo); {label, onClick} shows a custom action such as Retry.
   toast(message,action=false) {
     const toast=document.createElement("div");toast.className="toast";toast.setAttribute("role","status");toast.textContent=message;

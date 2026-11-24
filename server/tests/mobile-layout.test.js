@@ -26,12 +26,19 @@ async function model({ empty = false, screen = "home" } = {}) {
   }
   return m;
 }
-function markup(m) {
+// fabric: the Fabric Data app module open (AppModules.js), for a Fabric reader; no request ever answers (loading state).
+function markup(m, { fabric = false } = {}) {
   const document = { documentElement: { dataset: {}, style: { setProperty() {} } }, querySelector: () => null };
-  const context = vm.createContext({ window: {}, document, console, Intl, Date, URL, encodeURIComponent });
-  for (const file of ["AppView.js", "IconLibrary.js", "Appearance.js", "BoardGroups.js", "CommentsPanel.js"]) vm.runInContext(fs.readFileSync(path.join(ASSETS, file), "utf8"), context); // as the page loads them
+  const context = vm.createContext({ window: {}, document, console, Intl, Date, URL, URLSearchParams, encodeURIComponent, decodeURIComponent, setTimeout: () => 0, clearTimeout() {} });
+  const files = ["AppView.js", "IconLibrary.js", "Appearance.js", "BoardGroups.js", "CommentsPanel.js", ...(fabric ? ["AppModules.js", "FabricExplorer.js", "FabricDataPanel.js"] : [])];
+  for (const file of files) vm.runInContext(fs.readFileSync(path.join(ASSETS, file), "utf8"), context); // as the page loads them
   const root = { innerHTML: "" };
-  new context.window.AppView(root).render(m);
+  const view = new context.window.AppView(root);
+  if (fabric) {
+    m.screen = "fabric"; m.features = { fabricData: { read: true } }; m.storage = { adapter: { mode: "resource", request: () => new Promise(() => {}) } };
+    view.fabricPanel = new context.window.FabricDataPanel({ model: m, view });
+  }
+  view.render(m);
   return root.innerHTML;
 }
 
@@ -49,7 +56,7 @@ describe("Responsive layout (headless browser)", { skip: BROWSER ? false : "no C
   before(async () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "jarc-layout-"));
     const base = "file:///" + ASSETS.split(path.sep).join("/");
-    const css = ["styles.css", "table-clarity.css", "ui-foundation.css", "design-system.css"].map((f) => `<link rel="stylesheet" href="${base}/${f}">`).join("");
+    const css = ["styles.css", "table-clarity.css", "ui-foundation.css", "design-system.css", "fabric-ui.css", "fabric-data.css"].map((f) => `<link rel="stylesheet" href="${base}/${f}">`).join("");
     const write = (name, html, theme = "dark") => {
       const file = path.join(dir, `${name}.html`);
       fs.writeFileSync(file, `<!doctype html><html data-theme="${theme}" data-density="comfortable"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${css}</head><body><div id="app">${html}</div></body></html>`);
@@ -59,6 +66,9 @@ describe("Responsive layout (headless browser)", { skip: BROWSER ? false : "no C
     write("empty", empty); write("empty-light", empty, "light"); write("home", home); write("board", board);
     write("empty-drawer", empty.replace('class="sidebar" id="sidebar"', 'class="sidebar open" id="sidebar"'));
     write("home-drawer", home.replace('class="sidebar" id="sidebar"', 'class="sidebar open" id="sidebar"'));
+    const fabric = markup(await model(), { fabric: true });
+    write("fabric", fabric, "light"); write("fabric-dark", fabric);
+    write("fabric-drawer", fabric.replace('class="sidebar" id="sidebar"', 'class="sidebar open" id="sidebar"'), "light");
     browser = await launch(BROWSER);
   });
   after(async () => { await browser?.close(); if (dir) fs.rmSync(dir, { recursive: true, force: true }); });
@@ -112,6 +122,31 @@ describe("Responsive layout (headless browser)", { skip: BROWSER ? false : "no C
     assert.equal(await browser.evaluate(labelState('#sidebar .tree-item .nav-text')), "visually-hidden", "board links keep their names");
     await browser.open(pages.empty, { width: 1440 });
     assert.equal(await browser.evaluate(labelState('#sidebar [data-screen="home"] .nav-text')), "visible");
+  });
+
+  test("app module (Fabric Data): no workspace tree; no sideways or page scroll; Back, menu, search, notifications, profile and tabs reachable", async () => {
+    for (const name of ["fabric", "fabric-dark", "fabric-drawer"]) {
+      for (const width of [...WIDTHS, 375]) {
+        await browser.open(pages[name], { width, height: 700 });
+        assert.equal(await browser.evaluate(OVERFLOW), 0, `${name} @ ${width}px scrolls sideways`);
+        assert.equal(await browser.evaluate("document.querySelector('.app-shell').dataset.layout"), "module");
+        assert.equal(await browser.evaluate("!!document.querySelector('.nav-tree, .workspace-switch')"), false, "no workspace tree");
+        assert.equal(await browser.evaluate("document.documentElement.scrollHeight - document.documentElement.clientHeight"), 0, `${name} @ ${width}px: the page doesn't scroll`);
+        for (const selector of ['.topbar [data-action="toggle-nav"]', ".module-exit", '[data-action="command-palette"].global-search-button', '[data-action="notifications"]', '[data-action="profile-menu"]', "#fabric-tab-inventory", "#fabric-tab-sales", '[data-action="fabric-refresh"]']) {
+          assert.equal(await browser.evaluate(reachable(selector)), "ok", `${name} @ ${width}px: ${selector}`);
+        }
+        // The app fills the space under the header.
+        assert.equal(await browser.evaluate("Math.round(document.querySelector('.fx-app').getBoundingClientRect().bottom)"), 700, `${name} @ ${width}px: full height`);
+        if (name === "fabric-drawer") {
+          assert.equal(await browser.evaluate(reachable('#sidebar [data-screen="home"]')), "ok", `drawer @ ${width}px: Home`);
+          assert.equal(await browser.evaluate(labelState('#sidebar [data-screen="home"] .nav-text')), "visible", `drawer @ ${width}px: labels`);
+        } else assert.equal(await browser.evaluate(reachable('#sidebar [data-screen="home"]')), "hidden", `${name} @ ${width}px: navigation is a closed drawer`);
+      }
+    }
+    await browser.open(pages.fabric, { width: 1440 });
+    assert.equal(await browser.evaluate("getComputedStyle(document.querySelector('.fx-app')).backgroundColor"), "rgb(221, 229, 237)", "light Fabric window colour");
+    await browser.open(pages["fabric-dark"], { width: 1440 });
+    assert.equal(await browser.evaluate("getComputedStyle(document.querySelector('.fx-app')).backgroundColor"), "rgb(22, 28, 35)", "dark variant");
   });
 
   test("the empty-state panel stacks its steps on phones and lays them out in a row on wider screens", async () => {

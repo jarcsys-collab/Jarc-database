@@ -1,11 +1,9 @@
-/* Fabric Data (FabricDataPanel.js, FabricApiPanel.js). Colours come only from the theme variables, so dark mode and high
-   contrast follow the rest of JARC. Tables become cards on phones (≤ 620 px), like the account tables. */
+/* Fabric Data: legacy styles for the v1 invoice views (off unless features.fabricData.invoiceViews) and shared helpers still
+   used inside the Fabric app. The app shell, app bar, status and shared fx- components are in fabric-ui.css; the explorer,
+   record page and API Management have their own fabric-*.css. Colours come only from the theme variables. */
 .sidebar .sidebar-settings.nav-fabric.active { background: var(--sidebar-active, var(--selected)); font-weight: var(--weight-semibold, 600); }
-.fabric-page { padding: 0 28px 48px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; min-width: 0; }
 /* minmax(0, 1fr): a wide child (the table, a long index name) never widens the column past the page. */
-.fabric-root, #fabric-detail, #fabric-api-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; min-width: 0; }
-.fabric-head h1 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.fabric-readonly { font-size: 11px; vertical-align: middle; }
+#fabric-detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; min-width: 0; }
 .fabric-tabs { margin-bottom: 0; }
 .fabric-tabs .icon { width: 15px; height: 15px; vertical-align: -3px; }
 .fabric-tabs button:focus-visible, .fabric-sort:focus-visible, .fabric-link:focus-visible, .fabric-scroll:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -76,30 +74,7 @@
 .fabric-api-head p { margin: 0; }
 .fabric-api-intro { margin: 0; }
 
-/* Inventory and Sales explorer (FabricExplorer.js): the table scrolls inside its frame both ways, so the header row and the
-   first column stay in view (sticky), like the board tables. */
-.fabric-explorer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
-.fabric-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; font-size: var(--fs-sm, 13px); color: var(--muted); }
-.fabric-toolbar-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
-.fabric-toolbar .icon { width: 14px; height: 14px; vertical-align: -2px; }
-.fabric-explorer-scroll { overflow: auto; max-height: min(70vh, 760px); overscroll-behavior: contain; }
-.fabric-explorer-table { width: max-content; min-width: 100%; }
-.fabric-explorer-table th, .fabric-explorer-table td { white-space: nowrap; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
-.fabric-explorer-table thead th { z-index: 2; }
-.fabric-explorer-table tbody td:first-child { position: sticky; left: 0; z-index: 1; background: var(--surface); box-shadow: 1px 0 0 var(--line); }
-.fabric-explorer-table thead th:first-child { position: sticky; left: 0; top: 0; z-index: 3; box-shadow: 1px 0 0 var(--line); }
-.fabric-explorer-table tbody tr:hover td:first-child { background: var(--row-hover, var(--hover)); }
-.fabric-sensitive { font-size: 10px; padding: 1px 6px; }
-.fabric-chooser { display: grid; gap: 10px; }
-.fabric-chooser-head { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
-.fabric-chooser-head label { display: grid; gap: 4px; font-size: var(--fs-xs, 12px); color: var(--muted); flex: 1 1 200px; }
-.fabric-chooser-head input[type="search"] { min-height: var(--control-h, 34px); padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm, 8px); background: var(--surface); color: var(--text); font: inherit; font-size: var(--fs-sm, 13px); }
-.fabric-chooser-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 4px 14px; max-height: 320px; overflow: auto; padding: 2px; }
-.fabric-chooser-list code { font-size: 12px; overflow-wrap: anywhere; }
-.fabric-record-key { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; }
-.fabric-record-key > div { display: grid; gap: 2px; padding: 6px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm, 8px); background: var(--surface); }
-.fabric-record-key dt { color: var(--muted); font-size: 11px; }
-.fabric-record-key dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+/* The Inventory and Sales explorer's own rules moved to fabric-explorer.css (scoped under .fx-app). */
 .fabric-filters code, .fabric-help code { font-size: 11px; }
 
 /* Loading skeleton (unscoped: the board skeletons only work inside .board-surface). */
@@ -111,7 +86,6 @@
 :root[data-motion="off"] .fabric-skeleton { animation: none; }
 
 @media (max-width: 760px) {
-  .fabric-page { padding: 0 16px 40px; }
   .fabric-keys > div { grid-template-columns: 1fr; gap: 2px; }
 }
 @media (max-width: 620px) {
@@ -125,9 +99,6 @@
   .fabric-table td > small { text-align: right; }
   .fabric-table td { flex-wrap: wrap; }
   .fabric-table .fabric-num { white-space: normal; }
-  .fabric-explorer-scroll { max-height: none; }
-  .fabric-explorer-table { width: 100%; }
-  .fabric-explorer-table th, .fabric-explorer-table td { white-space: normal; max-width: none; overflow: visible; box-shadow: none !important; overflow-wrap: anywhere; }
   .fabric-pager { flex-direction: column; align-items: stretch; }
   .fabric-pager-buttons { justify-content: space-between; }
 }

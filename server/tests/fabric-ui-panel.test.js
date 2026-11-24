@@ -25,7 +25,9 @@ function load({ pathname = "/", search = "" } = {}) {
   const window = { location, history, localStorage, addEventListener: (name, fn) => { (listeners[name] ||= []).push(fn); }, dispatchEvent() {} };
   const document = { documentElement: { dataset: {}, style: { setProperty() {} } }, querySelector: () => null, querySelectorAll: () => [], addEventListener() {}, body: { classList: { add() {}, remove() {}, toggle() {}, contains: () => false } } };
   const context = vm.createContext({ window, document, console, Intl, Date, URL, URLSearchParams, encodeURIComponent, decodeURIComponent, setTimeout, clearTimeout, CSS: { escape: (v) => v } });
-  for (const f of ["AppView.js", "EntraAuth.js", "FabricApiDocs.js", "FabricApiPanel.js", "FabricExplorer.js", "FabricDataPanel.js"]) vm.runInContext(read(f), context, { filename: f });
+  // As index.html loads them (files another part of the redesign adds are loaded when present).
+  const files = ["AppView.js", "EntraAuth.js", "AppModules.js", "FabricFieldMeta.js", "FabricRecordView.js", "FabricApiDocs.js", "FabricApiPanel.js", "FabricExplorer.js", "FabricDataPanel.js"].filter((f) => fs.existsSync(path.join(ASSETS, f)));
+  for (const f of files) vm.runInContext(read(f), context, { filename: f });
   const source = read("AppController.js"), bootstrap = 'try { new AppController(document.querySelector("#app")); }';
   assert.ok(source.includes(bootstrap), "AppController.js still ends with its bootstrap line");
   vm.runInContext(source.slice(0, source.indexOf(bootstrap)), context, { filename: "AppController.js" });
@@ -137,7 +139,8 @@ describe("Fabric Data: navigation and gating", () => {
     assert.equal(panel.visible, true);
     const nav = view.fabricNav({ screen: "fabric" });
     assert.match(nav, /data-screen="fabric"/); assert.match(nav, /data-tooltip="Fabric Data"/); assert.match(nav, /aria-current="page"/);
-    assert.match(read("AppView.js"), /<div class="sidebar-footer">\$\{this\.fabricNav\(model\)\}<button class="sidebar-settings" data-action="settings"/);
+    assert.match(nav, /class="sidebar-settings nav-module nav-fabric active"/);
+    assert.match(read("AppView.js"), /<div class="sidebar-footer">\$\{this\.moduleNav\(model\)\}<button class="sidebar-settings" data-action="settings"/);
   });
 
   test("tabs: Inventory · Sales; Invoices only with invoiceViews; API Management only for API admins with tokens on", () => {
@@ -151,8 +154,67 @@ describe("Fabric Data: navigation and gating", () => {
     assert.equal(tabs({ read: true, datasets: ["sales"] }), "sales", "a dataset /features leaves out has no tab");
     const { panel } = panelWith(env, { features: { read: true, apiAdmin: true, apiTokens: true } });
     const html = panel.html();
-    assert.match(html, />[^<]*API Management<\/button>/); assert.doesNotMatch(html, /Sales Lines|Fabric API<\/button>/);
+    assert.match(html, /<span>API Management<\/span><\/button>/); assert.doesNotMatch(html, /Sales Lines|Fabric API<\/span><\/button>/);
     assert.match(html, /Read-only/);
+  });
+
+  test("app bar: icon, name, tabs, Read-only, connection chip and Refresh; no page title or description; nothing editable", () => {
+    const env = load();
+    const { panel } = panelWith(env, { features: { read: true, apiAdmin: true, apiTokens: true } });
+    const html = panel.html();
+    assert.match(html, /^<div class="fx-app" data-fx-view="inventory"><header class="fx-appbar">/);
+    assert.match(html, /<h1 class="fx-appbar__title">Fabric Data<\/h1>/);
+    assert.match(html, /<nav class="fx-appbar__tabs" role="tablist" aria-label="Fabric Data sections">/);
+    assert.deepEqual([...html.matchAll(/data-section="(\w+)"/g)].map((m) => m[1]), ["inventory", "sales", "api"], "Inventory · Sales · API Management");
+    assert.match(html, /class="fx-chip fx-chip--readonly"/); assert.match(html, /class="fx-chip fx-chip--conn is-info"[^>]*>.*Checking…/, "before /status answers");
+    assert.match(html, /data-action="fabric-refresh"[^>]*aria-label="Refresh"/);
+    assert.match(html, /<div id="fabric-root" class="fx-app__body fabric-root" role="tabpanel" aria-labelledby="fabric-tab-inventory" data-module-scroll/);
+    assert.doesNotMatch(html, /page-head|eyebrow|apitok-tabs|Rows from the Fabric/, "no large page title, description or the old tab strip");
+    assert.doesNotMatch(html, /data-action="fabric-[a-z-]*(create|edit|delete|import|export|archive)/);
+  });
+
+  test("status: statusFor and the connection chip (connected / index required / refreshing upstream / unavailable / access denied)", () => {
+    const env = load();
+    const { panel } = panelWith(env);
+    const chip = () => panel.connectionHtml().match(/is-(\w+)"[^>]*>.*<span>([^<]+)<\/span><\/span>$/).slice(1).join(" ");
+    assert.equal(panel.statusFor("inventory"), null);
+    panel.status = STATUS_OK;
+    assert.equal(chip(), "ok Connected"); assert.equal(panel.statusHtml(), "", "nothing more to say when all is well");
+    assert.deepEqual(plain(panel.statusFor("inventory")), { mode: "small", available: true, reason: null, missingIndexes: [], window: null });
+    panel.status = { available: true, datasets: { inventory: { available: false, mode: "unavailable", reason: "FABRIC_INDEX_REQUIRED", missingIndexes: [{ name: "idx_<b>" }] } } };
+    assert.equal(panel.statusFor("inventory").mode, "indexrequired"); assert.equal(chip(), "warn Index required");
+    assert.match(panel.statusHtml(), /fx-status fx-status--warn/); assert.match(panel.statusHtml(), /Index: idx_&lt;b&gt;/); assert.match(panel.statusHtml(), /<pre id="fabric-status-details" class="fx-status__details" hidden>/);
+    panel.status = { available: true, datasets: { inventory: { available: false, mode: "unavailable", reason: "FABRIC_SOURCE_MISSING" } } };
+    assert.equal(chip(), "warn Refreshing upstream");
+    panel.status = { available: false, reason: "FABRIC_UNAVAILABLE" };
+    assert.equal(chip(), "error Unavailable"); assert.equal(panel.statusFor("sales").available, false);
+    panel.status = null; panel.statusError = { kind: "unavailable", code: "SERVICE_UNAVAILABLE", message: "x", reference: "" };
+    assert.equal(chip(), "error Unavailable");
+    panel.denied = true; assert.equal(chip(), "error Access denied");
+  });
+
+  test("status: the small-collection index advice is a compact info line with collapsed details (Details toggles them)", () => {
+    const env = load();
+    const { panel } = panelWith(env);
+    panel.status = { ...STATUS_OK, datasets: { ...STATUS_OK.datasets, inventory: { mode: "small", missingIndexes: [{ name: "fabric_inventory_date" }] } } };
+    let line = panel.statusHtml();
+    assert.match(line, /^<div class="fx-status fx-status--info" role="status">/); assert.match(line, /Indexes recommended/);
+    assert.match(line, /aria-expanded="false" aria-controls="fabric-status-details">Details<\/button>/); assert.match(line, /hidden>Mode: small\nIndex: fabric_inventory_date<\/pre>/);
+    panel.onAction("fabric-status-details", { tagName: "BUTTON", dataset: {} }, {});
+    line = panel.statusHtml();
+    assert.match(line, /aria-expanded="true"/); assert.doesNotMatch(line, / hidden>/);
+    panel.forget(); assert.equal(panel.statusOpen, false, "forgotten when the session ends");
+  });
+
+  test("fabric-r-… actions, inputs and changes go to the explorer named by data-ds", () => {
+    const env = load();
+    const { panel } = panelWith(env);
+    const seen = [];
+    panel.explorers.sales.onAction = (a) => seen.push(["action", a]); panel.explorers.sales.onInput = (t) => seen.push(["input", t.dataset.action]); panel.explorers.sales.onChange = (t) => seen.push(["change", t.dataset.action]);
+    const target = { tagName: "BUTTON", dataset: { action: "fabric-r-tab", ds: "sales" } };
+    panel.onAction("fabric-r-tab", target, {}); panel.onInput(target); panel.onChange(target);
+    panel.onAction("fabric-r-tab", { tagName: "BUTTON", dataset: { ds: "other" } }, {});
+    assert.deepEqual(seen, [["action", "fabric-r-tab"], ["input", "fabric-r-tab"], ["change", "fabric-r-tab"]]);
   });
 
   test("applyRoute: API without the right → Inventory; invoice paths → Sales unless invoiceViews; Sales Lines → Sales", () => {
@@ -251,7 +313,8 @@ describe("Fabric Data: explorer (schema-driven)", () => {
     assert.equal(q.get("fields"), inventorySchema().defaultColumns.join(","));
     assert.equal(q.get("limit"), "100"); assert.equal(q.get("dateFrom"), null, "no dates: the server's window"); assert.equal(q.get("cursor"), null);
     const html = panel.body();
-    const heads = [...html.matchAll(/<th scope="col"[^>]*>(?:<button[^>]*>)?([A-Za-z_]+)/g)].map((m) => m[1]);
+    // Headers show friendly labels; each header's title starts with the schema field name it stands for.
+    const heads = [...html.matchAll(/<th scope="col"[^>]*title="([A-Za-z_]+)[ "]/g)].map((m) => m[1]);
     assert.deepEqual(heads, inventorySchema().defaultColumns);
     assert.match(html, /aria-sort="descending"[^>]*><button[^>]*data-sort="date"/, "Posting_Date sorts by the date sort");
     assert.match(html, /data-sort="entryNo"/, "Entry_No sorts by entryNo");
@@ -358,8 +421,29 @@ describe("Fabric Data: explorer (schema-driven)", () => {
     const c = inventoryPanel(env, { schema: inventorySchema({ sensitive: true }), records: page([row(ID1, { [SENSITIVE_FIELD]: "12.50" })]) });
     c.panel.ensure(); await settle();
     assert.equal(recordsCall(c.calls).get("fields"), `Posting_Date,${SENSITIVE_FIELD}`);
-    assert.match(c.panel.body(), new RegExp(`${SENSITIVE_FIELD} <span class="account-badge is-warn fabric-sensitive"`));
-    for (const f of ["FabricExplorer.js", "FabricDataPanel.js", "FabricApiPanel.js", "FabricApiDocs.js"]) for (const name of [SENSITIVE_FIELD, "landed_cost", "trade_price", "distributors_price", "Cost_Amount"]) assert.ok(!read(f).includes(name), `${f} doesn't name ${name}`);
+    assert.match(c.panel.body(), new RegExp(`<th scope="col"[^>]*title="${SENSITIVE_FIELD}[ "][^>]*>[^<]* <span class="account-badge is-warn fabric-sensitive"`), "the sensitive column's header is marked");
+    // The UI never hard-codes sensitive field names. The one exception: FabricApiDocs.RESTRICTED, the documented list of the
+    // restricted fields per dataset (the API docs must name them exactly); outside that list the docs don't name them either.
+    const SENSITIVE_NAMES = [SENSITIVE_FIELD, "landed_cost", "trade_price", "distributors_price", "Cost_Amount"];
+    const ui = ["FabricExplorer.js", "FabricDataPanel.js", "FabricApiPanel.js", "AppModules.js", "FabricRecordView.js"].filter((f) => fs.existsSync(path.join(ASSETS, f)));
+    for (const f of ui) for (const name of SENSITIVE_NAMES) assert.ok(!read(f).includes(name), `${f} doesn't name ${name}`);
+    // Second approved exception (2026-11-24): FabricFieldMeta.js holds presentation labels and groups for EVERY verified field,
+    // sensitive ones included, so a sensitive reader sees friendly labels. It never decides visibility: it has no sensitive
+    // list or flag, and arrange() places only the names the server actually returned.
+    if (fs.existsSync(path.join(ASSETS, "FabricFieldMeta.js"))) {
+      const code = read("FabricFieldMeta.js").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'])\/\/.*$/gm, "$1");
+      assert.doesNotMatch(code, /\b\w*(sensitive|restricted|visible|hidden|allowed)\w*\s*[(=:]/i, "FabricFieldMeta has no visibility logic (no such identifiers)");
+      const FM = env.window.FabricFieldMeta || env.context?.FabricFieldMeta;
+      if (FM?.arrange) {
+        const placed = FM.arrange("inventory", ["Posting_Date"]).flatMap((g) => g.fields.map((f) => (typeof f === "string" ? f : f.name)));
+        assert.equal(JSON.stringify(placed), JSON.stringify(["Posting_Date"]), "only fields present in the response are arranged");
+      }
+    }
+    // RESTRICTED as `static RESTRICTED = …;` or as an object property `RESTRICTED: Object.freeze({ sales: […], inventory: […] })`.
+    const docs = read("FabricApiDocs.js")
+      .replace(/static\s+RESTRICTED\s*=\s*(?:Object\.freeze\()?\s*(\{[\s\S]*?\}|\[[\s\S]*?\])\s*\)?\s*;/, "")
+      .replace(/\bRESTRICTED\s*:\s*Object\.freeze\(\{[\s\S]*?\}\)/, "");
+    for (const name of SENSITIVE_NAMES) assert.ok(!docs.includes(name), `FabricApiDocs.js names ${name} only in RESTRICTED`);
   });
 
   test("hostile values and field names are escaped in cells and in the record detail", async () => {
@@ -378,8 +462,13 @@ describe("Fabric Data: explorer (schema-driven)", () => {
     assert.equal(panel.urlFor().path, `/fabric/inventory/records/${ID1}`);
     html = panel.body();
     assert.doesNotMatch(html, /<img/); assert.match(html, /&lt;img/);
-    assert.match(html, /<dt><code>Company<\/code><\/dt>/, "the record key"); assert.match(html, /<dt><code>Entry_No<\/code><\/dt><dd>7<\/dd>/);
-    assert.match(html, /<code>Open<\/code><\/td><td data-label="Value">Yes<\/td><td data-label="Type"><small class="muted">bool<\/small>/);
+    // The record object page (FabricRecordView): the record key in the Keys tab's fx-fieldgroup dl, its values escaped.
+    const keys = html.match(/<dl class="fx-fieldgroup__grid" data-keys="record">([\s\S]*?)<\/dl>/);
+    assert.ok(keys, "the record key");
+    assert.match(keys[1], /<dt class="fx-field__label" title="Company">[^<]*<\/dt><dd class="fx-field__value fx-field__value--key"[^>]*><span[^>]*>&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;<\/span><\/dd>/, "a hostile key value is escaped");
+    assert.match(keys[1], /<dt class="fx-field__label" title="Entry_No">[^<]*<\/dt><dd class="fx-field__value fx-field__value--key"[^>]*><span[^>]*>7<\/span><\/dd>/);
+    assert.match(html, /<code class="fx-allfields__name">Open<\/code><\/th><td[^>]*><span[^>]*>Yes<\/span><\/td><td class="fx-allfields__type">bool<\/td>/);
+    assert.match(html, /<code class="fx-allfields__name">Item_Description<\/code><\/th><td[^>]*><span[^>]*>&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;<\/span><\/td>/, "a hostile field value is escaped");
     assert.match(html, /4 fields/);
   });
 
@@ -402,8 +491,8 @@ describe("Fabric Data: explorer (schema-driven)", () => {
     const gone = inventoryPanel(env, { extra: { [`/fabric/inventory/records/${ID1}`]: serverError(404, "FABRIC_RECORD_NOT_FOUND") } });
     gone.panel.applyRoute({ view: "inventory", recordId: ID1, query: env.FabricExplorer.emptyQuery() }); gone.panel.ensure(); await settle();
     html = gone.panel.body();
-    assert.match(html, /may have been refreshed/); assert.match(html, /data-action="fabric-x-reload" data-ds="inventory"/);
-    gone.panel.explorers.inventory.onAction("fabric-x-reload", { dataset: {} });
+    assert.match(html, /may have been refreshed/); assert.match(html, /data-action="fabric-r-reload" data-ds="inventory"/);
+    gone.panel.explorers.inventory.onAction("fabric-r-reload", { dataset: {} });
     assert.equal(gone.panel.explorers.inventory.recordId, "");
     // /status says the dataset waits for indexes: no records request at all.
     const blocked = inventoryPanel(env, { status: { available: true, datasets: { inventory: { mode: "index_required", missingIndexes: [{ name: "fabric_inventory_date" }] } } } });
@@ -412,7 +501,12 @@ describe("Fabric Data: explorer (schema-driven)", () => {
     assert.match(blocked.panel.body(), /waiting for the data team to add indexes/);
     const small = inventoryPanel(env, { status: { available: true, datasets: { inventory: { mode: "small", missingIndexes: [{ name: "fabric_inventory_date" }] } } } });
     await small.panel.loadStatus(); small.panel.ensure(); await settle();
-    assert.match(small.panel.body(), /small enough to browse without indexes/); assert.match(small.panel.body(), /fabric_inventory_date/);
+    // The index advice is shown once, compact, under the app bar (with the index name in its collapsed details), not again in the list.
+    const smallPage = small.panel.html();
+    assert.equal(smallPage.match(/small enough to browse without/g)?.length, 1, "the advice appears once");
+    assert.match(smallPage, /<div class="fx-status fx-status--info" role="status">[\s\S]*Details[\s\S]*fabric_inventory_date/);
+    assert.doesNotMatch(small.panel.body(), /small enough to browse without|fabric_inventory_date/, "no second banner in the list");
+    assert.ok(small.calls.some(([, p]) => p.startsWith("/fabric/inventory/records?")), "a small dataset is still browsed");
   });
 
   test("403 drops everything in memory; the session ending forgets the explorers too", async () => {
@@ -439,7 +533,7 @@ describe("Fabric Data: explorer (schema-driven)", () => {
     assert.equal(q.get("fields"), "invoice_date,Company,invoice_id,customer_name"); assert.equal(q.get("salesType"), "X"); assert.equal(q.get("ignored"), null, "only schema filters are sent");
     const html = panel.body();
     assert.match(html, /Showing all dates/); assert.match(html, /data-filter="salesType"/); assert.match(html, /Company &lt;|placeholder="Exact name; ~ = no company"/);
-    assert.match(panel.html(), /<h1>Sales /);
+    assert.match(panel.html(), /id="fabric-tab-sales"[^>]*aria-selected="true"[^>]*class="fx-appbar__tab is-active active">/);
   });
 });
 

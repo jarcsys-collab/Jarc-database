@@ -144,6 +144,10 @@ class BoardModel {
   // and keeps the attempted state so a user-triggered Retry can apply and save it again.
   save(change = { op: "saveState" }) {
     if (this.collecting) { this.collecting.push(change); return Promise.resolve(true); } // inside applyAfterSave
+    // An app module opened from its own link before JARC's data loaded (AppController.startShellOnly): this model holds no
+    // workspaces, so saving now would overwrite the person's stored per-user state. Kept in memory; saved after loadJarc.
+    // The latest per-person values are kept so loadJarc can put them back over the state it reads (a theme picked meanwhile).
+    if (this.shellOnly) { this.shellDirty = true; this.shellKeep = JSON.parse(JSON.stringify({ settings: this.settings, profile: this.profile, notifications: this.notifications, feedSeenAt: this.feedSeenAt })); return Promise.resolve(true); }
     if (change.op !== "updateUserState") this.scheduleViewCount();
     const state = this.toStorageState(), text = JSON.stringify(state), history = this.history.slice();
     this.pendingSaves += 1; this.saveState = "saving"; this.countDataSave(change);

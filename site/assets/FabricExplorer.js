@@ -77,7 +77,9 @@ class FabricExplorer {
       if (typeof name !== "string" || !FabricExplorer.NAME.test(name) || sorts.some((x) => x.name === name)) return;
       const keys = FabricExplorer.keyNames(Array.isArray(d) || (d && typeof d === "object" && !d.fields && !d.keys) ? d : d?.fields ?? d?.keys);
       // requiresCompany: the server lists this sort one company at a time (company=… or ~); dateRange false: no dates with it.
-      sorts.push({ name, fields: keys, label: typeof d?.label === "string" ? d.label : "", default: d?.default === true, requiresCompany: d?.requiresCompany === true, dateRange: d?.dateRange !== false });
+      // lead: the column the sort is named after (schema sorts[].field), when the server says so.
+      const lead = typeof d?.field === "string" && FabricExplorer.FIELD.test(d.field) ? d.field : typeof d?.lead === "string" && FabricExplorer.FIELD.test(d.lead) ? d.lead : "";
+      sorts.push({ name, fields: keys, lead, label: typeof d?.label === "string" ? d.label : "", default: d?.default === true, requiresCompany: d?.requiresCompany === true, dateRange: d?.dateRange !== false });
     };
     if (Array.isArray(s.sorts)) s.sorts.forEach((d) => (typeof d === "string" ? addSort(d, []) : addSort(d?.name ?? d?.key, d)));
     else if (s.sorts && typeof s.sorts === "object") Object.entries(s.sorts).forEach(([k, d]) => addSort(k, d));
@@ -89,21 +91,39 @@ class FabricExplorer {
     return { label: typeof s.label === "string" ? s.label : "", fields, byName, filters, sorts, defaultColumns: [...new Set(defaults)], dateField: typeof s.dateField === "string" ? s.dateField : "", companyField: typeof s.companyField === "string" ? s.companyField : "", recordKey };
   }
   static humanize(name) { const t = String(name).replace(/_/g, " ").replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().trim(); return t ? t[0].toUpperCase() + t.slice(1) : ""; }
+  // Optional collaborators (FabricFieldMeta.js, FabricRecordView.js): used when loaded, never required.
+  static global(name) {
+    let g;
+    try { g = name === "FabricFieldMeta" ? (typeof FabricFieldMeta !== "undefined" ? FabricFieldMeta : undefined) : name === "FabricRecordView" ? (typeof FabricRecordView !== "undefined" ? FabricRecordView : undefined) : undefined; } catch { g = undefined; }
+    if (g === undefined && typeof window !== "undefined" && window) g = window[name];
+    return g && (typeof g === "object" || typeof g === "function") ? g : null;
+  }
+  static NULL_MARK = `<span class="fx-null" title="No value"><span aria-hidden="true">—</span><span class="sr-only">No value</span></span>`;
 
   constructor(panel, dataset) { this.p = panel; this.ds = dataset; this.reset(); }
   reset() {
-    clearTimeout(this.searchTimer);
+    clearTimeout(this.searchTimer); clearTimeout(this.columnTimer); this.columnTimer = null; this.columnsDirty = false;
     this.query = FabricExplorer.emptyQuery(); this.draft = null; this.page = { cursor: null, stack: [] };
     this.schema = FabricExplorer.slot(); this.records = FabricExplorer.slot(); this.record = FabricExplorer.slot();
     this.info = null; this.columns = null; this.recordId = ""; this.chooser = false; this.columnFilter = ""; this.fieldFilter = ""; this.hideEmpty = false; this.problem = ""; this.notice = "";
+    // List view only (memory, never storage): filter bar open, object navigation open, the selected row, the company values
+    // seen on pages already loaded (quick filters, no extra request) and the last page shown (kept on screen while the next loads).
+    this.filtersOpen = false; this.navOpen = true; this.selectedId = ""; this.seenCompanies = []; this.shown = null;
   }
+  // The rows of the page on screen (FabricRecordView reads these for prev/next; nothing is fetched for it).
+  get items() { const d = this.records.data; return Array.isArray(d?.items) ? d.items : []; }
   static slot() { return { key: null, data: null, loading: false, error: null, seq: 0 }; }
   forget() { this.reset(); }
   get label() { return this.info?.label || FabricExplorer.DATASETS[this.ds] || this.ds; }
   esc(v) { return this.p.esc(v); }
   attr(v) { return this.p.attr(v); }
   get storageKey() { return `${FabricExplorer.STORAGE_PREFIX}${this.ds}`; }
-  get statusInfo() { const d = this.p.status?.datasets?.[this.ds]; return d && typeof d === "object" ? d : null; }
+  get statusInfo() {
+    const d = this.p.status?.datasets?.[this.ds];
+    if (d && typeof d === "object") return d;
+    const s = typeof this.p.statusFor === "function" ? this.p.statusFor(this.ds) : null; // the panel's summary, when it offers one
+    return s && typeof s === "object" ? s : null;
+  }
 
   // ---- Route (FabricDataPanel.applyRoute / routeForUrl)
   state() { return `${FabricExplorer.formatQuery(this.query)}|${this.recordId}`; }
@@ -139,7 +159,27 @@ class FabricExplorer {
     else return false;
     this.saveColumns(); return true;
   }
-  resetColumns() { try { window.localStorage?.removeItem(this.storageKey); } catch { /* storage blocked */ } this.columns = this.defaultColumns(); }
+  // Ticking columns in the chooser changes the choice (and what is remembered) at once; the page is asked for once per batch:
+  // COLUMN_DELAY after the last tick, or when the chooser closes (Done), whichever comes first.
+  static COLUMN_DELAY = 300;
+  queueColumns() {
+    this.columnsDirty = true; clearTimeout(this.columnTimer);
+    this.columnTimer = setTimeout(() => this.applyColumns(), FabricExplorer.COLUMN_DELAY);
+    if (typeof document === "undefined") return;
+    const ds = this.ds, count = document.querySelector(`#fabric-${ds}-col-count`), badge = document.querySelector(`#fabric-${ds}-head [data-focus-key="cols"] .fx-btn__count`);
+    if (count) count.textContent = this.colCountText();
+    if (badge) badge.textContent = `(${this.columns.length})`;
+  }
+  applyColumns() {
+    clearTimeout(this.columnTimer); this.columnTimer = null;
+    if (!this.columnsDirty) return false;
+    this.columnsDirty = false; this.page = { cursor: null, stack: [] };
+    const list = () => (typeof document !== "undefined" ? document.querySelector(`#fabric-${this.ds}-col-list`) : null), top = list()?.scrollTop || 0;
+    this.redrawAfter();
+    const after = list(); if (after && top) after.scrollTop = top;
+    return true;
+  }
+  resetColumns() { clearTimeout(this.columnTimer); this.columnsDirty = false; try { window.localStorage?.removeItem(this.storageKey); } catch { /* storage blocked */ } this.columns = this.defaultColumns(); }
 
   // ---- Loading
   blocked() {
@@ -147,7 +187,9 @@ class FabricExplorer {
     if (!s) return null;
     if (s.available === false) return FabricDataPanel.errorInfo({ cause: { serverCode: s.reason || "FABRIC_UNAVAILABLE" } });
     if (Array.isArray(s.access?.datasets) && !s.access.datasets.includes(this.ds)) return { kind: "forbidden", code: "FABRIC_DATASET_FORBIDDEN", message: `You don't have access to ${FabricExplorer.DATASETS[this.ds] || "this dataset"}.`, reference: "" };
-    const d = this.statusInfo;
+    // The panel's summary (statusFor) is the one reading of /status; the raw dataset entry is the fallback without it.
+    const st = typeof this.p.statusFor === "function" ? this.p.statusFor(this.ds) : null;
+    const d = st && typeof st === "object" ? st : this.statusInfo;
     if (!d) return null;
     const mode = String(d.mode || "").toLowerCase().replace(/[-_]/g, "");
     if (d.available === false || mode === "indexrequired" || mode === "unavailable" || mode === "sourcemissing") return FabricDataPanel.errorInfo({ cause: { serverCode: typeof d.reason === "string" && d.reason ? d.reason : mode === "unavailable" ? "FABRIC_UNAVAILABLE" : mode === "sourcemissing" ? "FABRIC_SOURCE_MISSING" : "FABRIC_INDEX_REQUIRED" } });
@@ -172,7 +214,7 @@ class FabricExplorer {
     if (!this.info) return;
     if (this.recordId) { this.want(this.record, FabricExplorer.recordPath(this.ds, this.recordId)); return; }
     const problem = this.rangeProblem() || this.sortProblem();
-    if (problem !== this.problem) { this.problem = problem; this.p.redraw(); }
+    if (problem !== this.problem) { this.problem = problem; this.p.redraw(); this.startMode = "full"; }
     if (!this.problem) this.want(this.records, this.recordsPath());
   }
   // The sort in use (the query's, or the server's default) and the company filter the schema offers.
@@ -191,12 +233,17 @@ class FabricExplorer {
   async load(slot, path, { keep = false } = {}) {
     const seq = ++slot.seq;
     if (!keep) slot.data = null;
-    slot.key = path; slot.loading = true; slot.error = null; this.p.redraw();
+    slot.key = path; slot.loading = true; slot.error = null;
+    // The start of a page load: when the page on screen stays (same columns), it is only marked busy in place; the one full
+    // redraw comes with the answer. startMode tells redrawAfter() what was drawn.
+    if (slot === this.records && this.markBusy()) this.startMode = "inplace";
+    else { this.p.redraw(); this.startMode = "full"; }
     try {
       const data = await this.p.adapter.request("GET", path);
       if (slot.seq !== seq) return;
       slot.data = data;
       if (slot === this.schema) { this.info = FabricExplorer.normalize(data); this.chooseColumns(); }
+      if (slot === this.records && data && Array.isArray(data.items)) { this.shown = { data, cols: (this.columns || []).join(",") }; this.noteCompanies(data.items); }
     } catch (error) {
       if (slot.seq !== seq) return;
       slot.error = FabricDataPanel.errorInfo(error);
@@ -253,7 +300,15 @@ class FabricExplorer {
     this.query = next; this.page = { cursor: null, stack: [] }; this.notice = "";
     this.after();
   }
-  after() { this.p.redraw(); this.ensure(); this.p.syncUrl(); }
+  after() { this.redrawAfter(); this.p.syncUrl(); }
+  // After a change that may start a request: one full redraw at most before the answer. A load drawn in full already shows
+  // the new state; one marked busy in place needs only the toolbar, filter bar and navigation brought up to date.
+  redrawAfter() {
+    this.startMode = "";
+    this.ensure();
+    if (this.startMode === "full") return;
+    if (this.startMode !== "inplace" || !this.redrawChrome()) this.p.redraw();
+  }
   setDate(edge, value) {
     const shown = this.shownWindow(), v = String(value || "");
     let from = edge === "from" ? v : this.query.dateFrom || shown.dateFrom, to = edge === "to" ? v : this.query.dateTo || shown.dateTo;
@@ -267,9 +322,28 @@ class FabricExplorer {
     const q = FabricExplorer.clean(this.draft, 100); this.draft = null;
     this.setQuery({ q });
   }
-  sortFor(column) {
-    const sorts = this.info?.sorts || [], skip = new Set([this.info?.companyField, "_id"]);
-    return sorts.find((s) => s.fields[0] === column) || sorts.find((s) => s.fields.filter((k) => !skip.has(k))[0] === column) || null;
+  // The column a sort is led by: the schema's field, else its first key that isn't the company or _id.
+  leadOf(s) { if (!s) return ""; if (s.lead) return s.lead; const skip = new Set([this.info?.companyField, "_id"]); return s.fields.filter((k) => !skip.has(k))[0] || s.fields[0] || ""; }
+  sortFor(column) { return (this.info?.sorts || []).find((s) => this.leadOf(s) === column) || null; }
+  // How a column takes part in the sort in use: primary (its arrow, aria-sort) or a later key of a compound sort ("then" n).
+  sortRole(column) {
+    const s = this.activeSort(), lead = this.leadOf(s);
+    if (!s) return { primary: false, then: 0 };
+    if (lead === column) return { primary: true, then: 0 };
+    const later = s.fields.filter((k) => k !== lead && k !== "_id"), i = later.indexOf(column);
+    return { primary: false, then: i >= 0 ? i + 2 : 0 };
+  }
+  // The order in words: "2nd", "3rd"… (header badges) and "second", "third"… (screen readers and tooltips).
+  static ordinal(n) { return n === 2 ? "2nd" : n === 3 ? "3rd" : `${n}th`; }
+  static ordinalWord(n) { return ["", "first", "second", "third", "fourth", "fifth", "sixth"][n] || `key ${n}`; }
+  // The Sort control's tooltip: the whole order of the sort in use, and what the header marks mean.
+  sortLegend() {
+    const s = this.activeSort(), lead = this.leadOf(s);
+    if (!s) return "";
+    const dir = this.query.dir === "asc" ? "ascending" : "descending";
+    const later = s.fields.filter((k) => k !== lead && k !== "_id");
+    const parts = [`${lead ? this.fieldLabel(lead) : this.sortLabel(s)} (${dir}, ▲/▼ in its header)`, ...later.map((k, i) => `then ${this.fieldLabel(k)} (${FabricExplorer.ordinal(i + 2)})`)];
+    return `Sorted by ${parts.join(", ")}. A "2nd"/"3rd" badge in a column header marks a later sort key. Click a column header to sort by it.`;
   }
   sortBy(name) {
     const sorts = this.info?.sorts || [];
@@ -305,53 +379,177 @@ class FabricExplorer {
   }
   plain(value) { if (value === null || value === undefined) return ""; if (typeof value === "boolean") return value ? "Yes" : "No"; if (typeof value === "object") { try { return JSON.stringify(value); } catch { return ""; } } return String(value); }
 
+  // Friendly labels and formatting come from FabricFieldMeta when it is loaded; without it, the field name and cell() as before.
+  // Requests always use the original field names.
+  fieldLabel(name) {
+    const m = FabricExplorer.global("FabricFieldMeta");
+    if (m && typeof m.label === "function") { try { const t = m.label(this.ds, name); if (typeof t === "string" && t.trim()) return t.trim(); } catch { /* fall back */ } }
+    return String(name);
+  }
+  filterLabel(f) {
+    if (f.label) return f.label;
+    const m = FabricExplorer.global("FabricFieldMeta");
+    if (m && typeof m.label === "function") { try { const t = m.label(this.ds, f.field); if (typeof t === "string" && t.trim()) return t.trim(); } catch { /* fall back */ } }
+    return FabricExplorer.humanize(f.name);
+  }
+  sortLabel(s) { return s.label || (this.leadOf(s) ? this.fieldLabel(this.leadOf(s)) : "") || FabricExplorer.humanize(s.name); }
+  // One grid cell: its inner HTML, a class for the cell itself (no wrapper element) and a tooltip only for a value long enough
+  // to be cut off (cells are one line, at most 360px wide): 200 rows × 85 columns stay a light page.
+  static TITLE_MIN = 40;
+  gridCell(value, type, name) {
+    if (value === null || value === undefined || value === "") return { html: FabricExplorer.NULL_MARK, cls: "", title: "" };
+    const long = (t) => (typeof t === "string" && t.length > FabricExplorer.TITLE_MIN ? t : "");
+    const m = FabricExplorer.global("FabricFieldMeta");
+    if (m && typeof m.format === "function") {
+      try {
+        const r = m.format(value, type, name);
+        if (r && typeof r.text === "string") return { html: this.esc(r.text), cls: typeof r.cls === "string" ? r.cls : "", title: long(r.text) ? (typeof r.title === "string" && r.title ? r.title : r.text) : "" };
+      } catch { /* fall back */ }
+    }
+    return { html: this.cell(value, type), cls: "", title: typeof value === "string" && String(type).toLowerCase() !== "date" ? long(value) : "" };
+  }
+
   // ---- The page
   html() {
     const blocked = this.blocked();
     if (blocked) return this.bannersHtml() + this.p.errorHtml(blocked, "fabric-refresh");
     if (this.schema.error) return this.p.errorHtml(this.schema.error, "fabric-x-retry", "", `data-ds="${this.ds}"`);
-    if (!this.info) return `<div class="fabric-explorer">${this.p.skeleton(6, 6)}</div>`;
-    return `<div class="fabric-explorer" data-ds="${this.ds}">${this.bannersHtml()}${this.recordId ? this.recordHtml() : this.listHtml()}</div>`;
+    if (!this.info) return `<div class="fabric-explorer fx-explorer">${this.p.skeleton(6, 6)}</div>`;
+    if (this.recordId) {
+      // The record page is FabricRecordView's (it reads this.record, this.info, this.items…); the old detail is the fallback.
+      const view = FabricExplorer.global("FabricRecordView");
+      let inner = "";
+      if (view && typeof view.html === "function") { try { inner = view.html(this); } catch { inner = ""; } }
+      return `<div class="fabric-explorer fx-explorer fx-explorer--record" data-ds="${this.ds}">${this.bannersHtml()}${typeof inner === "string" && inner ? inner : this.recordHtml()}</div>`;
+    }
+    return `<div class="fabric-explorer fx-explorer" data-ds="${this.ds}">${this.bannersHtml()}${this.listHtml()}</div>`;
   }
   bannersHtml() {
+    // The panel's app bar already shows the index advice once (FabricDataPanel.statusHtml): no second banner here.
+    if (typeof this.p.statusHtml === "function") return "";
     const d = this.statusInfo;
     if (!d) return "";
     const missing = Array.isArray(d.missingIndexes) ? d.missingIndexes : [];
     const mode = String(d.mode || "").toLowerCase();
     if (!missing.length) return "";
-    const list = `<details><summary>Indexes recommended</summary><ul>${missing.map((m) => `<li><code>${this.esc(typeof m === "string" ? m : m?.name || "")}</code></li>`).join("")}</ul></details>`;
+    const list = `<details class="fx-status__more"><summary class="fx-status__toggle">Indexes recommended</summary><ul class="fx-status__details">${missing.map((m) => `<li><code>${this.esc(typeof m === "string" ? m : m?.name || "")}</code></li>`).join("")}</ul></details>`;
     const text = mode.startsWith("small") ? "This dataset is small enough to browse without indexes. Searches and sorting may be slower until the data team adds them." : "Some searches or sorts are waiting for the data team to add indexes.";
-    return `<div class="integration-alert fabric-banner is-index" role="status"><span>${text}</span>${list}</div>`;
+    return `<div class="fx-status fx-status--info fabric-banner is-index" role="status"><span class="fx-status__msg">${text}</span>${list}</div>`;
   }
+  isCompany(f) { return f.name === "company" || Boolean(this.info?.companyField && f.field === this.info.companyField); }
   filterControl(f) {
-    const id = `fabric-${this.ds}-f-${f.name}`, value = this.query.filters[f.name] ?? "", label = this.esc(f.label || FabricExplorer.humanize(f.name));
+    const id = `fabric-${this.ds}-f-${f.name}`, value = this.query.filters[f.name] ?? "", label = this.esc(this.filterLabel(f));
     const common = `id="${this.attr(id)}" data-action="fabric-x-filter" data-ds="${this.ds}" data-filter="${this.attr(f.name)}" title="${this.attr(f.field)}"`;
-    if (f.type === "bool" || f.type === "boolean") return `<label>${label}<select ${common}><option value="">Any</option><option value="true" ${value === "true" ? "selected" : ""}>Yes</option><option value="false" ${value === "false" ? "selected" : ""}>No</option></select></label>`;
+    if (f.type === "bool" || f.type === "boolean") return `<label class="fx-filterbar__item">${label}<select ${common}><option value="">Any</option><option value="true" ${value === "true" ? "selected" : ""}>Yes</option><option value="false" ${value === "false" ? "selected" : ""}>No</option></select></label>`;
     const company = f.name === "company" || (this.info.companyField && f.field === this.info.companyField);
     let options = f.options;
     if (!options && company && Array.isArray(this.statusInfo?.companies)) options = this.statusInfo.companies;
     if (options && options.length) {
       const opts = options.map((o) => { const raw = o !== null && typeof o === "object" ? o.value : o, v = raw === null ? "~" : String(raw), text = o !== null && typeof o === "object" && typeof o.label === "string" ? o.label : raw === null ? "No company" : String(raw); return `<option value="${this.attr(v)}" ${v === value ? "selected" : ""}>${this.esc(text)}</option>`; });
       if (value && !options.some((o) => { const raw = o !== null && typeof o === "object" ? o.value : o; return (raw === null ? "~" : String(raw)) === value; })) opts.push(`<option value="${this.attr(value)}" selected>${this.esc(value === "~" ? "No company" : value)}</option>`);
-      return `<label>${label}<select ${common}><option value="">${company ? "All companies" : "Any"}</option>${opts.join("")}</select></label>`;
+      return `<label class="fx-filterbar__item">${label}<select ${common}><option value="">${company ? "All companies" : "Any"}</option>${opts.join("")}</select></label>`;
     }
-    return `<label>${label}<input ${common} type="search" value="${this.attr(value)}" maxlength="100" autocomplete="off" placeholder="${company ? "Exact name; ~ = no company" : "Exact value"}"></label>`;
+    return `<label class="fx-filterbar__item">${label}<input ${common} type="search" value="${this.attr(value)}" maxlength="100" autocomplete="off" placeholder="${company ? "Exact name; ~ = no company" : "Exact value"}"></label>`;
   }
   filtersHtml() {
-    const info = this.info, q = this.query, w = this.shownWindow(), max = this.maxDays, ds = this.ds;
-    const searchable = info.fields.filter((f) => f.searchable).map((f) => f.name);
-    const placeholder = searchable.length ? `Search ${searchable.slice(0, 3).join(", ")}${searchable.length > 3 ? "…" : ""}` : "Search";
-    const sorts = info.sorts.length > 1 ? `<label>Sort<select id="fabric-${ds}-sort" data-action="fabric-x-sort-select" data-ds="${ds}">${info.sorts.map((s) => `<option value="${this.attr(s.name)}" ${(q.sort || info.sorts[0].name) === s.name ? "selected" : ""}>${this.esc(s.label || FabricExplorer.humanize(s.name))}</option>`).join("")}</select></label>` : "";
-    const order = info.sorts.length ? `<label>Order<select id="fabric-${ds}-dir" data-action="fabric-x-dir" data-ds="${ds}"><option value="desc" ${q.dir !== "asc" ? "selected" : ""}>Descending</option><option value="asc" ${q.dir === "asc" ? "selected" : ""}>Ascending</option></select></label>` : "";
+    const info = this.info, w = this.shownWindow(), max = this.maxDays, ds = this.ds;
     const dates = this.datesApply(), off = dates ? "" : "disabled";
     const help = this.problem ? `<p id="fabric-${ds}-range-help" class="fabric-help is-error" role="alert">${this.esc(this.problem)}</p>` : !dates ? `<p id="fabric-${ds}-range-help" class="fabric-help">This order lists one company's rows by entry number; dates don't apply to it.</p>` : `<p id="fabric-${ds}-range-help" class="fabric-help">${info.dateField ? `Dates filter <code>${this.esc(info.dateField)}</code> (UTC days). ` : ""}${max ? `Up to ${max} days. ` : ""}Leave them empty for the server's default window.</p>`;
-    return `<form class="health-filters fabric-filters" role="search" aria-label="Filter ${this.attr(this.label)}" data-action="fabric-x-form" data-ds="${ds}">
-      <label class="fabric-search">Search<input id="fabric-${ds}-q" type="search" data-action="fabric-x-search" data-ds="${ds}" value="${this.attr(this.draft ?? q.q)}" maxlength="100" placeholder="${this.attr(placeholder)}" autocomplete="off"></label>
-      <label>From (UTC)<input id="fabric-${ds}-from" type="date" data-action="fabric-x-date" data-ds="${ds}" data-edge="from" value="${this.attr(w.dateFrom)}" aria-describedby="fabric-${ds}-range-help" ${off}></label>
-      <label>To (UTC)<input id="fabric-${ds}-to" type="date" data-action="fabric-x-date" data-ds="${ds}" data-edge="to" value="${this.attr(w.dateTo)}" aria-describedby="fabric-${ds}-range-help" ${off}></label>
-      ${info.filters.map((f) => this.filterControl(f)).join("")}${sorts}${order}
-      <label>Rows per page<select id="fabric-${ds}-limit" data-action="fabric-x-limit" data-ds="${ds}">${FabricExplorer.PAGE_SIZES.map((n) => `<option value="${n}" ${q.limit === n ? "selected" : ""}>${n}</option>`).join("")}</select></label>
-      ${help}</form>`;
+    return `<form class="fx-filterbar__form fabric-filters" aria-label="Filter ${this.attr(this.label)}" data-action="fabric-x-form" data-ds="${ds}"><div class="fx-filterbar__grid">
+      <label class="fx-filterbar__item">From (UTC)<input id="fabric-${ds}-from" type="date" data-action="fabric-x-date" data-ds="${ds}" data-edge="from" value="${this.attr(w.dateFrom)}" aria-describedby="fabric-${ds}-range-help" ${off}></label>
+      <label class="fx-filterbar__item">To (UTC)<input id="fabric-${ds}-to" type="date" data-action="fabric-x-date" data-ds="${ds}" data-edge="to" value="${this.attr(w.dateTo)}" aria-describedby="fabric-${ds}-range-help" ${off}></label>
+      ${info.filters.map((f) => this.filterControl(f)).join("")}</div>
+      <div class="fx-filterbar__foot">${help}<button type="button" class="fx-btn" data-action="fabric-x-clear" data-ds="${ds}" data-focus-key="clear-panel">Reset</button></div></form>`;
+  }
+  // ---- Toolbar, filter bar (collapsed by default, chips for what is active) and object navigation: nothing here fetches.
+  activeFilters() {
+    const q = this.query, info = this.info, out = [];
+    if (!info) return out;
+    if (q.q) out.push({ key: "q", label: "Search", text: q.q });
+    if (q.dateFrom && q.dateTo && this.datesApply()) out.push({ key: "dates", label: "Dates", text: `${q.dateFrom} – ${q.dateTo}` });
+    for (const f of info.filters) { const v = q.filters[f.name]; if (v !== undefined && v !== null && v !== "") out.push({ key: `f:${f.name}`, label: this.filterLabel(f), text: this.optionText(f, String(v)) }); }
+    return out;
+  }
+  optionText(f, v) {
+    if (f.type === "bool" || f.type === "boolean") return v === "true" ? "Yes" : v === "false" ? "No" : v;
+    const company = this.isCompany(f), options = f.options || (company && Array.isArray(this.statusInfo?.companies) ? this.statusInfo.companies : []);
+    const hit = options.find((o) => o !== null && typeof o === "object" && typeof o.label === "string" && (o.value === null ? "~" : String(o.value)) === v);
+    if (hit) return hit.label;
+    return company && v === "~" ? "No company" : v;
+  }
+  removeFilter(key) {
+    if (key === "q") { clearTimeout(this.searchTimer); this.draft = null; this.setQuery({ q: "" }); return true; }
+    if (key === "dates") { this.setQuery({ dateFrom: "", dateTo: "" }); return true; }
+    const name = typeof key === "string" && key.startsWith("f:") ? key.slice(2) : "";
+    if (!this.info?.filters.some((f) => f.name === name)) return false;
+    this.setQuery({ filters: { [name]: "" } }); return true;
+  }
+  hasQuery() { return FabricExplorer.formatQuery({ ...this.query, limit: FabricExplorer.DEFAULT_LIMIT }) !== ""; }
+  toolbarHtml() {
+    const ds = this.ds, q = this.query, info = this.info, n = this.activeFilters().length, open = this.filtersOpen || Boolean(this.problem);
+    // A short placeholder (never cut off); the searchable fields are in the tooltip and the input's description.
+    const searchable = info.fields.filter((f) => f.searchable).map((f) => this.fieldLabel(f.name));
+    const searchHelp = searchable.length ? `Searches ${searchable.join(", ")}` : "";
+    const value = this.draft ?? q.q;
+    const search = `<form class="fx-search" role="search" aria-label="Search ${this.attr(this.label)}" data-action="fabric-x-form" data-ds="${ds}"><span class="fx-search__icon" aria-hidden="true">${icon("search")}</span><input id="fabric-${ds}-q" class="fx-search__input" type="search" data-action="fabric-x-search" data-ds="${ds}" value="${this.attr(value)}" maxlength="100" placeholder="Search…" aria-label="Search"${searchHelp ? ` title="${this.attr(searchHelp)}" aria-describedby="fabric-${ds}-q-help"` : ""} autocomplete="off">${searchHelp ? `<span class="sr-only" id="fabric-${ds}-q-help">${this.esc(searchHelp)}</span>` : ""}${value ? `<button type="button" class="fx-btn fx-btn--icon fx-search__clear" data-action="fabric-x-search-clear" data-ds="${ds}" data-focus-key="search-clear" aria-label="Clear search">${icon("close")}</button>` : ""}</form>`;
+    const badge = n ? `<span class="fx-badge"><span class="sr-only">, </span>${n}<span class="sr-only"> active</span></span>` : "";
+    const active = this.activeSort(), dir = q.dir === "asc" ? "asc" : "desc", legend = this.attr(this.sortLegend());
+    const sort = info.sorts.length > 1 ? `<label class="fx-toolbar__field" title="${legend}">Sort<select id="fabric-${ds}-sort" data-action="fabric-x-sort-select" data-ds="${ds}">${info.sorts.map((s) => `<option value="${this.attr(s.name)}" ${active?.name === s.name ? "selected" : ""}>${this.esc(this.sortLabel(s))}</option>`).join("")}</select></label>` : active ? `<span class="fx-toolbar__text" title="${legend}">Sort <strong>${this.esc(this.sortLabel(active))}</strong></span>` : "";
+    const order = info.sorts.length ? `<button type="button" class="fx-btn fx-btn--icon fx-explorer__dir" data-action="fabric-x-dir-toggle" data-ds="${ds}" data-focus-key="dir" aria-label="${dir === "asc" ? "Ascending. Switch to descending" : "Descending. Switch to ascending"}" title="${dir === "asc" ? "Ascending" : "Descending"}"><span aria-hidden="true">${dir === "asc" ? "▲" : "▼"}</span></button>` : "";
+    return `<div class="fx-toolbar fx-explorer__toolbar" role="group" aria-label="${this.attr(this.label)} list tools">
+      <button type="button" class="fx-btn" data-action="fabric-refresh" data-focus-key="x-refresh" title="Load this page again">${icon("refresh")}<span>Refresh</span></button><span class="fx-sep" aria-hidden="true"></span>
+      ${search}
+      <button type="button" class="fx-btn" data-action="fabric-x-filters" data-ds="${ds}" data-focus-key="filters" aria-expanded="${open}" aria-controls="fabric-${ds}-filters">${icon("filter")}<span>Filters</span>${badge}</button>
+      <span class="fx-colpop"><button type="button" class="fx-btn" data-action="fabric-x-columns" data-ds="${ds}" data-focus-key="cols" aria-expanded="${this.chooser}" aria-controls="fabric-${ds}-chooser">${icon("columns")}<span>Columns</span> <small class="fx-btn__count">(${this.columns.length})</small></button>${this.chooser ? this.chooserHtml() : ""}</span>
+      <span class="fx-sep" aria-hidden="true"></span><span class="fx-toolbar__sort">${sort}${order}</span>
+      <button type="button" class="fx-btn fx-toolbar__secondary" data-action="fabric-x-clear" data-ds="${ds}" data-focus-key="clear-top" ${this.hasQuery() ? "" : "disabled"}>${icon("close")}<span>Clear filters</span></button>
+      <span class="fx-toolbar__spacer"></span>
+      <label class="fx-toolbar__field fx-toolbar__secondary">Rows per page<select id="fabric-${ds}-limit" data-action="fabric-x-limit" data-ds="${ds}">${FabricExplorer.PAGE_SIZES.map((v) => `<option value="${v}" ${q.limit === v ? "selected" : ""}>${v}</option>`).join("")}</select></label></div>`;
+  }
+  chipHtml(c) {
+    return `<span class="fx-chip fx-chip--filter"><span class="fx-chip__text" title="${this.attr(`${c.label}: ${c.text}`)}"><span class="fx-chip__label">${this.esc(c.label)}:</span> ${this.esc(c.text)}</span><button type="button" class="fx-chip__remove" data-action="fabric-x-chip" data-ds="${this.ds}" data-key="${this.attr(c.key)}" aria-label="Remove filter ${this.attr(c.label)}"><span aria-hidden="true">×</span></button></span>`;
+  }
+  filterbarHtml() {
+    const chips = this.activeFilters(), open = this.filtersOpen || Boolean(this.problem), ds = this.ds;
+    const info = chips.length ? `<div class="fx-filterbar__info" role="group" aria-label="Active filters">${chips.map((c) => this.chipHtml(c)).join("")}</div>` : "";
+    return `<div class="fx-filterbar${open ? " is-open" : " is-collapsed"}${!open && !chips.length ? " is-empty" : ""}"><div class="fx-filterbar__panel" id="fabric-${ds}-filters" ${open ? "" : "hidden"}>${this.filtersHtml()}</div>${info}</div>`;
+  }
+  // Company quick filters: only values already known (schema or status options, rows on pages already loaded, the current filter).
+  noteCompanies(items) {
+    const cf = this.info?.companyField;
+    if (!cf || !this.companyFilter()) return;
+    for (const item of items) {
+      const values = item && typeof item.values === "object" && item.values ? item.values : null;
+      if (!values || !Object.hasOwn(values, cf) || this.seenCompanies.length >= 50) continue;
+      const v = values[cf], n = v === null ? "~" : FabricExplorer.clean(typeof v === "string" ? v : "", 100);
+      if (n && !this.seenCompanies.includes(n)) this.seenCompanies.push(n);
+    }
+  }
+  navCompanies() {
+    const c = this.companyFilter();
+    if (!c) return [];
+    const out = [], seen = new Set();
+    const add = (v, text) => { if (typeof v !== "string" || !v || v.length > 100 || seen.has(v) || out.length >= 60) return; seen.add(v); out.push({ value: v, text: typeof text === "string" && text ? text : v === "~" ? "No company" : v }); };
+    const fromOption = (o) => { const raw = o !== null && typeof o === "object" ? o.value : o; if (raw !== null && typeof raw !== "string" && typeof raw !== "number") return; add(raw === null ? "~" : String(raw), o !== null && typeof o === "object" ? o.label : ""); };
+    (c.options || []).forEach(fromOption);
+    if (Array.isArray(this.statusInfo?.companies)) this.statusInfo.companies.forEach(fromOption);
+    this.seenCompanies.forEach((v) => add(v));
+    const current = this.query.filters[c.name];
+    if (current) add(current);
+    return out;
+  }
+  navHtml() {
+    const ds = this.ds, c = this.companyFilter(), current = c ? this.query.filters[c.name] || "" : "";
+    const toggle = `<button type="button" class="fx-btn fx-btn--icon fx-nav__collapse" data-action="fabric-x-nav" data-ds="${ds}" data-focus-key="nav-toggle" aria-expanded="${this.navOpen}" aria-controls="fabric-${ds}-nav" aria-label="${this.navOpen ? "Hide" : "Show"} object navigation">${icon(this.navOpen ? "left" : "right")}</button>`;
+    if (!this.navOpen) return `<aside class="fx-nav fx-explorer__nav is-collapsed" id="fabric-${ds}-nav" aria-label="Objects"><div class="fx-nav__caption">${toggle}</div></aside>`;
+    const row = (value, text, i) => `<li class="fx-nav__node"><button type="button" class="fx-nav__row${value === current ? " is-current" : ""}" data-action="fabric-x-nav-company" data-ds="${ds}" data-company="${this.attr(value)}" data-focus-key="nav-${i}"${value === current ? ' aria-current="true"' : ""}>${this.esc(text)}</button></li>`;
+    const companies = this.navCompanies();
+    // The company shortcuts are only the values already known (filter options, rows on pages loaded so far): labelled as such so
+    // they never read as the complete list of companies in the data.
+    const seen = companies.length ? `<li class="fx-nav__subhead" role="presentation">Seen on loaded pages <span class="fx-nav__hint">(not a complete list)</span></li>${companies.map((x, i) => row(x.value, x.text, i)).join("")}` : "";
+    const list = c ? `<ul class="fx-nav__group">${row("", "All records", "all")}${seen}</ul>` : `<ul class="fx-nav__group">${row("", "All records", "all")}</ul>`;
+    const foot = c ? "These shortcuts show only companies seen on the pages loaded so far. To choose any company, use Filters → Company." : "Use Filters to narrow the list.";
+    return `<aside class="fx-nav fx-explorer__nav" id="fabric-${ds}-nav" aria-label="Objects"><div class="fx-nav__caption"><span>Objects</span>${toggle}</div><ul class="fx-nav__tree"><li class="fx-nav__node is-root"><span class="fx-nav__rowtitle">${icon("list")}<span>${this.esc(this.label)}</span></span>${list}</li></ul><footer class="fx-nav__foot">${foot}</footer></aside>`;
   }
   windowText() {
     const w = this.records.data?.window;
@@ -361,46 +559,71 @@ class FabricExplorer {
     if (from && to) return `Showing ${this.esc(from)} – ${this.esc(to)} (UTC)`;
     return "Showing all dates";
   }
+  colCountText() { return `${this.columns.length} of ${this.info.fields.length} columns shown.`; }
   chooserHtml() {
     const ds = this.ds, term = this.columnFilter.trim().toLowerCase();
-    const rows = this.info.fields.map((f) => { const on = this.columns.includes(f.name), hide = term && !f.name.toLowerCase().includes(term); return `<label class="fabric-check" data-col="${this.attr(f.name.toLowerCase())}" ${hide ? "hidden" : ""}><input type="checkbox" data-action="fabric-x-col" data-ds="${ds}" data-name="${this.attr(f.name)}" ${on ? "checked" : ""}> <code>${this.esc(f.name)}</code> <small class="muted">${this.esc(f.type)}</small></label>`; }).join("");
-    return `<div class="integration-card fabric-chooser" id="fabric-${ds}-chooser" role="group" aria-label="Columns"><div class="fabric-chooser-head"><label class="fabric-search">Find a column<input id="fabric-${ds}-col-filter" type="search" data-action="fabric-x-col-filter" data-ds="${ds}" value="${this.attr(this.columnFilter)}" maxlength="64" autocomplete="off"></label><button type="button" class="button secondary small" data-action="fabric-x-columns-reset" data-ds="${ds}" data-focus-key="cols-reset">Default columns</button><button type="button" class="button secondary small" data-action="fabric-x-columns" data-ds="${ds}" data-focus-key="cols-done">Done</button></div><p class="fabric-help">${this.columns.length} of ${this.info.fields.length} columns shown. Your choice is remembered in this browser (column names only).</p><div class="fabric-chooser-list" id="fabric-${ds}-col-list">${rows}</div></div>`;
+    const rows = this.info.fields.map((f) => {
+      const on = this.columns.includes(f.name), label = this.fieldLabel(f.name), key = (label === f.name ? f.name : `${f.name} ${label}`).toLowerCase(), hide = term && !key.includes(term);
+      return `<label class="fabric-check" data-col="${this.attr(key)}" ${hide ? "hidden" : ""}><input type="checkbox" data-action="fabric-x-col" data-ds="${ds}" data-name="${this.attr(f.name)}" data-focus-key="col-${this.attr(f.name)}" ${on ? "checked" : ""}> ${label === f.name ? "" : `<span>${this.esc(label)}</span> `}<code>${this.esc(f.name)}</code> <small class="muted">${this.esc(f.type)}</small></label>`;
+    }).join("");
+    return `<div class="fx-explorer__chooser fabric-chooser" id="fabric-${ds}-chooser" role="group" aria-label="Columns"><div class="fabric-chooser-head fx-chooser__head"><span class="fx-search fx-chooser__search"><span class="fx-search__icon" aria-hidden="true">${icon("search")}</span><input id="fabric-${ds}-col-filter" class="fx-search__input" type="search" data-action="fabric-x-col-filter" data-ds="${ds}" value="${this.attr(this.columnFilter)}" maxlength="64" autocomplete="off" placeholder="Find a column" aria-label="Find a column"></span><button type="button" class="fx-btn" data-action="fabric-x-columns-reset" data-ds="${ds}" data-focus-key="cols-reset">Default columns</button><button type="button" class="fx-btn" data-action="fabric-x-columns" data-ds="${ds}" data-focus-key="cols-done">Done</button></div><p class="fabric-help"><span id="fabric-${ds}-col-count">${this.colCountText()}</span> Your choice is remembered in this browser (column names only).</p><div class="fabric-chooser-list" id="fabric-${ds}-col-list">${rows}</div></div>`;
   }
+  // While a new page loads, the last page stays on screen (dimmed, aria-busy, paging off) instead of a skeleton: no layout
+  // jump. Only with the same columns; the very first load shows the skeleton.
+  stalePage() { const s = this.records; return !s.data && s.loading && !s.error && !this.problem && this.shown && this.shown.cols === this.columns.join(",") ? this.shown.data : null; }
+  // The toolbar, the filter bar and the column chooser: one region (#fabric-{ds}-head, display: contents) redrawn on its own.
+  headHtml() { return `${this.toolbarHtml()}${this.filterbarHtml()}`; }
   listHtml() {
     const s = this.records, ds = this.ds;
+    const stale = this.stalePage();
     let results;
-    if (this.problem) results = `<p class="integration-note">${this.rangeProblem() ? "Fix the dates to see rows." : "Choose a company to see rows in this order."}</p>`;
+    if (this.problem) results = `<p class="fx-status fx-status--warn fx-explorer__msg" role="status">${this.rangeProblem() ? "Fix the dates to see rows." : "Choose a company to see rows in this order."}</p>`;
     else if (s.error) results = this.p.errorHtml(s.error, "fabric-x-retry", "", `data-ds="${ds}"`);
+    else if (s.data && Array.isArray(s.data.items) && s.data.items.length) results = this.tableHtml(s.data, s.loading) + this.pagerHtml(s.data, s.loading);
+    else if (stale && stale.items.length) results = this.tableHtml(stale, true) + this.pagerHtml(stale, true);
     else if (!s.data) results = this.p.skeleton(Math.min(this.columns.length, 8));
-    else if (!Array.isArray(s.data.items) || !s.data.items.length) results = `<div class="quiet-empty fabric-empty">${icon("search")}<span><strong>No rows match</strong><small>Try other dates, another filter or different search text.</small></span><button type="button" class="button secondary small" data-action="fabric-x-clear" data-ds="${ds}" data-focus-key="clear">Clear filters</button></div>`;
-    else results = this.tableHtml(s.data) + this.pagerHtml(s.data);
-    const tools = `<div class="fabric-toolbar"><span class="fabric-window" aria-live="polite">${this.windowText()}</span><span class="fabric-toolbar-buttons"><button type="button" class="button secondary small" data-action="fabric-x-clear" data-ds="${ds}" data-focus-key="clear-top">Clear filters</button><button type="button" class="button secondary small" data-action="fabric-x-columns" data-ds="${ds}" data-focus-key="cols" aria-expanded="${this.chooser}" aria-controls="fabric-${ds}-chooser">${icon("columns")} Columns <small>(${this.columns.length})</small></button></span></div>`;
-    return `${this.filtersHtml()}${tools}${this.chooser ? this.chooserHtml() : ""}${this.notice ? `<p class="integration-note fabric-notice" role="status">${this.esc(this.notice)}</p>` : ""}<div class="fabric-results" ${s.loading ? 'aria-busy="true"' : ""}>${results}</div>`;
+    else results = `<div class="fx-grid__empty quiet-empty fabric-empty">${icon("search")}<span><strong>No rows match</strong><small>Try other dates, another filter or different search text.</small></span><button type="button" class="fx-btn" data-action="fabric-x-clear" data-ds="${ds}" data-focus-key="clear">Clear filters</button></div>`;
+    const notice = this.notice ? `<p class="fx-status fx-status--info fabric-notice" role="status">${this.esc(this.notice)}</p>` : "";
+    return `<div class="fx-explorer__head" id="fabric-${ds}-head">${this.headHtml()}</div>${notice}<div class="fx-explorer__split${this.navOpen ? "" : " is-nav-collapsed"}" id="fabric-${ds}-split">${this.navHtml()}<div class="fx-explorer__main fabric-results" ${s.loading ? 'aria-busy="true"' : ""}>${results}</div></div>`;
   }
-  headerHtml(name) {
-    const f = this.info.byName.get(name), sort = this.sortFor(name), num = this.isNumeric(f?.type) ? "fabric-num" : "";
-    const label = `${this.esc(name)}${f?.sensitive ? ` <span class="account-badge is-warn fabric-sensitive" title="Sensitive field">S</span>` : ""}`;
-    if (!sort) return `<th scope="col" class="${num}" title="${this.attr(f?.type || "")}">${label}</th>`;
-    const current = (this.query.sort || this.info.sorts[0]?.name) === sort.name, dir = this.query.dir || "desc";
-    const aria = current ? (dir === "asc" ? "ascending" : "descending") : "none";
-    return `<th scope="col" class="${num}" aria-sort="${aria}"><button type="button" class="fabric-sort" data-action="fabric-x-sort" data-ds="${this.ds}" data-sort="${this.attr(sort.name)}" data-focus-key="sort-${this.attr(name)}" title="Sort by ${this.attr(sort.fields.join(", ") || sort.name)}">${label}<span class="fabric-sort-mark" aria-hidden="true">${current ? (dir === "asc" ? "▲" : "▼") : ""}</span></button></th>`;
+  headerHtml(name, i = 1) {
+    const f = this.info.byName.get(name), sort = this.sortFor(name), role = this.sortRole(name), dir = this.query.dir === "asc" ? "asc" : "desc";
+    const cls = [i === 0 ? "fx-grid__frozen" : "", this.isNumeric(f?.type) ? "fx-grid__num fabric-num" : ""].filter(Boolean).join(" ");
+    const label = `${this.esc(this.fieldLabel(name))}${f?.sensitive ? ` <span class="account-badge is-warn fabric-sensitive" title="Sensitive field">S</span>` : ""}`;
+    const lead = role.then ? this.leadOf(this.activeSort()) : "";
+    const title = `${name}${f?.type ? ` · ${f.type}` : ""}${role.then ? ` · sorted ${FabricExplorer.ordinalWord(role.then)}${lead ? `, after ${this.fieldLabel(lead)}` : ""}` : ""}`;
+    // A later key of a compound sort: a small "2nd"/"3rd" badge attached to the label, and "sorted second" for screen readers.
+    const then = role.then ? `<span class="fx-sort-then" aria-hidden="true">${FabricExplorer.ordinal(role.then)}</span><span class="sr-only">, sorted ${FabricExplorer.ordinalWord(role.then)}</span>` : "";
+    if (!sort) return `<th scope="col" class="${cls}" title="${this.attr(title)}">${label}${then}</th>`;
+    // aria-sort only on the primary key of the sort in use; the arrow is drawn only there.
+    const aria = role.primary ? ` aria-sort="${dir === "asc" ? "ascending" : "descending"}"` : "";
+    const mark = role.primary ? `<span class="fx-sort-mark fabric-sort-mark" aria-hidden="true">${dir === "asc" ? "▲" : "▼"}</span>` : "";
+    return `<th scope="col" class="${cls}" title="${this.attr(title)}"${aria}><button type="button" class="fx-grid__sort fabric-sort" data-action="fabric-x-sort" data-ds="${this.ds}" data-sort="${this.attr(sort.name)}" data-focus-key="sort-${this.attr(name)}" title="Sort by ${this.attr(sort.fields.filter((k) => k !== "_id").join(", ") || sort.name)}">${label}${mark}${then}</button></th>`;
   }
-  tableHtml(d) {
-    const cols = this.columns.filter((n) => this.info.byName.has(n));
+  tableHtml(d, busy = false) {
+    const cols = this.columns.filter((n) => this.info.byName.has(n)), ds = this.ds;
+    // Per column, worked out once: the type, the numeric class and the friendly label (escaped). The label is the cell's one
+    // data attribute: the phone card shows it (CSS ::before attr(data-label)); the header's title still names the field.
+    const meta = cols.map((name) => { const f = this.info.byName.get(name); return { name, type: f?.type, num: this.isNumeric(f?.type) ? "fx-grid__num fabric-num" : "", label: this.attr(this.fieldLabel(name)) }; });
     const rows = d.items.map((item) => {
       const values = item && typeof item.values === "object" && item.values ? item.values : {}, id = typeof item?.id === "string" && FabricExplorer.ID.test(item.id) ? item.id : "";
-      return `<tr>${cols.map((name, i) => {
-        const f = this.info.byName.get(name), v = Object.hasOwn(values, name) ? values[name] : null, shown = this.cell(v, f?.type);
-        const inner = i === 0 && id ? `<a class="fabric-link" href="${this.attr(this.recordHref(id))}" data-action="fabric-x-open" data-ds="${this.ds}" data-id="${id}" title="Open the record">${v === null || v === undefined || v === "" ? "Open" : shown}</a>` : shown;
-        return `<td data-label="${this.attr(name)}" class="${this.isNumeric(f?.type) ? "fabric-num" : ""}">${inner}</td>`;
+      const on = Boolean(id) && id === this.selectedId;
+      return `<tr${id ? ` data-action="fabric-x-select" data-ds="${ds}" data-id="${id}"` : ""}${on ? ' class="is-selected" aria-selected="true"' : ""}>${meta.map((c, i) => {
+        const v = Object.hasOwn(values, c.name) ? values[c.name] : null, empty = v === null || v === undefined || v === "", shown = this.gridCell(v, c.type, c.name);
+        const inner = i === 0 && id ? `<a class="fx-link fabric-link" href="${this.attr(this.recordHref(id))}" data-action="fabric-x-open" data-ds="${ds}" data-id="${id}" title="Open the record">${empty ? "Open" : shown.html}</a>` : shown.html;
+        const cls = [i === 0 ? "fx-grid__frozen" : "", c.num, shown.cls].filter(Boolean).join(" "), title = shown.title ? ` title="${this.attr(shown.title)}"` : "";
+        return i === 0 ? `<th scope="row" class="${this.attr(cls)}" data-label="${c.label}"${title}>${inner}</th>` : `<td data-label="${c.label}"${cls ? ` class="${this.attr(cls)}"` : ""}${title}>${inner}</td>`;
       }).join("")}</tr>`;
     }).join("");
-    return `<div class="fabric-scroll fabric-explorer-scroll" tabindex="0" data-focus-key="results" role="region" aria-label="${this.attr(this.label)} rows"><table class="fabric-table fabric-explorer-table"><thead><tr>${cols.map((n) => this.headerHtml(n)).join("")}</tr></thead><tbody>${rows}</tbody></table></div>`;
+    return `<div class="fx-grid fabric-explorer-scroll${busy ? " is-busy" : ""}" tabindex="0" data-focus-key="results" data-grid="${ds}" role="region" aria-label="${this.attr(this.label)} rows"${busy ? ' aria-busy="true"' : ""}><table class="fx-grid__table fabric-explorer-table"><thead><tr>${cols.map((n, i) => this.headerHtml(n, i)).join("")}</tr></thead><tbody>${rows}</tbody></table></div>`;
   }
-  pagerHtml(d) {
-    const items = d.items || [], start = this.page.stack.length * this.query.limit + 1, end = start + items.length - 1;
+  // Footer: the page and its rows, the date window and a short filter summary. Never a total: the server doesn't count.
+  pagerHtml(d, busy = false) {
+    const items = d.items || [], n = this.page.stack.length + 1, start = this.page.stack.length * this.query.limit + 1, end = start + items.length - 1;
     const more = Boolean(d.pagination?.hasMore && d.pagination?.nextCursor);
-    return `<div class="fabric-pager"><span>Rows ${start.toLocaleString()}–${end.toLocaleString()}${more ? " · more available" : ""}</span><span class="fabric-pager-buttons"><button type="button" class="button secondary small" data-action="fabric-x-page" data-ds="${this.ds}" data-dir="prev" data-focus-key="prev" ${this.page.stack.length ? "" : "disabled"}>${icon("left")} Previous</button><button type="button" class="button secondary small" data-action="fabric-x-page" data-ds="${this.ds}" data-dir="next" data-focus-key="next" ${more ? "" : "disabled"}>Next ${icon("right")}</button></span></div>`;
+    const chips = this.activeFilters(), summary = chips.length ? chips.slice(0, 2).map((c) => `${c.label}: ${c.text.length > 32 ? `${c.text.slice(0, 31)}…` : c.text}`).join(" · ") + (chips.length > 2 ? ` · +${chips.length - 2}` : "") : "No filters";
+    const range = busy ? "Loading…" : `Page ${n.toLocaleString()} · Rows ${start.toLocaleString()}–${end.toLocaleString()}${more ? " · more available" : ""}`;
+    return `<div class="fx-gridfoot fabric-pager"><span class="fx-gridfoot__range" role="status">${range}</span><span class="fx-gridfoot__ctx"><span class="fabric-window">${this.windowText()}</span><span class="fx-gridfoot__filters">${this.esc(summary)}</span></span><span class="fx-gridfoot__page fabric-pager-buttons"><button type="button" class="fx-btn" data-action="fabric-x-page" data-ds="${this.ds}" data-dir="prev" data-focus-key="prev" ${this.page.stack.length && !busy ? "" : "disabled"}>${icon("left")}<span>Previous</span></button><button type="button" class="fx-btn" data-action="fabric-x-page" data-ds="${this.ds}" data-dir="next" data-focus-key="next" ${more && !busy ? "" : "disabled"}><span>Next</span>${icon("right")}</button></span></div>`;
   }
   recordHtml() {
     const ds = this.ds, crumb = `<nav class="fabric-breadcrumb" aria-label="Breadcrumb"><a href="${this.attr(this.listHref())}" data-action="fabric-x-back" data-ds="${ds}">${icon("left")} ${this.esc(this.label)}</a><span aria-hidden="true">/</span><span aria-current="page">Record</span></nav>`;
@@ -434,33 +657,114 @@ class FabricExplorer {
   }
 
   // ---- Events (FabricDataPanel passes every "fabric-x-…" event for this dataset here)
-  onAction(action, target) {
-    if (action === "fabric-x-open") { const id = target.dataset.id; if (FabricExplorer.ID.test(id || "")) { this.openRecord(id); this.p.c.update(); if (typeof document !== "undefined") document.querySelector(".fabric-breadcrumb a")?.focus?.(); } return; }
+  // The selected row is marked in place (no redraw, so the grid keeps its scroll position); it is kept for the next render.
+  selectRow(id) {
+    if (!FabricExplorer.ID.test(id || "")) return;
+    this.selectedId = id;
+    if (typeof document === "undefined") return;
+    document.querySelectorAll(`[data-grid="${this.ds}"] tbody tr`).forEach((tr) => { const on = tr.dataset?.id === id; tr.classList?.toggle("is-selected", on); if (on) tr.setAttribute?.("aria-selected", "true"); else tr.removeAttribute?.("aria-selected"); });
+  }
+  // The start of a load with the page kept on screen: dim it, aria-busy, "Loading…" and paging off, in place (no rebuild).
+  markBusy() {
+    if (typeof document === "undefined" || this.recordId || this.problem || this.records.error) return false;
+    const s = this.records, d = s.data && Array.isArray(s.data.items) && s.data.items.length ? s.data : this.stalePage();
+    if (!d || !Array.isArray(d.items) || !d.items.length) return false;
+    const grid = document.querySelector(`#fabric-root [data-grid="${this.ds}"]`), main = grid?.closest?.(".fabric-results");
+    if (!grid || !main) return false;
+    grid.classList?.add("is-busy"); grid.setAttribute?.("aria-busy", "true"); main.setAttribute?.("aria-busy", "true");
+    const range = main.querySelector(".fx-gridfoot__range"); if (range) range.textContent = "Loading…";
+    const active = document.activeElement;
+    main.querySelectorAll('[data-action="fabric-x-page"]').forEach((b) => { b.disabled = true; });
+    if (active && active.disabled && main.contains(active)) grid.focus?.({ preventScroll: true }); // as a full redraw would
+    return true;
+  }
+  // Replaces one region's HTML, keeping focus (by id, else data-focus-key, else the fallback) and the caret, as the panel does.
+  swap(el, html, outer = false, fallback = "") {
+    const active = document.activeElement, inside = Boolean(active && el.contains(active));
+    const id = inside ? active.id : "", key = inside ? active.dataset?.focusKey : "", own = el.id;
+    let sel = null; if (inside) { try { sel = [active.selectionStart, active.selectionEnd]; } catch { sel = null; } }
+    if (outer) el.outerHTML = html; else el.innerHTML = html;
+    if (!inside) return;
+    const esc = (v) => (typeof CSS !== "undefined" && CSS.escape ? CSS.escape(v) : v), scope = outer ? document.querySelector(`#${esc(own)}`) : el;
+    const next = (id && document.querySelector(`#${esc(id)}`)) || (key && scope?.querySelector(`[data-focus-key="${esc(key)}"]`)) || (fallback && document.querySelector(`#fabric-root ${fallback}`)) || null;
+    if (!next || next.disabled) return;
+    next.focus?.({ preventScroll: true });
+    if (sel && sel[0] !== null && sel[0] !== undefined && typeof next.setSelectionRange === "function") { try { next.setSelectionRange(sel[0], sel[1]); } catch { /* not a text field */ } }
+  }
+  // The list's chrome without the grid: toolbar + filter bar + chooser (#fabric-{ds}-head), the navigation and its collapsed
+  // state. False when the list isn't on screen as expected (or the notice line would change): the caller redraws in full.
+  redrawChrome(fallback = "") {
+    if (typeof document === "undefined" || this.recordId) return false;
+    const ds = this.ds, head = document.querySelector(`#fabric-root #fabric-${ds}-head`), nav = document.querySelector(`#fabric-root #fabric-${ds}-nav`), split = document.querySelector(`#fabric-root #fabric-${ds}-split`);
+    if (!head || !nav || !split) return false;
+    const note = document.querySelector("#fabric-root .fabric-notice");
+    if (Boolean(note) !== Boolean(this.notice)) return false;
+    if (note && note.textContent !== this.notice) note.textContent = this.notice;
+    this.swap(head, this.headHtml(), false, fallback);
+    this.swap(nav, this.navHtml(), true);
+    split.classList?.toggle("is-nav-collapsed", !this.navOpen);
+    return true;
+  }
+  // A redraw for a view-only change (filter bar, navigation, chooser): no request and no grid rebuild; without the regions on
+  // screen, a full redraw that keeps where the grid was scrolled to.
+  redrawInPlace(fallback = "") {
+    if (this.redrawChrome(fallback)) return;
+    const find = () => (typeof document !== "undefined" ? document.querySelector(`[data-grid="${this.ds}"]`) : null);
+    const before = find(), top = before?.scrollTop || 0, left = before?.scrollLeft || 0;
+    this.p.redraw();
+    const after = find(); if (after && before) { after.scrollTop = top; after.scrollLeft = left; }
+  }
+  focus(selector) { if (typeof document !== "undefined") document.querySelector(`#fabric-root ${selector}`)?.focus?.({ preventScroll: true }); }
+  onAction(action, target, event) {
+    if (action.startsWith("fabric-r-")) { const view = FabricExplorer.global("FabricRecordView"); if (view && typeof view.onAction === "function") view.onAction(this, action, target, event); return; }
+    if (action === "fabric-x-open") { const id = target.dataset.id; if (FabricExplorer.ID.test(id || "")) { this.selectedId = id; this.openRecord(id); this.p.c.update(); if (typeof document !== "undefined") document.querySelector(".fabric-breadcrumb a")?.focus?.(); } return; }
+    if (action === "fabric-x-select") { this.selectRow(target.dataset.id); return; }
+    if (action === "fabric-x-filters") { this.filtersOpen = !(this.filtersOpen || Boolean(this.problem)); this.redrawInPlace(); return; }
+    if (action === "fabric-x-nav") { this.navOpen = !this.navOpen; this.redrawInPlace(); return; }
+    if (action === "fabric-x-nav-company") { const c = this.companyFilter(); if (c) this.setQuery({ filters: { [c.name]: FabricExplorer.clean(target.dataset.company || "", 100) } }); return; }
+    if (action === "fabric-x-chip") { if (this.removeFilter(target.dataset.key)) this.focus(`[data-action="fabric-x-filters"][data-ds="${this.ds}"]`); return; }
+    if (action === "fabric-x-search-clear") { clearTimeout(this.searchTimer); this.draft = null; this.setQuery({ q: "" }); this.focus(`#fabric-${this.ds}-q`); return; }
+    if (action === "fabric-x-dir-toggle") { if (this.info?.sorts.length) this.setQuery({ dir: this.query.dir === "asc" ? "desc" : "asc" }); return; }
     if (action === "fabric-x-back") { this.openRecord(""); this.p.c.update(); return; }
     if (action === "fabric-x-sort") { this.sortBy(target.dataset.sort); return; }
     if (action === "fabric-x-page") { this.movePage(target.dataset.dir); return; }
-    if (action === "fabric-x-columns") { this.chooser = !this.chooser; this.p.redraw(); return; }
-    if (action === "fabric-x-columns-reset") { this.resetColumns(); this.page = { cursor: null, stack: [] }; this.p.redraw(); this.ensure(); return; }
+    if (action === "fabric-x-columns") {
+      // Closing the chooser (Done or the Columns button) applies a pending column change at once; focus returns to Columns.
+      const closing = this.chooser, back = `[data-action="fabric-x-columns"][data-ds="${this.ds}"][data-focus-key="cols"]`;
+      this.chooser = !this.chooser;
+      if (closing && this.applyColumns()) { if (target?.dataset?.focusKey === "cols-done") this.focus(back); return; }
+      this.redrawInPlace(closing ? back : ""); return;
+    }
+    if (action === "fabric-x-columns-reset") { this.resetColumns(); this.page = { cursor: null, stack: [] }; this.redrawAfter(); return; }
     if (action === "fabric-x-retry") { this.retry(); return; }
     if (action === "fabric-x-clear") { this.clearFilters(); return; }
     if (action === "fabric-x-reload") { this.openRecord(""); this.records.key = null; this.p.c.update(); }
   }
   onInput(target) {
     const action = target.dataset.action;
+    if (action?.startsWith("fabric-r-")) { const view = FabricExplorer.global("FabricRecordView"); if (view && typeof view.onInput === "function") view.onInput(this, target); return; }
     if (action === "fabric-x-search") { this.draft = target.value; clearTimeout(this.searchTimer); this.searchTimer = setTimeout(() => this.commitSearch(), 350); return; }
     if (action === "fabric-x-field-filter") { this.fieldFilter = target.value; this.filterRows(); return; }
     if (action === "fabric-x-col-filter") { this.columnFilter = target.value; this.filterColumns(); }
   }
   onChange(target) {
     const action = target.dataset.action;
+    if (action?.startsWith("fabric-r-")) { const view = FabricExplorer.global("FabricRecordView"); if (view && typeof view.onChange === "function") view.onChange(this, target); return; }
     if (action === "fabric-x-filter") { const name = target.dataset.filter; if (this.info?.filters.some((f) => f.name === name)) this.setQuery({ filters: { [name]: FabricExplorer.clean(target.value, 100) } }); return; }
     if (action === "fabric-x-date") { this.setDate(target.dataset.edge === "to" ? "to" : "from", target.value); return; }
     if (action === "fabric-x-limit") { const n = Number(target.value); if (FabricExplorer.PAGE_SIZES.includes(n)) this.setQuery({ limit: n }); return; }
     if (action === "fabric-x-sort-select") { if (this.info?.sorts.some((s) => s.name === target.value)) this.setQuery({ sort: target.value }); return; }
     if (action === "fabric-x-dir") { this.setQuery({ dir: target.value === "asc" ? "asc" : "desc" }); return; }
-    if (action === "fabric-x-col") { if (this.toggleColumn(target.dataset.name, Boolean(target.checked))) { this.page = { cursor: null, stack: [] }; this.p.redraw(); this.ensure(); } else target.checked = this.columns?.includes(target.dataset.name) ?? false; return; }
+    if (action === "fabric-x-col") { if (this.toggleColumn(target.dataset.name, Boolean(target.checked))) this.queueColumns(); else target.checked = this.columns?.includes(target.dataset.name) ?? false; return; }
     if (action === "fabric-x-hide-empty") { this.hideEmpty = Boolean(target.checked); this.filterRows(); }
   }
   onSubmit() { if (this.draft !== null) this.commitSearch(); }
+  // Optional: the panel may pass keydown events here. Escape inside the column chooser closes it (like Done); the record view
+  // uses the rest.
+  onKeydown(event) {
+    if (!this.recordId && this.chooser && event?.key === "Escape" && event.target?.closest?.(`#fabric-${this.ds}-chooser, [data-action="fabric-x-columns"][data-focus-key="cols"]`)) {
+      event.preventDefault?.(); this.onAction("fabric-x-columns", { dataset: { action: "fabric-x-columns", ds: this.ds, focusKey: "cols-done" } }); return;
+    }
+    if (!this.recordId) return; const view = FabricExplorer.global("FabricRecordView"); if (view && typeof view.onKeydown === "function") view.onKeydown(this, event); }
 }
 if (typeof window !== "undefined") window.FabricExplorer = FabricExplorer;
