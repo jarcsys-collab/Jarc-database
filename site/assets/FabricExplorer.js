@@ -590,7 +590,12 @@ class FabricExplorer {
   clearFilters() {
     clearTimeout(this.searchTimer); this.draft = null;
     if (this.fb.open) { this.builder()?.destroyPicker?.(this); this.fb.open = false; this.fb.draft = null; }
-    const limit = this.query.limit; this.query = { ...FabricExplorer.emptyQuery(), limit }; this.page = { cursor: null, stack: [] }; this.after();
+    // Filters and search only: the sort (named sort + direction, or column sorts), the page size and the columns stay. A named
+    // sort listed one company at a time (requiresCompany) can't outlive the company filter it needs: it goes back to the default.
+    const { limit, sort, dir, orderBy } = this.query;
+    const keepSort = !(sort && (this.info?.sorts || []).find((s) => s.name === sort)?.requiresCompany);
+    this.query = { ...FabricExplorer.emptyQuery(), limit, orderBy: [...(orderBy || [])], ...(keepSort ? { sort, dir } : {}) };
+    this.page = { cursor: null, stack: [] }; this.after();
   }
   commitSearch() {
     clearTimeout(this.searchTimer);
@@ -755,7 +760,6 @@ class FabricExplorer {
     if (!this.info?.filters.some((f) => f.name === name)) return false;
     this.setQuery({ filters: { [name]: "" } }); return true;
   }
-  hasQuery() { return FabricExplorer.formatQuery({ ...this.query, limit: FabricExplorer.DEFAULT_LIMIT }) !== ""; }
   toolbarHtml() {
     const ds = this.ds, q = this.query, info = this.info, n = this.conditionCount(), B = this.builder(), open = Boolean(this.fb.open && B && FabricExplorer.model());
     // A short placeholder (never cut off); the searchable fields are in the tooltip and the input's description.
@@ -772,10 +776,9 @@ class FabricExplorer {
       <button type="button" class="fx-btn" data-action="fabric-refresh" data-focus-key="x-refresh" title="Load this page again">${icon("refresh")}<span>Refresh</span></button><span class="fx-sep" aria-hidden="true"></span>
       ${search}
       <span class="fx-fbpop"><button type="button" class="fx-btn" data-action="fabric-x-filters" data-ds="${ds}" data-focus-key="filters" aria-haspopup="dialog" aria-expanded="${open}" aria-controls="fabric-${ds}-fb"${n ? ` title="${n} condition${n === 1 ? "" : "s"} applied"` : ""}>${icon("filter")}<span>Filters</span>${badge}</button>${open ? B.html(this) : ""}</span>
-      <span class="fx-colpop"><button type="button" class="fx-btn" data-action="fabric-x-columns" data-ds="${ds}" data-focus-key="cols" aria-expanded="${this.chooser}" aria-controls="fabric-${ds}-chooser">${icon("columns")}<span>Columns</span> <small class="fx-btn__count">(${this.columns.length})</small></button>${this.chooser ? this.chooserHtml() : ""}</span>
       ${this.savedHtml("toolbarHtml")}
+      <span class="fx-colpop"><button type="button" class="fx-btn" data-action="fabric-x-columns" data-ds="${ds}" data-focus-key="cols" aria-expanded="${this.chooser}" aria-controls="fabric-${ds}-chooser">${icon("columns")}<span>Columns</span> <small class="fx-btn__count">(${this.columns.length})</small></button>${this.chooser ? this.chooserHtml() : ""}</span>
       <span class="fx-sep" aria-hidden="true"></span><span class="fx-toolbar__sort">${sort}${order}</span>
-      <button type="button" class="fx-btn fx-toolbar__secondary" data-action="fabric-x-clear" data-ds="${ds}" data-focus-key="clear-top" ${this.hasQuery() ? "" : "disabled"}>${icon("close")}<span>Clear filters</span></button>
       <span class="fx-toolbar__spacer"></span>
       <label class="fx-toolbar__field fx-toolbar__secondary">Rows per page<select id="fabric-${ds}-limit" data-action="fabric-x-limit" data-ds="${ds}">${FabricExplorer.PAGE_SIZES.map((v) => `<option value="${v}" ${q.limit === v ? "selected" : ""}>${v}</option>`).join("")}</select></label></div>`;
   }
@@ -796,7 +799,15 @@ class FabricExplorer {
     }
     const rootOr = this.isAdvanced() && m?.op === "or" && m.items.length > 1 ? `<span class="fx-chipgroup__join">Rows matching any condition:</span>` : "";
     const info = chips.length ? `<div class="fx-filterbar__info" role="group" aria-label="Active filters">${rootOr}${parts.join("")}</div>` : "";
-    return `<div class="fx-filterbar${chips.length ? "" : " is-empty"}" id="fabric-${this.ds}-filters">${info}</div>`;
+    // Clear filters: at the far right of this row, only while it has an applied filter to clear (never disabled, no space kept).
+    const clear = this.hasClearableFilters(chips) ? `<button type="button" class="fx-btn fx-filterbar__clear" data-action="fabric-x-clear" data-ds="${this.ds}" data-focus-key="clear-top">${icon("close")}<span>Clear filters</span></button>` : "";
+    return `<div class="fx-filterbar${chips.length ? "" : " is-empty"}" id="fabric-${this.ds}-filters">${info}${clear}</div>`;
+  }
+  // An applied filter that Clear filters (clearFilters) removes: search, a chosen date range, a legacy filter or a condition. The
+  // required default Sales window is never one (it isn't in the query), nor is a sort alone, nor the builder's unapplied draft.
+  hasClearableFilters(chips = this.activeFilters()) {
+    const q = this.query;
+    return chips.some((c) => c.condition || c.key === "q" || (c.key === "dates" && Boolean(q.dateFrom && q.dateTo)));
   }
   windowText() {
     const w = this.records.data?.window;
@@ -1025,7 +1036,12 @@ class FabricExplorer {
     }
     if (action === "fabric-x-columns-reset") { this.resetColumns(); this.page = { cursor: null, stack: [] }; this.redrawAfter(); return; }
     if (action === "fabric-x-retry") { this.retry(); return; }
-    if (action === "fabric-x-clear") { this.clearFilters(); return; }
+    if (action === "fabric-x-clear") {
+      this.clearFilters();
+      // The row's Clear filters is gone once nothing is left to clear: focus goes to Filters, as after removing the last chip.
+      if (target?.dataset?.focusKey === "clear-top") this.focus(`[data-action="fabric-x-filters"][data-ds="${this.ds}"]`);
+      return;
+    }
     if (action === "fabric-x-reload") { this.openRecord(""); this.records.key = null; this.p.c.update(); }
   }
   onInput(target) {

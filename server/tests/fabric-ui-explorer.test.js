@@ -48,7 +48,7 @@ async function ready(env, a = answers()) { const t = panelWith(env, a); t.panel.
 const T = (dataset) => ({ dataset });
 
 describe("Fabric explorer list view", () => {
-  test("toolbar: Refresh, search, Filters, Columns, Sort + order, Clear filters, Rows per page; read-only", async () => {
+  test("toolbar: Refresh, search, Filters, Save filter, Columns, Sort + order, Rows per page; Clear filters not in it; read-only", async () => {
     const env = load(); const { x } = await ready(env);
     const html = x.html();
     assert.match(html, /class="fx-toolbar fx-explorer__toolbar"/);
@@ -64,7 +64,15 @@ describe("Fabric explorer list view", () => {
     assert.match(html, /data-action="fabric-x-columns"[^>]*data-focus-key="cols"/);
     assert.match(html, /<select id="fabric-inventory-sort" data-action="fabric-x-sort-select"[^>]*><option value="date" selected>Posting_Date<\/option><option value="entryNo" >Entry_No<\/option>/);
     assert.match(html, /data-action="fabric-x-dir-toggle"[^>]*aria-label="Descending\. Switch to ascending"/);
-    assert.match(html, /data-action="fabric-x-clear"[^>]*data-focus-key="clear-top" disabled/, "nothing to clear yet");
+    // Nothing to clear yet: no Clear filters at all (not a disabled one), and none in the toolbar ever.
+    assert.doesNotMatch(html, /data-action="fabric-x-clear"/, "no Clear filters while nothing is applied");
+    const toolbar = html.match(/<div class="fx-toolbar fx-explorer__toolbar"[\s\S]*?Rows per page<select[\s\S]*?<\/select><\/label><\/div>/)[0];
+    assert.doesNotMatch(toolbar, /fabric-x-clear/);
+    // The order, also the Tab order (DOM order, no tabindex): Refresh, Search, Filters, [Save filter…], Columns, Sort, order, Rows per page.
+    const at = (re) => { const i = toolbar.search(re); assert.ok(i >= 0, `${re} in the toolbar`); return i; };
+    const order = [/data-action="fabric-refresh"/, /id="fabric-inventory-q"/, /data-action="fabric-x-filters"/, /data-action="fabric-x-columns"/, /id="fabric-inventory-sort"/, /data-action="fabric-x-dir-toggle"/, /id="fabric-inventory-limit"/].map(at);
+    assert.deepEqual(order, [...order].sort((a, b) => a - b), "toolbar order");
+    assert.doesNotMatch(toolbar, /tabindex="[1-9]/, "no positive tabindex: the Tab order is the visual order");
     assert.match(html, /Rows per page<select id="fabric-inventory-limit"[^>]*><option value="50" >50<\/option><option value="100" selected>100<\/option>/);
     assert.doesNotMatch(html, /data-action="[^"]*(create|edit|delete|import|export|archive)/);
   });
@@ -126,7 +134,10 @@ describe("Fabric explorer list view", () => {
     assert.match(html, /<span class="fx-chip__label">Open:<\/span> Yes/);
     // The badge counts conditions (Company, Open); the search is a chip but not a condition.
     assert.match(html, /<span class="fx-badge"><span class="sr-only">, <\/span>2<span class="sr-only"> active<\/span><\/span>/);
-    assert.match(html, /data-focus-key="clear-top" >/, "Clear filters enabled");
+    // Clear filters: in the chips row, after the chips (far right), enabled; never in the toolbar.
+    assert.match(html, /<div class="fx-filterbar" id="fabric-inventory-filters"><div class="fx-filterbar__info"[\s\S]*?<\/div><button type="button" class="fx-btn fx-filterbar__clear" data-action="fabric-x-clear" data-ds="inventory" data-focus-key="clear-top">[\s\S]*?<span>Clear filters<\/span><\/button><\/div>/);
+    assert.doesNotMatch(html, /data-focus-key="clear-top"[^>]*disabled/);
+    assert.equal((html.match(/data-focus-key="clear-top"/g) || []).length, 1, "one Clear filters");
     const before = recordCalls(calls).length;
     x.onAction("fabric-x-chip", T({ key: "f:company" })); await settle();
     assert.equal(recordCalls(calls).length, before + 1, "one request");
@@ -138,6 +149,20 @@ describe("Fabric explorer list view", () => {
     assert.equal(recordCalls(calls).length, before + 2, "unknown chips do nothing");
     html = x.html();
     assert.doesNotMatch(html, /Company:<\/span>/); assert.match(html, /Open:<\/span> Yes/);
+    assert.match(html, /data-focus-key="clear-top"/, "still one filter: Clear filters stays");
+    // The last clearable chip removed: Clear filters goes at once, and the empty row keeps no space.
+    x.onAction("fabric-x-chip", T({ key: "f:open" })); await settle();
+    html = x.html();
+    assert.doesNotMatch(html, /data-action="fabric-x-clear"/);
+    assert.match(html, /<div class="fx-filterbar is-empty" id="fabric-inventory-filters"><\/div>/);
+    // An unapplied draft in the builder doesn't bring it back.
+    x.onAction("fabric-x-filters", T({ ds: "inventory" })); await settle();
+    assert.equal(x.fb.open, true);
+    assert.doesNotMatch(x.html(), /data-action="fabric-x-clear"/, "opening the builder isn't applying a filter");
+    x.onAction("fabric-x-filters", T({}));
+    // A sort alone isn't a filter.
+    x.onAction("fabric-x-dir-toggle", T({})); await settle();
+    assert.doesNotMatch(x.html(), /data-action="fabric-x-clear"/, "a sort alone shows no Clear filters");
   });
 
   test("sort marks: the primary key has the arrow and aria-sort; later keys of the compound sort get a 'then' mark", async () => {

@@ -487,8 +487,10 @@ describe("Fabric Data Phase 7 in the real app (headless browser)", { skip: BROWS
     await click("#fabric-obj-inventory-all");
     assert.ok(await wait(`!document.querySelector(".fx-chip--filter") && document.querySelectorAll(${JSON.stringify(LIST)}).length === 100`), "All records: no filter");
     assert.equal(filterOf((await lastRecords("inventory")).url), null);
+    assert.equal(await has('[data-action="fabric-x-clear"][data-focus-key="clear-top"]'), false, "All records: no Clear filters");
     await b.evaluate(`[...document.querySelectorAll('#fabric-objects [data-action="fabric-s-open"]')].find((a) => /Synthetic sales items/.test(a.textContent)).click()`);
     assert.ok(await wait(`document.querySelectorAll(".fx-chip--filter").length === 2`), "opened: both conditions back");
+    assert.ok(await wait(`!!document.querySelector('.fx-filterbar [data-action="fabric-x-clear"][data-focus-key="clear-top"]')`), "an opened saved filter shows Clear filters");
     assert.equal(filterOf((await lastRecords("inventory")).url).items.length, 2);
     // Manage → Rename.
     await click('[data-action="fabric-s-manage"]');
@@ -692,5 +694,111 @@ describe("Fabric Data Phase 7 in the real app (headless browser)", { skip: BROWS
     assert.ok(await wait(`!document.querySelector("#fabric-inventory-fb") && document.activeElement?.matches(${JSON.stringify(FILTERS())})`), "Escape closes the builder, focus back on Filters");
     assert.equal(await lastRecords("inventory").then((c) => filterOf(c.url)), null, "nothing applied");
     await noErrors("D4 D5 D7");
+  });
+
+  test("9. toolbar: Save filter before Columns (also by Tab); Clear filters only in the chips row, at its right, only while something applied is clearable", async () => {
+    await signIn(people.admin);
+    const CLEAR = '[data-action="fabric-x-clear"][data-focus-key="clear-top"]';
+    const enc = (m) => Buffer.from(JSON.stringify(m), "utf8").toString("base64url");
+    const two = enc({ v: 1, op: "and", items: [{ field: "Company", op: "eq", value: "Synthetic Co A" }, { field: "customer_name", op: "contains", value: "Customer" }] });
+    // Sales, default: the required window's chip (locked) only; no Clear filters anywhere, and none in the toolbar.
+    await openList("/fabric/sales");
+    assert.ok(await wait(`!!document.querySelector(".fx-chip--filter.is-locked")`), "the default Sales window chip");
+    assert.equal(await has(CLEAR), false, "Sales default: no Clear filters (the default window isn't a filter)");
+    assert.equal(await has('.fx-explorer__toolbar [data-action="fabric-x-clear"]'), false);
+    // Order on screen (one row at 1440) and in the DOM: Refresh, Search, Filters, Save filter…, Columns, Sort, Rows per page.
+    const SEQ = ['[data-action="fabric-refresh"]', "#fabric-sales-q", FILTERS("sales"), '[data-focus-key="sf-bar-save"]', '[data-focus-key="cols"]', '[data-action="fabric-x-dir-toggle"]', "#fabric-sales-limit"];
+    const pos = await json(`${JSON.stringify(SEQ)}.map((s) => { const el = document.querySelector(".fx-explorer__toolbar " + s); if (!el) return null; const r = el.getBoundingClientRect(); return { x: Math.round(r.left), y: Math.round(r.top + r.height / 2) }; })`);
+    assert.ok(pos.every(Boolean), `every control in the toolbar: ${JSON.stringify(pos)}`);
+    assert.ok(pos.every((p, i) => i === 0 || p.x > pos[i - 1].x), `left to right: ${JSON.stringify(pos)}`);
+    assert.ok(pos.every((p) => Math.abs(p.y - pos[0].y) <= 4), `one row at 1440: ${JSON.stringify(pos)}`);
+    // Tab order follows it: from Filters, Tab → Save filter… → Columns.
+    await b.evaluate(`document.querySelector(${JSON.stringify(FILTERS("sales"))}).focus()`);
+    await b.key("Tab"); assert.equal(await focusKey(), "sf-bar-save", "Filters → Tab → Save filter…");
+    await b.key("Tab"); assert.equal(await focusKey(), "cols", "Save filter… → Tab → Columns");
+    // An unapplied draft in the builder shows nothing.
+    await openBuilder("sales");
+    await addCondition("customer_name", "", "sales");
+    assert.equal(await has(CLEAR), false, "a draft condition isn't applied");
+    await b.key("Escape");
+    assert.ok(await wait(`!document.querySelector("#fabric-sales-fb")`));
+    assert.equal(await has(CLEAR), false);
+
+    // Two applied conditions: Clear filters at the far right of the chips row, beside the chips, at every width and theme.
+    for (const [width, height] of [[320, 640], [390, 844], [768, 1024], [1024, 768], [1440, 900], [1920, 1080]]) {
+      for (const theme of ["light", "dark"]) {
+        const label = `${width}px ${theme}`;
+        await openList(`/fabric/sales?filter=${two}`, { width, height });
+        await b.evaluate(`document.documentElement.dataset.theme = ${JSON.stringify(theme)}`);
+        assert.ok(await wait(`document.querySelectorAll(".fx-chip--filter:not(.is-locked)").length === 2 && !!document.querySelector(${JSON.stringify(CLEAR)})`), `${label}: chips and Clear filters`);
+        const g = await json(`(() => { const bar = document.querySelector(".fx-filterbar").getBoundingClientRect(), btn = document.querySelector(${JSON.stringify(CLEAR)}), r = btn.getBoundingClientRect();
+          const chips = [...document.querySelectorAll(".fx-filterbar .fx-chip--filter")].map((c) => c.getBoundingClientRect());
+          const overlap = chips.some((c) => c.left < r.right && r.left < c.right && c.top < r.bottom && r.top < c.bottom);
+          return { inBar: btn.closest(".fx-filterbar") !== null, right: Math.round(bar.right - r.right), barH: Math.round(bar.height), h: Math.round(r.height), overlap, rightOfChips: chips.every((c) => c.right <= r.left + 1 || c.bottom <= r.top + 1), vw: document.documentElement.clientWidth, btnRight: Math.round(r.right), text: btn.textContent.trim(), sideways: document.documentElement.scrollWidth - document.documentElement.clientWidth }; })()`);
+        assert.equal(g.inBar, true, label); assert.equal(g.text, "Clear filters", label);
+        assert.ok(g.right >= 0 && g.right <= 12, `${label}: at the row's right edge (${JSON.stringify(g)})`);
+        assert.equal(g.overlap, false, `${label}: never over a chip`); assert.ok(g.rightOfChips, `${label}: chips to its left (or above)`);
+        assert.ok(g.btnRight <= g.vw, `${label}: on screen`); assert.equal(g.sideways, 0, `${label}: no sideways scroll`);
+        if (width > 1024) assert.ok(g.barH <= 32, `${label}: the chips row stays one compact row (${JSON.stringify(g)})`);
+        else assert.ok(g.h >= 32, `${label}: touch-size button (${g.h}px)`);
+      }
+    }
+    // Removing one condition keeps it; removing the last hides it; the window chip stays.
+    await openList(`/fabric/sales?filter=${two}`);
+    assert.ok(await wait(`!!document.querySelector(${JSON.stringify(CLEAR)})`));
+    await click('.fx-chip--filter:not(.is-locked) [data-action="fabric-x-chip"]');
+    assert.ok(await wait(`document.querySelectorAll(".fx-chip--filter:not(.is-locked)").length === 1 && !!document.querySelector(${JSON.stringify(CLEAR)})`), "one left: still shown");
+    await click('.fx-chip--filter:not(.is-locked) [data-action="fabric-x-chip"]');
+    assert.ok(await wait(`!document.querySelector(".fx-chip--filter:not(.is-locked)") && !document.querySelector(${JSON.stringify(CLEAR)})`), "last removed: hidden");
+    assert.equal(await has(".fx-chip--filter.is-locked"), true, "the required window stays");
+    // Clear filters: the same reset as before; the window protection stays, focus goes to Filters.
+    await openList(`/fabric/sales?filter=${two}&q=SYN`);
+    assert.ok(await wait(`!!document.querySelector(${JSON.stringify(CLEAR)})`));
+    await press(CLEAR);
+    assert.ok(await wait(`!document.querySelector(".fx-chip--filter:not(.is-locked)") && !document.querySelector(${JSON.stringify(CLEAR)})`), "cleared");
+    const last = new URLSearchParams((await lastRecords("sales")).url.split("?")[1]);
+    assert.deepEqual(["filter", "q", "dateFrom", "dateTo"].map((k) => last.get(k)), [null, null, null, null], "filters, search and custom dates cleared; the server's default window applies");
+    assert.equal(await has(".fx-chip--filter.is-locked"), true, "the required window chip stays");
+    assert.ok(await wait(`document.activeElement?.matches(${JSON.stringify(FILTERS("sales"))})`), `focus on Filters (${await focusKey()})`);
+    // Sorting, columns and the page size are preferences, not filters: a column sort, a page size and the chosen columns survive.
+    await openList(`/fabric/sales?filter=${two}&orderBy=invoice_date:asc&limit=50`);
+    assert.ok(await wait(`!!document.querySelector(${JSON.stringify(CLEAR)})`));
+    const colsBefore = await b.evaluate(`document.querySelector('[data-focus-key="cols"]').textContent.trim()`);
+    // Header titles minus the " · filtered" marks (those go with the filters, as they should).
+    const HEADS = `[...document.querySelectorAll(".fabric-explorer-table thead th")].map((t) => t.title.replace(/ · filtered/g, "")).join("|")`;
+    const heads = await b.evaluate(HEADS);
+    await press(CLEAR);
+    assert.ok(await wait(`!document.querySelector(".fx-chip--filter:not(.is-locked)") && !document.querySelector(${JSON.stringify(CLEAR)})`), "cleared (with a column sort)");
+    const kept = new URLSearchParams((await lastRecords("sales")).url.split("?")[1]);
+    assert.deepEqual(["filter", "q", "dateFrom", "orderBy", "limit"].map((k) => kept.get(k)), [null, null, null, "invoice_date:asc", "50"], "sort and page size kept, filters gone");
+    assert.match(await b.evaluate("location.search"), /orderBy=invoice_date(%3A|:)asc/, "the address keeps the sort");
+    assert.equal(await b.evaluate(`document.querySelector('[data-focus-key="cols"]').textContent.trim()`), colsBefore, "columns kept");
+    assert.equal(await b.evaluate(HEADS), heads, "same columns and sort marks");
+    assert.equal(await has(".fx-chip--filter.is-locked"), true, "the Sales window protection stays");
+
+    // Inventory: nothing applied → no row, no button, no space; applied → shown; same toolbar order.
+    await openList("/fabric/inventory");
+    assert.equal(await has(CLEAR), false, "Inventory without filters: no Clear filters");
+    assert.equal(await b.evaluate(`document.querySelector(".fx-filterbar").getBoundingClientRect().height`), 0, "the empty row takes no space");
+    const inv = await json(`["#fabric-inventory-q", ${JSON.stringify(FILTERS())}, '[data-focus-key="sf-bar-save"]', '[data-focus-key="cols"]', "#fabric-inventory-sort", "#fabric-inventory-limit"].map((s) => Math.round(document.querySelector(".fx-explorer__toolbar " + s).getBoundingClientRect().left))`);
+    assert.ok(inv.every((x, i) => i === 0 || x > inv[i - 1]), `Inventory order: ${JSON.stringify(inv)}`);
+    await openList(`/fabric/inventory?filter=${enc({ v: 1, op: "and", items: [{ field: "Company", op: "eq", value: "Synthetic Co A" }] })}`);
+    assert.ok(await wait(`!!document.querySelector(${JSON.stringify(CLEAR)})`), "Inventory with a filter: shown");
+    await press(CLEAR);
+    assert.ok(await wait(`!document.querySelector(".fx-chip--filter") && !document.querySelector(${JSON.stringify(CLEAR)})`));
+    // Inventory's own sort, ascending, is kept. Entry no. (listed one company at a time) can't outlive the company filter it
+    // needs: Clear filters puts the default sort back instead of leaving a "choose a company" message.
+    await openList(`/fabric/inventory?filter=${enc({ v: 1, op: "and", items: [{ field: "Company", op: "eq", value: "Synthetic Co A" }] })}&sort=date&dir=asc`);
+    await press(CLEAR);
+    assert.ok(await wait(`!document.querySelector(${JSON.stringify(CLEAR)})`));
+    let iq = new URLSearchParams((await lastRecords("inventory")).url.split("?")[1]);
+    assert.deepEqual([iq.get("filter"), iq.get("sort"), iq.get("dir")], [null, "date", "asc"], "Inventory: sort and direction kept");
+    await openList(`/fabric/inventory?filter=${enc({ v: 1, op: "and", items: [{ field: "Company", op: "eq", value: "Synthetic Co A" }] })}&sort=entryNo&dir=asc`);
+    assert.equal(new URLSearchParams((await lastRecords("inventory")).url.split("?")[1]).get("sort"), "entryNo", "Entry no. with a company");
+    await press(CLEAR);
+    assert.ok(await wait(`!document.querySelector(${JSON.stringify(CLEAR)}) && document.querySelectorAll(${JSON.stringify(LIST)}).length > 0`), "rows, not a company prompt");
+    iq = new URLSearchParams((await lastRecords("inventory")).url.split("?")[1]);
+    assert.deepEqual([iq.get("filter"), iq.get("sort")], [null, null], "Entry no. needed the company: back to the default sort");
+    await noErrors("toolbar refinement");
   });
 });

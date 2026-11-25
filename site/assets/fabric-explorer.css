@@ -34,6 +34,11 @@
 
 /* ---- Filter bar (collapsed by default) and the info bar of active-filter chips */
 .fx-app .fx-explorer .fx-filterbar { border-bottom: 1px solid var(--fx-border-light, #d3dde7); background: var(--fx-panel, #f4f7fa); }
+/* Chips on the left, Clear filters at the far right of the same row; it drops below only when it no longer fits beside them.
+   Top-aligned with the first chip line (3px, the chips' own padding), so it doesn't float beside wrapped chips on phones. */
+.fx-app .fx-explorer .fx-filterbar:has(.fx-filterbar__clear) { display: flex; flex-wrap: wrap; align-items: flex-start; column-gap: 6px; padding-right: 8px; }
+.fx-app .fx-explorer .fx-filterbar:has(.fx-filterbar__clear) > .fx-filterbar__info { flex: 1 1 240px; min-width: 0; }
+.fx-app .fx-explorer .fx-filterbar__clear { flex: none; margin: 3px 0 3px auto; height: 24px; padding: 0 8px; gap: 4px; }
 .fx-app .fx-explorer .fx-filterbar.is-empty { display: none; }
 .fx-app .fx-explorer .fx-filterbar__panel { margin: 6px 8px; padding: 8px 10px; border: 1px solid var(--fx-border-strong, #a7b9cc); border-radius: var(--fx-radius, 3px); background: var(--fx-surface, #fff); }
 .fx-app .fx-explorer .fx-filterbar__panel[hidden] { display: none; }
@@ -145,7 +150,7 @@
 }
 @media (max-width: 1024px) {
   .fx-app .fx-explorer__nav { display: none; }
-  /* The toolbar wraps onto a second row: primary tools first; Clear filters and Rows per page go together at the end. */
+  /* The toolbar wraps onto a second row: primary tools first; Rows per page at the end (Clear filters is in the chips row). */
   .fx-app .fx-explorer__toolbar { row-gap: 4px; }
   .fx-app .fx-explorer__toolbar .fx-search { flex: 1 1 200px; }
   /* Column chooser on tablets: anchored to the toolbar's right edge (not the Columns button, which can sit past the middle of

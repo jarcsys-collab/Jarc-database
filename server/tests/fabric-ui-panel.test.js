@@ -360,7 +360,18 @@ describe("Fabric Data: explorer (schema-driven)", () => {
     x.onChange({ dataset: { action: "fabric-x-date", edge: "to" }, value: "2026-02-01" }); await settle();
     assert.match(panel.body(), /start date must be on or before the end date/);
     x.onAction("fabric-x-clear", { dataset: {} }); await settle();
-    assert.equal(panel.urlFor().search, "?limit=200", "Clear filters keeps the page size only");
+    // (This schema doesn't mark entryNo requiresCompany, so it is an ordinary sort here; the real one is in the browser test.)
+    assert.equal(panel.urlFor().search, "?sort=entryNo&dir=desc&limit=200", "Clear filters: filters, search and dates go; the sort and the page size stay");
+    // Any other sort is a preference, not a filter: Clear filters keeps its field and direction (and the page size).
+    x.onAction("fabric-x-sort", { dataset: { sort: "date" } }); await settle();
+    x.onAction("fabric-x-sort", { dataset: { sort: "date" } }); await settle();
+    x.onChange({ dataset: { action: "fabric-x-filter", filter: "open" }, value: "true" }); await settle();
+    x.onInput({ dataset: { action: "fabric-x-search" }, value: "ITEM" }); await settle(400);
+    assert.equal(panel.urlFor().search, "?q=ITEM&open=true&sort=date&dir=asc&limit=200");
+    x.onAction("fabric-x-clear", { dataset: {} }); await settle();
+    assert.equal(panel.urlFor().search, "?sort=date&dir=asc&limit=200", "Clear filters keeps the sort and the page size");
+    q = recordsCall(calls);
+    assert.deepEqual([q.get("q"), q.get("open"), q.get("dateFrom"), q.get("sort"), q.get("dir"), q.get("limit")], [null, null, null, "date", "asc", "200"]);
   });
 
   test("cursor paging with Previous / Next", async () => {
