@@ -463,8 +463,8 @@ describe("migration attachments, rollback and locks on the verified local test i
     dry = await planRollback(db, r.plan);
     await assert.rejects(() => executeRollback({ client, target, plan: r.plan, planDigest: r.digest, approval: approval({ ...dry.counts, records: 1 }), storage }), (e) => e.code === "MIGRATION_ROLLBACK_REFUSED");
     const res = await executeRollback({ client, target, plan: r.plan, planDigest: r.digest, approval: approval(dry.counts), storage });
-    assert.deepEqual(res.removed, { comments: dry.counts.comments, records: dry.counts.records, boards: 2, activities: 2, mappings: dry.counts.mappings, attachments: dry.counts.attachments });
-    for (const c of ["records", "comments", "attachments", "integrationMappings"]) assert.equal(await db.collection(c).countDocuments({}), 0, c);
+    assert.deepEqual(res.removed, { comments: dry.counts.comments, records: dry.counts.records, boards: 2, activities: 2, mappings: dry.counts.mappings, attachments: dry.counts.attachments, searchIndex: dry.counts.records });
+    for (const c of ["records", "comments", "attachments", "integrationMappings", "recordSearch"]) assert.equal(await db.collection(c).countDocuments({}), 0, c);
     assert.equal(mig().filter((k) => r.plan.attachments.some((a) => k.endsWith(a._id.toHexString()))).length, 0, "migration objects removed");
     assert.ok(await db.collection("boards").findOne({ _id: other._id }), "nothing outside the run is touched");
     assert.equal((await db.collection("integrationJobs").findOne({ _id: `monday-migration:${r.plan.runId}` })).status, "rolled-back");

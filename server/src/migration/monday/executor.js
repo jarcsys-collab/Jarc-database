@@ -16,6 +16,8 @@
 //               it stopped; a completed run re-run inserts nothing.
 //   verify      every batch is read back by ID after commit; at the end, counts, groups, parents, same-board links,
 //               threads and attachment references are checked against the plan.
+//   search      each batch writes its records' recordSearch documents in the same transaction (this CLI can't reach the
+//               server's queue); records from an older run without them are indexed before the final verification.
 //   no files    attachments stay references (status not-migrated): no GridFS files or attachment documents are created.
 const crypto = require("crypto");
 const os = require("os");
@@ -23,6 +25,8 @@ const { COLLECTIONS, ensureDatabase } = require("../../db/bootstrap");
 const { activityEntry } = require("../../services/shared");
 const { MAPPING_PROVIDER } = require("./ids");
 const { isVerifiedTarget } = require("./target");
+const { insertedRecordOps, searchDocument, planOf } = require("../../services/record-search-index");
+const { writeGuarded } = require("../../repositories/mongo/record-search-repository");
 
 const PRODUCTION_EXECUTION_ENABLED = false; // Do not change without a separate reviewed change AND explicit approval.
 const BATCH_SIZE = 250;
@@ -188,7 +192,15 @@ async function runImport({ client, target, plan, planDigest, approval, operator 
   const { lockId, lease: leaseUntil } = await acquireRunLock(col("integrationJobs"), { jobId, now, operator, takeOverStaleLock, init: { provider: MAPPING_PROVIDER, type: JOB_TYPE, runId: plan.runId, planDigest, scope: target.scope, workspaceId, batchesDone: 0, approvedBy: approval.approvedBy } });
   const release = (set) => col("integrationJobs").updateOne({ _id: jobId, lockedBy: lockId }, { $set: { lockedBy: null, lockedUntil: null, ...set } });
 
-  const summary = { batchesPlanned: batches.length, batchesDone: 0, inserted: { boards: 0, records: 0, comments: 0, mappings: 0, activities: 0 } };
+  const summary = { batchesPlanned: batches.length, batchesDone: 0, inserted: { boards: 0, records: 0, comments: 0, mappings: 0, activities: 0, searchIndex: 0 }, searchIndexRepaired: 0 };
+  // The boards' current columns decide what is searchable (read in the batch's transaction, so a board inserted by the
+  // same batch is seen; the plan's copy otherwise).
+  const boardsOf = async (records, session) => {
+    const ids = [...new Map(records.map((r) => [r.boardId.toHexString(), r.boardId])).values()];
+    const found = new Map([plan.board, plan.subBoard].map((b) => [b._id.toHexString(), b]));
+    for (const b of await col("boards").find({ _id: { $in: ids } }, { projection: { _id: 1, columns: 1 }, session }).toArray()) found.set(b._id.toHexString(), b);
+    return found;
+  };
   try {
     let position = null;
     for (let index = 0; index < batches.length; index += 1) {
@@ -210,7 +222,12 @@ async function runImport({ client, target, plan, planDigest, approval, operator 
       try {
         await session.withTransaction(async () => {
           if (boards.length) await col("boards").insertMany(boards.map((b) => b.doc), { session, ordered: true });
-          if (records.length) await col("records").insertMany(records, { session, ordered: true });
+          if (records.length) {
+            await col("records").insertMany(records, { session, ordered: true });
+            // Search index: this runs as its own process, out of the server's reach, so the batch's index documents are
+            // written here, in the same transaction (a crash can't leave records without them).
+            await col("recordSearch").bulkWrite(insertedRecordOps(records, await boardsOf(records, session)), { session, ordered: true });
+          }
           if (comments.length) await col("comments").insertMany(comments, { session, ordered: true });
           if (mappings.length) await col("integrationMappings").insertMany(mappings, { session, ordered: true });
           if (activities.length) await col("activities").insertMany(activities, { session, ordered: true });
@@ -230,9 +247,11 @@ async function runImport({ client, target, plan, planDigest, approval, operator 
       if (boards.length && (await col("boards").countDocuments({ _id: { $in: boards.map((b) => b.doc._id) } })) !== boards.length) vb.push("boards missing after insert");
       if (vb.length) throw new MigrationError("MIGRATION_VERIFY_FAILED", `Batch ${index} did not read back as written.`, { problems: vb });
       summary.batchesDone += 1;
-      summary.inserted.boards += boards.length; summary.inserted.records += records.length; summary.inserted.comments += comments.length; summary.inserted.mappings += mappings.length; summary.inserted.activities += activities.length;
+      summary.inserted.boards += boards.length; summary.inserted.records += records.length; summary.inserted.searchIndex += records.length; summary.inserted.comments += comments.length; summary.inserted.mappings += mappings.length; summary.inserted.activities += activities.length;
       log(`batch ${index + 1}/${batches.length} (${batch.step}): ${records.length} records, ${comments.length} comments`);
     }
+    // Records committed by an earlier run of this import (before its batches wrote index documents) get them now.
+    summary.searchIndexRepaired = await indexImportedRecords(db, plan);
     const verification = await verifyImport(db, plan, workspaceId);
     await release({ status: verification.ok ? "completed" : "failed-verification", finishedAt: now(), verification: { ok: verification.ok, counts: verification.counts, problems: verification.problems.slice(0, 50) } });
     if (!verification.ok) throw new MigrationError("MIGRATION_VERIFY_FAILED", "The finished import does not match the plan.", { problems: verification.problems });
@@ -256,13 +275,33 @@ async function verifyImport(db, plan, workspaceId) {
     replies: await col("comments").countDocuments({ boardId: { $in: boardIds }, parentId: { $ne: null } }),
     mappings: await col("integrationMappings").countDocuments({ provider: MAPPING_PROVIDER, runId: plan.runId, kind: { $ne: "asset" } }),
     attachmentsCreated: await col("attachments").countDocuments({ boardId: { $in: boardIds }, imported: { $exists: false } }),
-    gridFsFiles: await db.collection(COLLECTIONS.attachmentFiles).countDocuments({ "metadata.boardId": { $in: boardIds } })
+    gridFsFiles: await db.collection(COLLECTIONS.attachmentFiles).countDocuments({ "metadata.boardId": { $in: boardIds } }),
+    searchIndex: await col("recordSearch").countDocuments({ boardId: { $in: boardIds } })
   };
-  const expected = { boards: 2, records: plan.records.length, subitems: plan.subRecords.length, updates: plan.comments.filter((c) => !c.parentId).length, replies: plan.comments.filter((c) => c.parentId).length, mappings: plan.mappings.length, attachmentsCreated: 0, gridFsFiles: 0 };
+  const expected = { boards: 2, records: plan.records.length, subitems: plan.subRecords.length, updates: plan.comments.filter((c) => !c.parentId).length, replies: plan.comments.filter((c) => c.parentId).length, mappings: plan.mappings.length, attachmentsCreated: 0, gridFsFiles: 0, searchIndex: plan.records.length + plan.subRecords.length };
   for (const [k, v] of Object.entries(expected)) if (counts[k] !== v) problems.push(`${k}: ${counts[k]} in the database, ${v} planned`);
   const board = await col("boards").findOne({ _id: plan.board._id });
   if (board?.source !== undefined) problems.push("the imported board is marked as a synchronized (read-only) board");
   return { ok: problems.length === 0, counts, expected, problems };
 }
 
-module.exports = { runImport, verifyImport, checkAuthorization, remainingBatches, verifyBatch, planCounts, attachmentCounts, acquireRunLock, MigrationError, MigrationLockedError, PRODUCTION_EXECUTION_ENABLED, BATCH_SIZE, SCOPE, ATTACHMENT_SCOPE, IMPORTABLE_ACTIONS, JOB_TYPE };
+// The plan's records that have no index document yet (committed by a run from before batches wrote them) get one,
+// BATCH_SIZE at a time, never replacing a newer one. Reads by the plan's own IDs only. Returns how many were written.
+async function indexImportedRecords(db, plan) {
+  const col = (n) => db.collection(COLLECTIONS[n]);
+  const boards = new Map();
+  for (const b of await col("boards").find({ _id: { $in: [plan.board._id, plan.subBoard._id] } }, { projection: { _id: 1, columns: 1 } }).toArray()) boards.set(b._id.toHexString(), b);
+  const ids = [...plan.records, ...plan.subRecords].map((r) => r._id);
+  let written = 0;
+  for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+    const part = ids.slice(i, i + BATCH_SIZE);
+    const have = new Set((await col("recordSearch").find({ _id: { $in: part } }, { projection: { _id: 1 } }).toArray()).map((d) => d._id.toHexString()));
+    const missing = part.filter((id) => !have.has(id.toHexString()));
+    if (!missing.length) continue;
+    const records = await col("records").find({ _id: { $in: missing } }).toArray();
+    written += (await writeGuarded(col("recordSearch"), records.filter((r) => boards.has(r.boardId.toHexString())).map((r) => searchDocument(r, planOf(boards.get(r.boardId.toHexString())))))).written;
+  }
+  return written;
+}
+
+module.exports = { runImport, verifyImport, indexImportedRecords,checkAuthorization, remainingBatches, verifyBatch, planCounts, attachmentCounts, acquireRunLock, MigrationError, MigrationLockedError, PRODUCTION_EXECUTION_ENABLED, BATCH_SIZE, SCOPE, ATTACHMENT_SCOPE, IMPORTABLE_ACTIONS, JOB_TYPE };

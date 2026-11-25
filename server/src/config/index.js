@@ -69,6 +69,9 @@ function loadConfig(env = process.env) {
     midAttachments: loadMidAttachmentsConfig(env),
     // Search index (services/record-search-index.js): off, shadow or on. Unset: off, which writes nothing.
     recordSearch: loadRecordSearchMode(env),
+    // Record search engine (services/search-engines/): { mode: regex | shadow | atlas, atlasIndex, shadowSamplePercent }.
+    // Unset: regex, exactly the regular search. shadow and atlas read the recordSearch copy, so they need RECORD_SEARCH_INDEX.
+    recordSearchEngine: loadRecordSearchEngine(env),
     // Optional features, each with its own switch: { nativeForms, spreadsheetImports }. Off in production unless turned on.
     features: loadFeatureSwitches(env, nodeEnv),
     // API tokens for other systems: { enabled, perMinute } and a key kept out of logs and inspection.
@@ -233,6 +236,19 @@ function loadRecordSearchMode(env) {
   const mode = env.RECORD_SEARCH_INDEX === undefined || env.RECORD_SEARCH_INDEX === "" ? "off" : env.RECORD_SEARCH_INDEX;
   if (!["off", "shadow", "on"].includes(mode)) throw new ConfigError("RECORD_SEARCH_INDEX must be off, shadow or on.");
   return mode;
+}
+
+// RECORD_SEARCH_ENGINE: regex (default) | shadow | atlas. RECORD_SEARCH_ATLAS_INDEX: the Atlas Search index name (default
+// jarc_text). RECORD_SEARCH_SHADOW_SAMPLE_PERCENT: share of cheap searches compared in shadow mode (0-100, default 10).
+function loadRecordSearchEngine(env) {
+  const mode = env.RECORD_SEARCH_ENGINE === undefined || env.RECORD_SEARCH_ENGINE === "" ? "regex" : env.RECORD_SEARCH_ENGINE;
+  if (!["regex", "shadow", "atlas"].includes(mode)) throw new ConfigError("RECORD_SEARCH_ENGINE must be regex, shadow or atlas.");
+  const atlasIndex = env.RECORD_SEARCH_ATLAS_INDEX === undefined || env.RECORD_SEARCH_ATLAS_INDEX === "" ? "jarc_text" : env.RECORD_SEARCH_ATLAS_INDEX;
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(atlasIndex)) throw new ConfigError("RECORD_SEARCH_ATLAS_INDEX must be 1-64 letters, digits, _ or -.");
+  const shadowSamplePercent = wholeNumberSetting(env, "RECORD_SEARCH_SHADOW_SAMPLE_PERCENT", 10, 0, 100);
+  // The engine searches the recordSearch copy: without the index it would be empty or stale.
+  if (mode !== "regex" && loadRecordSearchMode(env) === "off") throw new ConfigError("RECORD_SEARCH_ENGINE=shadow or atlas needs RECORD_SEARCH_INDEX=shadow or on.");
+  return Object.freeze({ mode, atlasIndex, shadowSamplePercent });
 }
 
 // AUTH_MODE selects how the resource API knows who is calling:

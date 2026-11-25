@@ -12,6 +12,7 @@ const { StorageUsageRepository } = require("./repositories/mongo/storage-usage-r
 const { FileService } = require("./services/file-service");
 const { SearchService } = require("./services/search-service");
 const { RecordSearchIndex } = require("./services/record-search-index");
+const { createRecordSearchEngine } = require("./services/search-engines");
 const { RecordSearchRepository } = require("./repositories/mongo/record-search-repository");
 const { IntegrationRepository } = require("./repositories/mongo/integration-repository");
 const { CommentRepository } = require("./repositories/mongo/comment-repository");
@@ -42,7 +43,7 @@ const { ApiTokenService } = require("./services/api-token-service");
 // googleDrive: config.googleDrive. Absent or not enabled: no Google Drive code runs, no store exists and its routes don't.
 // midAttachments: config.midAttachments (the Machine Installation Database attachment import). Only with Google Drive on;
 // midAttachmentsOptions: test-only settings (faults, now, sleep, mondayFetch). environment: refuses test faults in production.
-function createDataLayer({ connection, logger = console, fileStore = new GridFsFileStore(connection.db), maxFileStorageBytes, attachments = null, s3Store = null, monday = null, googleDrive = null, googleDriveOptions = {}, midAttachments = null, midAttachmentsOptions = {}, environment = "development", recordSearch = "off", fetch = globalThis.fetch } = {}) {
+function createDataLayer({ connection, logger = console, fileStore = new GridFsFileStore(connection.db), maxFileStorageBytes, attachments = null, s3Store = null, monday = null, googleDrive = null, googleDriveOptions = {}, midAttachments = null, midAttachmentsOptions = {}, environment = "development", recordSearch = "off", recordSearchEngine = null, fetch = globalThis.fetch } = {}) {
   const db = connection.db;
   const s3 = s3Store || (attachments?.s3 ? createS3FileStore(attachments.s3) : null);
   const repos = {
@@ -81,7 +82,7 @@ function createDataLayer({ connection, logger = console, fileStore = new GridFsF
       accounts: new AccountService(deps),
       // API tokens; unused unless the app is given their key (JARC_FEATURE_API_TOKENS).
       apiTokens: new ApiTokenService(deps),
-      search: new SearchService({ repos, index: searchIndex }),
+      search: new SearchService({ repos, index: searchIndex, engine: createRecordSearchEngine({ repos, logger, config: recordSearchEngine }) }),
       // access is attached when the routes are mounted (it depends on the access policy).
       comments: new CommentService({ repos, connection, logger }),
       forms: new FormService({ repos, connection, logger, records }),

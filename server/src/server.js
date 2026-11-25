@@ -25,7 +25,7 @@ async function main() {
     connection = new MongoConnection({ uri: config.mongo.uri, dbName: config.mongo.dbName });
     await connection.connect();
     const { createdCollections } = await ensureDatabase(connection.db, { features: { ...config.features, apiTokens: config.apiTokens.enabled } });
-    dataLayer = createDataLayer({ connection, maxFileStorageBytes: config.maxFileStorageBytes, attachments: config.attachments, monday: config.monday, googleDrive: config.googleDrive, midAttachments: config.midAttachments, environment: config.nodeEnv, recordSearch: config.recordSearch });
+    dataLayer = createDataLayer({ connection, maxFileStorageBytes: config.maxFileStorageBytes, attachments: config.attachments, monday: config.monday, googleDrive: config.googleDrive, midAttachments: config.midAttachments, environment: config.nodeEnv, recordSearch: config.recordSearch, recordSearchEngine: config.recordSearchEngine });
     if (config.enableDevResourceApi) devActor = await ensureDevelopmentActor(dataLayer.repos.users, { environment: config.nodeEnv });
     console.log(`MongoDB connected (database ${config.mongo.dbName}).${createdCollections.length ? ` Created collections: ${createdCollections.join(", ")}.` : ""}`);
   }
@@ -56,8 +56,9 @@ async function main() {
     if (config.accessPolicy === "development_shared") console.warn("ACCESS_POLICY=development_shared: every signed-in employee can create, edit and delete every workspace, board and record. Development collaboration only — set ACCESS_POLICY=role_based before production rollout.");
   });
 
-  // Search index: catches up in the background when switched on; search uses the records until it finishes.
-  dataLayer?.searchIndex.catchUp();
+  // Search index: an incremental catch up in the background when switched on (only what changed since its stored watermark,
+  // never every record), repeated every 10 minutes; search uses the records until it has finished.
+  dataLayer?.searchIndex.start();
 
   // Files: remove interrupted uploads and files left behind by deletions, shortly after start and every 15 minutes.
   const files = dataLayer?.services.files;
@@ -85,6 +86,8 @@ async function main() {
     if (stopping) return;
     stopping = true;
     server.close(async () => {
+      // Queued search-index updates get up to 5 seconds; whatever is left is picked up by the next start's catch up.
+      await dataLayer?.searchIndex.stop({ timeoutMs: 5000 }).catch(() => {});
       await connection?.close().catch(() => {});
       await fabricData?.close().catch(() => {});
       process.exit(0);

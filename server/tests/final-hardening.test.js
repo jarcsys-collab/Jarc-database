@@ -450,6 +450,14 @@ describe("Search cursors", () => {
     const make = (x) => Buffer.from(JSON.stringify({ k: "record", t: 1000, i: id.toHexString(), x })).toString("base64url");
     for (const bad of [[{ $ne: null }], ["not-an-id"], "text", Array.from({ length: 51 }, () => id.toHexString())]) assert.throws(() => decodeCursor(make(bad), "record"), /cursor is not valid/);
   });
+  test("L4 (S13): a cursor time outside the valid date range is refused with 400 VALIDATION_ERROR", () => {
+    const withTime = (t) => Buffer.from(JSON.stringify({ k: "record", t, i: id.toHexString() })).toString("base64url");
+    for (const t of [8.64e15 + 1, -8.64e15 - 1, Number.MAX_SAFE_INTEGER, -Number.MAX_SAFE_INTEGER]) {
+      assert.throws(() => decodeCursor(withTime(t), "record"), (e) => e.status === 400 && e.code === "VALIDATION_ERROR" && /cursor is not valid/.test(e.message), String(t));
+      assert.throws(() => searchParams({ type: "record", q: "abc", cursor: withTime(t) }, actor.userId), { code: "VALIDATION_ERROR" }, String(t));
+    }
+    for (const t of [8.64e15, -8.64e15, 0, null]) assert.equal(decodeCursor(withTime(t), "record").time?.getTime() ?? null, t, String(t));
+  });
 });
 
 describe("Search comparison in shadow mode", () => {
@@ -505,6 +513,6 @@ describe("Dependency advisories", () => {
   test("qs isn't reached by JARC: the simple query parser stays in use, and nothing calls qs directly", () => {
     const app = require("../src/app").createApp({ repository: { read() {} }, environment: "test" });
     assert.equal(app.get("query parser"), "simple");
-    for (const dir of ["routes", "services", "domain", "validation", "middleware"]) for (const f of fs.readdirSync(path.join(__dirname, "../src", dir))) assert.doesNotMatch(fs.readFileSync(path.join(__dirname, "../src", dir, f), "utf8"), /require\(["']qs["']\)/, f);
+    for (const dir of ["routes", "services", "domain", "validation", "middleware"]) for (const f of fs.readdirSync(path.join(__dirname, "../src", dir), { recursive: true })) if (fs.statSync(path.join(__dirname, "../src", dir, f)).isFile()) assert.doesNotMatch(fs.readFileSync(path.join(__dirname, "../src", dir, f), "utf8"), /require\(["']qs["']\)/, f);
   });
 });

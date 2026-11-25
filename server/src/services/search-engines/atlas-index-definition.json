@@ -1,0 +1,26 @@
+{
+  "mappings": {
+    "dynamic": false,
+    "fields": {
+      "text": {
+        "type": "string", "analyzer": "jarcTrigram", "searchAnalyzer": "jarcTrigram", "indexOptions": "positions", "norms": "omit",
+        "multi": { "bi": { "type": "string", "analyzer": "jarcBigram", "searchAnalyzer": "jarcBigram", "indexOptions": "docs", "norms": "omit" } }
+      },
+      "name": {
+        "type": "string", "analyzer": "jarcTrigram", "searchAnalyzer": "jarcTrigram", "indexOptions": "positions", "norms": "omit",
+        "multi": { "bi": { "type": "string", "analyzer": "jarcBigram", "searchAnalyzer": "jarcBigram", "indexOptions": "docs", "norms": "omit" } }
+      },
+      "boardId": { "type": "objectId" },
+      "archived": { "type": "boolean" },
+      "updatedAt": { "type": "date" },
+      "status": { "type": "token" },
+      "priority": { "type": "token" },
+      "owner": { "type": "token" }
+    }
+  },
+  "analyzers": [
+    { "name": "jarcTrigram", "tokenizer": { "type": "nGram", "minGram": 3, "maxGram": 3 }, "tokenFilters": [{ "type": "lowercase" }] },
+    { "name": "jarcBigram", "tokenizer": { "type": "nGram", "minGram": 2, "maxGram": 2 }, "tokenFilters": [{ "type": "lowercase" }] }
+  ],
+  "storedSource": { "include": ["boardId", "updatedAt"] }
+}

@@ -709,7 +709,7 @@ class AppController {
     if (this.shellOnly && this.signedIn && !this.shellAction(action, target)) { this.loadJarc({ prefetch: action !== "module-exit" }).then((ok) => { if (ok) this.guard(() => this.onClick(event)); }); return; }
     if (action === "quick-search-open") { this.quickSearch?.openAt(Number(target.dataset.index)); return; }
     if (action === "entra-sign-in" && this.entra) { this.entraSignIn(); return; }
-    if (action === "entra-sign-out" && this.entra) { this.clearModuleReturn(); this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true, signingOut: true }); this.entra.signOut(); return; }
+    if (action === "entra-sign-out" && this.entra) { this.command?.reset(); if (this.quickSearch) { this.quickSearch.all = null; this.quickSearch.items = []; } this.clearModuleReturn(); this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true, signingOut: true }); this.entra.signOut(); return; }
     if (window.jarcStorage?.connection === "offline" && ["cell-open","set-cell-option","inline-add","open-form","new-item","new-board","add-column","create-workspace","import"].includes(action)) { this.view.toast(StorageError.describe(StorageError.CODES.OFFLINE).message); return; }
     if (action.startsWith("integration-") && this.integrations) { if (target.tagName !== "SELECT") this.integrations.onAction(action, target); return; }
     if (action.startsWith("health-") && this.health) { if (target.tagName !== "FORM") this.health.onAction(action, target); return; }

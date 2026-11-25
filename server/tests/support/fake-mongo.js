@@ -151,6 +151,66 @@ function project(doc, projection) {
 
 const duplicateKey = () => new MongoServerError({ message: "E11000 duplicate key error (fake)", code: 11000, codeName: "DuplicateKey" });
 
+// ---- Atlas Search emulation (TEST-ONLY), for services/search-engines. Only what the record search engine uses, following the
+// documented semantics of the index in atlas-index-definition.json:
+//   compound   filter / must (all), mustNot (none), should (at least minimumShouldMatch, default 1 when alone).
+//   in / equals / range / exists on mapped fields; arrays match through any element; null and missing are not indexed.
+//   phrase     (slop 0) on a trigram-analyzed path: the lower-cased query is a literal substring of ONE newline-separated
+//              cell of the lower-cased value; under 3 characters there are no trigrams, so nothing matches.
+//   text       on the ".bi" multi (bigram) path: any of the query's 2-character pieces is a substring of one cell.
+//   sort       by the given fields (missing lowest), returnStoredSource: only _id and storedSource.include.
+// Like Atlas: a $search naming an index that doesn't exist returns no documents; one that isn't queryable fails. A collection
+// with no search index defined refuses $search outright (an unsupported stage, as before), so code can't rely on it by accident.
+// Not emulated (proved only on a real Atlas cluster): tokenizer details, scoring, index lag, positions of real n-grams.
+const strings = (value) => (typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((v) => typeof v === "string") : []);
+const searchCells = (value) => strings(value).flatMap((v) => v.toLowerCase().split("\n"));
+const valuesAt = (doc, path) => { const v = getPath(doc, path); return v === undefined || v === null ? [] : Array.isArray(v) ? v : [v]; };
+function searchPath(definition, path) {
+  const fields = definition.mappings?.fields || {};
+  if (typeof path === "string") { if (!fields[path]) throw new Error(`fake-mongo: $search on unmapped path ${path}`); return { field: path, spec: fields[path] }; }
+  const spec = fields[path.value]?.multi?.[path.multi];
+  if (!spec) throw new Error(`fake-mongo: $search on unmapped multi ${path.value}.${path.multi}`);
+  return { field: path.value, spec };
+}
+function gramsOf(definition, spec) {
+  const analyzer = (definition.analyzers || []).find((a) => a.name === (spec.searchAnalyzer || spec.analyzer));
+  if (!analyzer || analyzer.tokenizer?.type !== "nGram" || analyzer.tokenizer.minGram !== analyzer.tokenizer.maxGram) throw new Error("fake-mongo: only fixed-size nGram analyzers are emulated");
+  return analyzer.tokenizer.minGram;
+}
+function searchMatches(doc, op, definition) {
+  const [[name, arg]] = Object.entries(op);
+  switch (name) {
+    case "compound": {
+      if (!arg.filter && !arg.must && !arg.should && !arg.mustNot) throw new Error("fake-mongo: empty compound");
+      const all = (list) => (list || []).every((o) => searchMatches(doc, o, definition));
+      if (!all(arg.filter) || !all(arg.must)) return false;
+      if ((arg.mustNot || []).some((o) => searchMatches(doc, o, definition))) return false;
+      if (arg.should?.length) { const need = arg.minimumShouldMatch ?? (arg.filter || arg.must ? 0 : 1); if (arg.should.filter((o) => searchMatches(doc, o, definition)).length < need) return false; }
+      return true;
+    }
+    case "in": { searchPath(definition, arg.path); const list = Array.isArray(arg.value) ? arg.value : [arg.value]; return valuesAt(doc, arg.path).some((v) => list.some((x) => equalValues(v, x))); }
+    case "equals": searchPath(definition, arg.path); return valuesAt(doc, arg.path).some((v) => equalValues(v, arg.value));
+    case "exists": searchPath(definition, arg.path); return valuesAt(doc, arg.path).length > 0;
+    case "range": {
+      searchPath(definition, arg.path);
+      const bound = arg.gt ?? arg.gte ?? arg.lt ?? arg.lte;
+      return valuesAt(doc, arg.path).some((v) => typeOrder(v) === typeOrder(bound) && (arg.gt === undefined || compare(v, arg.gt) > 0) && (arg.gte === undefined || compare(v, arg.gte) >= 0) && (arg.lt === undefined || compare(v, arg.lt) < 0) && (arg.lte === undefined || compare(v, arg.lte) <= 0));
+    }
+    case "phrase": {
+      const { field, spec } = searchPath(definition, arg.path), n = gramsOf(definition, spec), query = String(arg.query).toLowerCase();
+      if ((arg.slop ?? 0) !== 0) throw new Error("fake-mongo: only phrase slop 0 is emulated");
+      if (query.length < n) return false;
+      return searchCells(getPath(doc, field)).some((cell) => cell.includes(query));
+    }
+    case "text": {
+      const { field, spec } = searchPath(definition, arg.path), n = gramsOf(definition, spec), query = String(arg.query).toLowerCase();
+      const grams = Array.from({ length: Math.max(0, query.length - n + 1) }, (_, i) => query.slice(i, i + n));
+      return grams.length > 0 && searchCells(getPath(doc, field)).some((cell) => grams.some((g) => cell.includes(g)));
+    }
+    default: throw new Error(`fake-mongo: unsupported $search operator ${name}`);
+  }
+}
+
 class FakeCursor {
   constructor(collection, filter, options = {}) { Object.assign(this, { collection, filter, sortSpec: options.sort, limitN: options.limit, projection: options.projection }); }
   sort(spec) { this.sortSpec = spec; return this; }
@@ -200,8 +260,21 @@ class FakeCollection {
     this.record("aggregate", { stages, options });
     const docs = () => {
       let rows = this.docs.map(clone);
-      for (const stage of stages) {
-        if (stage.$match) rows = rows.filter((d) => matches(d, stage.$match));
+      for (const [at, stage] of stages.entries()) {
+        if ((stage.$search || stage.$listSearchIndexes) && at !== 0) throw new Error("fake-mongo: $search must be the first stage");
+        if (stage.$listSearchIndexes && this.searchIndexes) rows = this.searchIndexes.filter((i) => !stage.$listSearchIndexes.name || i.name === stage.$listSearchIndexes.name).map((i) => ({ id: i.name, name: i.name, status: i.status, queryable: i.queryable, latestDefinition: clone(i.definition) }));
+        else if (stage.$search && this.searchIndexes) {
+          const index = this.searchIndexes.find((i) => i.name === stage.$search.index);
+          if (!index) { rows = []; continue; }
+          if (!index.queryable) throw new MongoServerError({ message: "search index is not queryable (fake)", code: 8, codeName: "UnknownError" });
+          const { index: _name, sort, returnStoredSource, ...operator } = stage.$search;
+          if (Object.keys(operator).length !== 1) throw new Error("fake-mongo: $search needs exactly one operator");
+          rows = rows.filter((d) => searchMatches(d, operator, index.definition));
+          if (sort) { const spec = Object.entries(sort); rows.sort((x, y) => { for (const [k, dir] of spec) { const c = compare(getPath(x, k), getPath(y, k)); if (c) return dir === -1 ? -c : c; } return 0; }); }
+          if (returnStoredSource) { const keep = index.definition.storedSource?.include || []; rows = rows.map((d) => Object.fromEntries([["_id", d._id], ...keep.filter((k) => d[k] !== undefined).map((k) => [k, d[k]])])); }
+        }
+        else if (stage.$project) rows = rows.map((d) => project(d, stage.$project));
+        else if (stage.$match) rows = rows.filter((d) => matches(d, stage.$match));
         else if (stage.$group) { const field = stage.$group._id.slice(1), counts = new Map(); for (const d of rows) { const k = getPath(d, field) ?? null; counts.set(k, (counts.get(k) || 0) + 1); } rows = [...counts].map(([_id, n]) => ({ _id, n })); }
         else if (stage.$addFields) for (const d of rows) for (const [field, spec] of Object.entries(stage.$addFields)) d[field] = isOperatorObject(spec) ? evalExpr(spec, d) : Object.fromEntries(Object.entries(spec).map(([k, v]) => [k, evalExpr(v, d)]));
         else if (stage.$sort) { const spec = Object.entries(stage.$sort); rows = [...rows].sort((a, b) => { for (const [k, dir] of spec) { const c = compare(getPath(a, k), getPath(b, k)); if (c) return dir === -1 ? -c : c; } return 0; }); }
@@ -316,6 +389,16 @@ class FakeCollection {
     this.indexes.push(spec);
     return name;
   }
+  // Atlas Search indexes (TEST-ONLY emulation above). Created queryable unless { queryable: false }.
+  async createSearchIndex({ name, definition }, { queryable = true } = {}) {
+    this.record("createSearchIndex", { name });
+    this.searchIndexes ??= [];
+    if (this.searchIndexes.some((i) => i.name === name)) throw new MongoServerError({ message: "Duplicate Index (fake)", code: 68, codeName: "IndexAlreadyExists" });
+    this.searchIndexes.push({ name, definition: clone(definition), status: queryable ? "READY" : "BUILDING", queryable });
+    return name;
+  }
+  setSearchIndexState(name, { queryable, status }) { const i = (this.searchIndexes || []).find((x) => x.name === name); if (!i) throw new Error(`fake-mongo: no search index ${name}`); Object.assign(i, { queryable, status: status || (queryable ? "READY" : "FAILED") }); }
+  async dropSearchIndex(name) { this.record("dropSearchIndex", { name }); this.searchIndexes = (this.searchIndexes || []).filter((i) => i.name !== name); }
   listIndexes() { return { toArray: async () => this.indexes.map((i) => ({ ...i })) }; }
   async drop() { throw new Error("fake-mongo: drop() must never be called by JARC code"); }
 }

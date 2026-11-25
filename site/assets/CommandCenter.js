@@ -15,6 +15,14 @@ class CommandCenter {
   static TYPES = Object.freeze([["all", "All"], ["workspace", "Workspaces"], ["board", "Boards"], ["record", "Records"], ["comment", "Updates"]]);
   static FILTER_KEYS = Object.freeze(["workspaceId", "boardId", "assignee", "status", "priority", "from", "to"]);
   static VIEW_LABELS = Object.freeze({ table: "Table", list: "List", kanban: "Kanban board", calendar: "Calendar" });
+  // Server search limits: q is sent only from 2 characters; successful answers are kept briefly in memory (never
+  // errors, never in browser storage); a failed question isn't asked again on its own for FAILURE_MS; after a costly
+  // failure (timeout, engine unavailable, too many searches) Try again waits 5 s, then 10 s, 20 s, 30 s.
+  static MIN_QUERY = 2;
+  static CACHE_SIZE = 20;
+  static CACHE_MS = 60000;
+  static FAILURE_MS = 30000;
+  static BACKOFF_MS = Object.freeze([5000, 10000, 20000, 30000]);
   static isMac() { const p = (typeof navigator !== "undefined" && (navigator.userAgentData?.platform || navigator.platform || navigator.userAgent)) || ""; return /mac|iphone|ipad/i.test(p); }
   static shortcutLabel() { return CommandCenter.isMac() ? "⌘ K" : "Ctrl K"; }
 
@@ -25,7 +33,10 @@ class CommandCenter {
     this.panelOpen = false;
     this.server = null; // { key, status: "loading" | "done" | "error", groups, message }
     this.recents = null; // { status, items }
-    this.seq = 0;
+    this.seq = 0; // advanced whenever the question shown changes, so an older answer never replaces a newer state
+    this.cache = new Map(); // key → { at, state }: the last CACHE_SIZE successful answers (oldest first)
+    this.failures = new Map(); // key → { at, attempts, state }: recent failures, never sent again on their own
+    this.inflight = new Map(); // key → Promise: one request per question at a time
     this.epoch = 0; // advanced by reset(): answers that arrive after a sign-out are dropped
     this.lastVisit = "";
     this.returnFocus = null;
@@ -39,7 +50,10 @@ class CommandCenter {
   get remote() { return typeof this.adapter?.searchGlobal === "function"; }
   get isOpen() { return Boolean(document.querySelector("#overlay-root .command-modal")); }
   get input() { return document.querySelector(".command-modal [data-action=command-search]"); }
-  get query() { return (this.input?.value || "").trim(); }
+  get query() { return (this.input?.value || "").replace(/\s+/g, " ").trim(); }
+  // What the server is asked: nothing under 2 characters (it would answer 400).
+  get serverQuery() { const q = this.query; return q.length >= CommandCenter.MIN_QUERY ? q : ""; }
+  now() { return Date.now(); }
   emptyFilters() { return { workspaceId: "", boardId: "", assignee: "", status: "", priority: "", from: "", to: "" }; }
   get activeFilters() { return CommandCenter.FILTER_KEYS.filter((k) => this.filters[k]); }
   // Filters that only records have: with any of them, workspaces, boards and Updates are left out.
@@ -65,7 +79,8 @@ class CommandCenter {
   // Sign-out, lock or an ended session: forget everything this person searched, saw or filtered, and ignore answers
   // still on their way (seq / epoch), so nothing of theirs reappears for whoever signs in next.
   reset() {
-    clearTimeout(this.timer); clearTimeout(this.localTimer);
+    clearTimeout(this.timer); clearTimeout(this.localTimer); clearTimeout(this.retryTimer);
+    this.cache.clear(); this.failures.clear(); this.inflight.clear();
     this.seq += 1; this.epoch = (this.epoch || 0) + 1;
     this.server = null; this.recents = null; this.filters = this.emptyFilters(); this.type = "all"; this.panelOpen = false; this.lastVisit = ""; this.returnFocus = null; this.returnSelector = null;
     if (this.isOpen) this.view.closeOverlay();
@@ -89,10 +104,18 @@ class CommandCenter {
     if (filters) { const focused = document.activeElement?.closest?.("[data-region=filters]") ? document.activeElement.dataset.key || document.activeElement.dataset.type || document.activeElement.dataset.action : null; filters.innerHTML = this.filterBar(); if (focused) (filters.querySelector(`[data-key="${CSS.escape(focused)}"]`) || filters.querySelector(`[data-type="${CSS.escape(focused)}"]`) || filters.querySelector(`[data-action="${CSS.escape(focused)}"]`))?.focus(); }
     const { html, count } = this.results();
     modal.querySelector(".command-results").innerHTML = html;
-    const status = modal.querySelector(".command-status"); if (status) status.textContent = this.query || this.activeFilters.length ? `${count} result${count === 1 ? "" : "s"}` : "";
+    const status = modal.querySelector(".command-status"); if (status) status.textContent = this.query || this.activeFilters.length ? this.countText(count) : "";
     this.input?.removeAttribute("aria-activedescendant");
     // Result rows are options of the listbox; the input announces the highlighted one (aria-activedescendant).
     modal.querySelectorAll(".command-results button").forEach((b, i) => { b.id = `cc-option-${i}`; b.setAttribute("role", "option"); b.setAttribute("aria-selected", "false"); b.tabIndex = -1; });
+  }
+  // The footer count never reads as complete when it isn't: "10+ results" when more exist, "from open boards" when
+  // only this browser's boards could be searched.
+  countText(count) {
+    const live = this.serverState(), n = `${count} result${count === 1 ? "" : "s"}`;
+    if (live?.status === "error") return `${n} from open boards`;
+    if (live?.status === "done" && (live.partial || Object.values(live.groups).some((g) => g.next || g.more))) return `${count}+ results`;
+    return n;
   }
   // Called by the keyboard handler after ↑/↓ moved the highlight.
   highlight(button) {
@@ -196,47 +219,91 @@ class CommandCenter {
     return item(`data-action="palette-record" data-id="${v.attr(it.target.recordId)}" data-board="${v.attr(place.b.id)}" data-workspace="${v.attr(place.w.id)}" data-title="${v.attr(it.title)}"`, "records", it.field ? v.escape(it.title) : v.mark(it.title, q), context, badges ? `<span class="cc-badges">${badges}</span>` : "");
   }
 
+  // When all-board search failed, what this browser can still show: "text" (a plain search of open boards), "filters"
+  // (status / priority / assignee checked on open boards) or "unavailable" (date filters can't be checked here).
+  fallbackMode() {
+    if (!this.narrowed) return "text";
+    if (this.filters.from || this.filters.to || (this.filters.assignee === "me" && !this.myRef())) return "unavailable";
+    return "filters";
+  }
+  myRef() { return [...(this.model.people || new Map())].find(([, p]) => p?.isYou)?.[0] || null; }
+
   recordHtml(item, spaces, inScope) {
-    const v = this.view, m = this.model, q = this.query, ql = q.toLowerCase(), has = (t) => String(t ?? "").toLowerCase().includes(ql);
+    const v = this.view, m = this.model, f = this.filters;
+    const live = this.serverState(), failed = this.remote && live?.status === "error", mode = failed ? this.fallbackMode() : null;
+    // With record filters, the text is matched only as the server would (2 characters or more).
+    const filtering = this.narrowed, q = filtering ? this.serverQuery : this.query, ql = q.toLowerCase(), has = (t) => String(t ?? "").toLowerCase().includes(ql);
     const hits = [], shown = new Set();
-    // Records already in this browser (boards opened this session): only for a plain text search.
-    if (q && !this.narrowed) {
+    // Records already in this browser (boards opened this session): for a plain text search, and as the fallback for
+    // record filters when all-board search failed.
+    if ((q && !filtering) || mode === "filters") {
+      const who = f.assignee === "me" ? this.myRef() : f.assignee;
       for (const w of spaces) for (const b of w.boards) {
         if (b.archived || !inScope(w, b)) continue;
         const cols = (b.columns || []).filter((c) => c.type !== "files" && c.type !== "checkbox");
+        const typed = (t) => (b.columns || []).filter((c) => c.type === t);
+        const statusCols = typed("status"), priorityCols = typed("priority"), ownerCols = typed("owner");
+        if (filtering && ((f.status && !statusCols.length) || (f.priority && !priorityCols.length) || (f.assignee && !ownerCols.length))) continue;
         for (const r of b.records || []) {
           if (r.archived || hits.length >= 20) continue;
+          if (filtering) {
+            if (f.status && !statusCols.some((c) => r[c.key] === f.status)) continue;
+            if (f.priority && !priorityCols.some((c) => r[c.key] === f.priority)) continue;
+            if (f.assignee && !ownerCols.some((c) => (Array.isArray(r[c.key]) ? r[c.key].includes(who) : r[c.key] === who))) continue;
+          }
           let hit = null;
-          for (const c of cols) { const val = r[c.key]; const text = Array.isArray(val) ? val.map((x) => (m.personName ? m.personName(x) : x)).join(", ") : val; if (text !== undefined && text !== null && text !== "" && has(text)) { hit = { c, text: String(text) }; break; } }
+          if (!q) hit = { c: { key: "serial" }, text: "" };
+          else for (const c of cols) { const val = r[c.key]; const text = Array.isArray(val) ? val.map((x) => (m.personName ? m.personName(x) : x)).join(", ") : val; if (text !== undefined && text !== null && text !== "" && has(text)) { hit = { c, text: String(text) }; break; } }
           if (!hit) continue;
           const name = r.serial || r[cols[0]?.key] || "Record";
           const context = hit.c.key === "serial" ? `${v.escape(b.name)} · ${v.escape(w.name)}` : `${v.escape(hit.c.label)}: ${v.mark(hit.text.length > 80 ? hit.text.slice(0, 80) + "…" : hit.text, q)} · ${v.escape(b.name)} · ${v.escape(w.name)}`;
           shown.add(String(m.serverId(r.id)));
-          hits.push(item(`data-action="palette-record" data-id="${v.attr(r.id)}" data-board="${v.attr(b.id)}" data-workspace="${v.attr(w.id)}"`, "records", hit.c.key === "serial" ? v.mark(name, q) : v.escape(name), context));
+          hits.push(item(`data-action="palette-record" data-id="${v.attr(r.id)}" data-board="${v.attr(b.id)}" data-workspace="${v.attr(w.id)}"`, "records", hit.c.key === "serial" && q ? v.mark(name, q) : v.escape(name), context));
         }
       }
     }
-    const live = this.serverState(), group = live?.status === "done" ? live.groups.record : null;
+    const group = live?.status === "done" ? live.groups.record : null;
     if (group) for (const it of group.items) { if (shown.has(it.id)) continue; const html = this.resultButton(item, it); if (html) { shown.add(it.id); hits.push(html); } }
-    return hits.join("") + this.statusHtml(live, group, "record");
+    // Never an answer that looks complete: open-board matches are labelled partial, even when there are none.
+    const partial = failed && mode !== "unavailable" ? `<p class="search-status cc-partial" role="note">Partial results — only boards you have open.${hits.length ? "" : " No matches on those boards."}</p>` : "";
+    return partial + hits.join("") + this.statusHtml(live, group, "record");
   }
 
   commentHtml(item) {
     const live = this.serverState(), group = live?.status === "done" ? live.groups.comment : null;
     const seen = new Set();
     const rows = (group?.items || []).filter((it) => !seen.has(it.id) && seen.add(it.id)).map((it) => this.resultButton(item, it)).join("");
-    return rows + (this.type === "comment" || rows ? this.statusHtml(live, group, "comment") : "");
+    return rows + (this.type === "comment" || rows || group?.partial ? this.statusHtml(live, group, "comment") : "");
   }
 
   statusHtml(live, group, type) {
     if (!this.remote || !live) return "";
     if (live.status === "loading") return type === "record" || this.type === type ? `<p class="search-status" role="status"><span class="loading-spinner" aria-hidden="true"></span> Searching all boards…</p>` : "";
-    if (live.status === "error") return type === "record" || this.type === type ? `<p class="search-status is-error" role="alert">${this.view.escape(live.message || "Couldn't search all boards.")}${type === "record" && !this.narrowed ? " Showing matches from boards opened here." : ""} <button type="button" class="button secondary small" data-action="search-retry">Try again</button></p>` : "";
+    if (live.status === "error") {
+      if (type !== "record" && this.type !== type) return "";
+      const mode = type === "record" ? this.fallbackMode() : null;
+      const note = mode === "unavailable" ? " Filtered results are unavailable right now." : mode ? " Showing matches from open boards." : "";
+      return `<p class="search-status is-error" role="alert">${this.view.escape(live.message || "Couldn't search all boards.")}${note} ${this.retryButton(live)}</p>`;
+    }
     if (group?.loadingMore) return `<p class="search-status" role="status"><span class="loading-spinner" aria-hidden="true"></span> Loading more…</p>`;
     if (group?.moreError) return `<p class="search-status is-error" role="alert">More results couldn't load. <button type="button" class="button secondary small" data-action="cc-more" data-type="${type}">Try again</button></p>`;
-    if (group?.next) return `<button type="button" class="cc-more" data-action="cc-more" data-type="${type}">${icon("chevron")}<span>Show more ${type === "record" ? "records" : "updates"}</span></button>`;
-    if (group?.more || (type === "record" && live.partial)) return `<p class="search-status">More matches exist. Type more to narrow the search.</p>`;
-    return "";
+    // Why an answer may be incomplete (partialReasons / a group's reason; an older server sends only partial).
+    const reasons = Array.isArray(live.partialReasons) ? live.partialReasons : null;
+    const notes = [];
+    if (group?.partial && group.reason === "time_budget") notes.push("Some results may be missing — the search took too long.");
+    if (group?.partial && group.reason === "candidate_cap") notes.push("Some matches weren't checked yet — Show more continues the search.");
+    if (type === "record" && reasons?.includes("board_cap")) notes.push(`Searched the first ${Number(live.maxBoards) || 300} boards. Choose a workspace or board to search the rest.`);
+    const note = notes.length ? `<p class="search-status">${this.view.escape(notes.join(" "))}</p>` : "";
+    if (group?.next) return `${note}<button type="button" class="cc-more" data-action="cc-more" data-type="${type}">${icon("chevron")}<span>Show more ${type === "record" ? "records" : "updates"}</span></button>`;
+    if (group?.more || (type === "record" && live.partial && !reasons)) return `${note}<p class="search-status">More matches exist. Type more to narrow the search.</p>`;
+    return note;
+  }
+
+  // Try again: never for a question the server can't accept; disabled while a back-off runs (re-enabled by a render).
+  retryButton(live) {
+    if (live.retryable === false) return "";
+    const wait = (live.retryAt || 0) > this.now();
+    return `<button type="button" class="button secondary small" data-action="search-retry"${wait ? ` disabled aria-disabled="true" title="Available again in a few seconds"` : ""}>${wait ? "Try again shortly" : "Try again"}</button>`;
   }
 
   // ---- Quick actions: only what can be done here, through the app's own commands ---------------------------------
@@ -257,11 +324,12 @@ class CommandCenter {
   }
 
   // ---- Server search ------------------------------------------------------------------------------------------
-  key() { return JSON.stringify([this.query, this.type, this.filters]); }
+  // The signed-in user is part of the key (a second safeguard besides reset()): a cached answer never serves another user.
+  key() { return JSON.stringify([this.c?.auth?.userId ?? null, this.serverQuery, this.type, this.filters]); }
   serverState() { const s = this.server; return s && s.key === this.key() ? s : null; }
   params({ type = null, cursor = null } = {}) {
     const m = this.model, f = this.filters, p = new URLSearchParams();
-    if (this.query) p.set("q", this.query);
+    if (this.serverQuery) p.set("q", this.serverQuery);
     p.set("type", type || (this.type === "record" || this.type === "comment" ? this.type : this.recordOnly ? "record" : "record,comment"));
     const serverOf = (id) => { const s = String(m.serverId(id)); return /^[0-9a-f]{24}$/.test(s) ? s : null; };
     if (f.workspaceId && serverOf(f.workspaceId)) p.set("workspaceId", serverOf(f.workspaceId));
@@ -271,27 +339,88 @@ class CommandCenter {
     return p;
   }
   // Debounced; only the latest question's answer is shown. Workspaces and boards alone are answered locally.
-  scheduleServer(delay = 250) {
+  // The same question (same text after trimming, type and filters) is never sent again on its own: an answer shown,
+  // loading, cached or recently failed is reused; only Try again (force) asks again after a failure. ApiAdapter.send
+  // takes no outside AbortSignal, so a superseded request finishes in the background: its answer is cached (or its
+  // failure remembered) but never shown over a newer question (seq, advanced here rather than when the timer fires).
+  scheduleServer(delay = 250, { force = false } = {}) {
+    const q = this.serverQuery, key = this.key();
+    const needed = this.remote && (this.type === "all" || this.type === "record" || this.type === "comment") && ((q.length >= CommandCenter.MIN_QUERY && q.length <= 100) || this.narrowed);
+    if (!needed) { clearTimeout(this.timer); this.seq += 1; this.server = null; this.render(); return; }
+    if (!force && this.server?.key === key && (this.server.status !== "error" || this.failure(key))) return;
     clearTimeout(this.timer);
-    const q = this.query, key = this.key();
-    const needed = this.remote && (this.type === "all" || this.type === "record" || this.type === "comment") && ((q.length >= 2 && q.length <= 100) || this.narrowed);
-    if (!needed) { this.server = null; this.render(); return; }
-    if (this.server?.key === key && this.server.status !== "error") return;
+    const seq = ++this.seq;
+    const cached = force ? null : this.cached(key);
+    if (cached) { this.server = cached; this.render(); return; }
+    const failed = force ? null : this.failure(key);
+    if (failed) { this.server = failed.state; this.render(); this.renderWhenRetryable(failed.state); return; }
     this.server = { key, status: "loading", groups: {} };
     this.render();
+    const params = this.params();
     this.timer = setTimeout(async () => {
-      const seq = ++this.seq;
-      let next;
-      try {
-        const res = await this.adapter.searchGlobal(this.params());
-        next = { key, status: "done", groups: Object.fromEntries((res.groups || []).map((g) => [g.type, { ...g, items: [...g.items] }])), partial: Boolean(res.partial) };
-      } catch (error) { next = { key, status: "error", groups: {}, message: this.errorText(error) }; }
-      if (seq !== this.seq) return; // a newer search started meanwhile
+      if (seq !== this.seq) return;
+      const next = await this.fetchServer(key, params);
+      if (!next || seq !== this.seq) return; // signed out, or a newer question meanwhile
       this.server = next;
       if (this.isOpen && this.key() === key) this.render();
+      if (next.status === "error") this.renderWhenRetryable(next);
     }, delay);
   }
-  errorText(error) { return error?.code === "RATE_LIMITED" ? "Too many searches just now." : error?.code === "OFFLINE" ? "You're offline, so other boards can't be searched." : error?.code === "SEARCH_TIMEOUT" ? "That search took too long. Add a word or a filter." : error?.code === "VALIDATION_ERROR" ? (error.message || "That search isn't valid.") : "Couldn't search all boards."; }
+  // One request per question at a time; its answer is recorded once (cache or failure list), whoever waits for it.
+  fetchServer(key, params) {
+    const running = this.inflight.get(key); if (running) return running;
+    const epoch = this.epoch;
+    const done = (res) => {
+      if (epoch !== this.epoch) return null; // signed out meanwhile: keep nothing
+      const state = { key, status: "done", groups: Object.fromEntries((res?.groups || []).map((g) => [g.type, { ...g, items: [...(g.items || [])] }])), partial: Boolean(res?.partial), partialReasons: Array.isArray(res?.partialReasons) ? res.partialReasons.map(String) : null, maxBoards: res?.maxBoards ?? null };
+      this.failures.delete(key); this.cache.delete(key); this.cache.set(key, { at: this.now(), state });
+      while (this.cache.size > CommandCenter.CACHE_SIZE) this.cache.delete(this.cache.keys().next().value);
+      return state;
+    };
+    const failed = (error) => {
+      if (epoch !== this.epoch) return null;
+      const prev = this.failure(key), attempts = (prev?.attempts || 0) + 1, info = this.errorInfo(error), at = this.now(), B = CommandCenter.BACKOFF_MS;
+      const state = { key, status: "error", groups: {}, message: info.message, kind: info.kind, retryable: info.retryable, retryAt: info.backoff ? at + B[Math.min(attempts, B.length) - 1] : 0 };
+      this.failures.delete(key); this.failures.set(key, { at, attempts, state });
+      while (this.failures.size > CommandCenter.CACHE_SIZE) this.failures.delete(this.failures.keys().next().value);
+      return state;
+    };
+    let promise;
+    try { promise = Promise.resolve(this.adapter.searchGlobal(params)).then(done, failed); } catch (error) { promise = Promise.resolve().then(() => failed(error)); }
+    this.inflight.set(key, promise);
+    promise.then(() => { if (this.inflight.get(key) === promise) this.inflight.delete(key); });
+    return promise;
+  }
+  cached(key) {
+    const hit = this.cache.get(key); if (!hit) return null;
+    if (this.now() - hit.at >= CommandCenter.CACHE_MS) { this.cache.delete(key); return null; }
+    this.cache.delete(key); this.cache.set(key, hit); // most recently used last
+    return hit.state;
+  }
+  failure(key) {
+    const f = this.failures.get(key); if (!f) return null;
+    if (this.now() - f.at >= CommandCenter.FAILURE_MS) { this.failures.delete(key); return null; }
+    return f;
+  }
+  // Re-renders once the back-off is over, so the disabled Try again becomes available.
+  renderWhenRetryable(state) {
+    clearTimeout(this.retryTimer);
+    const wait = (state.retryAt || 0) - this.now(); if (wait <= 0) return;
+    this.retryTimer = setTimeout(() => { if (this.isOpen && this.serverState() === state) this.render(); }, wait + 50);
+  }
+  // The server's own code (error.cause.serverCode) first: StorageService maps every 503 to SERVICE_UNAVAILABLE.
+  // backoff: the server did costly work (or refused to), so Try again waits before asking again.
+  errorInfo(error) {
+    const code = error?.code, server = error?.cause?.serverCode || null, is = (c) => server === c || code === c;
+    if (is("SEARCH_TIMEOUT")) return { kind: "timeout", message: "Search is taking too long across all boards.", retryable: true, backoff: true };
+    if (is("SEARCH_UNAVAILABLE")) return { kind: "unavailable", message: "Search across all boards isn't available right now.", retryable: true, backoff: true };
+    if (code === "VALIDATION_ERROR") return { kind: "validation", message: "Type at least 2 characters, or change the filters.", retryable: false, backoff: false };
+    if (code === "RATE_LIMITED") return { kind: "rate", message: "Too many searches just now.", retryable: true, backoff: true };
+    if (code === "OFFLINE") return { kind: "offline", message: "You're offline, so other boards can't be searched.", retryable: true, backoff: false };
+    if (code === "SERVICE_UNAVAILABLE" && !server) return { kind: "slow", message: "The server took too long. Try again in a moment.", retryable: true, backoff: true };
+    return { kind: "error", message: "Couldn't search all boards.", retryable: true, backoff: false };
+  }
+  errorText(error) { return this.errorInfo(error).message; }
   async more(type) {
     const live = this.serverState(), group = live?.groups?.[type]; if (!group?.next || group.loadingMore) return;
     group.loadingMore = true; group.moreError = false; this.render();
@@ -357,5 +486,10 @@ class CommandCenter {
     if (this.recordOnly && (this.type === "workspace" || this.type === "board" || this.type === "comment")) this.type = "all";
     this.server = null; this.render(); this.scheduleServer(0);
   }
-  retry() { this.server = null; this.scheduleServer(0); }
+  // Only an explicit Try again asks the same question again, and not while its back-off runs.
+  retry() {
+    const live = this.serverState();
+    if (live?.status === "error" && (live.retryable === false || (live.retryAt || 0) > this.now())) return;
+    this.scheduleServer(0, { force: true });
+  }
 }

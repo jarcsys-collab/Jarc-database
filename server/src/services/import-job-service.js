@@ -288,6 +288,7 @@ class ImportJobService {
       const ids = (await records.find(mine, { projection: { _id: 1 }, limit: REMOVE_BATCH }).toArray()).map((r) => r._id);
       if (!ids.length) break;
       const { deletedCount } = await records.deleteMany({ ...mine, _id: { $in: ids } });
+      this.searchIndex?.refresh(board._id, ids); // their index documents go too, even if the removal stops later
       removed += deletedCount;
       const held = await this.jobs.findOneAndUpdate({ _id: job._id, leaseOwner: this.workerId }, { $set: { removedRecords: removed, leaseUntil: new Date(Date.now() + this.leaseMs), updatedAt: new Date() } });
       if (!held) return undefined;

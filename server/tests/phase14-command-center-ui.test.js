@@ -229,6 +229,41 @@ describe("Phase 14: Command Center (real app, headless browser, role_based)", { 
     assert.equal(await mia.evaluate("!!document.querySelector('.record-drawer')"), false, "no wrong record opened");
   });
 
+  test("search quick fixes: a 503 SEARCH_TIMEOUT keeps open-board matches labelled partial, isn't repeated on its own, Try again backs off; 1 character + filter sends no q", async () => {
+    await openApp(mia); await openBoard(mia, "Service jobs");
+    // /search/global answers 503 SEARCH_TIMEOUT (shaped inside this page only); every search URL is recorded.
+    await mia.evaluate("(() => { window.__searches = []; window.__searchMode = 'timeout'; const f = window.fetch; window.fetch = async (u, i) => { if (String(u).includes('/api/v1/search/global')) { window.__searches.push(String(u)); if (window.__searchMode === 'timeout') return new Response(JSON.stringify({ error: { code: 'SEARCH_TIMEOUT', message: 'x' } }), { status: 503, headers: { 'Content-Type': 'application/json' } }); } return f(u, i); }; })()");
+    await palette(mia);
+    await type(mia, "kestrel");
+    const text = () => mia.evaluate("document.querySelector('.command-results').textContent");
+    assert.match(await text(), /Search is taking too long across all boards\. Showing matches from open boards\./);
+    assert.match(await text(), /Partial results — only boards you have open\./);
+    assert.doesNotMatch(await text(), /wasn't saved|No matches for/);
+    assert.ok((await section(mia, "Records")).some((t) => /JOB-1/.test(t)), "the open board's match stays");
+    assert.match(await mia.evaluate("document.querySelector('.command-status').textContent"), /from open boards/);
+    assert.equal(await mia.evaluate("document.querySelector('[data-action=search-retry]').disabled"), true, "Try again waits (back-off)");
+    // The same question with a trailing space, or after reopening, isn't sent again.
+    await type(mia, "kestrel ");
+    await mia.key("Escape"); await palette(mia); await type(mia, "kestrel"); await sleep(300);
+    assert.equal(await mia.evaluate("window.__searches.filter((u) => /q=kestrel(&|$)/.test(u)).length"), 1, "no automatic repeat of a failed search");
+    // ↓ still highlights a row of the partial results.
+    await mia.key("ArrowDown");
+    assert.ok(await mia.evaluate("!!document.querySelector('.command-results [role=option][aria-selected=true]')"));
+    // After the back-off, Try again is explicit and recovers.
+    await mia.evaluate("window.__searchMode = 'normal'");
+    assert.ok(await mia.waitFor("document.querySelector('[data-action=search-retry]')?.disabled === false", 8000), "Try again available after 5 s");
+    await click(mia, "[data-action=search-retry]");
+    assert.ok(await mia.waitFor("!document.querySelector('.search-status.is-error') && /Crew saw a kestrel/.test(document.querySelector('.command-results').textContent)", 8000), "Try again recovers");
+    // One character with a filter: the filter is sent, q isn't (the server would answer 400).
+    await click(mia, "[data-action=cc-toggle-filters]");
+    await mia.evaluate("(() => { const s = document.querySelector('select[data-key=status]'); s.value = 'Done'; s.dispatchEvent(new Event('change', { bubbles: true })); })()");
+    await type(mia, "k");
+    const last = await mia.evaluate("window.__searches.at(-1)");
+    assert.match(last, /status=Done/); assert.doesNotMatch(last, /[?&]q=/);
+    assert.doesNotMatch(await text(), /wasn't saved|isn't valid/);
+    await mia.key("Escape");
+  });
+
   test("dark theme, custom accent and reduced motion keep the same design; no console errors", async () => {
     await openApp(mia, { motion: "reduce" });
     await mia.evaluate("(() => { document.documentElement.dataset.theme = 'dark'; })()");

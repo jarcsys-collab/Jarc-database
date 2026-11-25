@@ -34,6 +34,7 @@ function day(raw, label, { end = false } = {}) {
 
 // Opaque position after the last result of a page: base64url JSON { k: type, t: time (ms) | null, i: id, x?: IDs already shown }.
 const MAX_CURSOR_EXCLUDED = 50;
+const MAX_DATE_MS = 8.64e15; // the valid JavaScript Date range (±8.64e15 ms); a time outside it would be an Invalid Date
 function encodeCursor(type, time, id, exclude = []) {
   return Buffer.from(JSON.stringify({ k: type, t: time instanceof Date ? time.getTime() : null, i: id.toHexString(), ...(exclude.length ? { x: exclude.map((e) => e.toHexString()) } : {}) })).toString("base64url");
 }
@@ -41,7 +42,7 @@ function decodeCursor(raw, type) {
   if (!CURSOR.test(raw)) fail("cursor is not valid.");
   let value;
   try { value = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")); } catch { fail("cursor is not valid."); }
-  if (!value || typeof value !== "object" || value.k !== type || !(value.t === null || Number.isSafeInteger(value.t)) || typeof value.i !== "string" || !/^[0-9a-f]{24}$/.test(value.i)) fail("cursor is not valid.");
+  if (!value || typeof value !== "object" || value.k !== type || !(value.t === null || (Number.isSafeInteger(value.t) && Math.abs(value.t) <= MAX_DATE_MS)) || typeof value.i !== "string" || !/^[0-9a-f]{24}$/.test(value.i)) fail("cursor is not valid.");
   if (value.x !== undefined && (!Array.isArray(value.x) || value.x.length > MAX_CURSOR_EXCLUDED || value.x.some((x) => typeof x !== "string" || !/^[0-9a-f]{24}$/.test(x)))) fail("cursor is not valid.");
   return { time: value.t === null ? null : new Date(value.t), id: new ObjectId(value.i), exclude: (value.x || []).map((x) => new ObjectId(x)) };
 }
@@ -51,7 +52,9 @@ function searchParams(query, actorId) {
   allowOnly(query, ["q", "type", "workspaceId", "boardId", "status", "priority", "assignee", "from", "to", "cursor", "limit"], "the query");
   const rawQ = queryString(query.q, "q");
   const q = rawQ === undefined ? "" : clean(rawQ);
-  if (q && (q.length < MIN_QUERY || q.length > MAX_QUERY)) fail(`q must be ${MIN_QUERY} to ${MAX_QUERY} characters.`);
+  // Also with a filter: a 1-character "contains" would read nearly every record. Leave q out to search by filters alone.
+  if (q && q.length < MIN_QUERY) fail(`Type at least ${MIN_QUERY} characters to search, or clear the search text to use the filters alone.`);
+  if (q.length > MAX_QUERY) fail(`Search text must be at most ${MAX_QUERY} characters.`);
   const typeText = queryString(query.type, "type");
   const types = typeText === undefined || typeText === "" ? [...TYPES] : [...new Set(typeText.split(","))];
   if (!types.length || types.length > TYPES.length || types.some((t) => !TYPES.includes(t))) fail(`type must be one or more of ${TYPES.join(", ")}.`);

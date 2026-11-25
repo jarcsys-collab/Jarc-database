@@ -203,14 +203,18 @@ class MondayIntegration {
       creates.push({ _id, workspaceId: board.workspaceId, boardId: board._id, values, groupId, position: (position += 1000), archived: false, pinned: false, createdBy: actorId, updatedBy: actorId, createdAt: now, updatedAt: now, version: 1 });
       mappings.push({ _id: new ObjectId(), provider: PROVIDER, kind: "item", sourceId: String(item.id), targetId: _id, boardId: board._id, sourceBoardId: boardMap.sourceId, sourceUpdatedAt: updatedAt, lastSyncedAt: now });
     }
-    if (creates.length) await this.connection.withTransaction(async (session) => { await this.repos.records.insertMany(creates, { session }); await this.repos.integrations.insertMappings(mappings, { session }); });
-    for (const u of updates) {
-      const set = { updatedAt: now, groupId: u.groupId, archived: Boolean(u.archived) };
-      for (const [k, v] of Object.entries(u.values)) set[`values.${k}`] = v;
-      await this.repos.records.collection.updateOne({ _id: u.map.targetId, boardId: board._id }, { $set: set, $inc: { version: 1 } });
-      await this.repos.integrations.updateMapping(u.map._id, { sourceUpdatedAt: u.updatedAt, lastSyncedAt: now });
-    }
-    this.searchIndex?.refreshBoard(board._id);
+    // Search index: only the records this call wrote, and also when it stops part-way (whatever was written is queued).
+    const touched = [];
+    try {
+      if (creates.length) { await this.connection.withTransaction(async (session) => { await this.repos.records.insertMany(creates, { session }); await this.repos.integrations.insertMappings(mappings, { session }); }); touched.push(...creates.map((c) => c._id)); }
+      for (const u of updates) {
+        const set = { updatedAt: now, groupId: u.groupId, archived: Boolean(u.archived) };
+        for (const [k, v] of Object.entries(u.values)) set[`values.${k}`] = v;
+        touched.push(u.map.targetId);
+        await this.repos.records.collection.updateOne({ _id: u.map.targetId, boardId: board._id }, { $set: set, $inc: { version: 1 } });
+        await this.repos.integrations.updateMapping(u.map._id, { sourceUpdatedAt: u.updatedAt, lastSyncedAt: now });
+      }
+    } finally { if (touched.length) this.searchIndex?.refresh(board._id, touched); }
     return creates.length;
   }
 
@@ -246,7 +250,8 @@ class MondayIntegration {
     do { const page = await client.itemsPage(boardMap.sourceId, { cursor, limit: PAGE_SIZE }); page.items.forEach((i) => seen.add(String(i.id))); created += await this.upsertItems(board, boardMap, page.items); cursor = page.cursor; } while (cursor);
     // Items gone from monday.com are archived in JARC (never deleted: their history and files stay).
     const gone = (await this.repos.integrations.listMappings({ provider: PROVIDER, kind: "item", boardId: board._id })).filter((m) => !seen.has(m.sourceId));
-    for (const m of gone) await this.repos.records.collection.updateOne({ _id: m.targetId, boardId: board._id, archived: false }, { $set: { archived: true, updatedAt: this.now() }, $inc: { version: 1 } });
+    try { for (const m of gone) await this.repos.records.collection.updateOne({ _id: m.targetId, boardId: board._id, archived: false }, { $set: { archived: true, updatedAt: this.now() }, $inc: { version: 1 } }); }
+    finally { if (gone.length) this.searchIndex?.refresh(board._id, gone.map((m) => m.targetId)); }
     await this.finishSync(board, `Synced from monday.com (${created} new, ${gone.length} archived)`);
     return { created, archived: gone.length };
   }
@@ -258,7 +263,7 @@ class MondayIntegration {
     const item = await client.item(itemId);
     if (!item || String(item.board?.id || sourceBoardId) !== String(sourceBoardId) || (item.state && item.state !== "active")) {
       const map = await this.repos.integrations.findMapping(PROVIDER, "item", itemId);
-      if (map) await this.repos.records.collection.updateOne({ _id: map.targetId, boardId: board._id }, { $set: { archived: true, updatedAt: this.now() }, $inc: { version: 1 } });
+      if (map) { try { await this.repos.records.collection.updateOne({ _id: map.targetId, boardId: board._id }, { $set: { archived: true, updatedAt: this.now() }, $inc: { version: 1 } }); } finally { this.searchIndex?.refresh(board._id, [map.targetId]); } }
     } else await this.upsertItems(board, boardMap, [item]);
     await this.finishSync(board, "Updated from monday.com");
     return { itemId };
@@ -266,7 +271,6 @@ class MondayIntegration {
   // Records the sync and tells connected browsers (live updates) that the board changed.
   async finishSync(board, summary) {
     const now = this.now();
-    this.searchIndex?.refreshBoard(board._id); // records archived during this sync
     await this.repos.integrations.set(PROVIDER, { lastSyncAt: now, lastError: null });
     await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: board.workspaceId, boardId: board._id, actorUserId: null, actorName: "monday.com sync", action: "integration.synced", entityType: "board", entityId: board._id, summary, now }));
   }

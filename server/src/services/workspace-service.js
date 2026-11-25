@@ -45,11 +45,15 @@ class WorkspaceService {
   // commit removes any board or record created concurrently while the transaction ran, so no orphans remain.
   async delete(id, expectedVersion, actor) {
     const now = new Date();
-    const boardIds = this.searchIndex?.enabled ? (await this.repos.boards.listByWorkspace(id)).map((b) => b._id) : [];
+    // Search index: the boards removed, listed inside the transaction and again before the sweep, so a board created
+    // concurrently is covered too (IDs only, at most MAX_BOARDS_PER_WORKSPACE each time).
+    const boardIds = [];
+    const listBoards = async (session) => { if (this.searchIndex?.enabled) boardIds.push(...(await this.repos.boards.collection.find({ workspaceId: id }, { projection: { _id: 1 }, session }).toArray()).map((b) => b._id)); };
     const removed = await this.connection.withTransaction(async (session) => {
       const workspace = await this.repos.workspaces.findById(id, { session });
       if (!workspace) throw notFound("workspace");
       if (workspace.version !== expectedVersion) throw conflict("workspace", workspace);
+      await listBoards(session);
       const records = await this.repos.records.deleteByWorkspace(id, { session });
       const boards = await this.repos.boards.deleteByWorkspace(id, { session });
       const memberships = await this.repos.memberships.deleteByWorkspace(id, { session });
@@ -58,6 +62,7 @@ class WorkspaceService {
       return { boards, records, memberships };
     });
     removed.records += await sweepAfterCommit(this.logger, "workspace records", () => this.repos.records.deleteByWorkspace(id));
+    await listBoards().catch(() => {});
     removed.boards += await sweepAfterCommit(this.logger, "workspace boards", () => this.repos.boards.deleteByWorkspace(id));
     this.searchIndex?.removeBoards(boardIds);
     return removed;

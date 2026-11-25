@@ -7,8 +7,10 @@
 //   blockers    the dry run refuses when imported data was touched after the import: a record edited (version > 1),
 //               a comment added by a person on an imported record, a file uploaded by a person, a board edited, or
 //               a run still holding its lock. Nobody's later work is removed silently.
-//   order       attachments (bytes first, then documents, quota freed) → comments → records → boards → activities →
-//               mappings, in batches inside transactions; the run document is kept and marked rolled-back (audit).
+//   order       attachments (bytes first, then documents, quota freed) → comments → records (with their recordSearch
+//               documents, same transaction) → boards → activities → mappings, in batches inside transactions; then any
+//               recordSearch documents left on this run's boards once those boards are gone. The run document is kept
+//               and marked rolled-back (audit).
 const { COLLECTIONS } = require("../../db/bootstrap");
 const { MAPPING_PROVIDER } = require("./ids");
 const { isVerifiedTarget } = require("./target");
@@ -86,14 +88,42 @@ async function executeRollback({ client, target, plan, planDigest, approval, sto
     }
     return removed;
   };
+  // Records, and in the same transaction the search-index documents of those that are now gone (this CLI can't reach the
+  // server's queue). A record kept by its guard keeps its index document.
+  let searchIndex = 0;
+  const removeRecords = async (list) => {
+    let removed = 0;
+    for (let i = 0; i < list.length; i += BATCH) {
+      const part = list.slice(i, i + BATCH), session = client.startSession();
+      let r = 0, s = 0; // set by the last (committed) attempt of the transaction
+      try {
+        await session.withTransaction(async () => {
+          r = (await col("records").deleteMany({ _id: { $in: part }, importId: plan.runId, version: 1 }, { session })).deletedCount;
+          const kept = new Set((await col("records").find({ _id: { $in: part } }, { projection: { _id: 1 }, session }).toArray()).map((d) => d._id.toHexString()));
+          const gone = part.filter((id) => !kept.has(id.toHexString()));
+          s = gone.length ? (await col("recordSearch").deleteMany({ _id: { $in: gone } }, { session })).deletedCount : 0;
+        });
+      } finally { await session.endSession(); }
+      removed += r; searchIndex += s;
+    }
+    return removed;
+  };
+  // Index documents still pointing at this run's boards once they are gone (re-checked: only boards that no longer exist).
+  const removeBoardIndex = async () => {
+    const gone = [];
+    for (const id of dry.targets.boards) if (!await col("boards").findOne({ _id: id }, { projection: { _id: 1 } })) gone.push(id);
+    if (gone.length) searchIndex += (await col("recordSearch").deleteMany({ boardId: { $in: gone } })).deletedCount;
+  };
   const removed = {
     comments: await removeAll("comments", dry.targets.comments, { "imported.runId": plan.runId }),
-    records: await removeAll("records", dry.targets.records, { importId: plan.runId, version: 1 }),
+    records: await removeRecords(dry.targets.records),
     boards: await removeAll("boards", dry.targets.boards, { importId: plan.runId }),
     activities: await removeAll("activities", dry.targets.activities, { action: "board.imported" }),
     mappings: await removeAll("integrationMappings", dry.targets.mappings, { provider: MAPPING_PROVIDER, runId: plan.runId }),
     attachments: dry.targets.attachments.length
   };
+  await removeBoardIndex();
+  removed.searchIndex = searchIndex;
   await col("integrationJobs").updateOne({ _id: `monday-migration:${plan.runId}` }, { $set: { status: "rolled-back", rolledBackAt: now(), lockedBy: null, lockedUntil: null }, $push: { history: { event: "rollback", at: now(), approvedBy: approval.approvedBy, removed } } });
   return { removed };
 }

@@ -56,8 +56,11 @@ class RecordService {
     if (filter) parts.push(recordFilter.filterQuery(filter, board, ctx));
     if (also) parts.push(recordFilter.filterQuery(also, board, ctx));
     if (q) {
-      if (this.searchIndex?.active) parts.push({ _id: { $in: await this.searchIndex.boardIds(board._id, recordFilter.escapeRegex(q.toLowerCase()), { maxTimeMS: FILTER_TIME_MS, archived }) } });
-      else { const { searchableKeys } = require("./record-search-index"); parts.push({ $or: searchableKeys(board).map((k) => ({ [`values.${k}`]: { $regex: recordFilter.escapeRegex(q), $options: "i" } })) }); }
+      const { searchableKeys } = require("./record-search-index");
+      const live = { $or: searchableKeys(board).map((k) => ({ [`values.${k}`]: { $regex: recordFilter.escapeRegex(q), $options: "i" } })) };
+      // From the index: only its matching IDs, and each must still match in the live record (a stale entry is never shown).
+      if (this.searchIndex?.active) parts.push({ _id: { $in: await this.searchIndex.boardIds(board._id, recordFilter.escapeRegex(q.toLowerCase()), { maxTimeMS: FILTER_TIME_MS, archived }) } }, live);
+      else parts.push(live);
     }
     return parts;
   }

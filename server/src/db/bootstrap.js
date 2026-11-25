@@ -35,6 +35,8 @@ const COLLECTIONS = Object.freeze({
   counters: "counters",
   // Derived search text, one document per record; rebuilt from records at any time (see services/record-search-index.js).
   recordSearch: "recordSearch",
+  // The search index's own progress: watermark, boards waiting for a rewrite, resumable passes (no record data).
+  recordSearchState: "recordSearchState",
   // Native forms and who submitted them (see services/form-service.js).
   forms: "forms",
   formSubmissions: "formSubmissions",

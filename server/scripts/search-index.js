@@ -2,10 +2,13 @@
 // Check or repair the record search index (services/record-search-index.js). Run it yourself, from your computer.
 //
 //   verify  --target local --db DB                 read-only: counts of missing, stale and extra documents
-//   rebuild --target local --db DB                 rewrites what differs, then verifies. Writes only recordSearch.
+//   rebuild --target local --db DB                 rewrites what differs, then verifies. Writes only recordSearch (and,
+//                                                  when clean, the baseline in recordSearchState).
 //   verify  --target production --railway-stdin    the same, read-only
 //   rebuild --target production --railway-stdin --confirm-production
 //                                                  writes only recordSearch, in jarc_database. Needs its own approval.
+// Both read every record at once (unpaced reads). For production prefer scripts/record-search-reconcile.js: paced,
+// resumable, never writes older over newer (see JARC-Search-Plan/RECONCILIATION-RUNBOOK.md).
 //
 // Production credentials come from `railway variables --json` on stdin, in memory only, and are never printed.
 "use strict";

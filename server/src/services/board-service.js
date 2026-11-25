@@ -4,6 +4,7 @@ const validate = require("../validation/resources");
 const { normalizeColumns, normalizeGroups, splitSavedViews, BLANK_BOARD_COLUMNS, LEGACY_DEFAULT_GROUPS } = require("../domain/board-schema");
 const { ApiError } = require("../middleware/errors");
 const { notFound, conflict, missingOrStale, activityEntry, appendActivity, fieldChanges, sweepAfterCommit } = require("./shared");
+const { planOf } = require("./record-search-index");
 
 class BoardService {
   constructor({ repos, connection, logger, searchIndex = null }) { Object.assign(this, { repos, connection, logger, searchIndex }); }
@@ -91,6 +92,8 @@ class BoardService {
     const after = { ...before, ...set, updatedAt: now, version: before.version + 1 };
     const changed = fieldChanges(before, after, Object.keys(set)).map((c) => (["columns", "groups", "savedViews"].includes(c.field) ? { field: c.field } : c));
     await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: board.workspaceId, boardId: id, actorUserId: actor.userId, actorName: actor.displayName, action: "board.updated", entityType: "board", entityId: id, changes: changed, now }));
+    // Search index: new columns can change what is searchable on every record of the board.
+    if (set.columns && this.searchIndex?.enabled && planOf(before).sig !== planOf(after).sig) this.searchIndex.refreshBoard(id);
     return after;
   }
 

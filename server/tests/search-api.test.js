@@ -156,7 +156,8 @@ describe("Global search API: rate limiting and failures", () => {
       const { filter, options } = finds[0];
       assert.equal(filter.archived, false);
       assert.equal(options.limit, 6);
-      assert.equal(options.maxTimeMS, 3000);
+      // What is left of the request's 3 s budget (the scope reads before it take a moment): never more than 3 s.
+      assert.ok(Number.isInteger(options.maxTimeMS) && options.maxTimeMS > 2000 && options.maxTimeMS <= 3000, `maxTimeMS ${options.maxTimeMS}`);
       assert.deepEqual(Object.keys(options.projection).sort(), ["_id", "boardId", "values.contact", "values.notes", "values.serial", "values.status", "workspaceId"], "no People, number or Files cells read");
       assert.ok(filter.$or.every((clause) => clause.boardId), "every branch is scoped to one board (uses the boardId indexes)");
     } finally { await app.close(); }
