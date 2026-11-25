@@ -167,8 +167,10 @@ function loadObjectIdList(env, name, max) {
 //   FABRIC_MONGODB_DB_NAME         required when on: letters, digits, "_" and "-", never JARC's own database.
 //   FABRIC_DATA_READER_OIDS        who may read it, both datasets (at most 50). FABRIC_DATA_COST_READER_OIDS (name kept for
 //                                  compatibility): who also sees the sensitive financial and inventory fields (landed cost, cost
-//                                  amounts, prices; at most 50, each must be a reader). FABRIC_API_ADMIN_OIDS: who issues and revokes Fabric API
-//                                  tokens (at most 20, each must be a reader). Empty or unset: nobody. Matched within ENTRA_TENANT_ID.
+//                                  amounts, prices; at most 50, each must be a reader). FABRIC_API_ADMIN_OIDS: who issues Fabric API
+//                                  tokens and manages their OWN (at most 20, each must be a reader). FABRIC_API_OVERSIGHT_OIDS: who
+//                                  also sees, revokes and reads the activity of EVERYONE's Fabric tokens (at most 5, each must be in
+//                                  FABRIC_API_ADMIN_OIDS). Empty or unset: nobody. Matched within ENTRA_TENANT_ID.
 //   FABRIC_API_RATE_PER_MINUTE (1–600, 60), FABRIC_QUERY_TIME_MS (1000–30000, 8000), FABRIC_POOL_SIZE (1–10, 5),
 //   FABRIC_MAX_WINDOW_ROWS (1000–200000, 50000): the most source rows one invoice list may group or one search may cover.
 //   FABRIC_UNINDEXED_SCAN_MAX (0–50000, 20000): a dataset with at most this many documents (estimatedDocumentCount) may be
@@ -204,10 +206,12 @@ function loadFabricDataConfig(env, authMode) {
   const apiAdminObjectIds = loadObjectIdList(env, "FABRIC_API_ADMIN_OIDS", 20);
   if (costReaderObjectIds.some((id) => !readerObjectIds.includes(id))) throw new ConfigError("Everyone in FABRIC_DATA_COST_READER_OIDS must also be in FABRIC_DATA_READER_OIDS.");
   if (apiAdminObjectIds.some((id) => !readerObjectIds.includes(id))) throw new ConfigError("Everyone in FABRIC_API_ADMIN_OIDS must also be in FABRIC_DATA_READER_OIDS.");
+  const apiOversightObjectIds = loadObjectIdList(env, "FABRIC_API_OVERSIGHT_OIDS", 5);
+  if (apiOversightObjectIds.some((id) => !apiAdminObjectIds.includes(id))) throw new ConfigError("Everyone in FABRIC_API_OVERSIGHT_OIDS must also be in FABRIC_API_ADMIN_OIDS.");
   const invoiceViews = env.FABRIC_INVOICE_VIEWS;
   if (invoiceViews !== undefined && invoiceViews !== "" && invoiceViews !== "true" && invoiceViews !== "false") throw new ConfigError("FABRIC_INVOICE_VIEWS must be true or false.");
   return hide({
-    enabled: true, dbName, readerObjectIds, costReaderObjectIds, apiAdminObjectIds,
+    enabled: true, dbName, readerObjectIds, costReaderObjectIds, apiAdminObjectIds, apiOversightObjectIds,
     apiRatePerMinute: wholeNumberSetting(env, "FABRIC_API_RATE_PER_MINUTE", 60, 1, 600),
     queryTimeMs: wholeNumberSetting(env, "FABRIC_QUERY_TIME_MS", 8000, 1000, 30000),
     poolSize: wholeNumberSetting(env, "FABRIC_POOL_SIZE", 5, 1, 10),

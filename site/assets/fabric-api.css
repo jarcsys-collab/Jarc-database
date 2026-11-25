@@ -75,6 +75,7 @@
 .fx-app .fx-api__sub { display: block; color: var(--fx-muted, #4b6178); font-size: 11px; overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
 .fx-app .fx-api__mono code, .fx-app code.fx-api__mono { color: var(--fx-label, #3b5068); }
 .fx-app .fx-api__actions { text-align: right; }
+.fx-app .fx-api__you { font-weight: 600; color: var(--fx-heading, #1f3d5c); }
 .fx-app .fx-api .fx-null { color: var(--fx-null, #5f7185); font-style: italic; }
 .fx-app .fx-api__empty { display: flex; flex-direction: column; gap: 4px; align-items: center; justify-content: center; padding: 24px 12px; border: 1px solid var(--fx-border-strong, #a7b9cc); background: var(--fx-surface, #fff); color: var(--fx-muted, #4b6178); text-align: center; }
 .fx-app .fx-api__empty strong { color: var(--fx-heading, #1f3d5c); }

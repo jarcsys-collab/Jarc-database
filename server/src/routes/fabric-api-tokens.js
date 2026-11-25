@@ -2,12 +2,15 @@
 // (`identify`) and BEFORE the GET-only Fabric data router, so every route needs a signed-in session and every change needs the
 // CSRF token (auth/session.js), exactly like the board token routes (routes/api-tokens.js). Every route is for the Fabric API
 // administrators only (fabricPermissions.isApiAdmin): anyone else gets 403 FABRIC_API_ADMIN_REQUIRED before anything is read.
-// Workspace roles, open access (development_shared), JARC.Admin and JARC_API_ADMIN_OIDS never grant it.
+// Workspace roles, open access (development_shared), JARC.Admin and JARC_API_ADMIN_OIDS never grant it. An administrator manages
+// only THEIR OWN tokens; only Fabric API oversight (fabricPermissions.isApiOversight, FABRIC_API_OVERSIGHT_OIDS) covers everyone's.
+// Another person's token is 404 NOT_FOUND without oversight, exactly like an unknown ID.
 //
-//   GET    /fabric/api-tokens                   every owner's Fabric tokens (never the digest or the token)
-//   GET    /fabric/api-tokens/activity          the newest Fabric token audit entries
+//   GET    /fabric/api-tokens                   { tokens, scope: "own" | "all" }: own tokens, or every owner's with oversight
+//                                               (never the digest or the token; each token has mine: boolean)
+//   GET    /fabric/api-tokens/activity          { items, scope }: audit entries about own tokens, or every Fabric token with oversight
 //   POST   /fabric/api-tokens                   { name, description?, scopes, expiresAt } → the token, and its secret this once
-//   POST   /fabric/api-tokens/:tokenId/revoke   anyone's Fabric token
+//   POST   /fabric/api-tokens/:tokenId/revoke   an own Fabric token, or anyone's with oversight
 // Unknown paths and methods here answer a JSON 404, so nothing falls through to the data router.
 const express = require("express");
 const { allowOnly, parseId } = require("../validation/common");
@@ -30,7 +33,7 @@ function fabricApiTokenRoutes({ tokens, fabricPermissions, limiter = searchLimit
     fabric.requireAdmin(req.actor);
     return next();
   });
-  router.get("/", async (req, res) => { noQuery(req); send(res, 200, { tokens: await fabric.list(req.actor) }); });
+  router.get("/", async (req, res) => { noQuery(req); send(res, 200, { tokens: await fabric.list(req.actor), scope: fabric.scopeOf(req.actor) }); });
   router.get("/activity", async (req, res) => { noQuery(req); send(res, 200, await fabric.activity(req.actor)); });
   router.post("/", async (req, res) => {
     noQuery(req);

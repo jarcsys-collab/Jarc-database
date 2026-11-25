@@ -118,6 +118,87 @@ describe("Fabric API Management: layout and permissions", () => {
   });
 });
 
+describe("Fabric API Management: ownership (oversight admin, regular admin, reader without admin rights)", () => {
+  // Synthetic identities: u-own is the signed-in person; u-other is another administrator.
+  const ADMIN = { read: true, apiAdmin: true, apiTokens: true, sensitive: true };
+  const KEYS = { tokens: [
+    { id: "k-mine", name: "My BI", prefix: "jarc_m1", status: "active", scopes: ["fabric.sales.read"], owner: { id: "u-own", name: "Synthetic Self" }, createdAt: "2026-03-01T00:00:00Z", expiresAt: "2027-03-01T00:00:00Z", requestCount: 1 },
+    { id: "k-other", name: "Their BI", prefix: "jarc_o1", status: "active", scopes: ["fabric.inventory.read"], owner: { id: "u-other", name: HOSTILE }, createdAt: "2026-03-01T00:00:00Z", expiresAt: "2027-03-01T00:00:00Z", requestCount: 2 }
+  ] };
+  const revokeIds = (html) => [...html.matchAll(/data-action="fabric-api-revoke" data-id="([^"]+)"/g)].map((m) => m[1]);
+
+  test("a reader without admin rights gets no API Management section, even as a sensitive reader", () => {
+    const env = load();
+    const panelFor = (features) => { const view = new env.AppView({ innerHTML: "" }); const c = { model: { features: { fabricData: features }, storage: { adapter: { request: async () => ({}) } }, screen: "fabric" }, view, update() {}, syncBoardUrl() {} }; return new env.FabricDataPanel(c); };
+    const ids = (p) => p.sections().map(([id]) => id);
+    assert.ok(!ids(panelFor({ read: true, sensitive: true, apiAdmin: false, apiOversight: false, apiTokens: true })).includes("api"));
+    assert.ok(ids(panelFor({ ...ADMIN, apiOversight: false })).includes("api"), "a regular administrator has it");
+    assert.ok(ids(panelFor({ ...ADMIN, apiOversight: true })).includes("api"), "the oversight administrator has it");
+  });
+
+  test("regular admin: own keys marked \"Created by you\", Revoke only on their own key, own-activity wording", async () => {
+    const env = load();
+    const keys = { ...KEYS, tokens: KEYS.tokens.map((t) => ({ ...t, mine: t.id === "k-mine" })) };
+    const { panel } = await loaded(env, { features: { ...ADMIN, apiOversight: false }, answers: { "GET /fabric/api-tokens": keys } });
+    const html = panel.html();
+    assert.match(html, /Your Fabric API keys: you can revoke only the keys you created\./);
+    assert.doesNotMatch(html, /any Fabric API administrator can revoke any key/);
+    assert.deepEqual(revokeIds(html), ["k-mine"], "no Revoke on someone else's key");
+    assert.match(html, /<td data-label="Owner"><span class="fx-api__you">Created by you<\/span><\/td>/);
+    assert.doesNotMatch(html, /<img/);
+    panel.onAction("fabric-api-revoke", { dataset: { id: "k-other" } });
+    assert.equal(env.root.innerHTML, "", "a hidden Revoke can't be triggered either");
+    panel.onAction("fabric-api-revoke", { dataset: { id: "k-mine" } });
+    assert.match(env.root.innerHTML, /data-action="fabric-api-revoke-form"/);
+    assert.doesNotMatch(env.root.innerHTML, /It belongs to/, "no \"belongs to\" for your own key");
+    panel.onAction("fabric-api-tab", { dataset: { tab: "activity" } });
+    assert.match(panel.html(), /The latest audit entries for your Fabric API keys/);
+    panel.onAction("fabric-api-tab", { dataset: { tab: "docs" } });
+    assert.match(panel.html(), /Power BI[\s\S]*Power Automate[\s\S]*n8n/, "docs and integration examples for every administrator");
+  });
+
+  test("oversight admin: every key with its creator, Revoke on all active keys, the owner named in the confirmation", async () => {
+    const env = load();
+    const keys = { tokens: KEYS.tokens.map((t) => ({ ...t, mine: t.id === "k-mine" })), scope: "all" };
+    const { panel } = await loaded(env, { features: { ...ADMIN, apiOversight: true }, answers: { "GET /fabric/api-tokens": keys } });
+    const html = panel.html();
+    assert.match(html, /you oversee them all and can revoke any key/);
+    assert.deepEqual(revokeIds(html), ["k-mine", "k-other"]);
+    assert.equal((html.match(/Created by you/g) || []).length, 1, "only the own key");
+    assert.match(html, /<td data-label="Owner">&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;<\/td>/, "other creator by (escaped) name");
+    panel.onAction("fabric-api-revoke", { dataset: { id: "k-other" } });
+    assert.match(env.root.innerHTML, /It belongs to <strong>&lt;img/);
+    panel.onAction("fabric-api-tab", { dataset: { tab: "activity" } });
+    assert.match(panel.html(), /The latest entries of the Fabric key audit log/);
+  });
+
+  test("the list's scope (\"own\" | \"all\") decides; revoked keys never offer Revoke; an older server keeps Revoke on every active key", async () => {
+    const env = load();
+    const own = { tokens: KEYS.tokens.map((t) => ({ ...t, mine: t.id === "k-mine" })), scope: "own" };
+    let p = await loaded(env, { features: { ...ADMIN, apiOversight: true }, answers: { "GET /fabric/api-tokens": own } });
+    assert.deepEqual(revokeIds(p.panel.html()), ["k-mine"], "scope \"own\" wins over features");
+    assert.match(p.panel.html(), /Your Fabric API keys/);
+    p = await loaded(env, { features: ADMIN, answers: { "GET /fabric/api-tokens": { ...own, scope: "all" } } });
+    assert.deepEqual(revokeIds(p.panel.html()), ["k-mine", "k-other"]);
+    p = await loaded(env, { features: { ...ADMIN, apiOversight: true }, answers: { "GET /fabric/api-tokens": { tokens: own.tokens.map((t) => ({ ...t, status: "revoked" })), scope: "all" } } });
+    assert.deepEqual(revokeIds(p.panel.html()), []);
+    p = await loaded(env, { features: ADMIN, answers: { "GET /fabric/api-tokens": KEYS } });
+    assert.deepEqual(revokeIds(p.panel.html()), ["k-mine", "k-other"], "no ownership reported: unchanged behaviour");
+    assert.match(p.panel.html(), /any Fabric API administrator can revoke any key/);
+  });
+
+  test("the sensitive scope is offered only when the server says this person may grant it", () => {
+    const env = load();
+    const offered = (features) => { apiPanel(env, { features }).panel.showCreate(); return /name="sensitive"/.test(env.root.innerHTML) && /fabric\.sensitive\.read/.test(env.root.innerHTML); };
+    assert.equal(offered({ ...ADMIN, canGrantSensitive: true }), true);
+    assert.equal(offered({ ...ADMIN, canGrantSensitive: false }), false, "canGrantSensitive: false wins over sensitive: true");
+    assert.equal(offered({ read: true, apiAdmin: true, apiTokens: true, sensitive: false, canGrantSensitive: true }), true, "the server's capability decides");
+    assert.equal(offered({ read: true, apiAdmin: true, apiTokens: true, sensitive: false }), false);
+    assert.equal(offered(ADMIN), true, "no capability field: falls back to sensitive");
+    for (const ds of ["sales", "inventory"]) { apiPanel(env, { features: { ...ADMIN, canGrantSensitive: false } }).panel.showCreate(); assert.match(env.root.innerHTML, new RegExp(`name="ds-${ds}"`)); }
+  });
+});
+
 describe("Fabric API Management: create, the one-time key, revoke", () => {
   test("create dialog: an fx-dialog with Sales / Inventory scopes; Sensitive fields only with features.sensitive (or cost)", async () => {
     const env = load();

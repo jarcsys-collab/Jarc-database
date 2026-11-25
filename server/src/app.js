@@ -37,7 +37,7 @@ const { apiTokenRoutes } = require("./routes/api-tokens");
 const { externalApiRoutes, windowLimiter, FAILED_AUTH } = require("./routes/external-api");
 const { externalFabricRoutes } = require("./routes/external-fabric");
 const { fabricApiTokenRoutes } = require("./routes/fabric-api-tokens");
-const { fabricDataRouter, requireFabricDataRead, canReadFabric, canReadFabricSensitive, canReadFabricCost, canManageFabricApi, DATASET_NAMES } = require("./fabric");
+const { fabricDataRouter, requireFabricDataRead, canReadFabric, canReadFabricSensitive, canReadFabricCost, canManageFabricApi, canOverseeFabricApi, DATASET_NAMES } = require("./fabric");
 const { version } = require("../package.json");
 
 // Larger than any state the frontend can produce today: browser storage caps at roughly 5 MB, and backup and CSV
@@ -145,15 +145,18 @@ function createApp({ fabricData = null, apiTokens = null, features = {}, reposit
     const fabricAccessFor = fabric ? (actor) => {
       const read = canReadFabric(actor, fabric.config, auth.entra.tenantId);
       const sensitive = canReadFabricSensitive(actor, fabric.config, auth.entra.tenantId);
-      return { read, sensitive, cost: sensitive, apiAdmin: canManageFabricApi(actor, fabric.config, auth.entra.tenantId), datasets: read ? [...DATASET_NAMES] : [], invoiceViews: read && fabric.config.invoiceViews === true };
+      const apiAdmin = canManageFabricApi(actor, fabric.config, auth.entra.tenantId);
+      // apiOversight: manages every person's Fabric tokens (FABRIC_API_OVERSIGHT_OIDS); canGrantSensitive: may issue fabric.sensitive.read.
+      return { read, sensitive, cost: sensitive, apiAdmin, apiOversight: canOverseeFabricApi(actor, fabric.config, auth.entra.tenantId), canGrantSensitive: apiAdmin && sensitive, datasets: read ? [...DATASET_NAMES] : [], invoiceViews: read && fabric.config.invoiceViews === true };
     } : null;
-    if (fabric) app.locals.fabric = Object.freeze({ service: fabric.service, config: fabric.config, tenantId: auth.entra.tenantId, router: fabricDataRouter, canReadFabric, canReadFabricSensitive, canReadFabricCost, canManageFabricApi });
+    if (fabric) app.locals.fabric = Object.freeze({ service: fabric.service, config: fabric.config, tenantId: auth.entra.tenantId, router: fabricDataRouter, canReadFabric, canReadFabricSensitive, canReadFabricCost, canManageFabricApi, canOverseeFabricApi });
     // Fabric API tokens (only with both switches on): the same token system as the board API (secret, digest, expiry, revocation,
     // audit), told apart by product "fabric" and the fabric.sales.read / fabric.inventory.read / fabric.sensitive.read scopes. A
     // Fabric token never reads boards (board authorize needs "read") and a board token never reads Fabric (403 INSUFFICIENT_SCOPE).
-    // Who may issue them: FABRIC_API_ADMIN_OIDS ∩ readers.
+    // Who may issue them: FABRIC_API_ADMIN_OIDS ∩ readers (each manages their own); every person's: FABRIC_API_OVERSIGHT_OIDS ∩ admins.
     const fabricTokens = fabric && tokenService ? { permissions: {
       isApiAdmin: (identity) => canManageFabricApi(identity, fabric.config, auth.entra.tenantId),
+      isApiOversight: (identity) => canOverseeFabricApi(identity, fabric.config, auth.entra.tenantId),
       isReader: (identity) => canReadFabric(identity, fabric.config, auth.entra.tenantId),
       isSensitiveReader: (identity) => canReadFabricSensitive(identity, fabric.config, auth.entra.tenantId),
       // The earlier name of the same check (the token service accepts either; remove once nothing reads it).

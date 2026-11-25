@@ -29,15 +29,32 @@ class FabricApiPanel {
   constructor(fabric) { this.f = fabric; this.forget(); }
   // Also on sign-out / session end: an open one-time-key dialog loses its value. (`secret` stays null: kept for older callers.)
   forget() {
-    this.tab = "tokens"; this.items = null; this.events = null; this.loading = false; this.error = ""; this.activityLoading = false; this.activityError = ""; this.pending = null; this.secret = null; this.seq = (this.seq || 0) + 1;
+    this.tab = "tokens"; this.items = null; this.events = null; this.listScope = ""; this.loading = false; this.error = ""; this.activityLoading = false; this.activityError = ""; this.pending = null; this.secret = null; this.seq = (this.seq || 0) + 1;
     const input = typeof document !== "undefined" ? document.querySelector?.("#fabric-api-secret") : null;
     if (input) { input.value = ""; input.setAttribute?.("value", ""); }
   }
   get c() { return this.f.c; }
   get view() { return this.c.view; }
   get adapter() { return this.f.adapter; }
-  // features.fabricData.sensitive (cost: its older name, kept by the server for one release).
-  get canGrantSensitive() { const f = this.f.features; return Boolean(f && (f.sensitive === true || (f.sensitive === undefined && f.cost === true))); }
+  // features.fabricData.canGrantSensitive when the server sends it; otherwise sensitive (cost: its older name, kept by the server
+  // for one release). The server refuses the scope anyway (403 FABRIC_SENSITIVE_ACCESS_REQUIRED).
+  get canGrantSensitive() {
+    const f = this.f.features;
+    if (!f) return false;
+    if (typeof f.canGrantSensitive === "boolean") return f.canGrantSensitive;
+    return f.sensitive === true || (f.sensitive === undefined && f.cost === true);
+  }
+  // Ownership: what the server reports, never decided here (it enforces every rule). Oversight = this person sees and manages
+  // everyone's keys: the list response's scope ("all" | "own") once loaded, else features.apiOversight. Otherwise the list and
+  // the activity hold only their own keys (each key has mine: boolean). ownershipKnown is false for a server that reports
+  // neither (older release: any administrator managed any key).
+  get oversight() { return this.listScope ? this.listScope === "all" : this.f.features?.apiOversight === true; }
+  get ownershipKnown() { return Boolean(this.listScope) || typeof this.f.features?.apiOversight === "boolean"; }
+  mine(t) { return t?.mine === true; }
+  // Revoke only for an active key this person may manage: with oversight any, otherwise their own (from an older server, every
+  // active key, as before).
+  canRevoke(t) { return t?.status === "active" && (!this.ownershipKnown || this.oversight || this.mine(t)); }
+  ownerHtml(t) { return this.mine(t) ? `<span class="fx-api__you">Created by you</span>` : this.esc(t.owner?.name || "A former user"); }
   // The datasets a key may be given: those /features lists (both when it lists none).
   get datasetScopes() { return FabricApiPanel.DATASET_SCOPES.filter(([ds]) => this.f.datasetAllowed ? this.f.datasetAllowed(ds) : true); }
   esc(v) { return this.view.escape(v ?? ""); }
@@ -61,7 +78,9 @@ class FabricApiPanel {
     try {
       const [list, activity] = await Promise.all([this.api("GET", ""), this.api("GET", "/activity")]);
       if (seq !== this.seq) return;
-      this.items = Array.isArray(list?.tokens) ? list.tokens : []; this.events = Array.isArray(activity?.items) ? activity.items : []; this.error = "";
+      this.items = Array.isArray(list?.tokens) ? list.tokens : [];
+      this.listScope = list?.scope === "all" || list?.scope === "own" ? list.scope : "";
+      this.events = Array.isArray(activity?.items) ? activity.items : []; this.error = "";
     } catch (error) { if (seq !== this.seq) return; this.error = this.message(error); }
     finally { if (seq === this.seq) this.loading = false; }
     this.f.redraw();
@@ -111,14 +130,17 @@ class FabricApiPanel {
   }
   tokensHtml() {
     const items = this.items || [];
-    const note = `<p class="fx-status fx-status--info fx-api__intro" role="note"><span class="fx-status__msg">Every Fabric API key, whoever created it; any Fabric API administrator can revoke any key. Keys read only the datasets they were given through <code>/api/v1/external/fabric/…</code>, never boards, and stop working as soon as their owner loses Fabric Data access.</span></p>`;
+    const who = !this.ownershipKnown ? "Every Fabric API key, whoever created it; any Fabric API administrator can revoke any key."
+      : this.oversight ? "Every Fabric API key, whoever created it: you oversee them all and can revoke any key."
+      : "Your Fabric API keys: you can revoke only the keys you created.";
+    const note = `<p class="fx-status fx-status--info fx-api__intro" role="note"><span class="fx-status__msg">${who} Keys read only the datasets they were given through <code>/api/v1/external/fabric/…</code>, never boards, and stop working as soon as their owner loses Fabric Data access.</span></p>`;
     if (!items.length) return `${note}<div class="fx-grid__empty fx-api__empty"><strong>No Fabric API keys yet</strong><span>Create one per integration (Power BI, Power Automate, n8n or a script).</span></div>`;
     const rows = items.map((t) => {
       const [label, tone] = FabricApiPanel.STATUS[t.status] || [t.status || "Unknown", "muted"];
       const revoked = t.status === "revoked" && t.revokedBy?.name ? ` <small class="fx-api__sub">by ${this.esc(t.revokedBy.name)}</small>` : "";
       const requests = Number.isFinite(Number(t.requestCount)) ? Number(t.requestCount).toLocaleString() : "—";
-      const action = t.status === "active" ? `<button type="button" class="fx-btn fx-btn--danger fx-btn--sm" data-action="fabric-api-revoke" data-id="${this.esc(t.id)}" data-focus-key="revoke-${this.esc(t.id)}" aria-label="Revoke ${this.esc(t.name)}">Revoke</button>` : "";
-      return `<tr><th class="fx-grid__frozen" scope="row" data-label="Name"><strong>${this.esc(t.name)}</strong>${t.description ? `<small class="fx-api__sub" title="${this.esc(t.description)}">${this.esc(t.description)}</small>` : ""}</th><td data-label="Prefix" class="fx-api__mono"><code>${this.esc(t.prefix)}…</code></td><td data-label="Datasets">${this.scopeBadges(t.scopes)}</td><td data-label="Status"><span class="account-badge fx-api__status is-${tone}">${this.esc(label)}</span>${revoked}</td><td data-label="Owner">${this.esc(t.owner?.name || "A former user")}</td><td data-label="Created">${this.date(t.createdAt)}</td><td data-label="Expires">${t.status === "revoked" ? "—" : this.date(t.expiresAt)}</td><td data-label="Last used">${this.dateTime(t.lastUsedAt)}</td><td data-label="Requests" class="fx-grid__num fabric-num">${requests}</td><td data-label="" class="fx-api__actions">${action}</td></tr>`;
+      const action = this.canRevoke(t) ? `<button type="button" class="fx-btn fx-btn--danger fx-btn--sm" data-action="fabric-api-revoke" data-id="${this.esc(t.id)}" data-focus-key="revoke-${this.esc(t.id)}" aria-label="Revoke ${this.esc(t.name)}">Revoke</button>` : "";
+      return `<tr><th class="fx-grid__frozen" scope="row" data-label="Name"><strong>${this.esc(t.name)}</strong>${t.description ? `<small class="fx-api__sub" title="${this.esc(t.description)}">${this.esc(t.description)}</small>` : ""}</th><td data-label="Prefix" class="fx-api__mono"><code>${this.esc(t.prefix)}…</code></td><td data-label="Datasets">${this.scopeBadges(t.scopes)}</td><td data-label="Status"><span class="account-badge fx-api__status is-${tone}">${this.esc(label)}</span>${revoked}</td><td data-label="Owner">${this.ownerHtml(t)}</td><td data-label="Created">${this.date(t.createdAt)}</td><td data-label="Expires">${t.status === "revoked" ? "—" : this.date(t.expiresAt)}</td><td data-label="Last used">${this.dateTime(t.lastUsedAt)}</td><td data-label="Requests" class="fx-grid__num fabric-num">${requests}</td><td data-label="" class="fx-api__actions">${action}</td></tr>`;
     }).join("");
     // With only a few keys the grid still fills the pane; a short hint sits in its empty area instead of a blank page.
     const hint = items.length < 6 ? `<div class="fx-api__gridhint"><span>${items.length === 1 ? "1 key" : `${items.length} keys`}. Create one key per integration (Power BI, Power Automate, n8n or a script), so each can be revoked on its own.</span><button type="button" class="fx-btn" data-action="fabric-api-new" data-focus-key="api-new-hint">${icon("plus")}<span>Create key</span></button></div>` : "";
@@ -127,7 +149,8 @@ class FabricApiPanel {
   activityHtml() {
     const events = this.events || [];
     const error = this.activityError ? `<div class="fx-status fx-status--error" role="alert"><span class="fx-status__msg"><strong>The activity couldn't be refreshed.</strong> ${this.esc(this.activityError)}</span></div>` : "";
-    const note = `<p class="fx-status fx-status--info fx-api__intro" role="note"><span class="fx-status__msg">The latest entries of the Fabric key audit log: created, revoked, and refused or failed requests. It doesn't update by itself: use Refresh to see the newest entries.</span></p>`;
+    const scope = this.ownershipKnown && !this.oversight ? "The latest audit entries for your Fabric API keys" : "The latest entries of the Fabric key audit log";
+    const note = `<p class="fx-status fx-status--info fx-api__intro" role="note"><span class="fx-status__msg">${scope}: created, revoked, and refused or failed requests. It doesn't update by itself: use Refresh to see the newest entries.</span></p>`;
     if (!events.length) return `${note}${error}<div class="fx-grid__empty fx-api__empty"><span>No Fabric API key events yet.</span></div>`;
     const who = (p) => (p ? this.esc(p.name || "A former user") : `<span class="fx-null" title="No value" aria-label="No value">—</span>`);
     const rows = events.map((e) => `<tr><th class="fx-grid__frozen" scope="row" data-label="When">${this.dateTime(e.at, "—")}</th><td data-label="Event"><span class="account-badge is-${FabricApiPanel.FAILURES.has(e.action) ? "warn" : "ok"}">${this.esc(FabricApiPanel.EVENTS[e.action] || e.action)}</span>${e.reason ? ` <small class="fx-api__sub">(${this.esc(e.reason)})</small>` : ""}</td><td data-label="Key">${e.token ? `<strong>${this.esc(e.token.name || "Unknown key")}</strong>${e.token.prefix ? ` <code class="fx-api__mono">${this.esc(e.token.prefix)}…</code>` : ""}` : "—"}</td><td data-label="By">${who(e.actor || (e.actorName ? { name: e.actorName } : null))}</td><td data-label="Owner">${who(e.owner)}</td></tr>`).join("");
@@ -217,7 +240,7 @@ class FabricApiPanel {
   showRevoke(t) {
     this.pending = t;
     this.view.overlay(`<form class="fx-dialog fx-api-dialog" role="dialog" aria-modal="true" data-action="fabric-api-revoke-form" aria-labelledby="fabric-api-revoke-title" aria-describedby="fabric-api-revoke-text">${this.dialogHead("fabric-api-revoke-title", `Revoke ${t.name || "this key"}?`)}
-      <div class="fx-dialog__body"><div class="fx-status fx-status--warn"><span class="fx-status__msg" id="fabric-api-revoke-text">Anything using this key stops reading Fabric Data immediately. This can't be undone.${t.owner?.name ? ` It belongs to <strong>${this.esc(t.owner.name)}</strong>.` : ""}</span></div>
+      <div class="fx-dialog__body"><div class="fx-status fx-status--warn"><span class="fx-status__msg" id="fabric-api-revoke-text">Anything using this key stops reading Fabric Data immediately. This can't be undone.${t.owner?.name && !this.mine(t) ? ` It belongs to <strong>${this.esc(t.owner.name)}</strong>.` : ""}</span></div>
       <p class="fx-api-dialog__error apitok-error" role="alert"></p></div>
       <div class="fx-dialog__foot"><button type="button" class="fx-btn" data-action="close-overlay">Cancel</button><button type="submit" class="fx-btn fx-btn--danger">Revoke key</button></div></form>`, "apitok-overlay fx-api-overlay");
     this.focus('[data-action="fabric-api-revoke-form"] .fx-dialog__foot [data-action="close-overlay"]');
@@ -236,7 +259,7 @@ class FabricApiPanel {
     if (action === "fabric-api-refresh") { this.refresh(); return; }
     if (action === "fabric-api-activity-refresh") { this.refreshActivity(); return; }
     if (action === "fabric-api-new") { this.showCreate(); return; }
-    if (action === "fabric-api-revoke") { const t = (this.items || []).find((x) => x.id === target.dataset.id); if (t) this.showRevoke(t); return; }
+    if (action === "fabric-api-revoke") { const t = (this.items || []).find((x) => x.id === target.dataset.id); if (t && this.canRevoke(t)) this.showRevoke(t); return; }
     if (action === "fabric-api-copy") { this.copySecret(target); return; }
     if (action === "fabric-api-done") { this.done(); return; }
     if (action === "fabric-api-copy-example") { const el = document.querySelector(`#fabric-api-example-${CSS.escape(target.dataset.example || "")}`); if (el) navigator.clipboard?.writeText(el.textContent).then(() => this.view.toast("Example copied"), () => this.view.toast("Select the example and copy it")); }

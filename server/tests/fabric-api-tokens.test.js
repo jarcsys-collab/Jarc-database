@@ -27,9 +27,9 @@ const SALES = "fabric.sales.read", INVENTORY = "fabric.inventory.read", SENSITIV
 
 // The permission lists as config would hold them (FABRIC_DATA_READER_OIDS etc.), mutable so tests can change them.
 function permissionsFor(tenantId) {
-  const lists = { readers: new Set(), sensitiveReaders: new Set(), admins: new Set() };
+  const lists = { readers: new Set(), sensitiveReaders: new Set(), admins: new Set(), oversight: new Set() };
   const ok = (identity, ...sets) => Boolean(identity?.kind === "entra" && identity.tenantId === tenantId && typeof identity.entraObjectId === "string" && sets.every((s) => s.has(identity.entraObjectId.toLowerCase())));
-  return { lists, permissions: { isApiAdmin: (id) => ok(id, lists.readers, lists.admins), isReader: (id) => ok(id, lists.readers), isSensitiveReader: (id) => ok(id, lists.readers, lists.sensitiveReaders) } };
+  return { lists, permissions: { isApiAdmin: (id) => ok(id, lists.readers, lists.admins), isApiOversight: (id) => ok(id, lists.readers, lists.admins, lists.oversight), isReader: (id) => ok(id, lists.readers), isSensitiveReader: (id) => ok(id, lists.readers, lists.sensitiveReaders) } };
 }
 
 // A stub of the shared fabricDataRouter: it reads only req.fabricAccess and echoes it (datasets as an array). The dataset routes
@@ -92,6 +92,8 @@ before(async () => {
   grant("readers", people.admin, people.adminPlain, people.reader);
   grant("sensitiveReaders", people.admin, people.reader);
   grant("admins", people.admin, people.adminPlain);
+  // people.admin also has oversight of every Fabric token (FABRIC_API_OVERSIGHT_OIDS); adminPlain manages only its own.
+  grant("oversight", people.admin);
   // jarcApiAdmin is a JARC API administrator (JARC_API_ADMIN_OIDS) and holds JARC.Admin, but is in no Fabric list.
   app.tokens.adminObjectIds = Object.freeze([people.jarcApiAdmin.oid.toLowerCase()]);
   for (const p of Object.values(people)) await app.browserOf(p);
@@ -125,7 +127,8 @@ describe("Fabric API token management (session)", () => {
     assert.equal(res.headers.get("cache-control"), "no-store");
     const { token, secret } = res.body;
     assert.match(secret, /^jarc_[0-9a-f]{24}_[A-Za-z0-9_-]{43}$/);
-    assert.deepEqual(Object.keys(token).sort(), ["createdAt", "description", "expiresAt", "id", "lastUsedAt", "name", "owner", "prefix", "requestCount", "revokedAt", "revokedBy", "scopes", "sensitive", "status", "datasets"].sort());
+    assert.deepEqual(Object.keys(token).sort(), ["createdAt", "description", "expiresAt", "id", "lastUsedAt", "name", "owner", "prefix", "requestCount", "revokedAt", "revokedBy", "scopes", "sensitive", "status", "datasets", "mine"].sort());
+    assert.equal(token.mine, true);
     assert.equal(token.status, "active");
     assert.deepEqual(token.scopes, [SALES]);
     assert.deepEqual(token.datasets, ["sales"]);

@@ -45,7 +45,7 @@ const fabricEnv = (overrides = {}) => entraEnv({
   FABRIC_API_ADMIN_OIDS: oids(people.fabAdmin, people.fabAdminNoCost),
   ...overrides
 });
-const flags = (read, sensitive, apiAdmin, apiTokens = true) => ({ read, sensitive, cost: sensitive, apiAdmin, datasets: read ? BOTH : [], invoiceViews: read, apiTokens });
+const flags = (read, sensitive, apiAdmin, apiTokens = true, apiOversight = false) => ({ read, sensitive, cost: sensitive, apiAdmin, apiOversight, canGrantSensitive: apiAdmin && sensitive, datasets: read ? BOTH : [], invoiceViews: read, apiTokens });
 
 // The real app over a (shareable) fake JARC database, so an app can be rebuilt with new configuration over the same tokens.
 async function boot({ fake = new FakeMongoClient(), env = fabricEnv(), apiTokens = true } = {}) {
@@ -251,10 +251,13 @@ describe("Fabric Data on, API tokens on (development_shared + beta open editing)
     assert.equal((await call(env, board.token.secret, "/me")).status, 200);
   });
 
-  test("5a. a revoked Fabric token is 401 TOKEN_REVOKED on its next use", async () => {
+  test("5a. a revoked Fabric token is 401 TOKEN_REVOKED on its next use; another administrator (no oversight) can't revoke it", async () => {
     const made = (await issueFabric(env, people.fabAdminNoCost)).body;
     assert.equal((await call(env, made.secret, "/fabric/status")).status, 200);
-    const revoke = await env.as(people.fabAdmin, "POST", `/api/v1/fabric/api-tokens/${made.token.id}/revoke`);
+    const other = await env.as(people.fabAdmin, "POST", `/api/v1/fabric/api-tokens/${made.token.id}/revoke`);
+    assert.deepEqual([other.status, code(other)], [404, "NOT_FOUND"], "FABRIC_API_OVERSIGHT_OIDS is unset here: nobody manages other people's tokens");
+    assert.equal((await call(env, made.secret, "/fabric/status")).status, 200);
+    const revoke = await env.as(people.fabAdminNoCost, "POST", `/api/v1/fabric/api-tokens/${made.token.id}/revoke`);
     assert.equal(revoke.status, 200, revoke.text);
     const res = await call(env, made.secret, "/fabric/status");
     assert.deepEqual([res.status, code(res)], [401, "TOKEN_REVOKED"]);

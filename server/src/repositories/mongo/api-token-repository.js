@@ -37,8 +37,13 @@ class ApiTokenRepository {
   revokeAny(id, byUserId, now, { session, product } = {}) {
     return this.tokens.findOneAndUpdate({ _id: id, revokedAt: null, ...ofProduct(product) }, { $set: { revokedAt: now, revokedByUserId: byUserId } }, { returnDocument: "after", session });
   }
-  // The newest audit entries, for API Activity. They hold IDs, the action and a short reason only.
-  listAudit({ limit = 200, product } = {}) { return this.audit.find(ofProduct(product), { sort: { at: -1, _id: -1 }, limit }).toArray(); }
+  // The newest audit entries, for API Activity. They hold IDs, the action and a short reason only. ownerUserId: only entries about
+  // that person's tokens (a Fabric API administrator without oversight sees only their own).
+  // all: true is required to read every owner's entries, so a missing owner can never widen the result.
+  listAudit({ limit = 200, product, ownerUserId, all = false } = {}) {
+    if (!all && !ownerUserId) throw new Error("listAudit needs ownerUserId, or all: true.");
+    return this.audit.find({ ...ofProduct(product), ...(all ? {} : { ownerUserId }) }, { sort: { at: -1, _id: -1 }, limit }).toArray();
+  }
 
   // Marks a token as replaced, once only. Null when it was revoked or rotated meanwhile. Board tokens only (Fabric tokens aren't rotated).
   markRotated(id, ownerUserId, set, { session } = {}) {

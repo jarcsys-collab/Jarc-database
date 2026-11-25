@@ -4,7 +4,10 @@
 // Readers read both datasets (sales, inventory).
 //   sensitive FABRIC_DATA_COST_READER_OIDS as well (name kept for compatibility): the sensitive financial and inventory fields
 //             (landed cost, cost amounts, prices) and, in the invoice views, cost, profit and margin. `cost` is its alias.
-//   apiAdmin FABRIC_API_ADMIN_OIDS as well: issues and revokes Fabric API tokens
+//   apiAdmin FABRIC_API_ADMIN_OIDS as well: issues Fabric API tokens and lists, revokes and reads the activity of THEIR OWN tokens
+//   apiOversight FABRIC_API_OVERSIGHT_OIDS as well (each must be an apiAdmin): sees, revokes and reads the activity of EVERY
+//             Fabric token. Empty or unset: nobody (fails closed: adding people to FABRIC_API_ADMIN_OIDS never lets them manage
+//             other people's tokens).
 const { sendError } = require("../middleware/errors");
 const { DATASET_NAMES } = require("./datasets");
 
@@ -14,18 +17,20 @@ const listed = (identity, list = [], tenantId) => {
   const oid = typeof identity?.objectId === "string" ? identity.objectId.toLowerCase() : null;
   return Boolean(tenantId && tid && oid && tid === String(tenantId).toLowerCase() && Array.isArray(list) && list.includes(oid));
 };
-// { read, sensitive, cost (= sensitive), apiAdmin } for a verified identity: for token owners, re-checked on every use (the
+// { read, sensitive, cost (= sensitive), apiAdmin, apiOversight } for a verified identity: for token owners, re-checked on every use (the
 // user record's tenantId and entraObjectId).
 function fabricIdentityAccess(identity, cfg, tenantId) {
   const read = listed(identity, cfg?.readerObjectIds, tenantId);
   const sensitive = read && listed(identity, cfg?.costReaderObjectIds, tenantId);
-  return { read, sensitive, cost: sensitive, apiAdmin: read && listed(identity, cfg?.apiAdminObjectIds, tenantId) };
+  const apiAdmin = read && listed(identity, cfg?.apiAdminObjectIds, tenantId);
+  return { read, sensitive, cost: sensitive, apiAdmin, apiOversight: apiAdmin && listed(identity, cfg?.apiOversightObjectIds, tenantId) };
 }
 const identityOf = (actor) => (actor?.kind === "entra" ? { tenantId: actor.tenantId, objectId: actor.entraObjectId } : null);
 const canReadFabric = (actor, cfg, tenantId) => fabricIdentityAccess(identityOf(actor), cfg, tenantId).read;
 const canReadFabricSensitive = (actor, cfg, tenantId) => fabricIdentityAccess(identityOf(actor), cfg, tenantId).sensitive;
 const canReadFabricCost = canReadFabricSensitive; // the earlier name
 const canManageFabricApi = (actor, cfg, tenantId) => fabricIdentityAccess(identityOf(actor), cfg, tenantId).apiAdmin;
+const canOverseeFabricApi = (actor, cfg, tenantId) => fabricIdentityAccess(identityOf(actor), cfg, tenantId).apiOversight;
 
 // Session routes (/api/v1/fabric/*), after `identify`. A bearer token is never accepted here (tokens use /external/fabric).
 function requireFabricDataRead({ config, tenantId }) {
@@ -40,4 +45,4 @@ function requireFabricDataRead({ config, tenantId }) {
   };
 }
 
-module.exports = { canReadFabric, canReadFabricSensitive, canReadFabricCost, canManageFabricApi, fabricIdentityAccess, requireFabricDataRead };
+module.exports = { canReadFabric, canReadFabricSensitive, canReadFabricCost, canManageFabricApi, canOverseeFabricApi, fabricIdentityAccess, requireFabricDataRead };

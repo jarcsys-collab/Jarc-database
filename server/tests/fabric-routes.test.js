@@ -79,10 +79,10 @@ describe("Fabric Data permissions (open access and JARC.Admin on: neither grants
 
   test("/features: fabricData for this caller (read, sensitive + its cost alias, apiAdmin, datasets, invoiceViews), apiTokens false while API tokens are off", async () => {
     const flags = async (c) => (await c.request("GET", "/api/v1/features")).body.features.fabricData;
-    assert.deepEqual(await flags(reader), { read: true, sensitive: false, cost: false, apiAdmin: false, datasets: DATASETS, invoiceViews: true, apiTokens: false });
-    assert.deepEqual(await flags(cost), { read: true, sensitive: true, cost: true, apiAdmin: false, datasets: DATASETS, invoiceViews: true, apiTokens: false });
-    assert.deepEqual(await flags(admin), { read: true, sensitive: false, cost: false, apiAdmin: true, datasets: DATASETS, invoiceViews: true, apiTokens: false });
-    assert.deepEqual(await flags(outsider), { read: false, sensitive: false, cost: false, apiAdmin: false, datasets: [], invoiceViews: false, apiTokens: false });
+    assert.deepEqual(await flags(reader), { read: true, sensitive: false, cost: false, apiAdmin: false, apiOversight: false, canGrantSensitive: false, datasets: DATASETS, invoiceViews: true, apiTokens: false });
+    assert.deepEqual(await flags(cost), { read: true, sensitive: true, cost: true, apiAdmin: false, apiOversight: false, canGrantSensitive: false, datasets: DATASETS, invoiceViews: true, apiTokens: false });
+    assert.deepEqual(await flags(admin), { read: true, sensitive: false, cost: false, apiAdmin: true, apiOversight: false, canGrantSensitive: false, datasets: DATASETS, invoiceViews: true, apiTokens: false });
+    assert.deepEqual(await flags(outsider), { read: false, sensitive: false, cost: false, apiAdmin: false, apiOversight: false, canGrantSensitive: false, datasets: [], invoiceViews: false, apiTokens: false });
   });
 
   test("a reader gets 200 with Cache-Control: no-store; status answers per dataset", async () => {
@@ -316,7 +316,7 @@ describe("Fabric Data failures and the switch", () => {
     try {
       const admin = await signedIn(env.app, people.admin);
       const features = (await admin.request("GET", "/api/v1/features")).body.features;
-      assert.deepEqual(features.fabricData, { read: true, sensitive: false, cost: false, apiAdmin: true, datasets: DATASETS, invoiceViews: false, apiTokens: true });
+      assert.deepEqual(features.fabricData, { read: true, sensitive: false, cost: false, apiAdmin: true, apiOversight: false, canGrantSensitive: false, datasets: DATASETS, invoiceViews: false, apiTokens: true });
       assert.equal(features.apiTokens, true);
     } finally { await env.close(); }
   });

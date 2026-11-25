@@ -69,7 +69,9 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
   before(async () => {
     issuer = await createTokenIssuer();
     people = {
-      admin: issuer.person("Ada FabricAdmin"), reader: issuer.person("Rhea Reader"), sensitive: issuer.person("Sid Sensitive"), outsider: issuer.person("Olive Outsider")
+      admin: issuer.person("Ada FabricAdmin"), reader: issuer.person("Rhea Reader"), sensitive: issuer.person("Sid Sensitive"), outsider: issuer.person("Olive Outsider"),
+      // A Fabric API administrator without oversight and without the sensitive-fields permission (Ada has oversight).
+      regular: issuer.person("Nia RegularAdmin")
     };
     const oids = (...ps) => ps.map((p) => p.oid).join(",");
     const port = await freePort();
@@ -77,7 +79,8 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     const entra = { ...issuer.config, redirectUri: `${base}/`, appOrigin: base };
     const env = entraEnv({
       JARC_FEATURE_FABRIC_DATA: "true", FABRIC_MONGODB_URI: "mongodb://fabric.invalid", FABRIC_MONGODB_DB_NAME: "FabricTestDb", FABRIC_UNINDEXED_SCAN_MAX: "300",
-      FABRIC_DATA_READER_OIDS: oids(people.admin, people.reader, people.sensitive), FABRIC_DATA_COST_READER_OIDS: oids(people.admin, people.sensitive), FABRIC_API_ADMIN_OIDS: oids(people.admin)
+      FABRIC_DATA_READER_OIDS: oids(people.admin, people.reader, people.sensitive, people.regular), FABRIC_DATA_COST_READER_OIDS: oids(people.admin, people.sensitive), FABRIC_API_ADMIN_OIDS: oids(people.admin, people.regular),
+      FABRIC_API_OVERSIGHT_OIDS: oids(people.admin)
     });
     const config = loadConfig(env).fabricData;
     fabricClient = new FabricFakeClient({ docs: salesRows(), indexes: ID_ONLY, inventory: { docs: inventoryRows(250) } });
@@ -471,6 +474,44 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     await click("#fabric-atab-docs");
     assert.ok(await wait(`document.querySelector("#fabric-atab-docs")?.getAttribute("aria-selected") === "true" && /\\/api\\/v1\\/external\\/fabric/.test(document.querySelector("#fabric-api-body")?.textContent || "")`), "Documentation tab");
     await noErrors("api management");
+  });
+
+  test("4b. API Management ownership: a regular administrator sees and revokes only their own keys; the oversight administrator sees and revokes every key", async () => {
+    const rows = () => json(`[...document.querySelectorAll(".fabric-api-tokens tbody tr")].map((tr) => ({ name: tr.querySelector("th strong")?.textContent || "", owner: tr.querySelector('[data-label="Owner"]')?.textContent || "", revoke: !!tr.querySelector('[data-action="fabric-api-revoke"]') }))`);
+    await signIn(people.regular);
+    await openApp("/fabric/api");
+    assert.ok(await wait("!!document.querySelector('#fabric-tab-api.active') && !!document.querySelector('.fabric-api .fx-api__intro')", 15000), "API Management for a regular administrator");
+    assert.match(await text(".fx-api__intro"), /Your Fabric API keys: you can revoke only the keys you created/);
+    assert.equal(await has(".fabric-api-tokens tbody tr"), false, "Ada's key (test 4) isn't listed");
+    await click('[data-action="fabric-api-new"]');
+    assert.ok(await wait("!!document.querySelector('form[data-action=\"fabric-api-create-form\"]')"));
+    assert.equal(await has('form[data-action="fabric-api-create-form"] input[name="sensitive"]'), false, "no sensitive scope without the sensitive-fields permission");
+    await setValue('form[data-action="fabric-api-create-form"] input[name="name"]', "Synthetic Regular", "input");
+    await b.evaluate(`document.querySelector('form[data-action="fabric-api-create-form"]').requestSubmit()`);
+    assert.ok(await wait("!!document.querySelector('#fabric-api-secret')?.value"), "secret shown");
+    await click('[data-action="fabric-api-done"]');
+    assert.ok(await wait("!!document.querySelector('.fabric-api-tokens tbody tr')"), "own key listed");
+    assert.deepEqual(await rows(), [{ name: "Synthetic Regular", owner: "Created by you", revoke: true }]);
+    await click("#fabric-atab-activity");
+    assert.ok(await wait(`!!document.querySelector(".fabric-api-activity tbody tr")`), "own activity");
+    assert.doesNotMatch(await text(".fabric-api-activity"), /Synthetic BI/, "nothing about Ada's key");
+    await click("#fabric-atab-docs");
+    assert.ok(await wait(`/Power BI/.test(document.querySelector("#fabric-api-body")?.textContent || "") && /n8n/.test(document.querySelector("#fabric-api-body")?.textContent || "")`), "docs and examples");
+    await noErrors("regular admin");
+
+    await signIn(people.admin);
+    await openApp("/fabric/api");
+    assert.ok(await wait(`document.querySelectorAll(".fabric-api-tokens tbody tr").length === 2`, 15000), "every key for oversight");
+    assert.match(await text(".fx-api__intro"), /you oversee them all/);
+    const all = await rows();
+    assert.deepEqual(all.find((r) => r.name === "Synthetic Regular"), { name: "Synthetic Regular", owner: "Nia RegularAdmin", revoke: true });
+    assert.deepEqual(all.find((r) => r.name === "Synthetic BI"), { name: "Synthetic BI", owner: "Created by you", revoke: false }, "already revoked");
+    await click('.fabric-api-tokens [data-action="fabric-api-revoke"]');
+    assert.ok(await wait("!!document.querySelector('form[data-action=\"fabric-api-revoke-form\"]')"));
+    assert.match(await text('form[data-action="fabric-api-revoke-form"]'), /It belongs to Nia RegularAdmin/);
+    await b.evaluate(`document.querySelector('form[data-action="fabric-api-revoke-form"]').requestSubmit()`);
+    assert.ok(await wait(`!document.querySelector('.fabric-api-tokens [data-action="fabric-api-revoke"]')`), "revoked by oversight");
+    await noErrors("oversight admin");
   });
 
   test("5. deep links load directly; Back and Forward move between list and record", async () => {

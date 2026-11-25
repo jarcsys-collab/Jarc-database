@@ -8,7 +8,7 @@ const { FabricService } = require("./service");
 const { DatasetSource } = require("./source");
 const { DATASETS, DATASET_NAMES, datasetNamed } = require("./datasets");
 const { fabricDataRouter, fabricLimiter } = require("./router");
-const { canReadFabric, canReadFabricCost, canReadFabricSensitive, canManageFabricApi, fabricIdentityAccess, requireFabricDataRead } = require("./access");
+const { canReadFabric, canReadFabricCost, canReadFabricSensitive, canManageFabricApi, canOverseeFabricApi, fabricIdentityAccess, requireFabricDataRead } = require("./access");
 
 // The service stack for config.fabricData (enabled). Nothing connects until the first Fabric request.
 // createClient: tests only (a fake MongoClient factory).
@@ -30,4 +30,4 @@ function createFabricData({ config, logger = console, createClient, now } = {}) 
   return { config, connection, repository, indexes, sources, service, close: () => connection.close() };
 }
 
-module.exports = { createFabricData, FabricConnection, FabricIndexes, FabricRepository, FabricService, DatasetSource, DATASETS, DATASET_NAMES, datasetNamed, fabricDataRouter, fabricLimiter, canReadFabric, canReadFabricCost, canReadFabricSensitive, canManageFabricApi, fabricIdentityAccess, requireFabricDataRead };
+module.exports = { createFabricData, FabricConnection, FabricIndexes, FabricRepository, FabricService, DatasetSource, DATASETS, DATASET_NAMES, datasetNamed, fabricDataRouter, fabricLimiter, canReadFabric, canReadFabricCost, canReadFabricSensitive, canManageFabricApi, canOverseeFabricApi, fabricIdentityAccess, requireFabricDataRead };

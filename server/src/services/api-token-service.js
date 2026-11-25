@@ -344,7 +344,7 @@ class ApiTokenService {
   // prefix, never its secret or digest) and the people involved. Each entry is what the audit stored; nothing is worked out again.
   async activity(sessionActor) {
     this.requireAdmin(sessionActor);
-    const entries = await this.repos.apiTokens.listAudit({ limit: 200 });
+    const entries = await this.repos.apiTokens.listAudit({ limit: 200, all: true });
     const tokens = new Map((await this.repos.apiTokens.findManyByIds([...new Set(entries.map((e) => hex(e.tokenId)).filter(Boolean))].map((id) => new ObjectId(id)))).map((t) => [hex(t._id), t]));
     const people = await this.peopleNamed(entries.flatMap((e) => [e.ownerUserId, e.actorUserId]));
     const workspaces = new Map((await this.repos.workspaces.list()).map((w) => [hex(w._id), w.name]));
@@ -430,7 +430,11 @@ class ApiTokenService {
 //
 // Authority never comes from workspace roles, open access (development_shared, beta open editing) or JARC.Admin. It comes from the
 // injected permissions, each given a verified Microsoft Entra identity { kind: "entra", tenantId, entraObjectId }:
-//   isApiAdmin(identity)         may issue, list and revoke Fabric tokens and read their activity (FABRIC_API_ADMIN_OIDS ∩ readers)
+//   isApiAdmin(identity)         may issue Fabric tokens, and list, revoke and read the activity of THEIR OWN (FABRIC_API_ADMIN_OIDS
+//                                ∩ readers). Another person's token is "doesn't exist" (404) to them, and a token's secret never
+//                                exists anywhere after creation, whoever asks.
+//   isApiOversight(identity)     optional: may also list, revoke and read the activity of EVERY Fabric token (FABRIC_API_OVERSIGHT_OIDS
+//                                ∩ administrators). Not given: nobody has oversight (fails closed).
 //   isReader(identity)           may read both Fabric datasets (FABRIC_DATA_READER_OIDS)
 //   isSensitiveReader(identity)  may also read the sensitive fields (FABRIC_DATA_COST_READER_OIDS); isCostReader is accepted as
 //                                the earlier name of the same check
@@ -447,7 +451,9 @@ const fabricDatasetsOf = (scopes) => (Array.isArray(scopes) ? Object.keys(FABRIC
 function fabricPermissionsOf(permissions) {
   const checks = { isApiAdmin: permissions?.isApiAdmin, isReader: permissions?.isReader, isSensitiveReader: permissions?.isSensitiveReader ?? permissions?.isCostReader };
   for (const [name, check] of Object.entries(checks)) if (typeof check !== "function") throw new Error(`Fabric API tokens need permissions.${name}.`);
-  return Object.freeze(checks);
+  const oversight = permissions?.isApiOversight;
+  if (oversight !== undefined && typeof oversight !== "function") throw new Error("Fabric API tokens: permissions.isApiOversight must be a function.");
+  return Object.freeze({ ...checks, isApiOversight: oversight || (() => false) });
 }
 
 class FabricTokenService {
@@ -468,6 +474,16 @@ class FabricTokenService {
   }
   requireAdmin(sessionActor) {
     if (!this.isAdmin(sessionActor)) throw new ApiError(403, "FABRIC_API_ADMIN_REQUIRED", "Only Fabric API administrators can manage Fabric API tokens.");
+  }
+  // Oversight of every person's Fabric tokens: an administrator who is also in the oversight list.
+  hasOversight(sessionActor) {
+    const identity = this.sessionIdentity(sessionActor);
+    return Boolean(identity && this.isAdmin(sessionActor) && this.permissions.isApiOversight({ ...sessionActor, ...identity }));
+  }
+  scopeOf(sessionActor) { return this.hasOversight(sessionActor) ? "all" : "own"; }
+  // Whether this session may see and act on this token: its owner, or someone with oversight.
+  mayManage(sessionActor, doc) {
+    return Boolean(doc && ((sessionActor?.userId && doc.ownerUserId && hex(doc.ownerUserId) === hex(sessionActor.userId)) || this.hasOversight(sessionActor)));
   }
 
   // At least one of fabric.sales.read and fabric.inventory.read, optionally fabric.sensitive.read, each once, and nothing else
@@ -502,7 +518,7 @@ class FabricTokenService {
       await this.repos.apiTokens.insert(doc, { session });
       await this.repos.apiTokens.appendAudit({ action: "token.created", tokenId: doc._id, ownerUserId: actor.userId, actorUserId: actor.userId, actorName: actor.displayName, product: FABRIC_PRODUCT, at: now }, { session });
     });
-    return { token: await this.describe(doc), secret: token };
+    return { token: { ...(await this.describe(doc)), mine: true }, secret: token };
   }
 
   // Whether the owner may read Fabric data right now (and the sensitive fields), from the stored person; null when they can't use
@@ -531,36 +547,46 @@ class FabricTokenService {
     };
   }
 
-  // Every owner's Fabric tokens (only those), newest first.
+  // The Fabric tokens (only those) this session may manage, newest first: everyone's with oversight, otherwise its own. Each has
+  // mine (whether this session owns it). The route answers { tokens, scope: "all" | "own" }.
   async list(sessionActor) {
     this.requireAdmin(sessionActor);
-    const docs = await this.repos.apiTokens.listAll({ product: FABRIC_PRODUCT });
+    const docs = this.hasOversight(sessionActor)
+      ? await this.repos.apiTokens.listAll({ product: FABRIC_PRODUCT })
+      : await this.repos.apiTokens.listForOwner(sessionActor.userId, { limit: 500, product: FABRIC_PRODUCT });
     const people = await this.tokens.peopleNamed(docs.flatMap((d) => [d.ownerUserId, d.revokedByUserId]));
     const owners = new Map();
     await Promise.all([...new Set(docs.map((d) => hex(d.ownerUserId)))].map(async (id) => owners.set(id, await this.ownerAccess(new ObjectId(id)))));
-    return Promise.all(docs.map((doc) => this.describe(doc, { people, owner: owners.get(hex(doc.ownerUserId)) ?? null })));
+    const me = hex(sessionActor.userId);
+    return Promise.all(docs.map(async (doc) => ({ ...(await this.describe(doc, { people, owner: owners.get(hex(doc.ownerUserId)) ?? null })), mine: hex(doc.ownerUserId) === me })));
   }
 
-  // Any Fabric token, by a Fabric API administrator, who is recorded on it. Repeating it changes nothing. A board token's ID is
-  // "doesn't exist" here (and a Fabric token's ID is "doesn't exist" on the board routes).
+  // A Fabric token this session may manage (its own, or any with oversight); whoever revokes it is recorded on it. Repeating it
+  // changes nothing. Another person's token without oversight, an unknown ID and a board token's ID are the same 404 (nothing
+  // tells them apart), decided before anything changes. A board token's ID is "doesn't exist" here (and a Fabric token's ID is
+  // "doesn't exist" on the board routes).
   async revoke(sessionActor, tokenId) {
     this.requireAdmin(sessionActor);
     const now = new Date();
+    if (!this.mayManage(sessionActor, await this.repos.apiTokens.findById(tokenId, { product: FABRIC_PRODUCT }))) throw new ApiError(404, "NOT_FOUND", "This token doesn't exist.");
     const revoked = await this.repos.apiTokens.revokeAny(tokenId, sessionActor.userId, now, { product: FABRIC_PRODUCT });
     if (revoked) await this.repos.apiTokens.appendAudit({ action: "token.revoked", tokenId, ownerUserId: revoked.ownerUserId, actorUserId: sessionActor.userId, actorName: sessionActor.displayName ?? null, product: FABRIC_PRODUCT, at: now });
     const doc = revoked || await this.repos.apiTokens.findById(tokenId, { product: FABRIC_PRODUCT });
     if (!doc) throw new ApiError(404, "NOT_FOUND", "This token doesn't exist.");
-    return { token: await this.describe(doc) };
+    return { token: { ...(await this.describe(doc)), mine: hex(doc.ownerUserId) === hex(sessionActor.userId) } };
   }
 
-  // The newest audit entries about Fabric tokens only.
+  // The newest audit entries about Fabric tokens only: about every token with oversight, otherwise only about this session's own
+  // tokens (filtered in the query, so other people's entries are never read). Answers { items, scope: "all" | "own" }.
   async activity(sessionActor) {
     this.requireAdmin(sessionActor);
-    const entries = await this.repos.apiTokens.listAudit({ limit: 200, product: FABRIC_PRODUCT });
+    const oversight = this.hasOversight(sessionActor);
+    const entries = await this.repos.apiTokens.listAudit({ limit: 200, product: FABRIC_PRODUCT, ...(oversight ? { all: true } : { ownerUserId: sessionActor.userId }) });
     const tokens = new Map((await this.repos.apiTokens.findManyByIds([...new Set(entries.map((e) => hex(e.tokenId)).filter(Boolean))].map((id) => new ObjectId(id)))).map((t) => [hex(t._id), t]));
     const people = await this.tokens.peopleNamed(entries.flatMap((e) => [e.ownerUserId, e.actorUserId]));
     const person = (id, fallback = null) => (id ? { id: hex(id), name: people.get(hex(id)) ?? fallback } : null);
     return {
+      scope: oversight ? "all" : "own",
       items: entries.map((e) => { const t = tokens.get(hex(e.tokenId)); return {
         action: e.action, at: iso(e.at), reason: e.reason || null,
         token: e.tokenId ? { id: hex(e.tokenId), name: t?.name ?? null, prefix: t ? displayPrefix(t.publicId) : null } : null,
