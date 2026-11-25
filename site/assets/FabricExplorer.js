@@ -166,11 +166,25 @@ class FabricExplorer {
   }
   static NULL_MARK = `<span class="fx-null" title="No value"><span aria-hidden="true">—</span><span class="sr-only">No value</span></span>`;
 
-  constructor(panel, dataset) {
-    this.p = panel; this.ds = dataset; this.listeners = []; this.reset();
+  // Options (another module reusing the explorer, e.g. the People directory); every default is Fabric Data's own:
+  //   apiBase "/fabric" (schema, records, record, values), routeBase "/fabric" (page addresses), datasets FabricExplorer.DATASETS
+  //   (labels), idPattern FabricExplorer.ID (record IDs), savedFiltersBase "/fabric/saved-filters", recordRenderer null (an object
+  //   with html(explorer, record, schema) that draws the record page instead of FabricRecordView), rootSelector "#fabric-root"
+  //   (the region the explorer is drawn in), errorInfo null (FabricDataPanel.errorInfo), schemaLabels false (true: column labels
+  //   come from the schema's fields[].label). The column-names key stays "jarc.fabric.columns.<user>.<dataset>" (dataset names
+  //   differ per module, so the keys never meet). dateWindow true (false: the data has no date window, so the footer shows no
+  //   "Showing … dates" text and the empty state doesn't suggest other dates).
+  static defaultOptions() { return { apiBase: "/fabric", routeBase: "/fabric", datasets: FabricExplorer.DATASETS, idPattern: FabricExplorer.ID, savedFiltersBase: "/fabric/saved-filters", recordRenderer: null, rootSelector: "#fabric-root", errorInfo: null, schemaLabels: false, dateWindow: true }; }
+  get hasDateWindow() { return this.opts?.dateWindow !== false; }
+  constructor(panel, dataset, options = {}) {
+    this.p = panel; this.ds = dataset; this.listeners = [];
+    const d = FabricExplorer.defaultOptions(), o = options && typeof options === "object" ? options : {};
+    this.opts = { ...d, ...Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) };
+    if (typeof this.opts.idPattern?.test !== "function") this.opts.idPattern = d.idPattern;
+    this.reset();
     // A right-click on this dataset's grid opens the cell menu (FabricColumnMenu, when loaded); elsewhere the browser's menu.
     if (typeof document !== "undefined") document.addEventListener?.("contextmenu", (event) => {
-      if (this.recordId || !event?.target?.closest?.(`#fabric-root [data-grid="${this.ds}"]`)) return;
+      if (this.recordId || !event?.target?.closest?.(`${this.rootSelector} [data-grid="${this.ds}"]`)) return;
       const C = FabricExplorer.global("FabricColumnMenu"); if (C && typeof C.onContextMenu === "function") C.onContextMenu(this, event);
     });
   }
@@ -193,7 +207,16 @@ class FabricExplorer {
   get items() { const d = this.records.data; return Array.isArray(d?.items) ? d.items : []; }
   static slot() { return { key: null, data: null, loading: false, error: null, seq: 0 }; }
   forget() { this.reset(); }
-  get label() { return this.info?.label || FabricExplorer.DATASETS[this.ds] || this.ds; }
+  get apiBase() { return this.opts?.apiBase || "/fabric"; }
+  get routeBase() { return this.opts?.routeBase || "/fabric"; }
+  get datasets() { return this.opts?.datasets || FabricExplorer.DATASETS; }
+  get idPattern() { return this.opts?.idPattern || FabricExplorer.ID; }
+  get savedFiltersBase() { return this.opts?.savedFiltersBase || "/fabric/saved-filters"; }
+  get recordRenderer() { const r = this.opts?.recordRenderer; return r && (typeof r === "object" || typeof r === "function") && typeof r.html === "function" ? r : null; }
+  get rootSelector() { return this.opts?.rootSelector || "#fabric-root"; }
+  validId(id) { return typeof id === "string" && this.idPattern.test(id); }
+  errorInfo(error) { const f = this.opts?.errorInfo; return typeof f === "function" ? f(error) : FabricDataPanel.errorInfo(error); }
+  get label() { return this.info?.label || this.datasets[this.ds] || this.ds; }
   esc(v) { return this.p.esc(v); }
   attr(v) { return this.p.attr(v); }
   // Per person and dataset ("jarc.fabric.columns.<user id>.<dataset>"), like FabricObjects' key; "" (nothing stored or read)
@@ -219,11 +242,12 @@ class FabricExplorer {
     if (this.fb.open) { FabricExplorer.global("FabricFilterBuilder")?.destroyPicker?.(this); this.fb.open = false; this.fb.draft = null; }
   }
   openRecord(id) {
-    const next = typeof id === "string" && FabricExplorer.ID.test(id) ? id : "";
+    const next = this.validId(id) ? id : "";
     if (next !== this.recordId) { this.recordId = next; this.fieldFilter = ""; this.record = FabricExplorer.slot(); }
   }
-  listHref() { return `/fabric/${this.ds}${FabricExplorer.formatQuery(this.query)}`; }
-  recordHref(id) { return `/fabric/${this.ds}/records/${encodeURIComponent(id)}${FabricExplorer.formatQuery(this.query)}`; }
+  listHref() { return `${this.routeBase}/${this.ds}${FabricExplorer.formatQuery(this.query)}`; }
+  recordHref(id) { return `${this.routeBase}/${this.ds}/records/${encodeURIComponent(id)}${FabricExplorer.formatQuery(this.query)}`; }
+  recordApiPath(id) { return `${this.apiBase}/${encodeURIComponent(this.ds)}/records/${encodeURIComponent(id)}`; }
 
   // ---- Columns (names only in browser storage)
   savedColumns() {
@@ -275,17 +299,17 @@ class FabricExplorer {
   blocked() {
     const s = this.p.status;
     if (!s) return null;
-    if (s.available === false) return FabricDataPanel.errorInfo({ cause: { serverCode: s.reason || "FABRIC_UNAVAILABLE" } });
-    if (Array.isArray(s.access?.datasets) && !s.access.datasets.includes(this.ds)) return { kind: "forbidden", code: "FABRIC_DATASET_FORBIDDEN", message: `You don't have access to ${FabricExplorer.DATASETS[this.ds] || "this dataset"}.`, reference: "" };
+    if (s.available === false) return this.errorInfo({ cause: { serverCode: s.reason || "FABRIC_UNAVAILABLE" } });
+    if (Array.isArray(s.access?.datasets) && !s.access.datasets.includes(this.ds)) return { kind: "forbidden", code: "FABRIC_DATASET_FORBIDDEN", message: `You don't have access to ${this.datasets[this.ds] || "this dataset"}.`, reference: "" };
     // The panel's summary (statusFor) is the one reading of /status; the raw dataset entry is the fallback without it.
     const st = typeof this.p.statusFor === "function" ? this.p.statusFor(this.ds) : null;
     const d = st && typeof st === "object" ? st : this.statusInfo;
     if (!d) return null;
     const mode = String(d.mode || "").toLowerCase().replace(/[-_]/g, "");
-    if (d.available === false || mode === "indexrequired" || mode === "unavailable" || mode === "sourcemissing") return FabricDataPanel.errorInfo({ cause: { serverCode: typeof d.reason === "string" && d.reason ? d.reason : mode === "unavailable" ? "FABRIC_UNAVAILABLE" : mode === "sourcemissing" ? "FABRIC_SOURCE_MISSING" : "FABRIC_INDEX_REQUIRED" } });
+    if (d.available === false || mode === "indexrequired" || mode === "unavailable" || mode === "sourcemissing") return this.errorInfo({ cause: { serverCode: typeof d.reason === "string" && d.reason ? d.reason : mode === "unavailable" ? "FABRIC_UNAVAILABLE" : mode === "sourcemissing" ? "FABRIC_SOURCE_MISSING" : "FABRIC_INDEX_REQUIRED" } });
     return null;
   }
-  schemaPath() { return `/fabric/${encodeURIComponent(this.ds)}/schema`; }
+  schemaPath() { return `${this.apiBase}/${encodeURIComponent(this.ds)}/schema`; }
   recordsPath() {
     const q = this.query, info = this.info, p = new URLSearchParams();
     if (q.dateFrom && q.dateTo && this.datesApply()) { p.set("dateFrom", q.dateFrom); p.set("dateTo", q.dateTo); }
@@ -309,13 +333,13 @@ class FabricExplorer {
     p.set("limit", String(q.limit));
     if (this.page.cursor) p.set("cursor", this.page.cursor);
     p.set("fields", this.columns.join(","));
-    return `/fabric/${encodeURIComponent(this.ds)}/records?${p}`;
+    return `${this.apiBase}/${encodeURIComponent(this.ds)}/records?${p}`;
   }
   ensure() {
     if (this.blocked()) return;
     this.want(this.schema, this.schemaPath());
     if (!this.info) return;
-    if (this.recordId) { this.want(this.record, FabricExplorer.recordPath(this.ds, this.recordId)); return; }
+    if (this.recordId) { this.want(this.record, this.recordApiPath(this.recordId)); return; }
     if (this.migrateLegacy()) this.p.syncUrl?.();
     const problem = this.rangeProblem() || this.sortProblem();
     if (problem !== this.problem) { this.problem = problem; this.p.redraw(); this.startMode = "full"; }
@@ -502,7 +526,7 @@ class FabricExplorer {
       if (slot === this.records && data && Array.isArray(data.items)) this.shown = { data, cols: (this.columns || []).join(",") };
     } catch (error) {
       if (stale()) return;
-      slot.error = FabricDataPanel.errorInfo(error);
+      slot.error = this.errorInfo(error);
       if (slot === this.records) slot.error = this.filterError(slot.error, path);
       if (slot.error.kind === "denied") { slot.loading = false; this.p.deny(); return; }
       // A page cursor the server no longer accepts (cursors are signed per server process, so a restart or a deploy ends them):
@@ -643,7 +667,7 @@ class FabricExplorer {
     if (dir === "next") { const next = d?.pagination?.nextCursor; if (!d?.pagination?.hasMore || typeof next !== "string" || !next) return; this.page.stack.push(this.page.cursor); this.page.cursor = next; }
     else { if (!this.page.stack.length) return; this.page.cursor = this.page.stack.pop(); }
     this.ensure();
-    if (typeof document !== "undefined") document.querySelector("#fabric-root [data-focus-key='results']")?.scrollIntoView?.({ block: "nearest" });
+    if (typeof document !== "undefined") document.querySelector(`${this.rootSelector} [data-focus-key='results']`)?.scrollIntoView?.({ block: "nearest" });
   }
 
   // ---- Formatting
@@ -668,6 +692,10 @@ class FabricExplorer {
   // Friendly labels and formatting come from FabricFieldMeta when it is loaded; without it, the field name and cell() as before.
   // Requests always use the original field names.
   fieldLabel(name) {
+    if (this.opts?.schemaLabels && this.info) {
+      const raw = Array.isArray(this.schema?.data?.fields) ? this.schema.data.fields.find((f) => f && f.name === name) : null, t = raw?.label;
+      if (typeof t === "string" && t.trim() && t.length <= 80) return t.trim();
+    }
     const m = FabricExplorer.global("FabricFieldMeta");
     if (m && typeof m.label === "function") { try { const t = m.label(this.ds, name); if (typeof t === "string" && t.trim()) return t.trim(); } catch { /* fall back */ } }
     return String(name);
@@ -701,6 +729,13 @@ class FabricExplorer {
     if (blocked) return this.bannersHtml() + this.p.errorHtml(blocked, "fabric-refresh");
     if (this.schema.error) return this.p.errorHtml(this.schema.error, "fabric-x-retry", "", `data-ds="${this.ds}"`);
     if (!this.info) return `<div class="fabric-explorer fx-explorer">${this.p.skeleton(6, 6)}</div>`;
+    if (this.recordId && this.recordRenderer) {
+      // Another module's record page (options.recordRenderer): the raw record response, the normalized schema; it draws its own
+      // loading, not-found and error states from this.record.
+      let inner = "";
+      try { inner = this.recordRenderer.html(this, this.record.data, this.info); } catch { inner = ""; }
+      return `<div class="fabric-explorer fx-explorer fx-explorer--record" data-ds="${this.ds}">${typeof inner === "string" ? inner : ""}</div>`;
+    }
     if (this.recordId) {
       // The record page is FabricRecordView's (it reads this.record, this.info, this.items…); the old detail is the fallback.
       const view = FabricExplorer.global("FabricRecordView");
@@ -811,7 +846,7 @@ class FabricExplorer {
   }
   windowText() {
     const w = this.records.data?.window;
-    if (!this.records.data) return "";
+    if (!this.records.data || !this.hasDateWindow) return "";
     const day = (v) => { const d = typeof v === "string" ? new Date(`${v.slice(0, 10)}T00:00:00Z`) : null; if (!d || Number.isNaN(d.getTime())) return ""; try { return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeZone: "UTC" }).format(d); } catch { return v.slice(0, 10); } };
     const from = day(w?.dateFrom), to = day(w?.dateTo);
     if (from && to) return `Showing ${this.esc(from)} – ${this.esc(to)} (UTC)`;
@@ -848,7 +883,7 @@ class FabricExplorer {
     else if (s.data && Array.isArray(s.data.items) && s.data.items.length) results = this.tableHtml(s.data, s.loading) + this.pagerHtml(s.data, s.loading);
     else if (stale && stale.items.length) results = this.tableHtml(stale, true) + this.pagerHtml(stale, true);
     else if (!s.data) results = this.p.skeleton(Math.min(this.columns.length, 8));
-    else results = `<div class="fx-grid__empty quiet-empty fabric-empty">${icon("search")}<span><strong>No rows match</strong><small>Try other dates, another filter or different search text.</small></span><button type="button" class="fx-btn" data-action="fabric-x-clear" data-ds="${ds}" data-focus-key="clear">Clear filters</button></div>`;
+    else results = `<div class="fx-grid__empty quiet-empty fabric-empty">${icon("search")}<span><strong>No rows match</strong><small>${this.hasDateWindow ? "Try other dates, another filter or different search text." : "Try another filter or different search text."}</small></span><button type="button" class="fx-btn" data-action="fabric-x-clear" data-ds="${ds}" data-focus-key="clear">Clear filters</button></div>`;
     const notice = this.notice ? `<p class="fx-status fx-status--info fabric-notice" role="status">${this.esc(this.notice)}</p>` : "";
     if (this.fb.open && this.fb.values) setTimeout(() => this.builder()?.syncPicker?.(this), 0); // mount the value picker once drawn
     return `<div class="fx-explorer__head" id="fabric-${ds}-head">${this.headHtml()}</div>${notice}<div class="fx-explorer__split" id="fabric-${ds}-split"><div class="fx-explorer__main fabric-results" ${s.loading ? 'aria-busy="true"' : ""}>${results}</div></div>`;
@@ -884,7 +919,7 @@ class FabricExplorer {
     // data attribute: the phone card shows it (CSS ::before attr(data-label)); the header's title still names the field.
     const meta = cols.map((name) => { const f = this.info.byName.get(name); return { name, type: f?.type, num: this.isNumeric(f?.type) ? "fx-grid__num fabric-num" : "", label: this.attr(this.fieldLabel(name)) }; });
     const rows = d.items.map((item) => {
-      const values = item && typeof item.values === "object" && item.values ? item.values : {}, id = typeof item?.id === "string" && FabricExplorer.ID.test(item.id) ? item.id : "";
+      const values = item && typeof item.values === "object" && item.values ? item.values : {}, id = this.validId(item?.id) ? item.id : "";
       const on = Boolean(id) && id === this.selectedId;
       return `<tr${id ? ` data-action="fabric-x-select" data-ds="${ds}" data-id="${id}"` : ""}${on ? ' class="is-selected" aria-selected="true"' : ""}>${meta.map((c, i) => {
         const v = Object.hasOwn(values, c.name) ? values[c.name] : null, empty = v === null || v === undefined || v === "", shown = this.gridCell(v, c.type, c.name);
@@ -901,7 +936,7 @@ class FabricExplorer {
     const more = Boolean(d.pagination?.hasMore && d.pagination?.nextCursor);
     const chips = this.activeFilters(), summary = chips.length ? chips.slice(0, 2).map((c) => `${c.label}: ${c.text.length > 32 ? `${c.text.slice(0, 31)}…` : c.text}`).join(" · ") + (chips.length > 2 ? ` · +${chips.length - 2}` : "") : "No filters";
     const range = busy ? "Loading…" : `Page ${n.toLocaleString()} · Rows ${start.toLocaleString()}–${end.toLocaleString()}${more ? " · more available" : ""}`;
-    return `<div class="fx-gridfoot fabric-pager"><span class="fx-gridfoot__range" role="status">${range}</span><span class="fx-gridfoot__ctx"><span class="fabric-window">${this.windowText()}</span><span class="fx-gridfoot__filters">${this.esc(summary)}</span></span><span class="fx-gridfoot__page fabric-pager-buttons"><button type="button" class="fx-btn" data-action="fabric-x-page" data-ds="${this.ds}" data-dir="prev" data-focus-key="prev" ${this.page.stack.length && !busy ? "" : "disabled"}>${icon("left")}<span>Previous</span></button><button type="button" class="fx-btn" data-action="fabric-x-page" data-ds="${this.ds}" data-dir="next" data-focus-key="next" ${more && !busy ? "" : "disabled"}><span>Next</span>${icon("right")}</button></span></div>`;
+    return `<div class="fx-gridfoot fabric-pager"><span class="fx-gridfoot__range" role="status">${range}</span><span class="fx-gridfoot__ctx">${this.hasDateWindow ? `<span class="fabric-window">${this.windowText()}</span>` : ""}<span class="fx-gridfoot__filters">${this.esc(summary)}</span></span><span class="fx-gridfoot__page fabric-pager-buttons"><button type="button" class="fx-btn" data-action="fabric-x-page" data-ds="${this.ds}" data-dir="prev" data-focus-key="prev" ${this.page.stack.length && !busy ? "" : "disabled"}>${icon("left")}<span>Previous</span></button><button type="button" class="fx-btn" data-action="fabric-x-page" data-ds="${this.ds}" data-dir="next" data-focus-key="next" ${more && !busy ? "" : "disabled"}><span>Next</span>${icon("right")}</button></span></div>`;
   }
   recordHtml() {
     const ds = this.ds, crumb = `<nav class="fabric-breadcrumb" aria-label="Breadcrumb"><a href="${this.attr(this.listHref())}" data-action="fabric-x-back" data-ds="${ds}">${icon("left")} ${this.esc(this.label)}</a><span aria-hidden="true">/</span><span aria-current="page">Record</span></nav>`;
@@ -937,7 +972,7 @@ class FabricExplorer {
   // ---- Events (FabricDataPanel passes every "fabric-x-…" event for this dataset here)
   // The selected row is marked in place (no redraw, so the grid keeps its scroll position); it is kept for the next render.
   selectRow(id) {
-    if (!FabricExplorer.ID.test(id || "")) return;
+    if (!this.validId(id || "")) return;
     this.selectedId = id;
     if (typeof document === "undefined") return;
     document.querySelectorAll(`[data-grid="${this.ds}"] tbody tr`).forEach((tr) => { const on = tr.dataset?.id === id; tr.classList?.toggle("is-selected", on); if (on) tr.setAttribute?.("aria-selected", "true"); else tr.removeAttribute?.("aria-selected"); });
@@ -947,7 +982,7 @@ class FabricExplorer {
     if (typeof document === "undefined" || this.recordId || this.problem || this.records.error) return false;
     const s = this.records, d = s.data && Array.isArray(s.data.items) && s.data.items.length ? s.data : this.stalePage();
     if (!d || !Array.isArray(d.items) || !d.items.length) return false;
-    const grid = document.querySelector(`#fabric-root [data-grid="${this.ds}"]`), main = grid?.closest?.(".fabric-results");
+    const grid = document.querySelector(`${this.rootSelector} [data-grid="${this.ds}"]`), main = grid?.closest?.(".fabric-results");
     if (!grid || !main) return false;
     grid.classList?.add("is-busy"); grid.setAttribute?.("aria-busy", "true"); main.setAttribute?.("aria-busy", "true");
     const range = main.querySelector(".fx-gridfoot__range"); if (range) range.textContent = "Loading…";
@@ -964,7 +999,7 @@ class FabricExplorer {
     if (outer) el.outerHTML = html; else el.innerHTML = html;
     if (!inside) return;
     const esc = (v) => (typeof CSS !== "undefined" && CSS.escape ? CSS.escape(v) : v), scope = outer ? document.querySelector(`#${esc(own)}`) : el;
-    const next = (id && document.querySelector(`#${esc(id)}`)) || (key && scope?.querySelector(`[data-focus-key="${esc(key)}"]`)) || (fallback && document.querySelector(`#fabric-root ${fallback}`)) || null;
+    const next = (id && document.querySelector(`#${esc(id)}`)) || (key && scope?.querySelector(`[data-focus-key="${esc(key)}"]`)) || (fallback && document.querySelector(`${this.rootSelector} ${fallback}`)) || null;
     if (!next || next.disabled) return;
     next.focus?.({ preventScroll: true });
     if (sel && sel[0] !== null && sel[0] !== undefined && typeof next.setSelectionRange === "function") { try { next.setSelectionRange(sel[0], sel[1]); } catch { /* not a text field */ } }
@@ -973,9 +1008,9 @@ class FabricExplorer {
   // state. False when the list isn't on screen as expected (or the notice line would change): the caller redraws in full.
   redrawChrome(fallback = "") {
     if (typeof document === "undefined" || this.recordId) return false;
-    const ds = this.ds, head = document.querySelector(`#fabric-root #fabric-${ds}-head`), split = document.querySelector(`#fabric-root #fabric-${ds}-split`);
+    const ds = this.ds, root = this.rootSelector, head = document.querySelector(`${root} #fabric-${ds}-head`), split = document.querySelector(`${root} #fabric-${ds}-split`);
     if (!head || !split) return false;
-    const note = document.querySelector("#fabric-root .fabric-notice");
+    const note = document.querySelector(`${root} .fabric-notice`);
     if (Boolean(note) !== Boolean(this.notice)) return false;
     if (note && note.textContent !== this.notice) note.textContent = this.notice;
     this.swap(head, this.headHtml(), false, fallback);
@@ -991,10 +1026,21 @@ class FabricExplorer {
     this.p.redraw();
     const after = find(); if (after && before) { after.scrollTop = top; after.scrollLeft = left; }
   }
-  focus(selector) { if (typeof document !== "undefined") document.querySelector(`#fabric-root ${selector}`)?.focus?.({ preventScroll: true }); }
+  focus(selector) { if (typeof document !== "undefined") document.querySelector(`${this.rootSelector} ${selector}`)?.focus?.({ preventScroll: true }); }
   onAction(action, target, event) {
     if (action.startsWith("fabric-r-")) { const view = FabricExplorer.global("FabricRecordView"); if (view && typeof view.onAction === "function") view.onAction(this, action, target, event); return; }
-    if (action === "fabric-x-open") { const id = target.dataset.id; if (FabricExplorer.ID.test(id || "")) { this.selectedId = id; this.openRecord(id); this.p.c.update(); if (typeof document !== "undefined") document.querySelector(".fabric-breadcrumb a")?.focus?.(); } return; }
+    if (action === "fabric-x-open") {
+      const id = target.dataset.id;
+      if (!this.validId(id || "")) return;
+      const R = this.recordRenderer;
+      this.selectedId = id;
+      if (R && typeof R.rememberRow === "function") { try { R.rememberRow(this, id); } catch { /* the renderer's own concern */ } }
+      this.openRecord(id); this.p.c.update();
+      // With a record renderer, it places focus itself (its heading); Fabric's record page: the breadcrumb, as before.
+      if (R) { if (typeof R.focusHeading === "function") { try { R.focusHeading(this); } catch { /* not drawn */ } } }
+      else if (typeof document !== "undefined") document.querySelector(".fabric-breadcrumb a")?.focus?.();
+      return;
+    }
     // The builder (fabric-f-*), column menus (fabric-c-*) and saved filters (fabric-s-*): their own modules, when loaded.
     if (action.startsWith("fabric-f-")) { this.builder()?.onAction?.(this, action, target, event); return; }
     if (action.startsWith("fabric-c-")) { const C = FabricExplorer.global("FabricColumnMenu"); if (C && typeof C.onAction === "function") C.onAction(this, action, target, event); return; }
@@ -1088,6 +1134,8 @@ class FabricExplorer {
     if (!this.recordId && this.chooser && event?.key === "Escape" && event.target?.closest?.(`#fabric-${this.ds}-chooser, [data-action="fabric-x-columns"][data-focus-key="cols"]`)) {
       event.preventDefault?.(); this.onAction("fabric-x-columns", { dataset: { action: "fabric-x-columns", ds: this.ds, focusKey: "cols-done" } }); return;
     }
-    if (!this.recordId) return; const view = FabricExplorer.global("FabricRecordView"); if (view && typeof view.onKeydown === "function") view.onKeydown(this, event); }
+    if (!this.recordId) return;
+    const R = this.recordRenderer; if (R) { if (typeof R.onKeydown === "function") R.onKeydown(this, event); return; }
+    const view = FabricExplorer.global("FabricRecordView"); if (view && typeof view.onKeydown === "function") view.onKeydown(this, event); }
 }
 if (typeof window !== "undefined") window.FabricExplorer = FabricExplorer;

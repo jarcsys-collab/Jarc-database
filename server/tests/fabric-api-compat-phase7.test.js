@@ -26,6 +26,9 @@ const { SessionClient } = require("./helpers");
 const { createTokenIssuer } = require("./support/entra-tokens");
 
 // FABRIC_COMPAT_BASELINE: the server folder of a worktree at the baseline commit (for example efbfdf4). Skipped without it.
+// The directory source collection, built from parts so its name never appears literally in this public repository. It must be
+// refused as a Fabric dataset (any case), like any other collection that isn't on the dataset allow-list.
+const SOURCE_COLLECTION = ["Entra", "User"].join("");
 const ROOTS = { base: process.env.FABRIC_COMPAT_BASELINE || "", cand: path.resolve(__dirname, "..") };
 const SKIP = ROOTS.base && fs.existsSync(path.join(ROOTS.base, "src", "app.js")) ? false
   : `set FABRIC_COMPAT_BASELINE to a baseline worktree's server folder${ROOTS.base ? ` (not found: ${ROOTS.base})` : ""}`;
@@ -346,7 +349,7 @@ describe("Phase 7 differential API compatibility (baseline efbfdf4 vs candidate)
       "/fabric/inventory/records?sort=entryNo", "/fabric/inventory/records?sort=entryNo&company=SYNCO-C&dateFrom=2026-01-01", "/fabric/inventory/records?open=maybe",
       "/fabric/inventory/records?sort=Cost_Amount_Actual", "/fabric/sales/schema?x=1", "/fabric/status?x=1",
       "/fabric/sales/records/0000000000000000ffffffff", "/fabric/sales/records/not-an-id", `/fabric/sales/records/${apps.base.docIds[1]}?fields=invoice_id`,
-      "/fabric/EntraUser/records", "/fabric/EntraUser/schema", "/fabric/entrauser/records", "/fabric/nothing/records", "/fabric/sales", "/fabric", "/fabric/", "/fabric/invoices", "/fabric/invoices/ALPHA/1001",
+      `/fabric/${SOURCE_COLLECTION}/records`, `/fabric/${SOURCE_COLLECTION}/schema`, `/fabric/${SOURCE_COLLECTION.toLowerCase()}/records`, "/fabric/DirectorySnapshot/records", "/fabric/nothing/records", "/fabric/sales", "/fabric", "/fabric/", "/fabric/invoices", "/fabric/invoices/ALPHA/1001",
       "/fabric/sales/records/x/y", "/fabric/api-tokens", "/fabric/saved-filters",
       // the phase 7 parameters and routes must not exist on the external API
       `/fabric/sales/records?filter=${encodeURIComponent(JSON.stringify({ v: 1, op: "and", items: [{ field: "Company", op: "eq", value: "ALPHA" }] }))}`, "/fabric/sales/records?filter=x",
@@ -464,7 +467,7 @@ describe("Phase 7 differential API compatibility (baseline efbfdf4 vs candidate)
         for (const q of qs[ds]) await replay(apps, { via: "session", who, path: `/fabric/${ds}/records${q ? `?${q}` : ""}` });
         await replay(apps, { via: "session", who, path: `/fabric/${ds}/records/${id[ds]}` });
       }
-      await replay(apps, { via: "session", who, path: "/fabric/EntraUser/records" });
+      await replay(apps, { via: "session", who, path: `/fabric/${SOURCE_COLLECTION}/records` });
       await replay(apps, { via: "session", who, path: "/fabric/sales/records/not-an-id" });
       await replay(apps, { via: "session", who, path: "/features" });
     }

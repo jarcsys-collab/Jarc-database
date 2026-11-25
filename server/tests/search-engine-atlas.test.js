@@ -466,11 +466,13 @@ describe("Static checks (S7, S23) and the printed index commands", () => {
   test("L7: the static exclusion list covers the search repository and the reconcile script", () => {
     for (const f of ["record-search-repository.js", "record-search-reconcile.js"]) assert.ok(files.some((x) => x.endsWith(f) && fs.existsSync(x)), f);
   });
+  // The directory source collection's name is built from parts so it never appears literally in this public repository.
+  const FORBIDDEN_SOURCES = new RegExp(["FactSales", "FactInventory", ["Entra", "User"].join(""), "DirectorySnapshot", "fabric"].join("|"), "i");
   test("search code never reaches Fabric Data or the employee collection", () => {
     for (const f of files) {
       const text = fs.readFileSync(f, "utf8");
       assert.ok(!/require\([^)]*fabric/i.test(text), f);
-      assert.ok(!/FactSales|FactInventory|EntraUser|fabric/i.test(text), f);
+      assert.ok(!FORBIDDEN_SOURCES.test(text), f);
     }
     assert.equal(require("../src/config").JARC_DB_NAME, "jarc_database");
   });

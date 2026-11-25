@@ -5,6 +5,7 @@ class AppController {
     this.integrations = typeof IntegrationsPanel === "function" ? new IntegrationsPanel(this) : null; this.view.integrations = this.integrations;
     this.health = typeof SystemHealthPanel === "function" ? new SystemHealthPanel(this) : null; this.view.healthPanel = this.health;
     this.fabric = typeof FabricDataPanel === "function" ? new FabricDataPanel(this) : null; this.view.fabricPanel = this.fabric; // Fabric Data (FabricDataPanel.js)
+    this.employees = typeof EmployeesPanel === "function" && typeof FabricExplorer === "function" ? new EmployeesPanel(this) : null; this.view.employeesPanel = this.employees; // People directory (EmployeesPanel.js)
     this.accounts = typeof AccountsPanel === "function" ? new AccountsPanel(this) : null; this.view.accountsPanel = this.accounts;
     this.apiTokens = typeof ApiTokensPanel === "function" ? new ApiTokensPanel(this) : null; this.view.apiTokensPanel = this.apiTokens;
     this.groupActions = typeof BoardGroupActions === "function" ? new BoardGroupActions(this) : null;
@@ -137,6 +138,8 @@ class AppController {
     // A direct board link (/boards/{id}, kept through Microsoft sign-in by EntraAuth): open that board before anything is drawn,
     // so the default screen never shows first. The board list is complete by now (only boards this person may see).
     if (this.model.screen === "fabric" && !this.fabric?.visible) this.model.screen = "home"; // a saved Fabric screen, no longer permitted
+    // A saved People directory screen, no longer permitted (a direct /admin/employees link still shows its no-access state).
+    if (this.model.screen === "employees" && !this.employees?.visible && !(typeof EmployeesPanel === "function" && EmployeesPanel.parsePath(window.location.pathname))) this.model.screen = "home";
     this.applyBoardUrl(); this.boardUrlStart = true;
     this.root.onclick = null; this.ready = true; this.update(); this.integrations?.afterStart(); this.appearance?.afterStart();
     if (!this.shellOnly) this.startBackground();
@@ -210,6 +213,13 @@ class AppController {
   }
   // Actions that work while JARC's data isn't loaded yet; anything else loads it first (then runs as usual).
   static SHELL_ACTIONS = new Set(["toggle-nav","collapse-nav","close-overlay","notifications","notification-filter","mark-notifications","profile-menu","theme","shortcuts","request-logout","confirm-logout","lock-session","retry-save","dismiss-hint","entra-sign-in","entra-sign-out"]);
+  // An action for the People directory (EmployeesPanel): emp-* from inside #employees-root, and fabric-* from inside it or from
+  // a saved-filter dialog (#overlay-root) opened while its screen is shown. Never from #fabric-root.
+  peopleAction(action, target) {
+    if (typeof action !== "string" || (!action.startsWith("emp-") && !action.startsWith("fabric-"))) return false;
+    if (target?.closest?.("#employees-root")) return true;
+    return this.model.screen === "employees" && action.startsWith("fabric-s-") && Boolean(target?.closest?.("#overlay-root .fx-sf-dialog"));
+  }
   shellAction(action, target) {
     if (action.startsWith("fabric-") || AppController.SHELL_ACTIONS.has(action)) return true;
     return action === "nav" && Boolean(AppModules.forScreen(target.dataset.screen));
@@ -532,6 +542,14 @@ class AppController {
     if (!this.boardLinksEnabled) return false;
     const id = AppController.boardIdInPath(window.location.pathname), model = this.model;
     if (id === undefined) {
+      // People directory (/admin/employees/…): a screen of the shell, not a module. For someone who may not open it (or a list
+      // they may not open) the screen shows its no-access state; nothing is requested and no data is drawn.
+      const people = this.employees && typeof EmployeesPanel === "function" ? EmployeesPanel.parsePath(window.location.pathname, window.location.search) : undefined;
+      if (people !== undefined) {
+        const changed = this.employees.visible ? Boolean(this.employees.applyRoute(people)) : false;
+        if (model.screen !== "employees" || model.boardLinkProblem) { model.openScreen("employees"); return true; }
+        return changed;
+      }
       // App module paths (/fabric/… for Fabric Data): only for the people who may open the module; anyone else gets the usual
       // screen (and the address becomes /). Arriving from a JARC screen (Back/Forward) remembers the way back.
       const modules = typeof AppModules === "function" ? AppModules.all() : (this.fabric && typeof FabricDataPanel === "function" ? [{ id: "fabric", screen: "fabric", visible: (c) => Boolean(c.fabric?.visible), parsePath: (p, s) => FabricDataPanel.parsePath(p, s), applyRoute: (c, r) => c.fabric.applyRoute(r) }] : []);
@@ -586,7 +604,9 @@ class AppController {
     const model = this.model, start = this.boardUrlStart; this.boardUrlStart = false;
     let wanted = "/", fabricSearch = null;
     const mod = typeof AppModules === "function" ? AppModules.active(this) : (model.screen === "fabric" && this.fabric?.visible ? { urlFor: (c) => c.fabric.urlFor() } : null);
-    if (mod) { const u = mod.urlFor(this); wanted = u.path; fabricSearch = u.search; }
+    const people = model.screen === "employees" && this.employees && typeof EmployeesPanel === "function";
+    if (people) { const u = this.employees.urlFor(); wanted = u.path; fabricSearch = u.search; }
+    else if (mod) { const u = mod.urlFor(this); wanted = u.path; fabricSearch = u.search; }
     else if (model.screen === "board" && model.board) { const link = this.boardLinkFor(model.board); if (!link) return; wanted = new URL(link).pathname; }
     // ?view= follows the open saved view (a view not saved yet has no server ID: the address names the board only).
     const params = new URLSearchParams(this.fabric && FabricDataPanel.parsePath(window.location.pathname) !== undefined ? "" : window.location.search), viewId = model.screen === "board" && model.activeView ? model.serverId(model.activeView.id) : "";
@@ -594,7 +614,7 @@ class AppController {
     const search = fabricSearch ?? (params.toString() ? `?${params}` : "");
     // Fabric Data: the same page spelled differently (percent-encoding, the old /fabric/sales-lines) is rewritten in place, and a
     // filter change replaces the entry: neither adds to the history.
-    const here = window.location.pathname === "/index.html" ? "/" : window.location.pathname, fabricHere = fabricSearch !== null && FabricDataPanel.samePath(here, wanted);
+    const here = window.location.pathname === "/index.html" ? "/" : window.location.pathname, fabricHere = fabricSearch !== null && (people ? EmployeesPanel.samePath(here, wanted) : FabricDataPanel.samePath(here, wanted));
     const state = { jarcScreen: model.screen };
     if (here === wanted && window.location.search === search) { if (window.history.state?.jarcScreen !== state.jarcScreen) window.history.replaceState(state, "", window.location.href); return; }
     // The address already names this board another way (an older link by server ID, upper case, a trailing slash): it becomes
@@ -607,7 +627,7 @@ class AppController {
   get signedIn() { return Boolean(this.auth.authenticated) && !this.entraGate; }
   // A gate means the person's session ended: search results, recents and filters of the Command Center are dropped
   // before the gate shows, so the next person at this computer can't open them.
-  showEntraGate(state, options = {}) { this.entraGate = state; this.command?.reset(); this.fabric?.forget(); this.clearModuleReturn?.(); this.navOpen = false; this.applyNav(); this.view.renderEntraGate(state, this.model, options); }
+  showEntraGate(state, options = {}) { this.entraGate = state; this.command?.reset(); this.fabric?.forget(); this.employees?.forget(); this.clearModuleReturn?.(); this.navOpen = false; this.applyNav(); this.view.renderEntraGate(state, this.model, options); }
   entraSignIn() {
     this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true });
     this.entra.signIn().catch(() => this.showEntraGate("error", { message: "Microsoft sign-in couldn't start. Check your connection, then try again." }));
@@ -715,6 +735,9 @@ class AppController {
     if (window.jarcStorage?.connection === "offline" && ["cell-open","set-cell-option","inline-add","open-form","new-item","new-board","add-column","create-workspace","import"].includes(action)) { this.view.toast(StorageError.describe(StorageError.CODES.OFFLINE).message); return; }
     if (action.startsWith("integration-") && this.integrations) { if (target.tagName !== "SELECT") this.integrations.onAction(action, target); return; }
     if (action.startsWith("health-") && this.health) { if (target.tagName !== "FORM") this.health.onAction(action, target); return; }
+    // People directory: its own emp-* actions, and the explorer's fabric-* actions from inside #employees-root (or from its
+    // saved-filter dialogs while the screen is open) go to its explorers, never to Fabric Data.
+    if (this.employees && this.peopleAction(action, target)) { if (!["SELECT", "INPUT", "FORM"].includes(target.tagName)) this.employees.onAction(action, target, event); return; }
     if (action.startsWith("fabric-") && this.fabric) { if (!["SELECT", "INPUT", "FORM"].includes(target.tagName)) this.fabric.onAction(action, target, event); return; }
     if (action.startsWith("apitok-") && this.apiTokens) { if (!["SELECT", "INPUT", "FORM"].includes(target.tagName)) this.apiTokens.onAction(action, target); return; }
     if (action.startsWith("acct-") && this.accounts) { if (!["SELECT", "INPUT", "FORM"].includes(target.tagName)) this.accounts.onAction(action, target); return; }
@@ -965,6 +988,7 @@ class AppController {
     if (event.target.dataset?.action === "comment-input") { this.comments?.onInput(event.target); return; }
     if (event.target.dataset?.action === "acct-search") { this.accounts?.onSearch(event.target); return; }
     if (event.target.dataset?.action?.startsWith("apitok-")) { this.apiTokens?.onInput(event.target); return; }
+    if (this.employees && this.peopleAction(event.target.dataset?.action, event.target)) { this.employees.onInput(event.target, event); return; }
     if (event.target.dataset?.action?.startsWith("fabric-")) { this.fabric?.onInput(event.target, event); return; }
     if (event.target.dataset.action === "files-filter") { const term=event.target.value.trim().toLowerCase(), panel=event.target.closest(".files-popover"); let shown=0; panel?.querySelectorAll(".file-list > li:not([data-upload])").forEach((li)=>{const hit=!term||li.textContent.toLowerCase().includes(term);li.hidden=!hit;if(hit)shown+=1;}); const empty=panel?.querySelector(".file-filter-empty"); if(empty)empty.hidden=shown>0; return; }
     if (event.target.dataset.action === "cell-option-search") { this.view.filterOptions(event.target.closest(".cell-options-popover"),event.target.value); return; }
@@ -1170,6 +1194,7 @@ class AppController {
     }
     if (event.target.dataset?.action === "integration-wizard-workspace") { this.integrations?.onAction("integration-wizard-workspace", event.target); return; }
     if (event.target.dataset?.action?.startsWith("apitok-")) { this.apiTokens?.onChange(event.target); return; }
+    if (this.employees && this.peopleAction(event.target.dataset?.action, event.target)) { this.employees.onChange(event.target); return; }
     if (event.target.dataset?.action?.startsWith("fabric-")) { this.fabric?.onChange(event.target); return; }
     if (event.target.dataset?.action === "acct-filter") { this.accounts?.onFilter(event.target); return; }
     if (event.target.dataset?.action === "acct-ws-role") { this.accounts?.onChange(event.target); return; }
@@ -1207,6 +1232,7 @@ class AppController {
     if (action?.startsWith("integration-")) { this.integrations?.onSubmit(action, data, event.target); return; }
     if (action?.startsWith("health-")) { this.health?.onSubmit(action, data, event.target); return; }
     if (action?.startsWith("apitok-")) { this.apiTokens?.onSubmit(action, event.target); return; }
+    if (this.employees && this.peopleAction(action, event.target)) { this.employees.onSubmit(action, event.target); return; }
     if (action?.startsWith("fabric-")) { this.fabric?.onSubmit(action, event.target); return; }
     if (action?.startsWith("acct-")) { this.accounts?.onSubmit(action, data, event.target); return; }
     if ((action === "group-form" || action === "group-delete-form") && this.groupActions) { this.groupActions.onSubmit(action, data, event.target); return; }

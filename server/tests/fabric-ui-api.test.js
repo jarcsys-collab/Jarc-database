@@ -403,9 +403,10 @@ describe("Fabric API Management: documentation", () => {
     const html = docs(env, `https://x.test/${HOSTILE}`);
     assert.doesNotMatch(html, /<img/);
     assert.doesNotMatch(html, /jarc_[A-Za-z0-9]{20,}/);
-    assert.doesNotMatch(html, /\b[A-Z][a-z]+User\b|EntraUser|employee|Employee/);
+    // [A-Z][a-z]+User also covers the directory source collection's name, without writing it here (public repository).
+    assert.doesNotMatch(html, /\b[A-Z][a-z]+User\b|employee|Employee/);
     assert.doesNotMatch(html, /\/invoices|sales-lines/);
-    for (const f of ["FabricApiDocs.js", "FabricApiPanel.js"]) assert.doesNotMatch(read(f), /\b[A-Z][a-z]+User\b|EntraUser|employee/i, f);
+    for (const f of ["FabricApiDocs.js", "FabricApiPanel.js"]) assert.doesNotMatch(read(f), /\b[A-Z][a-z]+User\b|employee/i, f);
     for (const f of ["FabricApiDocs.js", "FabricApiPanel.js"]) assert.doesNotMatch(read(f).replace(/^\s*\/\/.*$/gm, ""), /localStorage|sessionStorage|indexedDB|setInterval/, f);
   });
 });

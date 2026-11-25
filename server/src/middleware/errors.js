@@ -27,7 +27,8 @@ function apiNotFound(req, res) { sendError(res, 404, "NOT_FOUND"); }
 // Logged request path: search text (q and filter values) is personal and never written to the server log; neither is the query
 // of the token API, where a mistaken client may have put a token. Fabric Data paths and queries hold invoice numbers and company
 // names: only the route prefix is logged. Case-insensitive, like Express routing (/api/v1/FABRIC/… reaches the same routes).
-const FABRIC_PATH = /^\/api\/v1\/(external\/)?fabric(?=[/?#]|$)/i;
+// The People directory (Employee Management) is redacted the same way: its paths carry profile IDs and filters.
+const FABRIC_PATH = /^\/api\/v1\/(?:(?:external\/)?fabric|admin\/employees)(?=[/?#]|$)/i;
 const loggedUrl = (req) => {
   const url = String(req.originalUrl || "");
   const fabric = FABRIC_PATH.exec(url);

@@ -58,8 +58,10 @@ class FabricSavedFilters {
   // ---- Small helpers
   static esc(x, v) { return typeof x?.p?.esc === "function" ? x.p.esc(v) : String(v ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`); }
   static attr(x, v) { return typeof x?.p?.attr === "function" ? x.p.attr(v) : FabricSavedFilters.esc(x, v); }
-  static label(x) { return x?.label || (typeof FabricExplorer === "function" && FabricExplorer.DATASETS?.[x?.ds]) || x?.ds || "this dataset"; }
-  static path(x, id) { return `${FabricSavedFilters.BASE}/${encodeURIComponent(x.ds)}${id ? `/${encodeURIComponent(id)}` : ""}`; }
+  static label(x) { return x?.label || (x?.datasets && typeof x.datasets === "object" ? x.datasets[x?.ds] : null) || (typeof FabricExplorer === "function" && FabricExplorer.DATASETS?.[x?.ds]) || x?.ds || "this dataset"; }
+  // The explorer's saved-filters base (FabricExplorer options.savedFiltersBase), else Fabric Data's BASE.
+  static base(x) { const b = x?.savedFiltersBase; return typeof b === "string" && /^\/[a-z][a-z/-]{0,63}$/.test(b) ? b : FabricSavedFilters.BASE; }
+  static path(x, id) { return `${FabricSavedFilters.base(x)}/${encodeURIComponent(x.ds)}${id ? `/${encodeURIComponent(id)}` : ""}`; }
   static redraw(x) { x?.p?.redraw?.(); x?.p?.redrawObjects?.(); }
   static announce(x, text) { x?.p?.announce?.(text); }
   static focus(selector) {

@@ -33,6 +33,7 @@ const { AccountService } = require("./services/account-service");
 const { ApiTokenRepository } = require("./repositories/mongo/api-token-repository");
 const { PersonalViewRepository } = require("./repositories/mongo/personal-view-repository");
 const { FabricSavedFilterRepository } = require("./repositories/mongo/fabric-saved-filter-repository");
+const { EmployeeSavedFilterRepository } = require("./repositories/mongo/employee-saved-filter-repository");
 const { ApiTokenService } = require("./services/api-token-service");
 
 // fileStore: where attachment bytes go (default GridFS in the same database; tests pass a MemoryFileStore).
@@ -64,7 +65,9 @@ function createDataLayer({ connection, logger = console, fileStore = new GridFsF
     apiTokens: new ApiTokenRepository(db),
     personalViews: new PersonalViewRepository(db),
     // Fabric Data saved filters (routes/fabric-saved-filters.js); JARC's database, never Fabric's. Used only while Fabric Data is on.
-    fabricSavedFilters: new FabricSavedFilterRepository(db)
+    fabricSavedFilters: new FabricSavedFilterRepository(db),
+    // Employee Management saved filters (routes/employee-saved-filters.js); JARC's database. Created lazily, no indexes.
+    employeeSavedFilters: new EmployeeSavedFilterRepository(db)
   };
   const defaultProvider = attachments?.defaultProvider || "gridfs";
   const drive = googleDrive?.enabled ? new GoogleDriveService({ repos, config: googleDrive, fetch, logger, activeForUploads: defaultProvider === "gdrive", ...googleDriveOptions }) : null;

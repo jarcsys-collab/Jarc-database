@@ -1,0 +1,58 @@
+/* People directory (EmployeesPanel.js, EmployeesObjects.js): a screen of the normal JARC shell that reuses the Fabric Data
+   look (fabric-ui.css tokens, fabric-objects.css, fabric-explorer.css, all scoped under .fx-app). Only what differs lives here:
+   the screen is a bounded box inside the shell's content area (not a full-viewport module), the heading has a subtitle, and the
+   grouping views. Light and dark come from the --fx- tokens (fabric-ui.css: :root[data-theme="dark"] .fx-app). */
+
+.fx-app.emp-app { flex: none; height: calc(100vh - 132px); height: calc(100dvh - 132px); min-height: 480px; border: 1px solid var(--fx-border-strong); border-radius: 8px; overflow: hidden; }
+.fx-app.emp-app--closed { height: auto; min-height: 0; }
+.fx-app.emp-app--closed .fx-app__body { overflow: visible; }
+
+.fx-app .emp-appbar { min-height: 48px; flex-wrap: wrap; row-gap: 2px; }
+.fx-app .emp-appbar__heading { display: flex; flex-direction: column; min-width: 0; flex: 0 1 auto; }
+.fx-app .emp-appbar__heading .fx-appbar__title { margin: 0; line-height: 1.2; }
+/* The heading takes focus only as a fallback (tabindex -1, e.g. Back to list before the rows are drawn): no ring on click. */
+.fx-app .emp-appbar__heading .fx-appbar__title:focus { outline: none; }
+.fx-app .emp-appbar__heading .fx-appbar__title:focus-visible { outline: 2px solid var(--fx-focus); outline-offset: 2px; }
+
+/* State messages (no access, administrators only, unavailable, errors): the title on its own line above the text. */
+.fx-app .emp-state__title { display: block; margin-bottom: 2px; }
+.fx-app .emp-state__msg { display: block; }
+.fx-app .emp-appbar__subtitle { margin: 0; font-size: var(--fx-text-sm); color: var(--fx-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+
+/* The divider and caption before the administrators' lists in the navigation. */
+.fx-app .emp-objects__sep { margin-top: 6px; padding-top: 4px; border-top: 1px solid var(--fx-border); }
+.fx-app .emp-objects__caption { display: block; padding: 2px 10px; font-size: var(--fx-text-sm); color: var(--fx-muted); text-transform: none; }
+
+/* Grouping views: a two-column table (value, accounts) using the grid styles. */
+.fx-app .emp-group__head { display: flex; flex-direction: column; gap: 2px; }
+.fx-app .emp-group__title { margin: 0; font-size: var(--fx-text-lg, 15px); color: var(--fx-heading); }
+.fx-app .emp-group__title:focus { outline: none; }
+.fx-app .emp-group__title:focus-visible { outline: 2px solid var(--fx-focus); outline-offset: 2px; }
+.fx-app .emp-group { max-height: none; overflow: auto; }
+.fx-app .emp-group__table { width: 100%; max-width: 720px; }
+.fx-app .emp-group__table th[scope="row"] { font-weight: 400; text-align: left; }
+.fx-app .emp-group__unassigned { font-style: italic; color: var(--fx-muted); }
+.fx-app .emp-group__total { margin: 0; }
+
+/* The record page without EmployeeProfile.js (fallback only). */
+.fx-app .emp-basic { display: grid; grid-template-columns: minmax(140px, max-content) 1fr; gap: 4px 16px; margin: 8px 0 0; }
+.fx-app .emp-basic > div { display: contents; }
+.fx-app .emp-basic dt { color: var(--fx-muted); }
+.fx-app .emp-basic dd { margin: 0; overflow-wrap: anywhere; }
+
+/* Tablets and phones: the navigation is a drawer (fabric-objects.css). Here the screen sits in the scrolling shell page, so the
+   drawer and its backdrop are fixed to the viewport (always fully on screen, whatever the page's scroll). */
+@media (max-width: 1024px) {
+  .fx-app.emp-app { height: calc(100dvh - 120px); }
+  .fx-app.emp-app .fx-objects { position: fixed; top: 0; bottom: 0; left: 0; z-index: 50; }
+  .fx-app.emp-app .fx-objects__backdrop:not([hidden]) { position: fixed; z-index: 49; }
+}
+/* Phones: the grid's rows become cards (fabric-explorer.css); the page scrolls as one, so the box grows with its content. */
+@media (max-width: 620px) {
+  .fx-app.emp-app { height: auto; min-height: calc(100dvh - 120px); border-radius: 0; border-left: 0; border-right: 0; }
+  .fx-app.emp-app .fx-app__split { min-height: 420px; }
+  .fx-app .emp-appbar__subtitle { white-space: normal; }
+  .fx-app .emp-basic { grid-template-columns: 1fr; }
+  .fx-app .emp-basic dt { margin-top: 6px; }
+}
+@media (forced-colors: active) { .fx-app.emp-app { border-color: CanvasText; } }

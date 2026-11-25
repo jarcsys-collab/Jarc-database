@@ -21,6 +21,8 @@ const { sessionAuthentication, stillAllowed } = require("./auth/session");
 const { canManageDrive, actorCanManageDrive } = require("./integrations/google-drive/access");
 const { Access } = require("./auth/access");
 const { apiNotFound, errorHandler, sendError } = require("./middleware/errors");
+const { securityHeaders, cspReportHandler } = require("./middleware/security-headers");
+const { employeeRoutes } = require("./employees");
 const { ActivityStream } = require("./realtime/activity-stream");
 const { eventRoutes, entraSessionCheck } = require("./routes/events");
 const { fileRoutes } = require("./routes/files");
@@ -66,6 +68,8 @@ const BOARD_LINK_PATH = /^\/boards\/[^/]{1,200}\/?$/;
 // FABRIC_INVOICE_VIEWS.
 const FABRIC_LINK_PATH = /^\/fabric\/((inventory|sales)(\/records\/[^/]{1,64})?|api)\/?$/;
 const FABRIC_INVOICE_LINK_PATH = /^\/fabric\/invoices(\/[^/]{1,400}\/[^/]{1,400})?\/?$/;
+// People directory (Employee Management) links: the screen itself asks the server what this person may see.
+const EMPLOYEES_LINK_PATH = /^\/admin\/employees(?:\/(?:active|all|disabled|guests)(?:\/records\/[A-Za-z0-9_-]{22})?|\/groups\/(?:department|jobTitle|officeLocation|emailDomain))?\/?$/;
 const rootRelative = (html) => html.replace(/(\s(?:href|src))="assets\//g, '$1="/assets/');
 
 // An optional feature not stated is off in production and on elsewhere.
@@ -82,7 +86,7 @@ const resolveFeatures = (features = {}, environment = "development") => { const 
 // apiTokens: { key, perMinute? } turns on API tokens for other systems (config/index.js); Entra sign-in only. Without it their paths don't exist.
 // fabricData: { config, service, limiter? } (config.fabricData with the switch on, and a FabricService from src/fabric) turns on Fabric Data;
 // Entra sign-in only. Without it (or with the switch off) its paths don't exist and /features doesn't mention it.
-function createApp({ fabricData = null, apiTokens = null, features = {}, repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console, slowRequestMs = 0, monitor = defaultMonitor } = {}) {
+function createApp({ securityHeadersOptions = {}, employees: employeesOption = null, fabricData = null, apiTokens = null, features = {}, repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console, slowRequestMs = 0, monitor = defaultMonitor } = {}) {
   if (environment === "production" && (enableDevStateApi || enableDevResourceApi)) {
     throw new Error("Development (pre-auth) APIs can't be enabled in production.");
   }
@@ -96,9 +100,15 @@ function createApp({ fabricData = null, apiTokens = null, features = {}, reposit
   const fabric = fabricData?.config?.enabled ? fabricData : null;
   if (fabric && !auth) throw new Error("Fabric Data needs Microsoft Entra ID sign-in.");
   if (fabric && !fabric.service) throw new Error("createApp needs the Fabric service when Fabric Data is on.");
+  // Employee Management (JARC administration): its own permission lists; it shares only the read-only directory connection.
+  const employees = employeesOption?.config?.enabled ? employeesOption : null;
+  if (employees && !auth) throw new Error("Employee Management needs Microsoft Entra ID sign-in.");
   const app = express();
   app.disable("x-powered-by");
-  app.use((req, res, next) => { res.set("X-Content-Type-Options", "nosniff"); next(); });
+  // P0 security headers: nosniff, X-Frame-Options DENY, enforced frame-ancestors/base-uri/object-src, Referrer-Policy,
+  // Permissions-Policy, HSTS (production over HTTPS) and the full Content-Security-Policy in REPORT-ONLY mode (enforced
+  // after the reports are reviewed). A route's own stricter headers (attachments, Google Drive return) are kept.
+  app.use(securityHeaders({ environment, entra: auth?.entra || null, reportUri: "/api/v1/csp-report", ...securityHeadersOptions }));
 
   const api = express.Router();
   api.use(slowRequestLog({ logger, thresholdMs: slowRequestMs }));
@@ -113,6 +123,9 @@ function createApp({ fabricData = null, apiTokens = null, features = {}, reposit
   // Saved Fabric filters take small bodies only (a filter is at most 4 KB canonical): their own 32 KB parser runs first, so the
   // app-wide 10 MB parser below sees the body as already read and skips it (L3, Fabric phase 7 security review).
   if (fabric) api.use("/fabric/saved-filters", express.json({ limit: "32kb", strict: true, inflate: false }));
+  if (employees) api.use("/admin/employees/saved-filters", express.json({ limit: "32kb", strict: true, inflate: false }));
+  // CSP violation reports (report-only policy): own 8 KB parser, logs directive + blocked origin only, rate-limited.
+  api.use("/csp-report", cspReportHandler({ logger }));
   api.use(express.json({ limit: JSON_BODY_LIMIT, strict: true, inflate: false }));
   api.use(healthRoutes({ environment, version, database: dataLayer?.connection ?? null }));
   api.use(authConfigRoutes({ mode: auth ? "entra" : "dev", entra: auth?.entra }));
@@ -197,8 +210,10 @@ function createApp({ fabricData = null, apiTokens = null, features = {}, reposit
     // What this server has switched on, so the browser shows only what will work. The routes above are what enforce it.
     // apiTokenAdmin: whether THIS caller is a JARC API administrator (only to show or hide the Developer sections).
     // fabricData (only while it's on): what THIS caller may do there; apiTokens: whether Fabric API tokens can exist at all.
+    // Employee Management (People directory): only the employee lists decide; never Fabric lists or workspace roles.
+    if (employees) api.use("/admin/employees", identify, employeeRoutes({ employees, savedFilterRepo: dataLayer.repos.employeeSavedFilters || null, logger }));
     api.get("/features", identify, (req, res) => {
-      const fabricFlags = fabricAccessFor ? { fabricData: { ...fabricAccessFor(req.actor), apiTokens: Boolean(tokenService) } } : {};
+      const fabricFlags = { ...(fabricAccessFor ? { fabricData: { ...fabricAccessFor(req.actor), apiTokens: Boolean(tokenService) } } : {}), ...(employees ? { employees: employees.accessFor(req.actor) } : {}) };
       res.status(200).set("Cache-Control", "no-store").json({ features: tokenService ? { ...enabled, apiTokens: true, apiTokenAdmin: tokenService.isAdmin(req.actor), ...fabricFlags } : { ...enabled, ...fabricFlags } });
     });
     api.use(identify, preferenceRoutes({ repos: dataLayer.repos }));
@@ -231,6 +246,11 @@ function createApp({ fabricData = null, apiTokens = null, features = {}, reposit
   // Fabric Data links (/fabric/inventory, /fabric/sales, /fabric/api, …/records/{id}; the invoice pages only with the invoice
   // views): only while it's on. The page itself checks whether this person may read Fabric Data.
   if (fabric) app.get(fabric.config.invoiceViews === true ? [FABRIC_LINK_PATH, FABRIC_INVOICE_LINK_PATH] : FABRIC_LINK_PATH, (req, res, next) => {
+    try { boardLinkHtml ??= rootRelative(fs.readFileSync(path.join(siteDir, "index.html"), "utf8")); } catch { return next(); }
+    res.set("Cache-Control", "no-cache").type("html").send(boardLinkHtml);
+  });
+  // People directory links: the page HTML only (no data); every directory request is authorised by the employee lists.
+  if (employees) app.get(EMPLOYEES_LINK_PATH, (req, res, next) => {
     try { boardLinkHtml ??= rootRelative(fs.readFileSync(path.join(siteDir, "index.html"), "utf8")); } catch { return next(); }
     res.set("Cache-Control", "no-cache").type("html").send(boardLinkHtml);
   });

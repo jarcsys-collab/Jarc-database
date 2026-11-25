@@ -1,0 +1,56 @@
+/* People directory: the profile page of one directory account (EmployeeProfile.js).
+   Uses the shared --fx-* tokens from fabric-ui.css (light and dark); the var() fallbacks are the light values.
+   Two columns of sections from 1025 px, one column below; no horizontal overflow at 320 px. */
+
+.emp-profile { display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 1100px; color: var(--fx-text-c, #1d2b38); font-size: var(--fx-text, 13px); line-height: var(--fx-lh, 1.35); overflow-wrap: anywhere; }
+.emp-profile *, .emp-profile *::before, .emp-profile *::after { box-sizing: border-box; }
+.emp-p__bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.emp-p__bar a.fx-btn { text-decoration: none; }
+.emp-p__title { margin: 0; font-size: 20px; font-weight: 700; color: var(--fx-heading, #1f3d5c); min-width: 0; }
+.emp-p__title:focus { outline: none; }
+.emp-p__title:focus-visible { outline: 2px solid var(--fx-focus, #1f6fb2); outline-offset: 2px; }
+
+.emp-p__head { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.emp-p__avatar { flex: 0 0 48px; width: 48px; height: 48px; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background: var(--fx-selected, #c5daf0); color: var(--fx-heading, #1f3d5c); border: 1px solid var(--fx-border-strong, #a7b9cc); font-size: 17px; font-weight: 700; letter-spacing: .02em; user-select: none; }
+.emp-p__who { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.emp-p__subtitle { margin: 0; color: var(--fx-label, #3b5068); }
+.emp-p__badges { margin: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.emp-p__badge { display: inline-flex; align-items: center; min-height: 20px; padding: 0 8px; border-radius: 10px; border: 1px solid var(--fx-border-strong, #a7b9cc); background: var(--fx-surface, #fff); color: var(--fx-text-c, #1d2b38); font-size: var(--fx-text-sm, 12px); font-weight: 600; }
+.emp-p__badge--on { border-color: var(--fx-ok, #2e7d32); }
+.emp-p__badge--off { border-color: var(--fx-err-bd, #e0a3a3); background: var(--fx-err-bg, #fdecec); color: var(--fx-err-fg, #8a1c1c); }
+
+.emp-p__sections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
+.emp-p__section { min-width: 0; padding: 8px 12px 10px; background: var(--fx-surface, #fff); border: 1px solid var(--fx-border-strong, #a7b9cc); border-radius: var(--fx-radius, 3px); }
+.emp-p__section-title { margin: 0 0 8px; font-size: var(--fx-text-sm, 12px); font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--fx-heading, #1f3d5c); }
+.emp-p__grid { display: grid; grid-template-columns: minmax(110px, 38%) minmax(0, 1fr); gap: 6px 12px; margin: 0; }
+.emp-p__row { display: contents; }
+.emp-p__label { margin: 0; color: var(--fx-label, #3b5068); font-size: var(--fx-text-sm, 12px); align-self: center; }
+.emp-p__value { margin: 0; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; user-select: text; -webkit-user-select: text; }
+.emp-p__text { min-width: 0; }
+.emp-p__none { font-style: italic; color: var(--fx-null, #5f7185); }
+.emp-p__mail { color: var(--fx-link, #0a4f8f); min-width: 0; }
+.emp-p__copy { height: 24px; padding: 0 8px; font-size: var(--fx-text-sm, 12px); }
+.emp-p__note { margin: 8px 0 0; font-size: var(--fx-text-sm, 12px); color: var(--fx-muted, #4b6178); }
+.emp-p__source { margin: 0; font-size: var(--fx-text-sm, 12px); color: var(--fx-muted, #4b6178); }
+.emp-p__banner, .emp-p__state { margin: 0; }
+.emp-profile :is(a, button):focus-visible { outline: 2px solid var(--fx-focus, #1f6fb2); outline-offset: 1px; }
+
+@media (max-width: 1024px) {
+  .emp-p__sections { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 620px) {
+  .emp-p__title { font-size: 18px; }
+  .emp-p__grid { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
+  .emp-p__label { margin-top: 6px; }
+  .emp-p__section { padding: 8px; }
+}
+@media (pointer: coarse) {
+  .emp-profile .fx-btn, .emp-p__copy { min-height: 32px; height: auto; }
+  .emp-p__mail { display: inline-flex; align-items: center; min-height: 32px; }
+}
+@media (forced-colors: active) {
+  .emp-p__section, .emp-p__badge, .emp-p__avatar { border-color: CanvasText; }
+}
+@media print {
+  .emp-p__bar, .emp-p__copy, .emp-p__section[aria-labelledby^="emp-p-contact-"] { display: none; }
+}

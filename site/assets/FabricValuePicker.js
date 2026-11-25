@@ -142,7 +142,9 @@ class FabricValuePicker {
     p.set("limit", String(this.limit));
     if (c.filter) p.set("filter", FabricValuePicker.encodeFilter(c.filter));
     if (c.dateFrom && c.dateTo) { p.set("dateFrom", c.dateFrom); p.set("dateTo", c.dateTo); }
-    return `/fabric/${encodeURIComponent(this.ds)}/values?${p.toString()}`;
+    // The explorer's API base (FabricExplorer options.apiBase; Fabric Data's "/fabric" by default).
+    const base = typeof this.x?.apiBase === "string" && /^\/[a-z][a-z/-]{0,63}$/.test(this.x.apiBase) ? this.x.apiBase : "/fabric";
+    return `${base}/${encodeURIComponent(this.ds)}/values?${p.toString()}`;
   }
   cacheKey(path) {
     let user = "";

@@ -122,6 +122,7 @@ class AppView {
       <button class="nav-item ${model.screen === "mywork" ? "active" : ""}" data-action="nav" data-screen="mywork" data-tooltip="My work">${icon("work")}<span class="nav-text">My work</span><span class="nav-count">${model.myWork.length}</span></button>
       <button class="nav-item ${model.screen === "integrations" ? "active" : ""}" data-action="nav" data-screen="integrations" data-tooltip="Integrations">${icon("link")}<span class="nav-text">Integrations</span></button>
       ${this.healthPanel?.visible ? `<button class="nav-item ${model.screen === "system-health" ? "active" : ""}" data-action="nav" data-screen="system-health" data-tooltip="System Health" ${model.screen === "system-health" ? 'aria-current="page"' : ""}>${icon("refresh")}<span class="nav-text">System Health</span></button>` : ""}
+      ${this.employeesPanel?.visible ? `<button class="nav-item nav-employees ${model.screen === "employees" ? "active" : ""}" data-action="nav" data-screen="employees" data-tooltip="People directory" ${model.screen === "employees" ? 'aria-current="page"' : ""}>${icon("people")}<span class="nav-text">People directory</span></button>` : ""}
       <button class="nav-item" data-action="command-palette" data-place="nav" data-tooltip="Search">${icon("search")}<span class="nav-text">Search</span><span class="nav-shortcut">${this.shortcutLabel()}</span></button>
       ${module ? "" : this.workspaceNav(model)}
     </nav><div class="sidebar-footer">${this.moduleNav(model)}<button class="sidebar-settings" data-action="settings" title="Settings">${icon("settings")}<span>Settings</span></button><button class="sidebar-settings" data-action="shortcuts" title="Keyboard shortcuts (?)">${icon("command")}<span>Keyboard shortcuts</span></button></div></aside>`;
@@ -156,7 +157,7 @@ class AppView {
 
   topbar(model, { module = null } = {}) {
     const avatar=this.safeImage(model.profile.avatar)?`<img src="${this.attr(this.safeImage(model.profile.avatar))}" alt="">`:this.escape(model.profile.initials);
-    const context = module ? this.moduleExit(module) : `<span>${this.escape(model.workspace?.name||"JARC Database")}</span><span class="context-divider">/</span><strong>${!model.workspace?"Get started":model.screen==="home"?"Home":model.screen==="mywork"?"My work":model.screen==="system-health"?"System Health":model.screen==="integrations"?"Integrations":this.escape(model.board?.name||"Boards")}</strong>`;
+    const context = module ? this.moduleExit(module) : `<span>${this.escape(model.workspace?.name||"JARC Database")}</span><span class="context-divider">/</span><strong>${!model.workspace?"Get started":model.screen==="home"?"Home":model.screen==="mywork"?"My work":model.screen==="system-health"?"System Health":model.screen==="employees"?"People directory":model.screen==="integrations"?"Integrations":this.escape(model.board?.name||"Boards")}</strong>`;
     return `<header class="topbar"><div class="top-context"><button class="icon-button mobile-only nav-toggle" data-action="toggle-nav" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false"><span class="nav-toggle-open">${icon("menu")}</span><span class="nav-toggle-close">${icon("close")}</span></button>${context}</div><button class="global-search-button" data-action="command-palette" data-place="topbar">${icon("search")}<span>Search JARC</span><kbd>${this.shortcutLabel()}</kbd></button><div class="top-actions"><button class="save-state" data-action="retry-save" title="Data is saved in this browser" aria-live="polite"><i></i> Saved locally</button><button class="notification-button icon-button" data-action="notifications" aria-label="Notifications">${icon("bell")}${model.unreadCount?`<b>${model.unreadCount}</b>`:""}</button><button class="profile profile-button" data-action="profile-menu" style="background:${this.cssColor(model.profile.color,"#0f9489")}" aria-label="Open profile">${avatar}</button></div></header>`;
   }
 
@@ -164,6 +165,8 @@ class AppView {
     if (model.boardLinkProblem) return this.boardLinkProblem(model.boardLinkProblem);
     if (model.screen === "integrations" && this.integrations) return this.integrations.html();
     if (model.screen === "system-health" && this.healthPanel) return this.healthPanel.html();
+    // People directory (JARC administration, EmployeesPanel.js): without employees.view it draws only its no-access state.
+    if (model.screen === "employees" && this.employeesPanel) return this.employeesPanel.html();
     // App modules (Fabric Data) work without any workspace; for anyone else a saved module screen shows Home. The module body
     // fills the rest of the viewport; data-module-scroll marks it for AppController's scroll keeping.
     const mod = typeof AppModules === "function" ? AppModules.forScreen(model.screen) : (model.screen === "fabric" ? { id: "fabric", render: (v) => v.fabricPanel.html() } : null);

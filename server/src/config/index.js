@@ -78,6 +78,8 @@ function loadConfig(env = process.env) {
     apiTokens: loadApiTokenConfig(env, authMode),
     // Fabric Data (read-only sales data from a separate MongoDB, src/fabric/): off everywhere unless JARC_FEATURE_FABRIC_DATA=true.
     fabricData: loadFabricDataConfig(env, authMode),
+    // Employee Management (JARC administration, read-only people directory, src/employees/): off unless JARC_FEATURE_EMPLOYEES=true.
+    employees: loadEmployeeConfig(env, authMode),
     // Requests slower than this are logged by route pattern (middleware/slow-requests.js). 0 turns it off.
     slowRequestMs: loadSlowRequestMs(env),
     // MongoDB commands at least this slow are listed on the System Health page (monitoring/monitor.js). Unset: 500.
@@ -223,6 +225,51 @@ function loadFabricDataConfig(env, authMode) {
     invoiceViews: invoiceViews === "true"
   }, uri);
 }
+// Employee Management (src/employees/, a JARC administration feature): a read-only people directory over ONE collection of the
+// separate MongoDB that FABRIC_MONGODB_URI / FABRIC_MONGODB_DB_NAME point to (the connection only: no permission is shared).
+//   JARC_FEATURE_EMPLOYEES          true or false (anything else stops startup). Unset: off. While off, none of the variables
+//                                   below are looked at, the paths don't exist and /features doesn't mention it.
+//   EMPLOYEE_DIRECTORY_COLLECTION   required when on: 1 to 64 of [A-Za-z0-9_.-], never a system collection or a Fabric dataset's.
+//   EMPLOYEE_VIEWER_OIDS            who may open the directory (dataset active), at most 50. Empty: nobody.
+//   EMPLOYEE_ADMIN_OIDS             who may also open the admin datasets (all, disabled, guests), at most 20. Admin implies viewer.
+//                                   Empty: nobody. Both matched within ENTRA_TENANT_ID only; never JARC.Admin, workspace roles,
+//                                   open access or any other feature's list.
+// Also needs (when on) AUTH_MODE=entra, FABRIC_MONGODB_URI, FABRIC_MONGODB_DB_NAME (same rules as there) and JARC_API_TOKEN_KEY
+// (the key of the opaque profile IDs; no new secret).
+const EMPLOYEE_COLLECTION = /^[A-Za-z0-9_.-]{1,64}$/;
+function loadEmployeeConfig(env, authMode) {
+  const value = env.JARC_FEATURE_EMPLOYEES;
+  if (value !== undefined && value !== "" && value !== "true" && value !== "false") throw new ConfigError("JARC_FEATURE_EMPLOYEES must be true or false.");
+  const hide = (config, uri, idKey) => Object.freeze(Object.defineProperties(config, { uri: { value: uri, enumerable: false }, idKey: { value: idKey, enumerable: false } }));
+  if (value !== "true") return hide({ enabled: false, collection: null, dbName: null, tenantId: null, viewerObjectIds: Object.freeze([]), adminObjectIds: Object.freeze([]) }, null, null);
+  if (authMode !== "entra") throw new ConfigError("JARC_FEATURE_EMPLOYEES=true needs AUTH_MODE=entra.");
+  const missing = ["EMPLOYEE_DIRECTORY_COLLECTION", "FABRIC_MONGODB_URI", "FABRIC_MONGODB_DB_NAME", "JARC_API_TOKEN_KEY"].filter((name) => !env[name]);
+  if (missing.length) throw new ConfigError(`JARC_FEATURE_EMPLOYEES=true needs ${missing.join(", ")}.`);
+  const collection = env.EMPLOYEE_DIRECTORY_COLLECTION;
+  if (!EMPLOYEE_COLLECTION.test(collection) || collection.toLowerCase().startsWith("system.")) throw new ConfigError("EMPLOYEE_DIRECTORY_COLLECTION must be 1 to 64 letters, digits, \"_\", \".\" or \"-\" (not a system collection).");
+  if (["factsales", "factinventory"].includes(collection.toLowerCase())) throw new ConfigError("EMPLOYEE_DIRECTORY_COLLECTION must not be a Fabric Data collection.");
+  const dbName = env.FABRIC_MONGODB_DB_NAME;
+  if (!FABRIC_DB_NAME.test(dbName)) throw new ConfigError("FABRIC_MONGODB_DB_NAME must be 1 to 64 letters, digits, \"_\" or \"-\".");
+  if ([JARC_DB_NAME, env.MONGODB_DB_NAME].filter(Boolean).some((name) => name.toLowerCase() === dbName.toLowerCase())) throw new ConfigError("FABRIC_MONGODB_DB_NAME must not be JARC's own database.");
+  const uri = env.FABRIC_MONGODB_URI;
+  const hosts = mongoHosts(uri);
+  if (!hosts) throw new ConfigError("FABRIC_MONGODB_URI must be a mongodb:// or mongodb+srv:// connection string.");
+  let pathDb;
+  try { pathDb = decodeURIComponent((/^mongodb(?:\+srv)?:\/\/[^/?#]+(\/[^?#]*)?/.exec(uri)[1] || "/").slice(1)); } catch { throw new ConfigError("FABRIC_MONGODB_URI is not a valid connection string."); }
+  if (pathDb && pathDb !== dbName) throw new ConfigError("FABRIC_MONGODB_URI names a different database in its path. Remove it; the database always comes from FABRIC_MONGODB_DB_NAME.");
+  if (env.MONGODB_URI) {
+    if (uri === env.MONGODB_URI) throw new ConfigError("FABRIC_MONGODB_URI must not be JARC's MONGODB_URI.");
+    const jarcHosts = mongoHosts(env.MONGODB_URI) || [];
+    if (hosts.some((host) => jarcHosts.includes(host))) throw new ConfigError("FABRIC_MONGODB_URI must point to a different cluster from MONGODB_URI.");
+  }
+  const idKey = Buffer.from(env.JARC_API_TOKEN_KEY, "base64");
+  if (idKey.length !== 32) throw new ConfigError("JARC_API_TOKEN_KEY must be 32 random bytes, base64-encoded (for example: openssl rand -base64 32).");
+  const viewerObjectIds = loadObjectIdList(env, "EMPLOYEE_VIEWER_OIDS", 50);
+  const adminObjectIds = loadObjectIdList(env, "EMPLOYEE_ADMIN_OIDS", 20);
+  const tenantId = String(env.ENTRA_TENANT_ID || "").toLowerCase() || null;
+  return hide({ enabled: true, collection, dbName, tenantId, viewerObjectIds, adminObjectIds, queryTimeMs: 8000 }, uri, idKey);
+}
+
 // The lowercased host names (without ports or credentials) of a MongoDB connection string, or null when it isn't one.
 function mongoHosts(uri) {
   const match = /^mongodb(\+srv)?:\/\/([^/?#]+)/.exec(String(uri || ""));
@@ -482,4 +529,4 @@ function assertMongoUri(uri) {
   if (pathDb && pathDb !== JARC_DB_NAME) throw new ConfigError(`MONGODB_URI names a different database in its path. Remove it (or use "${JARC_DB_NAME}"); the database always comes from MONGODB_DB_NAME.`);
 }
 
-module.exports = { FEATURE_SWITCHES, loadConfig, loadAccountConfig, loadMondayConfig, loadGoogleDriveConfig, loadMidAttachmentsConfig, loadAttachmentConfig, loadApiAdminObjectIds, loadFabricDataConfig, assertJarcDatabaseName, ConfigError, JARC_DB_NAME, ACCESS_POLICIES };
+module.exports = { FEATURE_SWITCHES, loadConfig, loadAccountConfig, loadMondayConfig, loadGoogleDriveConfig, loadMidAttachmentsConfig, loadAttachmentConfig, loadApiAdminObjectIds, loadFabricDataConfig, loadEmployeeConfig, assertJarcDatabaseName, ConfigError, JARC_DB_NAME, ACCESS_POLICIES };
