@@ -123,7 +123,10 @@ describe("Query shape (S4, S11, S17)", () => {
     assert.equal(definition.mappings.fields.text.multi.bi.analyzer, "jarcBigram");
     assert.deepEqual(definition.analyzers.map((a) => [a.name, a.tokenizer.minGram, a.tokenizer.maxGram]), [["jarcTrigram", 3, 3], ["jarcBigram", 2, 2]]);
     assert.deepEqual(definition.storedSource, { include: ["boardId", "updatedAt"] });
-    assert.deepEqual(Object.keys(definition.mappings.fields).sort(), ["archived", "boardId", "name", "owner", "priority", "status", "text", "updatedAt"]);
+    // _id (objectId) is indexed so the query's sort { updatedAt: -1, _id: -1 } has its tie-break key in the index.
+    assert.deepEqual(definition.mappings.fields._id, { type: "objectId" });
+    assert.deepEqual(Object.keys(definition.mappings.fields).sort(), ["_id", "archived", "boardId", "name", "owner", "priority", "status", "text", "updatedAt"]);
+    assert.ok(Buffer.byteLength(JSON.stringify(definition)) < 3000, "within Atlas's 3 KB definition limit on Flex");
   });
 });
 

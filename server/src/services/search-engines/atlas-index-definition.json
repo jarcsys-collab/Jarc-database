@@ -10,6 +10,7 @@
         "type": "string", "analyzer": "jarcTrigram", "searchAnalyzer": "jarcTrigram", "indexOptions": "positions", "norms": "omit",
         "multi": { "bi": { "type": "string", "analyzer": "jarcBigram", "searchAnalyzer": "jarcBigram", "indexOptions": "docs", "norms": "omit" } }
       },
+      "_id": { "type": "objectId" },
       "boardId": { "type": "objectId" },
       "archived": { "type": "boolean" },
       "updatedAt": { "type": "date" },
