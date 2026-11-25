@@ -189,10 +189,12 @@ class FabricRepository {
   // ---- Guarded primitives (read only) ----
   // collection: a datasets.js collection name (FactSales by default). hint: an index name. unindexed: true only in
   // small-collection mode (source.js decides; the query still has maxTimeMS, a $limit and a $project).
-  aggregate(pipeline, { hint, unindexed = false, collection = SALES }) {
+  // maxTimeMs: a shorter server time limit for this one query (never longer than queryTimeMs).
+  aggregate(pipeline, { hint, unindexed = false, collection = SALES, maxTimeMs = null }) {
     assertSafePipeline(pipeline);
     if (!hint && unindexed !== true) throw new Error("fabric repository: every query needs a hint.");
-    return this.run(collection, (c) => c.aggregate(pipeline, { ...(hint ? { hint } : {}), maxTimeMS: this.queryTimeMs, allowDiskUse: false }).toArray());
+    const maxTimeMS = Number.isInteger(maxTimeMs) && maxTimeMs > 0 ? Math.min(maxTimeMs, this.queryTimeMs) : this.queryTimeMs;
+    return this.run(collection, (c) => c.aggregate(pipeline, { ...(hint ? { hint } : {}), maxTimeMS, allowDiskUse: false }).toArray());
   }
 
   countDocuments(filter, { hint, limit, unindexed = false, collection = SALES }) {
@@ -224,6 +226,28 @@ class FabricRepository {
     const sort = { $sort: toSort(keys) }, lim = { $limit: limit + 1 };
     const pipeline = hint ? [{ $match: match }, sort, lim, projection] : [{ $match: match }, projection, sort, lim];
     return this.aggregate(pipeline, { collection: dataset.collection, ...(hint ? { hint } : { unindexed: true }) });
+  }
+
+  // Distinct values of one allow-listed (never sensitive, never dotted) field, for the value picker (values.js):
+  //   $match (window + context + search + `after`) → $limit rowCap + 1 (a bound on MATCHED rows; values.js counts the window first when the match is selective) → $project (null, missing, "" and " "
+  //   become one blank bucket: null) → $group (value, rows) → $facet { values: by value in BSON order (blank first), limit + 1;
+  //   scanned: the rows grouped }.
+  // Indexed mode hints the dataset's index (the date window is its bound); small mode runs unindexed over a collection of at
+  // most FABRIC_UNINDEXED_SCAN_MAX documents. → { values: [{ _id, n }], rows }.
+  async distinctValues(dataset, { match, field, rowCap, limit, hint, maxTimeMs }) {
+    if (typeof field !== "string" || !dataset.fields.includes(field) || field.includes(".") || field.startsWith("$") || dataset.sensitive.includes(field)) throw new Error("fabric repository: values need an allow-listed, non-sensitive field.");
+    if (!Number.isInteger(rowCap) || rowCap < 1 || !Number.isInteger(limit) || limit < 1) throw new Error("fabric repository: values need a row cap and a limit.");
+    const ref = "$" + field;
+    const blank = { $or: [{ $eq: [{ $ifNull: [ref, null] }, null] }, { $eq: [ref, ""] }, { $eq: [ref, " "] }] };
+    const pipeline = [
+      { $match: match },
+      { $limit: rowCap + 1 },
+      { $project: { _id: 0, v: { $cond: [blank, null, ref] } } },
+      { $group: { _id: "$v", n: { $sum: 1 } } },
+      { $facet: { values: [{ $sort: { _id: 1 } }, { $limit: limit + 1 }], scanned: [{ $group: { _id: null, rows: { $sum: "$n" } } }] } }
+    ];
+    const [out] = await this.aggregate(pipeline, { collection: dataset.collection, maxTimeMs, ...(hint ? { hint } : { unindexed: true }) });
+    return { values: out?.values || [], rows: out?.scanned?.[0]?.rows ?? 0 };
   }
 
   // One record by _id with the given fields (the _id index always exists, so this is the same in every mode).

@@ -18,7 +18,7 @@ function load({ extra = "" } = {}) {
   const window = { location: { pathname: "/fabric/inventory", search: "", origin: "https://jarc.example.test" }, history: { replaceState() {}, pushState() {} }, localStorage, addEventListener() {}, dispatchEvent() {} };
   const document = { documentElement: { dataset: {}, style: { setProperty() {} } }, querySelector: () => null, querySelectorAll: () => [], addEventListener() {}, body: { classList: { add() {}, remove() {}, toggle() {}, contains: () => false } } };
   const context = vm.createContext({ window, document, console, Intl, Date, URL, URLSearchParams, encodeURIComponent, decodeURIComponent, setTimeout, clearTimeout, CSS: { escape: (v) => v } });
-  for (const f of ["AppView.js", "EntraAuth.js", "FabricApiDocs.js", "FabricApiPanel.js", "FabricExplorer.js", "FabricDataPanel.js"]) vm.runInContext(read(f), context, { filename: f });
+  for (const f of ["AppView.js", "EntraAuth.js", "FabricApiDocs.js", "FabricApiPanel.js", "FabricFilterModel.js", "FabricFilterBuilder.js", "FabricExplorer.js", "FabricDataPanel.js"]) vm.runInContext(read(f), context, { filename: f });
   if (extra) vm.runInContext(extra, context, { filename: "stub.js" });
   const get = (name) => vm.runInContext(name, context);
   return { context, get, FabricDataPanel: get("FabricDataPanel"), FabricExplorer: get("FabricExplorer"), AppView: get("AppView") };
@@ -27,7 +27,7 @@ function panelWith(env, answers) {
   const calls = [];
   const adapter = { mode: "resource", async request(method, p) { calls.push([method, p]); const hit = Object.entries(answers).find(([k]) => p === k || p.startsWith(`${k}?`)); if (!hit) throw Object.assign(new Error("no answer"), { code: "NOT_FOUND", cause: { status: 404 } }); return typeof hit[1] === "function" ? hit[1](p) : hit[1]; } };
   const view = new env.AppView({ innerHTML: "" });
-  const controller = { model: { features: { fabricData: { read: true } }, storage: { adapter }, screen: "fabric" }, view, update() {}, syncBoardUrl() {} };
+  const controller = { model: { features: { fabricData: { read: true } }, storage: { adapter }, screen: "fabric", me: "user:u1" }, view, update() {}, syncBoardUrl() {} };
   const panel = new env.FabricDataPanel(controller);
   view.fabricPanel = panel; controller.fabric = panel;
   return { panel, calls, x: panel.explorers.inventory };
@@ -69,25 +69,28 @@ describe("Fabric explorer list view", () => {
     assert.doesNotMatch(html, /data-action="[^"]*(create|edit|delete|import|export|archive)/);
   });
 
-  test("filter bar: collapsed by default (controls kept, hidden), expands on toggle, no request for toggles", async () => {
+  test("Filters opens the builder popover (no static form); toggles make no request; chips bar hidden while empty", async () => {
     const env = load(); const { x, calls } = await ready(env);
     let html = x.html();
-    assert.match(html, /class="fx-filterbar is-collapsed is-empty"><div class="fx-filterbar__panel" id="fabric-inventory-filters" hidden>/);
-    assert.match(html, /id="fabric-inventory-from" type="date"[^>]*value="2026-02-14"/, "dates from the server's window");
+    assert.match(html, /<div class="fx-filterbar is-empty" id="fabric-inventory-filters"><\/div>/);
+    assert.doesNotMatch(html, /class="fx-fb"|data-action="fabric-x-filter"/, "no builder and no old filter form until Filters is pressed");
+    assert.match(html, /data-action="fabric-x-filters"[^>]*aria-haspopup="dialog" aria-expanded="false" aria-controls="fabric-inventory-fb"/);
     const before = calls.length;
     x.onAction("fabric-x-filters", T({ ds: "inventory" })); await settle();
     html = x.html();
-    assert.match(html, /class="fx-filterbar is-open"><div class="fx-filterbar__panel" id="fabric-inventory-filters" >/);
+    assert.match(html, /<form class="fx-fb" id="fabric-inventory-fb" role="dialog"[^>]*data-action="fabric-f-form"/);
     assert.match(html, /data-action="fabric-x-filters"[^>]*aria-expanded="true"/);
-    x.onAction("fabric-x-filters", T({})); x.onAction("fabric-x-nav", T({})); x.onAction("fabric-x-columns", T({})); x.onAction("fabric-x-columns", T({}));
+    assert.match(html, /The default window is 2026-02-14 – 2026-03-15\./, "the builder names the server's window");
+    x.onAction("fabric-x-filters", T({})); assert.equal(x.fb.open, false, "pressed again: closed, draft discarded");
+    x.onAction("fabric-x-columns", T({})); x.onAction("fabric-x-columns", T({}));
     x.onAction("fabric-x-select", T({ id: ID2 })); await settle();
-    assert.equal(calls.length, before, "toggles, the chooser and row selection never fetch");
+    assert.equal(calls.length, before, "the builder, the chooser and row selection never fetch");
     assert.match(x.html(), new RegExp(`<tr data-action="fabric-x-select" data-ds="inventory" data-id="${ID2}" class="is-selected" aria-selected="true">`));
     assert.equal((x.html().match(/aria-selected="true"/g) || []).length, 1);
-    // A date problem opens the bar so the message is visible.
+    // A date problem (from the address or the legacy date action) is shown in place of the rows, with Edit filters.
     x.onChange({ dataset: { action: "fabric-x-date", edge: "from" }, value: "2026-03-10" }); await settle();
     x.onChange({ dataset: { action: "fabric-x-date", edge: "to" }, value: "2026-03-01" }); await settle();
-    assert.match(x.html(), /class="fx-filterbar is-open"[\s\S]*start date must be on or before the end date/);
+    assert.match(x.html(), /id="fabric-inventory-problem"><strong>Fix the dates to see rows\.<\/strong> The start date must be on or before the end date\.[\s\S]*data-focus-key="edit-filters"/);
   });
 
   test("column chooser: a batch of ticks is one request (after a short pause, or at once on Done); names still saved per tick", async () => {
@@ -96,7 +99,7 @@ describe("Fabric explorer list view", () => {
     x.onAction("fabric-x-columns", T({}));
     for (const name of ["Open", "Item_Description", "Entry_No"]) x.onChange({ dataset: { action: "fabric-x-col", name }, checked: name === "Open" });
     assert.equal(recordCalls(calls).length, before, "nothing asked while ticking");
-    assert.deepEqual(JSON.parse(env.get("window").localStorage.getItem("jarc.fabric.columns.inventory")), ["Posting_Date", "Company", "Entry_Type", "Item_No", "Quantity", "Open"], "remembered at once");
+    assert.deepEqual(JSON.parse(env.get("window").localStorage.getItem("jarc.fabric.columns.u1.inventory")), ["Posting_Date", "Company", "Entry_Type", "Item_No", "Quantity", "Open"], "remembered at once");
     await settle(400);
     assert.equal(recordCalls(calls).length, before + 1, "one request for the batch");
     assert.equal(lastQuery(calls).get("fields"), "Posting_Date,Company,Entry_Type,Item_No,Quantity,Open");
@@ -121,7 +124,8 @@ describe("Fabric explorer list view", () => {
     assert.match(html, /<span class="fx-chip__label">Search:<\/span> ITEM<\/span><button type="button" class="fx-chip__remove" data-action="fabric-x-chip" data-ds="inventory" data-key="q" aria-label="Remove filter Search">/);
     assert.match(html, /<span class="fx-chip__label">Company:<\/span> No company/);
     assert.match(html, /<span class="fx-chip__label">Open:<\/span> Yes/);
-    assert.match(html, /<span class="fx-badge"><span class="sr-only">, <\/span>3<span class="sr-only"> active<\/span><\/span>/);
+    // The badge counts conditions (Company, Open); the search is a chip but not a condition.
+    assert.match(html, /<span class="fx-badge"><span class="sr-only">, <\/span>2<span class="sr-only"> active<\/span><\/span>/);
     assert.match(html, /data-focus-key="clear-top" >/, "Clear filters enabled");
     const before = recordCalls(calls).length;
     x.onAction("fabric-x-chip", T({ key: "f:company" })); await settle();
@@ -156,7 +160,8 @@ describe("Fabric explorer list view", () => {
     assert.equal(q.get("sort"), "entryNo"); assert.equal(q.get("company"), "CO_A"); assert.equal(q.get("dateFrom"), null, "no dates with entryNo");
     html = x.html();
     assert.match(html, /aria-sort="descending"><button[^>]*data-sort="entryNo"[^>]*>Entry_No<span class="fx-sort-mark fabric-sort-mark" aria-hidden="true">▼/);
-    assert.match(html, /title="Company · string · sorted second, after Entry_No">Company<span class="fx-sort-then" aria-hidden="true">2nd/);
+    // Company is filtered now (company=CO_A): its header also carries the filter mark.
+    assert.match(html, /class="is-filtered" title="Company · string · sorted second, after Entry_No · filtered">Company<span class="fx-sort-then" aria-hidden="true">2nd[\s\S]*?<span class="fx-col-filtered"/);
     assert.doesNotMatch(html, /data-sort="date"[^>]*>Posting_Date<span class="fx-sort-mark fabric-sort-mark" aria-hidden="true">▼/);
     assert.equal((html.match(/aria-sort=/g) || []).length, 1);
     x.onAction("fabric-x-dir-toggle", T({})); await settle();
@@ -183,26 +188,18 @@ describe("Fabric explorer list view", () => {
     assert.match(sales.x.html(), /Showing all dates/);
   });
 
-  test("object navigation: companies already known only, quick filter in one request, collapsible", async () => {
+  test("no company shortcuts: Company is an ordinary filter field (the builder offers it), one request on Apply", async () => {
     const env = load(); const { x, calls } = await ready(env);
     const fetched = calls.length;
-    let html = x.html();
-    assert.match(html, /<aside class="fx-nav fx-explorer__nav" id="fabric-inventory-nav" aria-label="Objects">/);
-    assert.match(html, /data-action="fabric-x-nav-company" data-ds="inventory" data-company="" data-focus-key="nav-all" aria-current="true">All records/);
-    assert.match(html, /data-company="CO_A"[^>]*>CO_A<\/button>[\s\S]*data-company="CO_B"[^>]*>CO_B<\/button>/, "from the rows already loaded");
-    // Never presented as the complete list of companies.
-    assert.match(html, /Seen on loaded pages <span class="fx-nav__hint">\(not a complete list\)<\/span>/);
-    assert.match(html, /only companies seen on the pages loaded so far\. To choose any company, use Filters → Company\./);
-    assert.doesNotMatch(html, />All companies</, "the nav doesn't claim to list all companies");
-    assert.equal(calls.length, fetched, "no distinct-value request");
-    x.onAction("fabric-x-nav-company", T({ company: "CO_B" })); await settle();
-    assert.equal(lastQuery(calls).get("company"), "CO_B"); assert.equal(calls.length, fetched + 1);
-    assert.match(x.html(), /data-company="CO_B"[^>]*aria-current="true">CO_B/);
-    x.onAction("fabric-x-nav-company", T({ company: "" })); await settle();
-    assert.equal(lastQuery(calls).get("company"), null);
-    x.onAction("fabric-x-nav", T({})); html = x.html();
-    assert.match(html, /fx-explorer__nav is-collapsed[\s\S]*aria-expanded="false"[^>]*aria-label="Show object navigation"/);
-    assert.equal(calls.length, fetched + 2);
+    const html = x.html();
+    assert.doesNotMatch(html, /fx-explorer__nav|fabric-x-nav|Seen on loaded pages/, "the Phase 4 company navigation is gone (FabricObjects is the navigation)");
+    assert.ok(x.filterFields().some((f) => f.name === "Company"), "Company is a filter field");
+    assert.equal(x.openFilterFor("Company", { op: "eq", value: "CO_B" }), true);
+    assert.equal(calls.length, fetched, "opening the builder asks nothing");
+    x.onAction("fabric-f-apply", T({ ds: "inventory" })); await settle();
+    assert.equal(lastQuery(calls).get("company"), "CO_B", "legacy schema: sent as the equality parameter"); assert.equal(calls.length, fetched + 1);
+    x.onAction("fabric-x-chip", T({ key: "f:company" })); await settle();
+    assert.equal(lastQuery(calls).get("company"), null); assert.equal(calls.length, fetched + 2);
   });
 
   test("hostile values are escaped in cells, chips, navigation and the footer; empty values get an accessible marker", async () => {
@@ -211,8 +208,10 @@ describe("Fabric explorer list view", () => {
     x.onChange({ dataset: { action: "fabric-x-filter", filter: "entryType" }, value: HOSTILE }); await settle();
     const html = x.html();
     assert.doesNotMatch(html, /<img|<script/);
-    assert.match(html, /data-company="&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;"/);
     assert.match(html, /Entry type:<\/span> &lt;img/);
+    x.openFilterFor("Entry_Type");
+    assert.doesNotMatch(x.html(), /<img|<script/, "the builder escapes the draft's values");
+    assert.match(x.html(), /value="&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;"/);
     assert.match(html, /<span class="fx-null" title="No value"><span aria-hidden="true">—<\/span><span class="sr-only">No value<\/span><\/span>/);
     assert.match(html, /<td data-label="Quantity" class="fx-grid__num fabric-num"><span class="fx-null"/);
   });

@@ -137,6 +137,12 @@
   .fx-app .fx-explorer .fx-grid__table th, .fx-app .fx-explorer .fx-grid__table td { height: 34px; }
   .fx-app .fx-explorer .fx-chip__remove::after { inset: -8px; } /* 32px hit area */
 }
+/* Touch (13-browser-responsive-review.md, D7): header sort buttons and record links are at least 32 px tall on a coarse
+   pointer (they were 15–18 px). The desktop density (fine pointer) is unchanged. */
+@media (pointer: coarse) {
+  .fx-app .fx-explorer .fx-grid__sort { min-height: 32px; }
+  .fx-app .fx-explorer .fabric-link { display: inline-flex; align-items: center; min-height: 32px; }
+}
 @media (max-width: 1024px) {
   .fx-app .fx-explorer__nav { display: none; }
   /* The toolbar wraps onto a second row: primary tools first; Clear filters and Rows per page go together at the end. */
@@ -155,7 +161,9 @@
   .fx-app .fx-explorer__toolbar .fx-toolbar__spacer, .fx-app .fx-explorer__toolbar .fx-sep { display: none; }
   .fx-app .fx-explorer__split { padding: 8px 0; }
   .fx-app .fx-explorer .fx-grid { overflow: visible; border: 0; background: none; min-height: 0; }
-  .fx-app .fx-explorer .fx-grid__table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+  /* D5: the cards carry each column's name (data-label), so the clipped header row is also hidden: its sort and column-menu
+     buttons leave the Tab order instead of taking focus where nothing can be seen. */
+  .fx-app .fx-explorer .fx-grid__table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); visibility: hidden; }
   .fx-app .fx-explorer .fx-grid__table, .fx-app .fx-explorer .fx-grid__table tbody, .fx-app .fx-explorer .fx-grid__table tr, .fx-app .fx-explorer .fx-grid__table th, .fx-app .fx-explorer .fx-grid__table td { display: block; width: 100%; }
   .fx-app .fx-explorer .fx-grid__table tbody tr { margin-bottom: 8px; padding: 6px 10px; border: 1px solid var(--fx-border-strong, #a7b9cc); border-radius: var(--fx-radius, 3px); background: var(--fx-surface, #fff) !important; }
   .fx-app .fx-explorer .fx-grid__table tbody tr.is-selected { background: var(--fx-selected, #c5daf0) !important; }

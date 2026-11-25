@@ -62,7 +62,16 @@ const DATASETS = freezeDeep(Object.assign(Object.create(null), {
     defaultColumns: ["invoice_date", "Company", "invoice_id", "customer_name", "invoice_item_name", "invoice_item_quantity", "invoice_item_amount", "sales_data_source"],
     recordKey: ["Company", "invoice_id", "Line_No"],
     indexes: { date: { name: "fabric_invoice_date", keys: { invoice_date: -1, Company: 1, invoice_id: 1, _id: 1 } } },
-    maxDays: 92, windowOptionalWhenSmall: false, blankDateFields: []
+    maxDays: 92, windowOptionalWhenSmall: false, blankDateFields: [],
+    // Advanced filters (filter-model.js; audits 02 §4 and 03): category = few distinct values (kind "category", value list
+    // "distinct"); valueSearch = a searchable value list; disabled = constant, always empty or always null (no operators).
+    filtering: {
+      categories: ["Company", "sales_data_source", "sales_type", "classification", "category", "type", "level", "subcategory", "category_1", "category_2", "category_3",
+        "business_unit_2026", "Location_Code", "uom_code", "uom", "warehouse", "region", "Data_Table", "Salesperson_Code", "invoice_terms_description",
+        "is_tagged_product_db", "is_tagged_main_product_db", "is_tagged_customer_db", "is_tagged_territory_db"],
+      valueSearch: ["customer_id", "customer_name", "invoice_item_id", "invoice_item_name", "Ship_to_Name", "Order_No", "external_document_no"],
+      disabled: ["sales_data_type", "invoice_status"]
+    }
   },
   inventory: {
     name: "inventory", label: "Inventory", collection: "FactInventory",
@@ -86,7 +95,16 @@ const DATASETS = freezeDeep(Object.assign(Object.create(null), {
     // Small-collection mode may browse the whole collection (no date window); indexed mode follows the 92-day rule.
     maxDays: 92, windowOptionalWhenSmall: true,
     // Business Central writes 0001-01-01 for "no date": returned as null (years before 1900).
-    blankDateFields: ["Expiration_Date"]
+    blankDateFields: ["Expiration_Date"],
+    filtering: {
+      categories: ["Company", "Entry_Type", "Document_Type", "Order_Type", "Source_Type", "Unit_of_Measure_Code", "uom", "uom_base", "Global_Dimension_1_Code",
+        "Global_Dimension_2_Code", "category_1", "category_2", "category_3", "subcategory", "Location_Code", "warehouse_code", "warehouse_name"],
+      valueSearch: ["Item_No", "item_name", "Item_Description", "Document_No", "Lot_No", "Serial_No", "Source_No"],
+      // Constant or always empty (the legacy open= parameter stays for compatibility), and the always-zero decimals.
+      disabled: ["Variant_Code", "Customer_Code", "Return_Reason_Code", "Package_No", "Job_No", "Job_Task_No", "Shortcut_Dimension_3_Code", "Shortcut_Dimension_6_Code",
+        "Date_Filter", "Transfer_Type", "ETag", "Prod_Order_Comp_Line_No", "Open", "Drop_Shipment", "Assemble_to_Order",
+        "RunningBalance", "RunningBalanceLoc", "Shipped_Qty_Not_Returned", "Reserved_Quantity", "Sales_Amount_Expected"]
+    }
   }
 }));
 
@@ -111,6 +129,11 @@ for (const ds of Object.values(DATASETS)) {
     if (f.includes(".")) throw new Error(`fabric/datasets: ${ds.name} filters, sorts or searches a dotted field.`);
   }
   for (const f of ds.sensitive) if (!ds.fields.includes(f)) throw new Error(`fabric/datasets: ${ds.name} sensitive field is not in its allow-list.`);
+  // Advanced filters: the category and value-search lists name only allow-listed, non-sensitive, undotted string fields.
+  for (const f of [...ds.filtering.categories, ...ds.filtering.valueSearch]) {
+    if (!ds.fields.includes(f) || ds.sensitive.includes(f) || f.includes(".") || (ds.types[f] || "string") !== "string") throw new Error(`fabric/datasets: ${ds.name} filtering lists a field that can't have a value list.`);
+  }
+  for (const f of ds.filtering.disabled) if (!ds.fields.includes(f)) throw new Error(`fabric/datasets: ${ds.name} disables an unknown field.`);
   for (const [name, sort] of Object.entries(ds.sorts)) {
     if (sort.keys.at(-1)[0] !== "_id") throw new Error(`fabric/datasets: ${ds.name} sort ${name} must end in _id.`);
     if (JSON.stringify(Object.fromEntries(sort.keys)) !== JSON.stringify(ds.indexes[name]?.keys)) throw new Error(`fabric/datasets: ${ds.name} sort ${name} needs its recommended index.`);

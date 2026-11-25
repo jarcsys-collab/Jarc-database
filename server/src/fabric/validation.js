@@ -1,12 +1,17 @@
 // Fabric Data request parsing. Every failure is 400 VALIDATION_ERROR with a short reason that is safe to show. Query values
 // arrive as strings: unknown, repeated (array) or object parameters are refused, so nothing a client sends can become a field
-// name or an operator. Cursors are opaque (base64url JSON, at most 512 characters) and bound to the route, the sort and the
-// filters they were issued for.
+// name or an operator. Cursors are opaque (base64url JSON) and bound to the route, the sort and the filters they were issued
+// for: at most 512 characters, as before phase 7 (the external token API and the invoice views), and 2,048 only on the session
+// API's records route (advanced), where filter models and orderBy keys make longer positions. The session API (advanced) also takes filter= (the v1 model, filter-model.js), orderBy= and
+// searchField=; the external API refuses them as unknown parameters.
 const crypto = require("crypto");
 const { ObjectId, Decimal128 } = require("mongodb");
 const { ApiError } = require("../middleware/errors");
+const fm = require("./filter-model");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const CURSOR_MAX = 512; // the efbfdf4 limit: every route by default, the external API always
+const SESSION_CURSOR_MAX = 2048; // the session records route only (advanced)
 const LIMITS = Object.freeze({ defaultDays: 30, maxDays: 92, invoicePageMax: 100, linePageMax: 200, recordPageMax: 200, recordPageDefault: 100 });
 const fail = (message) => { throw new ApiError(400, "VALIDATION_ERROR", message); };
 const CONTROL = /[\u0000-\u001f\u007f]/;
@@ -75,6 +80,7 @@ const DECIMAL_TEXT = /^-?\d{1,34}(\.\d{1,34})?(E[+-]?\d{1,4})?$/;
 const encodeValue = (v) => {
   if (v === null || v === undefined) return null;
   if (typeof v === "string") return { s: v };
+  if (typeof v === "boolean") return { b: v };
   if (typeof v === "number" && Number.isFinite(v)) return { n: v };
   if (v instanceof Date) return { d: v.toISOString() };
   if (v?._bsontype === "ObjectId") return { o: v.toHexString() };
@@ -85,6 +91,7 @@ const decodeValue = (v) => {
   if (v === null) return null;
   if (!v || typeof v !== "object" || Array.isArray(v) || Object.keys(v).length !== 1) fail("cursor is not valid.");
   if (typeof v.s === "string" && v.s.length <= 400) return v.s;
+  if (typeof v.b === "boolean") return v.b;
   if (typeof v.n === "number" && Number.isFinite(v.n)) return v.n;
   if (typeof v.d === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(v.d) && !Number.isNaN(Date.parse(v.d))) return new Date(v.d);
   if (typeof v.o === "string" && /^[0-9a-f]{24}$/.test(v.o)) return ObjectId.createFromHexString(v.o);
@@ -95,22 +102,39 @@ const decodeValue = (v) => {
 // shaped the page, and its own position values: a client can neither forge a position nor reuse a cursor for another list.
 // After a restart every earlier cursor is refused (400, "start again from the first page").
 const CURSOR_KEY = crypto.randomBytes(32);
-const signatureOf = (route, binding, encoded) => crypto.createHmac("sha256", CURSOR_KEY).update(JSON.stringify([route, binding, encoded])).digest("base64url").slice(0, 22);
-function encodeCursor(route, binding, values) {
+// A timed cursor (session records route only) also signs its issued-at time t; an untimed one signs exactly what efbfdf4 signed.
+const signatureOf = (route, binding, encoded, t) => crypto.createHmac("sha256", CURSOR_KEY).update(JSON.stringify(t === undefined ? [route, binding, encoded] : [route, binding, encoded, t])).digest("base64url").slice(0, 22);
+// null when a position can't be carried (more than `max` characters in all; with the session limit also a key text over 400
+// characters): the client gets no further page (the session records route then reports pagination.cursorTooLong).
+// max: CURSOR_MAX (512, the default and the external API) or SESSION_CURSOR_MAX (the session records route).
+// issuedAt (ms, session records route only): carried and signed as t, { b, v, t }; without it the cursor is { b, v } as in efbfdf4.
+function encodeCursor(route, binding, values, max = CURSOR_MAX, { issuedAt } = {}) {
+  if (max > CURSOR_MAX && values.some((v) => typeof v === "string" && v.length > 400)) return null;
   const encoded = values.map(encodeValue);
-  const text = Buffer.from(JSON.stringify({ b: signatureOf(route, binding, encoded), v: encoded })).toString("base64url");
-  return text.length <= 512 ? text : null; // too long (very long keys): the client simply gets no further page
+  const timed = Number.isSafeInteger(issuedAt) && issuedAt >= 0;
+  const payload = timed ? { b: signatureOf(route, binding, encoded, issuedAt), v: encoded, t: issuedAt } : { b: signatureOf(route, binding, encoded), v: encoded };
+  const text = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return text.length <= max ? text : null;
 }
-function decodeCursor(text, route, binding, length) {
-  if (text === undefined) return null;
-  if (!text.length || text.length > 512 || !/^[A-Za-z0-9_-]+$/.test(text)) fail("cursor is not valid.");
+function readCursor(text, route, binding, length, max, timed) {
+  if (!text.length || text.length > max || !/^[A-Za-z0-9_-]+$/.test(text)) fail("cursor is not valid.");
   let parsed;
   try { parsed = JSON.parse(Buffer.from(text, "base64url").toString("utf8")); } catch { fail("cursor is not valid."); }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.keys(parsed).length !== 2 || typeof parsed.b !== "string" || !Array.isArray(parsed.v) || parsed.v.length !== length) fail("cursor is not valid.");
-  const expected = Buffer.from(signatureOf(route, binding, parsed.v));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.keys(parsed).length !== (timed ? 3 : 2) || typeof parsed.b !== "string" || !Array.isArray(parsed.v) || parsed.v.length !== length) fail("cursor is not valid.");
+  if (timed && !(Number.isSafeInteger(parsed.t) && parsed.t >= 0)) fail("cursor is not valid.");
+  const expected = Buffer.from(timed ? signatureOf(route, binding, parsed.v, parsed.t) : signatureOf(route, binding, parsed.v));
   const given = Buffer.from(parsed.b);
   if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) fail("cursor belongs to a different list or filter, or has expired. Start again from the first page.");
-  return parsed.v.map(decodeValue);
+  return { values: parsed.v.map(decodeValue), issuedAt: timed ? parsed.t : null };
+}
+function decodeCursor(text, route, binding, length, max = CURSOR_MAX) {
+  if (text === undefined) return null;
+  return readCursor(text, route, binding, length, max, false).values;
+}
+// A timed cursor (encodeCursor with issuedAt): { values, issuedAt } (null without a cursor); an untimed one is refused.
+function decodeTimedCursor(text, route, binding, length, max = SESSION_CURSOR_MAX) {
+  if (text === undefined) return null;
+  return readCursor(text, route, binding, length, max, true);
 }
 
 // ---- Per route ----
@@ -128,9 +152,19 @@ function invoiceListQuery(query, now = new Date()) {
 // GET /:dataset/records, first step (no database needed): every parameter checked against the dataset's allow-lists. A
 // sensitive field the caller may not see is refused exactly like a field that doesn't exist. The window and the cursor are
 // resolved by the service (resolveWindow, decodeCursor), which knows the dataset's latest date and the query mode.
-function recordsQuery(ds, query, { sensitive = false } = {}) {
+// advanced (the session API only): filter= (validated and normalized against `now`), orderBy= and searchField= are accepted.
+function recordsQuery(ds, query, { sensitive = false, advanced = false, now = new Date() } = {}) {
   const filterNames = Object.keys(ds.filters);
-  const p = params(query, ["dateFrom", "dateTo", "q", "sort", "dir", "limit", "cursor", "fields", ...filterNames]);
+  const p = params(query, ["dateFrom", "dateTo", "q", "sort", "dir", "limit", "cursor", "fields", ...filterNames, ...(advanced ? ["filter", "orderBy", "searchField"] : [])]);
+  const orderBy = advanced ? fm.parseOrderBy(ds, p.orderBy) : null;
+  if (orderBy && (p.sort !== undefined || p.dir !== undefined)) fail("orderBy can't be combined with sort or dir.");
+  const filter = advanced && p.filter !== undefined ? fm.validateFilter(ds, fm.parseFilterParam(p.filter), { now }) : null;
+  let searchField = null;
+  if (advanced && p.searchField !== undefined) {
+    const entry = ds.searchFields.find(([f]) => f === p.searchField);
+    if (!entry) fail("searchField must be one of the schema's searchFields.");
+    searchField = entry;
+  }
   const from = p.dateFrom !== undefined ? utcDay(p.dateFrom, "dateFrom") : null;
   const to = p.dateTo !== undefined ? utcDay(p.dateTo, "dateTo") : null;
   if (from && to && from > to) fail("dateFrom must be on or before dateTo.");
@@ -140,7 +174,7 @@ function recordsQuery(ds, query, { sensitive = false } = {}) {
     const { field, type } = ds.filters[name];
     filters.push({ name, field, value: filterValue(name, type, p[name]) });
   }
-  if (p.cursor !== undefined && (!p.cursor.length || p.cursor.length > 512 || !/^[A-Za-z0-9_-]+$/.test(p.cursor))) fail("cursor is not valid.");
+  if (p.cursor !== undefined && (!p.cursor.length || p.cursor.length > (advanced ? SESSION_CURSOR_MAX : CURSOR_MAX) || !/^[A-Za-z0-9_-]+$/.test(p.cursor))) fail("cursor is not valid.");
   const sort = choice(p.sort, Object.keys(ds.sorts), ds.defaultSort, "sort");
   // A sort whose index isn't led by the date (inventory entryNo: Company, Entry_No, _id) reads one company in entry order: the
   // company bounds the index walk, and a date window (which that index can't bound) is refused rather than scanned for.
@@ -148,7 +182,7 @@ function recordsQuery(ds, query, { sensitive = false } = {}) {
   if (def.requiresCompany && !filters.some((f) => f.name === "company")) fail(`sort=${sort} needs a company (company=… or company=~ for none).`);
   if (def.noDateWindow && (from || to)) fail(`sort=${sort} lists one company in entry order: leave out dateFrom and dateTo.`);
   return {
-    from, to, q: searchText(p.q), filters,
+    from, to, q: searchText(p.q), filters, filter, orderBy, searchField,
     sort,
     dir: choice(p.dir, ["asc", "desc"], "desc", "dir") === "asc" ? 1 : -1,
     limit: limit(p.limit, LIMITS.recordPageMax, LIMITS.recordPageDefault),
@@ -206,4 +240,4 @@ function lineId(text) {
 }
 const noParams = (query) => params(query, []);
 
-module.exports = { invoiceListQuery, invoicePath, invoiceLinesQuery, lineId, recordsQuery, resolveWindow, recordId, noParams, encodeCursor, decodeCursor, dateWindow, LIMITS };
+module.exports = { invoiceListQuery, invoicePath, invoiceLinesQuery, lineId, recordsQuery, resolveWindow, recordId, noParams, encodeCursor, decodeCursor, decodeTimedCursor, dateWindow, LIMITS, CURSOR_MAX, SESSION_CURSOR_MAX };

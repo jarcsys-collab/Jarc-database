@@ -1,0 +1,64 @@
+/* Fabric Data: the Objects panel (FabricObjects.js), the app's primary navigation (VISUAL-SPEC "Object navigation" / fx-nav).
+   Desktop: a 240 px column left of the body, collapsible to a 32 px rail whose button reopens it.
+   ≤1024 px: a drawer over the body (under the app bar and JARC's header), opened by the app bar's Objects button.
+   Scoped under .fx-app; --fx- tokens only, so the dark variant follows fabric-ui.css. */
+
+.fx-app .fx-objects { flex: none; width: var(--fx-w-nav, 240px); min-height: 0; display: flex; flex-direction: column; background: var(--fx-surface); border-right: 1px solid var(--fx-border-strong); overflow: hidden; }
+.fx-app .fx-objects__caption { display: flex; align-items: center; gap: 4px; min-height: 30px; padding: 0 2px 0 10px; background: var(--fx-head); border-bottom: 1px solid var(--fx-border-head); flex: none; }
+.fx-app .fx-objects__title { flex: 1 1 auto; min-width: 0; font-size: var(--fx-text-sm); font-weight: 700; color: var(--fx-heading); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fx-app .fx-objects__collapse, .fx-app .fx-objects__close { width: 26px; height: 24px; flex: none; }
+.fx-app .fx-objects__close { display: none; }
+.fx-app .fx-objects__tree, .fx-app .fx-objects__group { list-style: none; margin: 0; padding: 0; }
+.fx-app .fx-objects__tree { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 3px 0; }
+.fx-app .fx-objects__node { margin: 0; }
+
+/* A row: min 26 px, 16 px indent per level, a twisty slot (so labels line up), icon, label. */
+.fx-app .fx-objects__row { display: flex; align-items: center; gap: 6px; min-height: 26px; padding: 2px 8px 2px calc(4px + (var(--fx-level, 1) - 1) * 16px); color: var(--fx-text-c); text-decoration: none; font-size: var(--fx-text); white-space: nowrap; cursor: pointer; user-select: none; border-left: 3px solid transparent; }
+.fx-app .fx-objects__row--l1 { --fx-level: 1; font-weight: 600; color: var(--fx-heading); }
+.fx-app .fx-objects__row--l2 { --fx-level: 2; }
+.fx-app .fx-objects__row--l3 { --fx-level: 3; font-size: var(--fx-text-sm); }
+.fx-app .fx-objects__row:hover { background: var(--fx-hover); }
+.fx-app .fx-objects__row:focus-visible { outline: 2px solid var(--fx-focus); outline-offset: -2px; }
+/* The open page: selected fill, bold, and a left bar (state is never colour alone: aria-current="page"). */
+.fx-app .fx-objects__row[aria-current="page"] { background: var(--fx-selected); font-weight: 700; border-left-color: var(--fx-focus); }
+.fx-app .fx-objects__row.is-active:not([aria-current]) { color: var(--fx-heading); }
+.fx-app .fx-objects__row--note { color: var(--fx-muted); font-style: italic; cursor: default; }
+.fx-app .fx-objects__row--note:hover { background: none; }
+.fx-app .fx-objects__label { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.fx-app .fx-objects__twisty { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; color: var(--fx-muted); transform: rotate(-90deg); transition: transform .12s ease; }
+.fx-app .fx-objects__twisty:empty { transform: none; }
+.fx-app .fx-objects__twisty.is-open { transform: none; }
+.fx-app .fx-objects__twisty .icon { width: 12px; height: 12px; }
+.fx-app .fx-objects__row .icon { width: 14px; height: 14px; }
+.fx-app .fx-objects__warn { flex: none; display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--fx-warn-bg); border: 1px solid var(--fx-warn-bd); color: var(--fx-warn-fg); font-size: 11px; font-weight: 700; }
+.fx-app .fx-objects__backdrop { display: none; }
+
+/* The app bar's Objects button. */
+.fx-app .fx-appbar__objects { margin-left: -4px; flex: none; }
+
+/* Desktop: collapsed to a 32 px rail; its button (aria-expanded="false") reopens the panel. */
+@media (min-width: 1025px) {
+  .fx-app .fx-objects.is-collapsed { width: 32px; }
+  .fx-app .fx-objects.is-collapsed .fx-objects__caption { padding: 0; justify-content: center; border-bottom: 0; background: none; }
+  .fx-app .fx-objects.is-collapsed .fx-objects__title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+  .fx-app .fx-objects.is-collapsed .fx-objects__tree { display: none; }
+  .fx-app .fx-objects.is-collapsed .fx-objects__collapse { margin-top: 4px; border-color: var(--fx-border-input); background: var(--fx-btn); }
+}
+
+/* ≤1024 px: a drawer over the body (the split is position: relative). Closed, it is hidden from everyone (visibility), so its
+   links take no tab stops; open, it is a modal dialog (FabricObjects: focus trap, Escape, focus back to the Objects button). */
+@media (max-width: 1024px) {
+  .fx-app .fx-objects { position: absolute; top: 0; bottom: 0; left: 0; z-index: 20; width: min(300px, calc(100% - 48px)); border-right: 1px solid var(--fx-border-strong); box-shadow: 0 8px 24px rgb(0 0 0 / .25); transform: translateX(-100%); visibility: hidden; transition: transform .12s ease, visibility 0s linear .12s; }
+  .fx-app .fx-objects.is-drawer-open { transform: none; visibility: visible; transition: transform .12s ease, visibility 0s; }
+  .fx-app .fx-objects__collapse { display: none; }
+  .fx-app .fx-objects__close { display: inline-flex; width: 34px; height: 34px; }
+  .fx-app .fx-objects__backdrop:not([hidden]) { display: block; position: absolute; inset: 0; z-index: 19; background: rgb(8 13 22 / .35); touch-action: none; }
+  .fx-app .fx-objects__row { min-height: 36px; }
+}
+@media (pointer: coarse) { .fx-app .fx-objects__row { min-height: 36px; } }
+
+@media (prefers-reduced-motion: reduce) { .fx-app .fx-objects, .fx-app .fx-objects__twisty { transition: none !important; } }
+@media (forced-colors: active) {
+  .fx-app .fx-objects { border-color: CanvasText; }
+  .fx-app .fx-objects__row[aria-current="page"] { border-left-color: Highlight; outline: 1px solid CanvasText; outline-offset: -1px; }
+}

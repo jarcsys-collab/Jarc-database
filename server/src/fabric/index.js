@@ -27,7 +27,15 @@ function createFabricData({ config, logger = console, createClient, now } = {}) 
   indexes = new FabricIndexes({ listIndexes: () => repository.listIndexes(DATASETS.sales.collection) });
   for (const name of DATASET_NAMES) sources[name] = new DatasetSource({ dataset: DATASETS[name], repository, scanMax: config.unindexedScanMax ?? 20000 });
   const service = new FabricService({ repository, sources, indexes, config, connection, ...(now ? { now } : {}) });
-  return { config, connection, repository, indexes, sources, service, close: () => connection.close() };
+  // The value lists (values.js, session API only): loaded only when the module is there.
+  const fs = require("fs"), path = require("path");
+  let values = null;
+  if (fs.existsSync(path.join(__dirname, "values.js"))) {
+    const { FabricValues } = require("./values");
+    const opts = { repository, sources, config, ...(now ? { now } : {}) };
+    values = FabricValues.prototype ? new FabricValues(opts) : FabricValues(opts);
+  }
+  return { config, connection, repository, indexes, sources, service, values, close: () => connection.close() };
 }
 
 module.exports = { createFabricData, FabricConnection, FabricIndexes, FabricRepository, FabricService, DatasetSource, DATASETS, DATASET_NAMES, datasetNamed, fabricDataRouter, fabricLimiter, canReadFabric, canReadFabricCost, canReadFabricSensitive, canManageFabricApi, canOverseeFabricApi, fabricIdentityAccess, requireFabricDataRead };

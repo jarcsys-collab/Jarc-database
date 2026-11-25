@@ -26,7 +26,7 @@ function load({ pathname = "/", search = "" } = {}) {
   const document = { documentElement: { dataset: {}, style: { setProperty() {} } }, querySelector: () => null, querySelectorAll: () => [], addEventListener() {}, body: { classList: { add() {}, remove() {}, toggle() {}, contains: () => false } } };
   const context = vm.createContext({ window, document, console, Intl, Date, URL, URLSearchParams, encodeURIComponent, decodeURIComponent, setTimeout, clearTimeout, CSS: { escape: (v) => v } });
   // As index.html loads them (files another part of the redesign adds are loaded when present).
-  const files = ["AppView.js", "EntraAuth.js", "AppModules.js", "FabricFieldMeta.js", "FabricRecordView.js", "FabricApiDocs.js", "FabricApiPanel.js", "FabricExplorer.js", "FabricDataPanel.js"].filter((f) => fs.existsSync(path.join(ASSETS, f)));
+  const files = ["AppView.js", "EntraAuth.js", "AppModules.js", "FabricFieldMeta.js", "FabricRecordView.js", "FabricFilterModel.js", "FabricFilterBuilder.js", "FabricApiDocs.js", "FabricApiPanel.js", "FabricExplorer.js", "FabricObjects.js", "FabricDataPanel.js"].filter((f) => fs.existsSync(path.join(ASSETS, f)));
   for (const f of files) vm.runInContext(read(f), context, { filename: f });
   const source = read("AppController.js"), bootstrap = 'try { new AppController(document.querySelector("#app")); }';
   assert.ok(source.includes(bootstrap), "AppController.js still ends with its bootstrap line");
@@ -39,11 +39,11 @@ function load({ pathname = "/", search = "" } = {}) {
 
 // A FabricDataPanel with a stub controller; adapter.request answers from `answers` (path → value, function or Error; matched
 // exactly or as the path before "?") and records calls.
-function panelWith(env, { features = { read: true }, answers = {}, screen = "fabric" } = {}) {
+function panelWith(env, { features = { read: true }, answers = {}, screen = "fabric", me } = {}) {
   const calls = [];
   const adapter = { mode: "resource", async request(method, p, body) { calls.push([method, p, body]); const hit = Object.entries(answers).find(([k]) => p === k || p.startsWith(`${k}?`)); if (!hit) throw Object.assign(new Error("no answer"), { code: "NOT_FOUND", cause: { status: 404 } }); if (hit[1] instanceof Error) throw hit[1]; return typeof hit[1] === "function" ? hit[1](p) : hit[1]; } };
   const view = new env.AppView({ innerHTML: "" });
-  const controller = { model: { features: features === null ? {} : { fabricData: features }, storage: { adapter }, screen }, view, updates: 0, update() { this.updates += 1; }, syncBoardUrl() {} };
+  const controller = { model: { features: features === null ? {} : { fabricData: features }, storage: { adapter }, screen, ...(me ? { me } : {}) }, view, updates: 0, update() { this.updates += 1; }, syncBoardUrl() {} };
   const panel = new env.FabricDataPanel(controller);
   view.fabricPanel = panel; controller.fabric = panel;
   return { panel, controller, calls, view, answers };
@@ -70,8 +70,8 @@ const salesSchema = () => ({ dataset: "sales", label: "Sales", fields: [{ name: 
 const row = (id, over = {}) => ({ id, values: { Posting_Date: "2026-03-01T00:00:00.000Z", Company: "CO_A", Entry_No: 1001, Entry_Type: "Sale", Document_No: "DOC-0001", Item_No: "ITEM-0001", Item_Description: "Example item", Location_Code: "LOC1", Quantity: -2, Remaining_Quantity: 0, Unit_of_Measure_Code: "PCS", ...over } });
 const page = (items, over = {}) => ({ items, pagination: { limit: 100, hasMore: false, nextCursor: null }, window: { dateFrom: "2026-02-14", dateTo: "2026-03-15" }, access: { sensitive: false }, ...over });
 const STATUS_OK = { available: true, datasets: { inventory: { mode: "small", latestDate: "2026-03-15T00:00:00Z", missingIndexes: [] }, sales: { mode: "indexed", missingIndexes: [] } }, access: { datasets: ["sales", "inventory"], sensitive: false } };
-function inventoryPanel(env, { schema = inventorySchema(), records = page([row(ID1)]), status = STATUS_OK, features = { read: true }, extra = {} } = {}) {
-  return panelWith(env, { features, answers: { "/fabric/status": status, "/fabric/inventory/schema": schema, "/fabric/inventory/records": records, ...extra } });
+function inventoryPanel(env, { schema = inventorySchema(), records = page([row(ID1)]), status = STATUS_OK, features = { read: true }, extra = {}, me } = {}) {
+  return panelWith(env, { features, me, answers: { "/fabric/status": status, "/fabric/inventory/schema": schema, "/fabric/inventory/records": records, ...extra } });
 }
 const recordsCall = (calls) => { const c = calls.filter(([, p]) => p.startsWith("/fabric/inventory/records?")).at(-1); return c ? new URLSearchParams(c[1].split("?")[1]) : null; };
 
@@ -90,7 +90,7 @@ describe("Fabric Data: addresses (contract v2 routes)", () => {
 
   test("filters in the query string: parsed, invalid values dropped, written back canonically", () => {
     const q = X.parseQuery("?dateFrom=2026-01-01&dateTo=2026-01-31&q=%20abc%20&company=~&entryType=Sale&sort=entryNo&dir=asc&limit=200&cursor=zzz&fields=a,b");
-    assert.deepEqual(plain(q), { dateFrom: "2026-01-01", dateTo: "2026-01-31", q: "abc", sort: "entryNo", dir: "asc", limit: 200, filters: { company: "~", entryType: "Sale" } });
+    assert.deepEqual(plain(q), { dateFrom: "2026-01-01", dateTo: "2026-01-31", q: "abc", sort: "entryNo", dir: "asc", limit: 200, filters: { company: "~", entryType: "Sale" }, filter: null, orderBy: [] });
     assert.equal(X.formatQuery(q), "?dateFrom=2026-01-01&dateTo=2026-01-31&q=abc&company=~&entryType=Sale&sort=entryNo&dir=asc&limit=200");
     const bad = X.parseQuery("?dateFrom=2026-02-30&dateTo=2026-03-01&limit=7&dir=sideways&sort=a%20b&__proto__=x&9x=1&ok=%01");
     assert.deepEqual(plain(bad), plain(X.emptyQuery()), "only valid parts survive");
@@ -143,7 +143,7 @@ describe("Fabric Data: navigation and gating", () => {
     assert.match(read("AppView.js"), /<div class="sidebar-footer">\$\{this\.moduleNav\(model\)\}<button class="sidebar-settings" data-action="settings"/);
   });
 
-  test("tabs: Inventory · Sales; Invoices only with invoiceViews; API Management only for API admins with tokens on", () => {
+  test("sections: Inventory · Sales; Invoices only with invoiceViews; API Management only for API admins with tokens on", () => {
     const env = load();
     const tabs = (features) => panelWith(env, { features }).panel.sections().map(([id]) => id).join(",");
     assert.equal(tabs({ read: true }), "inventory,sales");
@@ -154,21 +154,22 @@ describe("Fabric Data: navigation and gating", () => {
     assert.equal(tabs({ read: true, datasets: ["sales"] }), "sales", "a dataset /features leaves out has no tab");
     const { panel } = panelWith(env, { features: { read: true, apiAdmin: true, apiTokens: true } });
     const html = panel.html();
-    assert.match(html, /<span>API Management<\/span><\/button>/); assert.doesNotMatch(html, /Sales Lines|Fabric API<\/span><\/button>/);
+    assert.match(html, /<span class="fx-objects__label">API Management<\/span><\/a>/); assert.doesNotMatch(html, /Sales Lines|Fabric API<\/span>/);
     assert.match(html, /Read-only/);
   });
 
-  test("app bar: icon, name, tabs, Read-only, connection chip and Refresh; no page title or description; nothing editable", () => {
+  test("app bar: Objects button, icon, name, open section, Read-only, connection chip and Refresh; no tabs; nothing editable", () => {
     const env = load();
     const { panel } = panelWith(env, { features: { read: true, apiAdmin: true, apiTokens: true } });
     const html = panel.html();
-    assert.match(html, /^<div class="fx-app" data-fx-view="inventory"><header class="fx-appbar">/);
+    assert.match(html, /^<div class="fx-app" data-fx-view="inventory"><header class="fx-appbar"><button type="button" id="fabric-objects-toggle"[^>]*data-action="fabric-o-panel"[^>]*aria-controls="fabric-objects" aria-expanded="true" aria-label="Objects"/);
     assert.match(html, /<h1 class="fx-appbar__title">Fabric Data<\/h1>/);
-    assert.match(html, /<nav class="fx-appbar__tabs" role="tablist" aria-label="Fabric Data sections">/);
-    assert.deepEqual([...html.matchAll(/data-section="(\w+)"/g)].map((m) => m[1]), ["inventory", "sales", "api"], "Inventory · Sales · API Management");
+    assert.doesNotMatch(html, /role="tablist"|role="tab"|fx-appbar__tab/, "the horizontal section tabs are gone");
+    assert.match(html, /<span id="fabric-section-title">Inventory<\/span>/);
+    assert.deepEqual([...html.matchAll(/data-section="(\w+)"/g)].map((m) => m[1]), ["inventory", "sales", "api"], "Inventory · Sales · API Management, in the Objects panel");
     assert.match(html, /class="fx-chip fx-chip--readonly"/); assert.match(html, /class="fx-chip fx-chip--conn is-info"[^>]*>.*Checking…/, "before /status answers");
     assert.match(html, /data-action="fabric-refresh"[^>]*aria-label="Refresh"/);
-    assert.match(html, /<div id="fabric-root" class="fx-app__body fabric-root" role="tabpanel" aria-labelledby="fabric-tab-inventory" data-module-scroll/);
+    assert.match(html, /<div class="fx-app__split"><aside id="fabric-objects" class="fx-objects"[^>]*>[\s\S]*<\/aside><div class="fx-objects__backdrop"[^>]*hidden><\/div><div id="fabric-root" class="fx-app__body fabric-root" role="region" aria-labelledby="fabric-section-title" data-module-scroll/);
     assert.doesNotMatch(html, /page-head|eyebrow|apitok-tabs|Rows from the Fabric/, "no large page title, description or the old tab strip");
     assert.doesNotMatch(html, /data-action="fabric-[a-z-]*(create|edit|delete|import|export|archive)/);
   });
@@ -319,12 +320,15 @@ describe("Fabric Data: explorer (schema-driven)", () => {
     assert.match(html, /aria-sort="descending"[^>]*><button[^>]*data-sort="date"/, "Posting_Date sorts by the date sort");
     assert.match(html, /data-sort="entryNo"/, "Entry_No sorts by entryNo");
     assert.doesNotMatch(html, /data-action="fabric-x-sort"[^>]*data-sort="[^"]*"[^>]*data-focus-key="sort-Item_No"/, "a column without a sort isn't sortable");
-    // Filters from schema.filters: company select with "~" = no company, bool as Any/Yes/No, the rest as text.
-    assert.match(html, /<option value="">All companies<\/option><option value="CO_A" >CO_A<\/option><option value="~" >No company<\/option>/);
-    assert.match(html, /data-filter="open"[^>]*><option value="">Any<\/option><option value="true" >Yes<\/option><option value="false" >No<\/option>/);
-    assert.match(html, /<input [^>]*data-filter="entryType"[^>]*type="search"/);
+    // Filters from schema.filters (Phase 7: offered by the filter builder): company = a category (equals, or "is blank" = ~),
+    // bool as is true / is false, the rest as text equality.
+    const fx = panel.explorers.inventory;
+    assert.deepEqual(plain(fx.filterFields().map((f) => [f.name, f.kind, f.ops])), [["Company", "category", ["eq", "blank"]], ["Entry_Type", "text", ["eq"]], ["Item_No", "text", ["eq"]], ["Open", "bool", ["isTrue", "isFalse"]]]);
+    fx.openFilterFor("Open");
+    assert.match(panel.body(), /data-action="fabric-f-op"[^>]*><option value="isTrue" selected>is true<\/option><option value="isFalse">is false<\/option>/);
+    assert.match(panel.body(), /The default window is 2026-02-14 – 2026-03-15\./, "the builder names the server's window");
+    fx.onAction("fabric-f-cancel", { dataset: { ds: "inventory" } });
     assert.match(html, /Showing [^<]*Feb[^<]*2026[^<]*Mar[^<]*2026 \(UTC\)/, "the window the server returned");
-    assert.match(html, /value="2026-02-14"/); assert.match(html, /value="2026-03-15"/);
     assert.match(html, /Rows per page<select[^>]*><option value="50" >50<\/option><option value="100" selected>100<\/option><option value="200" >200<\/option>/);
     assert.match(html, /href="\/fabric\/inventory\/records\/a{24}"/, "the first cell links to the record");
     assert.doesNotMatch(html, /data-action="(create|edit|delete|import|archive)/);
@@ -375,7 +379,8 @@ describe("Fabric Data: explorer (schema-driven)", () => {
   test("column chooser: names only in localStorage (never values), restored next time, unknown names dropped", async () => {
     const env = load();
     const secretValue = "VALUE-NEVER-STORED-123";
-    const { panel } = inventoryPanel(env, { records: page([row(ID1, { Item_Description: secretValue, Company: HOSTILE })]) });
+    const me = "user:u1", KEY = "jarc.fabric.columns.u1.inventory";
+    const { panel } = inventoryPanel(env, { me, records: page([row(ID1, { Item_Description: secretValue, Company: HOSTILE })]) });
     const x = panel.explorers.inventory;
     panel.ensure(); await settle();
     x.onAction("fabric-x-columns", { dataset: {} });
@@ -385,27 +390,52 @@ describe("Fabric Data: explorer (schema-driven)", () => {
     x.onChange({ dataset: { action: "fabric-x-col", name: "Item_Description" }, checked: false }); await settle();
     x.onChange({ dataset: { action: "fabric-x-col", name: "NotAField" }, checked: true });
     const stored = env.localStorage.map;
-    assert.deepEqual([...stored.keys()], ["jarc.fabric.columns.inventory"]);
-    const names = JSON.parse(stored.get("jarc.fabric.columns.inventory"));
+    assert.deepEqual([...stored.keys()].filter((k) => k.startsWith("jarc.fabric.columns.")), [KEY], "per person and dataset");
+    const names = JSON.parse(stored.get(KEY));
     assert.ok(names.includes("Open") && !names.includes("Item_Description") && !names.includes("NotAField"));
     const known = new Set(inventorySchema().fields.map((f) => f.name));
     assert.ok(names.every((n) => known.has(n)), "only field names from the schema");
     const everything = [...stored.values()].join("|");
     for (const v of [secretValue, "DOC-0001", "ITEM-0001", "CO_A", HOSTILE, "2026-03-01", "1001", ID1]) assert.ok(!everything.includes(v), `no data value in storage: ${v}`);
     // Next time (or another person's saved list with a name the schema no longer has): restored, unknown names dropped.
-    env.localStorage.setItem("jarc.fabric.columns.inventory", JSON.stringify(["Open", "Gone_Field", "Entry_No"]));
-    const again = inventoryPanel(env);
+    env.localStorage.setItem(KEY, JSON.stringify(["Open", "Gone_Field", "Entry_No"]));
+    const again = inventoryPanel(env, { me });
     again.panel.ensure(); await settle();
     assert.deepEqual(plain(again.panel.explorers.inventory.columns), ["Open", "Entry_No"]);
     assert.equal(recordsCall(again.calls).get("fields"), "Open,Entry_No");
+    // Another person on the same browser starts from the defaults and never sees u1's choice.
+    const other = inventoryPanel(env, { me: "user:u2" });
+    other.panel.ensure(); await settle();
+    assert.deepEqual(plain(other.panel.explorers.inventory.columns), inventorySchema().defaultColumns);
+    assert.equal(env.localStorage.getItem("jarc.fabric.columns.u2.inventory"), null, "nothing written until u2 chooses");
     // The last column can't be removed; Default columns forgets the choice.
     const y = again.panel.explorers.inventory;
     y.onChange({ dataset: { action: "fabric-x-col", name: "Open" }, checked: false });
     const last = { dataset: { action: "fabric-x-col", name: "Entry_No" }, checked: false }; y.onChange(last);
     assert.deepEqual(plain(y.columns), ["Entry_No"]); assert.equal(last.checked, true);
     y.onAction("fabric-x-columns-reset", { dataset: {} });
-    assert.equal(env.localStorage.getItem("jarc.fabric.columns.inventory"), null);
+    assert.equal(env.localStorage.getItem(KEY), null);
     assert.deepEqual(plain(y.columns), inventorySchema().defaultColumns);
+  });
+
+  test("column choices: nothing stored without a known person; the old unscoped key is ignored and removed", async () => {
+    const env = load();
+    const legacy = "jarc.fabric.columns.inventory";
+    env.localStorage.setItem(legacy, JSON.stringify(["Open", "Entry_No"]));
+    const anon = inventoryPanel(env);
+    anon.panel.ensure(); await settle();
+    const x = anon.panel.explorers.inventory;
+    assert.deepEqual(plain(x.columns), inventorySchema().defaultColumns, "the unscoped list isn't used");
+    assert.equal(env.localStorage.getItem(legacy), null, "and is removed");
+    x.onChange({ dataset: { action: "fabric-x-col", name: "Open" }, checked: true }); await settle();
+    assert.ok(plain(x.columns).includes("Open"), "the choice still applies on screen");
+    assert.deepEqual([...env.localStorage.map.keys()].filter((k) => k.startsWith("jarc.fabric.columns.")), [], "but nothing is stored");
+    // A signed-in person with only the old key left over: ignored as well.
+    env.localStorage.setItem(legacy, JSON.stringify(["Open", "Entry_No"]));
+    const signed = inventoryPanel(env, { me: "user:u1" });
+    signed.panel.ensure(); await settle();
+    assert.deepEqual(plain(signed.panel.explorers.inventory.columns), inventorySchema().defaultColumns);
+    assert.equal(env.localStorage.getItem(legacy), null);
   });
 
   test("sensitive fields: absent unless the schema returns them (then marked), never named by the client", async () => {
@@ -414,11 +444,11 @@ describe("Fabric Data: explorer (schema-driven)", () => {
     a.panel.ensure(); await settle();
     a.panel.explorers.inventory.chooser = true;
     assert.doesNotMatch(a.panel.body(), new RegExp(SENSITIVE_FIELD));
-    env.localStorage.setItem("jarc.fabric.columns.inventory", JSON.stringify(["Posting_Date", SENSITIVE_FIELD]));
-    const b = inventoryPanel(env);
+    env.localStorage.setItem("jarc.fabric.columns.u1.inventory", JSON.stringify(["Posting_Date", SENSITIVE_FIELD]));
+    const b = inventoryPanel(env, { me: "user:u1" });
     b.panel.ensure(); await settle();
     assert.equal(recordsCall(b.calls).get("fields"), "Posting_Date", "a saved sensitive column isn't asked for without the permission");
-    const c = inventoryPanel(env, { schema: inventorySchema({ sensitive: true }), records: page([row(ID1, { [SENSITIVE_FIELD]: "12.50" })]) });
+    const c = inventoryPanel(env, { me: "user:u1", schema: inventorySchema({ sensitive: true }), records: page([row(ID1, { [SENSITIVE_FIELD]: "12.50" })]) });
     c.panel.ensure(); await settle();
     assert.equal(recordsCall(c.calls).get("fields"), `Posting_Date,${SENSITIVE_FIELD}`);
     assert.match(c.panel.body(), new RegExp(`<th scope="col"[^>]*title="${SENSITIVE_FIELD}[ "][^>]*>[^<]* <span class="account-badge is-warn fabric-sensitive"`), "the sensitive column's header is marked");
@@ -454,7 +484,12 @@ describe("Fabric Data: explorer (schema-driven)", () => {
     panel.ensure(); await settle();
     let html = panel.body();
     assert.doesNotMatch(html, /<img|<script|<b onmouseover/); assert.match(html, /&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;/);
-    assert.match(html, /&lt;img src=x[^<]*<\/option>/, "a hostile company option is escaped too");
+    // A hostile value typed as a filter value is escaped in the builder and in its chip.
+    const hx = panel.explorers.inventory;
+    hx.openFilterFor("Company", { op: "eq", value: HOSTILE });
+    assert.doesNotMatch(panel.body(), /<img/); assert.match(panel.body(), /value="&lt;img src=x onerror=&quot;alert\(1\)&quot;&gt;"/, "escaped in the builder");
+    hx.onAction("fabric-f-apply", { dataset: { ds: "inventory" } }); await settle();
+    assert.doesNotMatch(panel.body(), /<img/); assert.match(panel.body(), /Company:<\/span> &lt;img src=x/, "escaped in the chip");
     panel.explorers.inventory.chooser = true; html = panel.body();
     assert.doesNotMatch(html, /onmouseover/, "a field name outside the safe pattern is dropped");
     panel.explorers.inventory.onAction("fabric-x-open", { dataset: { id: ID1 } }); panel.ensure(); await settle();
@@ -532,8 +567,9 @@ describe("Fabric Data: explorer (schema-driven)", () => {
     const c = calls.find(([, p]) => p.startsWith("/fabric/sales/records?")), q = new URLSearchParams(c[1].split("?")[1]);
     assert.equal(q.get("fields"), "invoice_date,Company,invoice_id,customer_name"); assert.equal(q.get("salesType"), "X"); assert.equal(q.get("ignored"), null, "only schema filters are sent");
     const html = panel.body();
-    assert.match(html, /Showing all dates/); assert.match(html, /data-filter="salesType"/); assert.match(html, /Company &lt;|placeholder="Exact name; ~ = no company"/);
-    assert.match(panel.html(), /id="fabric-tab-sales"[^>]*aria-selected="true"[^>]*class="fx-appbar__tab is-active active">/);
+    assert.match(html, /Showing all dates/); assert.match(html, /Sales type:<\/span> X/, "the salesType chip");
+    assert.deepEqual(plain(panel.explorers.sales.filterFields().map((f) => f.name)), ["Company", "sales_type"], "the builder offers the schema's filters");
+    assert.match(panel.html(), /id="fabric-obj-sales-all" role="treeitem"[^>]*aria-current="page"/, "Sales › All records is the open page");
   });
 });
 
@@ -611,15 +647,21 @@ describe("API Management", () => {
 function viewEscape(s) { return String(s).replace(/[&<>'"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c])); }
 
 describe("Fabric Data: browser storage", () => {
-  test("only FabricExplorer touches localStorage, under jarc.fabric.columns.*; nothing uses sessionStorage, IndexedDB or BoardCache", () => {
-    for (const f of ["FabricDataPanel.js", "FabricApiPanel.js", "FabricApiDocs.js", "FabricExplorer.js"]) {
+  test("only FabricExplorer (jarc.fabric.columns.*) and FabricObjects (jarc.fabric.objects.<person>) touch localStorage; nothing uses sessionStorage, IndexedDB or BoardCache", () => {
+    for (const f of ["FabricDataPanel.js", "FabricApiPanel.js", "FabricApiDocs.js", "FabricExplorer.js", "FabricObjects.js"]) {
       const src = read(f).replace(/^\s*\/\/.*$/gm, "");
       assert.doesNotMatch(src, /sessionStorage|indexedDB|BoardCache|jarcStorage|setPreference/, f);
-      if (f !== "FabricExplorer.js") assert.doesNotMatch(src, /localStorage/, f);
+      if (f !== "FabricExplorer.js" && f !== "FabricObjects.js") assert.doesNotMatch(src, /localStorage/, f);
     }
     const src = read("FabricExplorer.js");
     assert.equal((src.match(/localStorage\?\.(setItem|getItem|removeItem)\(this\.storageKey/g) || []).length, 3, "every access uses the column-names key");
+    assert.equal((src.match(/localStorage\?\.(setItem|getItem|removeItem)\(/g) || []).length, 4, "plus one removal of the old unscoped key");
+    assert.match(src, /get storageKey\(\) \{ const id = FabricExplorer\.userId\(this\.p\); return id \? `\$\{FabricExplorer\.STORAGE_PREFIX\}\$\{id\}\.\$\{this\.ds\}` : ""; \}/, "per person; none without one");
     assert.match(src, /static STORAGE_PREFIX = "jarc\.fabric\.columns\.";/);
+    const objects = read("FabricObjects.js");
+    assert.equal((objects.match(/localStorage/g) || []).length, 2, "one read and one write");
+    assert.match(objects, /localStorage\?\.getItem\(key\)/); assert.match(objects, /localStorage\?\.setItem\(key, /);
+    assert.match(objects, /static STORAGE_PREFIX = "jarc\.fabric\.objects\.";/);
   });
   test("index.html loads the Fabric files before AppController.js, the explorer before the panel", () => {
     const html = fs.readFileSync(path.resolve(ASSETS, "..", "index.html"), "utf8");

@@ -1,0 +1,92 @@
+/* Fabric Data column header menus, cell quick actions and the searchable value picker (FabricColumnMenu.js,
+   FabricValuePicker.js). The menu layer sits on <body>, outside .fx-app, so it carries its own copy of the --fx- tokens it
+   uses (VISUAL-SPEC §2): light by default, dark under :root[data-theme=dark]. The picker can also be embedded inside .fx-app
+   (F2's builder), where the app's tokens apply. Touch: every target is at least 32 px (36 px rows) on coarse pointers. */
+
+.fx-menu-layer, .fx-app .fx-vpick {
+  --fxm-font: var(--fx-font, "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif);
+  --fxm-surface: #ffffff; --fxm-panel: #f4f7fa; --fxm-head: linear-gradient(#f3f6f9, #dbe4ec);
+  --fxm-btn: linear-gradient(#fbfcfd, #e1e8ef); --fxm-btn-hover: linear-gradient(#ffffff, #e8eef4); --fxm-btn-active: #d3dfeb;
+  --fxm-border-strong: #a7b9cc; --fxm-border: #b9c8d7; --fxm-border-light: #d3dde7; --fxm-border-input: #7f95ac;
+  --fxm-text: #1d2b38; --fxm-muted: #4b6178; --fxm-heading: #1f3d5c; --fxm-hover: #e3ecf5; --fxm-selected: #c5daf0;
+  --fxm-info: #1f6fb2; --fxm-focus: #1f6fb2; --fxm-warn-fg: #5a4a12;
+  --fxm-row: 28px; --fxm-btn-h: 26px;
+}
+:root[data-theme="dark"] .fx-menu-layer, :root[data-theme="dark"] .fx-app .fx-vpick {
+  --fxm-surface: #212a34; --fxm-panel: #1c242d; --fxm-head: linear-gradient(#2a3540, #222c36);
+  --fxm-btn: linear-gradient(#2c3846, #25303c); --fxm-btn-hover: linear-gradient(#334152, #2b3745); --fxm-btn-active: #1d2630;
+  --fxm-border-strong: #4a5d71; --fxm-border: #3a4a5b; --fxm-border-light: #2c3946; --fxm-border-input: #6b8097;
+  --fxm-text: #e3e9ef; --fxm-muted: #9aabbc; --fxm-heading: #cfe0f1; --fxm-hover: #2c3a48; --fxm-selected: #24405e;
+  --fxm-info: #4da3ff; --fxm-focus: #4da3ff; --fxm-warn-fg: #f1dea0;
+}
+@media (pointer: coarse), (max-width: 1024px) { .fx-menu-layer, .fx-app .fx-vpick { --fxm-row: 36px; --fxm-btn-h: 34px; } }
+
+/* ---- Header trigger (drawn by the explorer next to the column label) */
+.fx-app .fx-colmenu__btn { display: inline-grid; place-items: center; width: 20px; height: 20px; margin: 0 0 0 4px; padding: 0; border: 1px solid transparent; border-radius: 2px; background: none; color: var(--fx-muted, #4b6178); font: inherit; font-size: 11px; line-height: 1; cursor: pointer; vertical-align: middle; }
+.fx-app .fx-colmenu__btn:hover, .fx-app .fx-colmenu__btn[aria-expanded="true"] { border-color: var(--fx-border-input, #7f95ac); background: var(--fx-btn-hover, #fff); color: var(--fx-text-c, #1d2b38); }
+.fx-app .fx-colmenu__btn.is-filtered { color: var(--fx-info, #1f6fb2); font-weight: 700; }
+.fx-app .fx-colmenu__btn:focus-visible { outline: 2px solid var(--fx-focus, #1f6fb2); outline-offset: -2px; }
+@media (pointer: coarse) { .fx-app .fx-colmenu__btn { width: 32px; height: 32px; margin: -6px -6px -6px 0; } }
+
+/* ---- Menu layer and panel: fixed, placed by FabricColumnMenu.place() inside the viewport */
+.fx-menu-layer { position: fixed; inset: 0 auto auto 0; width: 0; height: 0; z-index: 60; }
+.fx-menu { position: fixed; display: flex; flex-direction: column; box-sizing: border-box; min-width: 200px; width: max-content; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow: auto; overscroll-behavior: contain; padding: 4px 0; border: 1px solid var(--fxm-border-strong); border-radius: 3px; background: var(--fxm-surface); color: var(--fxm-text); box-shadow: 0 8px 24px rgba(0, 0, 0, .25); font-family: var(--fxm-font); font-size: 13px; line-height: 1.35; }
+.fx-menu--picker { width: 300px; }
+.fx-menu.is-sheet { min-width: 0; }
+.fx-menu__title { margin: 0; padding: 4px 10px 6px; border-bottom: 1px solid var(--fxm-border-light); color: var(--fxm-heading); font-size: 12px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-menu__list { list-style: none; margin: 0; padding: 2px 0; }
+.fx-menu__list > li { margin: 0; }
+.fx-menu__item { display: flex; align-items: center; gap: 6px; box-sizing: border-box; width: 100%; min-height: var(--fxm-row); padding: 0 12px 0 6px; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.fx-menu__item:hover:not([aria-disabled="true"]) { background: var(--fxm-hover); }
+.fx-menu__item:focus-visible { outline: 2px solid var(--fxm-focus); outline-offset: -2px; background: var(--fxm-hover); }
+.fx-menu__item[aria-disabled="true"] { opacity: .55; cursor: default; }
+.fx-menu__item[aria-checked="true"] { font-weight: 600; }
+.fx-menu__check { display: inline-block; width: 14px; text-align: center; color: var(--fxm-info); }
+.fx-menu__label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-menu__sep { height: 1px; margin: 3px 0; background: var(--fxm-border-light); }
+.fx-menu__section { display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--fxm-border-light); padding: 6px 8px 4px; }
+.fx-menu__caption { margin: 0 0 4px; color: var(--fxm-muted); font-size: 12px; font-weight: 600; }
+.fx-menu__picker { display: flex; flex-direction: column; min-height: 0; }
+
+/* ---- Value picker (inside the menu or embedded in the filter builder) */
+.fx-vpick { display: flex; flex-direction: column; gap: 6px; min-width: 0; min-height: 0; color: var(--fxm-text, #1d2b38); font-size: 12px; }
+.fx-vpick .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.fx-vpick__search { position: relative; display: flex; width: 100%; }
+.fx-vpick__input { box-sizing: border-box; width: 100%; height: var(--fxm-btn-h); padding: 0 6px; border: 1px solid var(--fxm-border-input); border-radius: 2px; background: var(--fxm-surface); color: var(--fxm-text); font: inherit; font-size: 12px; }
+/* Browser review (13-browser-responsive-review.md, D2): in the column menu (on <body>, outside .fx-app) fabric-ui.css's
+   `.fx-search input` (more specific) won with --fx- tokens that are undefined there, so the box had no border, background or
+   height. Restate the box here for the menu layer only (font size untouched: the touch rules still apply). */
+.fx-menu-layer .fx-vpick__search .fx-vpick__input { height: var(--fxm-btn-h); padding: 0 6px; border: 1px solid var(--fxm-border-input); border-radius: 2px; background: var(--fxm-surface); color: var(--fxm-text); }
+.fx-vpick__tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.fx-vpick__selcount { margin-left: auto; color: var(--fxm-muted); }
+.fx-vpick .fx-btn { display: inline-flex; align-items: center; justify-content: center; height: var(--fxm-btn-h); min-width: 32px; padding: 0 10px; border: 1px solid var(--fxm-border-input); border-radius: 3px; background: var(--fxm-btn); color: var(--fxm-text); font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.fx-vpick .fx-btn:hover:not(:disabled) { background: var(--fxm-btn-hover); }
+.fx-vpick .fx-btn[aria-pressed="true"] { background: var(--fxm-btn-active); box-shadow: inset 0 1px 2px rgba(0, 0, 0, .12); }
+.fx-vpick .fx-btn:disabled { opacity: .55; cursor: default; }
+.fx-vpick .fx-btn--primary { border-color: var(--fxm-info); background: var(--fxm-info); color: #fff; }
+.fx-vpick .fx-btn:focus-visible, .fx-vpick__input:focus-visible { outline: 2px solid var(--fxm-focus); outline-offset: 1px; }
+.fx-vpick__list { list-style: none; margin: 0; padding: 0; flex: 1 1 auto; min-height: 84px; max-height: min(280px, 40vh); overflow: auto; overscroll-behavior: contain; border: 1px solid var(--fxm-border); border-radius: 2px; background: var(--fxm-surface); }
+.fx-vpick__list:focus-visible { outline: 2px solid var(--fxm-focus); outline-offset: 1px; }
+.fx-vpick__opt { display: flex; align-items: center; gap: 6px; min-height: var(--fxm-row); padding: 0 8px; cursor: pointer; border-bottom: 1px solid var(--fxm-border-light); }
+.fx-vpick__opt:last-child { border-bottom: 0; }
+.fx-vpick__opt:hover { background: var(--fxm-hover); }
+.fx-vpick__list:focus .fx-vpick__opt.is-active, .fx-vpick__list:focus-visible .fx-vpick__opt.is-active { outline: 2px solid var(--fxm-focus); outline-offset: -2px; }
+.fx-vpick__opt[aria-selected="true"] { background: var(--fxm-selected); }
+.fx-vpick__box { flex: none; width: 14px; height: 14px; box-sizing: border-box; border: 1px solid var(--fxm-border-input); border-radius: 2px; background: var(--fxm-surface); }
+.fx-vpick__opt[aria-selected="true"] .fx-vpick__box { border-color: var(--fxm-info); background: var(--fxm-info); box-shadow: inset 0 0 0 2px var(--fxm-surface); }
+.fx-vpick__label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-vpick__label em { color: var(--fxm-muted); }
+.fx-vpick__opt.is-typed .fx-vpick__label { color: var(--fxm-info); }
+.fx-vpick__count { flex: none; color: var(--fxm-muted); font-variant-numeric: tabular-nums; }
+.fx-vpick__status { margin: 0; min-height: 1em; color: var(--fxm-muted); font-size: 12px; }
+.fx-vpick__status:empty { display: none; }
+.fx-vpick__more[hidden] { display: none; }
+.fx-vpick__more { align-self: flex-start; }
+.fx-vpick__foot { display: flex; justify-content: flex-end; gap: 6px; padding-top: 2px; }
+
+@media (prefers-reduced-motion: reduce) { .fx-menu, .fx-vpick * { transition: none !important; } }
+@media (forced-colors: active) {
+  .fx-menu, .fx-vpick__list, .fx-vpick__box { border-color: CanvasText; }
+  .fx-vpick__opt[aria-selected="true"] { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  .fx-menu__item:focus-visible, .fx-vpick__opt.is-active { outline-color: Highlight; }
+}

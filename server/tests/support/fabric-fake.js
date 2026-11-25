@@ -1,5 +1,6 @@
 // TEST-ONLY: an in-memory stand-in for the Fabric MongoDB (FactSales), with just the query semantics src/fabric/repository.js
-// uses: $match (equality, $gt/$gte/$lt/$lte/$ne/$in/$regex/$or/$and/$expr), $project, $addFields, $group ($sum/$max/$min/$addToSet/
+// uses: $match (equality, $eq/$gt/$gte/$lt/$lte/$ne/$in/$nin/$regex/$not/$type/$exists/$or/$and/$nor/$expr; Decimal128 compared
+// exactly), $project, $addFields, $group ($sum/$max/$min/$addToSet/
 // $push), $sort, $limit, $facet, and the expressions $ifNull, $cond, $eq, $ne, $gt, $lt, $or, $and, $concat, $toString, $toDouble, $convert
 // (to decimal), $multiply, $subtract, $divide and $getField. It follows MongoDB's BSON ordering (null first) and its hint rule
 // (a hint naming no index fails). Synthetic data only. It has NO write methods: any write attempt throws a TypeError.
@@ -17,6 +18,21 @@ const isOid = (v) => v?._bsontype === "ObjectId";
 const num = (v) => (isDec(v) ? Number(v.toString()) : v);
 const isNum = (v) => typeof v === "number" || isDec(v);
 const dec = (n) => Decimal128.fromString(String(n));
+// Two Decimal128 values compared exactly (as MongoDB does), from their text: no rounding through a JS number.
+function decParts(text) {
+  const m = /^([+-]?)(\d+)(?:\.(\d+))?(?:E([+-]?\d+))?$/i.exec(text);
+  if (!m) return null;
+  const frac = m[3] || "";
+  return { n: BigInt(`${m[1] === "-" ? "-" : ""}${m[2]}${frac}`), scale: frac.length - Number(m[4] || 0) };
+}
+function decCmp(x, y) {
+  const a = decParts(x), b = decParts(y);
+  if (!a || !b) return Number(x) - Number(y);
+  const s = Math.max(a.scale, b.scale);
+  const p = (d) => (s - d.scale >= 0 ? d.n * 10n ** BigInt(s - d.scale) : d.n / 10n ** BigInt(d.scale - s));
+  const l = p(a), r = p(b);
+  return l < r ? -1 : l > r ? 1 : 0;
+}
 // BSON comparison order: missing/null, numbers, strings, objects, arrays, ObjectId, booleans, dates.
 const rank = (v) => (v === undefined || v === null ? 1 : isNum(v) ? 2 : typeof v === "string" ? 3 : isOid(v) ? 7 : typeof v === "boolean" ? 8 : v instanceof Date ? 9 : Array.isArray(v) ? 5 : 4);
 function cmp(a, b) {
@@ -24,7 +40,7 @@ function cmp(a, b) {
   if (ra !== rb) return ra - rb;
   switch (ra) {
     case 1: return 0;
-    case 2: return num(a) - num(b);
+    case 2: return isDec(a) && isDec(b) ? decCmp(a.toString(), b.toString()) : num(a) - num(b);
     case 3: return a < b ? -1 : a > b ? 1 : 0;
     case 7: { const x = a.toHexString(), y = b.toHexString(); return x < y ? -1 : x > y ? 1 : 0; }
     case 8: return Number(a) - Number(b);
@@ -44,31 +60,43 @@ const get = (doc, path) => path.split(".").reduce((v, k) => (v === null || v ===
 const isOperators = (v) => v && typeof v === "object" && !Array.isArray(v) && !(v instanceof Date) && !v._bsontype && Object.keys(v).length > 0 && Object.keys(v).every((k) => k.startsWith("$"));
 const sameType = (a, b) => rank(a) === rank(b);
 
+// $type names/numbers the compiler may emit.
+const TYPE_OF = { null: (v) => v === null, 10: (v) => v === null, string: (v) => typeof v === "string", 2: (v) => typeof v === "string", bool: (v) => typeof v === "boolean", 8: (v) => typeof v === "boolean", date: (v) => v instanceof Date, 9: (v) => v instanceof Date, decimal: isDec, 19: isDec, double: (v) => typeof v === "number", 1: (v) => typeof v === "number" };
 function matches(doc, filter) {
   for (const [key, cond] of Object.entries(filter)) {
     if (key === "$or") { if (!cond.some((f) => matches(doc, f))) return false; continue; }
     if (key === "$and") { if (!cond.every((f) => matches(doc, f))) return false; continue; }
+    if (key === "$nor") { if (cond.some((f) => matches(doc, f))) return false; continue; }
     if (key === "$expr") { if (!evaluate(cond, doc)) return false; continue; }
     if (key.startsWith("$")) throw new Error(`fabric-fake: unsupported ${key}`);
     const v = get(doc, key);
-    const equal = (want) => (want === null ? v === null || v === undefined : sameType(v, want) && cmp(v, want) === 0);
-    if (!isOperators(cond)) { if (!equal(cond)) return false; continue; }
-    for (const [op, arg] of Object.entries(cond)) {
-      let ok;
-      switch (op) {
-        case "$gt": ok = sameType(v, arg) && cmp(v, arg) > 0; break;
-        case "$gte": ok = arg === null ? equal(null) : sameType(v, arg) && cmp(v, arg) >= 0; break;
-        case "$lt": ok = sameType(v, arg) && cmp(v, arg) < 0; break;
-        case "$lte": ok = arg === null ? equal(null) : sameType(v, arg) && cmp(v, arg) <= 0; break;
-        case "$ne": ok = !equal(arg); break;
-        case "$in": ok = arg.some((a) => equal(a)); break;
-        case "$regex": ok = typeof v === "string" && new RegExp(arg, cond.$options || "").test(v); break;
-        case "$options": ok = true; break;
-        case "$exists": ok = (v !== undefined) === Boolean(arg); break;
-        default: throw new Error(`fabric-fake: unsupported ${op}`);
-      }
-      if (!ok) return false;
+    if (!isOperators(cond)) { if (!(cond === null ? v === null || v === undefined : sameType(v, cond) && cmp(v, cond) === 0)) return false; continue; }
+    if (!matchOps(v, cond)) return false;
+  }
+  return true;
+}
+// One field's operator object, MongoDB style (type bracketing for ranges; null also matches missing).
+function matchOps(v, cond) {
+  const equal = (want) => (want === null ? v === null || v === undefined : sameType(v, want) && cmp(v, want) === 0);
+  for (const [op, arg] of Object.entries(cond)) {
+    let ok;
+    switch (op) {
+      case "$eq": ok = equal(arg); break;
+      case "$gt": ok = sameType(v, arg) && cmp(v, arg) > 0; break;
+      case "$gte": ok = arg === null ? equal(null) : sameType(v, arg) && cmp(v, arg) >= 0; break;
+      case "$lt": ok = sameType(v, arg) && cmp(v, arg) < 0; break;
+      case "$lte": ok = arg === null ? equal(null) : sameType(v, arg) && cmp(v, arg) <= 0; break;
+      case "$ne": ok = !equal(arg); break;
+      case "$in": ok = arg.some((a) => equal(a)); break;
+      case "$nin": ok = !arg.some((a) => equal(a)); break;
+      case "$regex": ok = typeof v === "string" && new RegExp(arg, cond.$options || "").test(v); break;
+      case "$options": ok = true; break;
+      case "$exists": ok = (v !== undefined) === Boolean(arg); break;
+      case "$type": { const t = TYPE_OF[arg]; if (!t) throw new Error(`fabric-fake: unsupported $type ${arg}`); ok = v !== undefined && t(v); break; }
+      case "$not": { if (!isOperators(arg)) throw new Error("fabric-fake: $not needs an operator object"); ok = !matchOps(v, arg); break; }
+      default: throw new Error(`fabric-fake: unsupported ${op}`);
     }
+    if (!ok) return false;
   }
   return true;
 }

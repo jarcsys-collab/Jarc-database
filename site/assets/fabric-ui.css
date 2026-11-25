@@ -1,7 +1,7 @@
 /* Fabric Data application: the app-module layout (AppModules.js) and the Fabric design system (VISUAL-SPEC.md).
    1. Module layout: applies only while an app module is open (.app-shell[data-layout=module]); JARC pages are unchanged.
    2. --fx- tokens, light by default, dark under :root[data-theme=dark] .fx-app.
-   3. Shared components: fx-app, fx-appbar, fx-tabs, fx-toolbar, fx-btn, fx-sep, fx-search, fx-chip, fx-status, fx-statusbar,
+   3. Shared components: fx-app, fx-appbar, fx-app__split, fx-tabs, fx-toolbar, fx-btn, fx-sep, fx-search, fx-chip, fx-status, fx-statusbar,
       fx-dialog, focus. Everything below section 1 is scoped under .fx-app. */
 
 /* ---- 1. App-module layout: the global header stays; primary navigation is a drawer at every width (no workspace tree is
@@ -128,23 +128,24 @@ html:has(.app-shell[data-layout="module"]) body { height: 100%; overflow: hidden
 /* Focus: visible on every control. Inside grids use outline-offset: -2px (see fabric-explorer.css). */
 .fx-app :focus-visible { outline: 2px solid var(--fx-focus); outline-offset: 1px; }
 
-/* fx-appbar: 44 px; icon + name, module tabs, chips. Wraps to two rows on narrow screens (tabs scroll inside their row). */
-.fx-appbar { display: flex; align-items: center; gap: 10px; min-height: var(--fx-h-appbar); padding: 0 10px; background: var(--fx-titlebar); border-bottom: 1px solid var(--fx-border-strong); flex: none; flex-wrap: wrap; }
+/* fx-appbar: 44 px, one row at every width: the Objects button, icon + name, the open section, chips. Navigation between
+   sections is the Objects panel (fabric-objects.css), so nothing here wraps and the rows below get the height. */
+.fx-appbar { display: flex; align-items: center; gap: 10px; min-height: var(--fx-h-appbar); padding: 0 10px; background: var(--fx-titlebar); border-bottom: 1px solid var(--fx-border-strong); flex: none; flex-wrap: nowrap; min-width: 0; }
 .fx-appbar__icon { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: var(--fx-radius); background: var(--fx-info); color: #fff; flex: none; }
 .fx-appbar__icon .icon { width: 15px; height: 15px; }
-.fx-appbar__title { margin: 0; font-size: var(--fx-text-title); font-weight: 700; color: var(--fx-heading); white-space: nowrap; letter-spacing: 0; }
-.fx-appbar__tabs { display: flex; align-items: stretch; gap: 2px; align-self: stretch; min-width: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
-.fx-appbar__tabs::-webkit-scrollbar { display: none; }
-.fx-appbar__tab { display: inline-flex; align-items: center; gap: 6px; height: var(--fx-h-tabs); align-self: center; padding: 0 12px; border-radius: var(--fx-radius) var(--fx-radius) 0 0; color: var(--fx-label); white-space: nowrap; border-bottom: 2px solid transparent; }
-.fx-appbar__tab:hover { background: var(--fx-hover); color: var(--fx-text-c); }
-.fx-appbar__tab.is-active, .fx-appbar__tab[aria-selected="true"] { background: var(--fx-surface); color: var(--fx-heading); font-weight: 700; border-bottom-color: var(--fx-focus); }
+.fx-appbar__title { margin: 0; font-size: var(--fx-text-title); font-weight: 700; color: var(--fx-heading); white-space: nowrap; letter-spacing: 0; flex: none; }
+.fx-appbar__section { display: inline-flex; align-items: center; gap: 8px; min-width: 0; color: var(--fx-heading); font-weight: 600; white-space: nowrap; overflow: hidden; }
+.fx-appbar__section > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.fx-appbar__sep { color: var(--fx-muted); font-weight: 400; }
 .fx-appbar__chips { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
 .fx-appbar__conn { display: contents; }
 @media (max-width: 620px) {
-  .fx-appbar { gap: 6px; padding: 4px 8px 0; }
-  .fx-appbar__tabs { order: 3; flex: 1 1 100%; }
+  .fx-appbar { gap: 6px; padding: 0 8px; }
   .fx-appbar__chips { gap: 4px; }
 }
+@media (max-width: 380px) { .fx-appbar__icon { display: none; } }
+/* fx-app__split: the Objects panel and the body side by side; the body takes the rest of the width and height. */
+.fx-app__split { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; position: relative; }
 
 /* fx-tabs: section tabs inside a page (object page). 28 px, merged 1 px into the pane. Arrow keys belong to their owner. */
 .fx-tabs { display: flex; gap: 2px; align-items: flex-end; border-bottom: 1px solid var(--fx-border-strong); overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
@@ -211,6 +212,7 @@ html:has(.app-shell[data-layout="module"]) body { height: 100%; overflow: hidden
 .fx-status--block { padding: 6px 8px; }
 .fx-status__toggle { padding: 0 4px; height: 20px; border-radius: var(--fx-radius-sm); color: inherit; text-decoration: underline; font-size: var(--fx-text-sm); }
 .fx-status__toggle:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
+@media (pointer: coarse) { .fx-status__toggle { height: auto; min-height: 32px; } } /* D7: a 32 px touch target (20 px on desktop) */
 .fx-status__details { flex: 1 1 100%; margin: 2px 0 0; max-height: 160px; overflow: auto; padding: 6px 8px; border: 1px solid var(--fx-border-light); border-radius: var(--fx-radius-sm); background: var(--fx-surface); color: var(--fx-text-c); font-family: var(--fx-font-mono); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .fx-status__details[hidden] { display: none; }
 
@@ -234,6 +236,5 @@ html:has(.app-shell[data-layout="module"]) body { height: 100%; overflow: hidden
 
 @media (prefers-reduced-motion: reduce) { .fx-app *, .fx-dialog * { transition-duration: .01ms !important; animation-duration: .01ms !important; } }
 @media (forced-colors: active) {
-  .fx-chip, .fx-btn, .fx-status, .fx-appbar__tab.is-active, .fx-tab { border-color: CanvasText; }
-  .fx-appbar__tab.is-active { border-bottom: 2px solid Highlight; }
+  .fx-chip, .fx-btn, .fx-status, .fx-tab { border-color: CanvasText; }
 }

@@ -95,7 +95,7 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
       auth: { mode: "entra", entra, verify: createEntraVerifier({ ...entra, keySet: issuer.keySet }) },
       accessPolicy: "development_shared", betaOpenEditing: true,
       apiTokens: { key: crypto.randomBytes(32), adminObjectIds: [], issuePerHour: 1000, maxActive: 1000 },
-      fabricData: { config, service: stack.service, limiter: fabricLimiter({ perWindow: 100000 }) }
+      fabricData: { config, service: stack.service, values: stack.values, limiter: fabricLimiter({ perWindow: 100000 }) }
     });
     server = await new Promise((resolve) => { const s = app.listen(port, "127.0.0.1", () => resolve(s)); });
     b = await launch(BROWSER);
@@ -121,9 +121,15 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
   const sortState = (field) => json(`(() => { const h = ${th(field)}; return h ? { aria: h.getAttribute("aria-sort"), mark: h.querySelector(".fx-sort-mark")?.textContent || "", then: h.querySelector(".fx-sort-then")?.textContent || "", button: h.querySelector('[data-action="fabric-x-sort"]')?.dataset.sort || null } : null; })()`);
   const jarcCalls = async () => (await json("window.__all || []")).filter((u) => /^\/api\/v1\/(workspaces|boards)\b/.test(u));
   const api = (method, url, body) => b.evaluate(`(async () => { const { csrfToken } = await (await fetch("/api/v1/auth/session")).json(); const r = await fetch(${JSON.stringify(url)}, { method: ${JSON.stringify(method)}, headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: ${JSON.stringify(JSON.stringify(body))} }); return JSON.stringify(await r.json()); })()`).then(JSON.parse);
-  // Nothing in the Fabric module creates, edits, deletes, imports or exports data.
+  // Nothing in the Fabric module creates, edits, deletes, imports or exports Fabric data. The only exception is Phase 7's saved
+  // filters (FabricSavedFilters and the builder's "Save filter"): they store the person's own view definitions in JARC
+  // (/api/v1/fabric/saved-filters, the fabricSavedFilters collection), never in Fabric. They are exempt only by their exact
+  // data-action; any other write-looking control still fails, and no write request may reach any other Fabric route.
+  const SAVED_FILTER_ACTIONS = ["fabric-s-save", "fabric-s-update", "fabric-s-manage", "fabric-s-rename", "fabric-s-delete", "fabric-f-save"];
   const noWriteControls = async (label) => {
-    const found = await json(`[...document.querySelectorAll(".fx-app [data-action], .fx-app button, .fx-app a, .fx-app [contenteditable]")].filter((el) => /export|download|create|edit|delete|import|archive|save|upload/i.test(el.dataset.action || "") || /^(export|download|new record|add|edit|delete|import|save)\\b/i.test((el.textContent || "").trim()) || el.isContentEditable).map((el) => (el.dataset.action || el.tagName) + ":" + (el.textContent || "").trim().slice(0, 30))`);
+    const writes = (await calls()).filter((c) => c.method !== "GET" && !/^\/api\/v1\/fabric\/(saved-filters|api-tokens)(\/|$)/.test(c.url));
+    assert.deepEqual(writes, [], `${label}: no write request to a Fabric data route`);
+    const found = await json(`[...document.querySelectorAll(".fx-app [data-action], .fx-app button, .fx-app a, .fx-app [contenteditable]")].filter((el) => !${JSON.stringify(SAVED_FILTER_ACTIONS)}.includes(el.dataset.action || "")).filter((el) => /export|download|create|edit|delete|import|archive|save|upload/i.test(el.dataset.action || "") || /^(export|download|new record|add|edit|delete|import|save)\\b/i.test((el.textContent || "").trim()) || el.isContentEditable).map((el) => (el.dataset.action || el.tagName) + ":" + (el.textContent || "").trim().slice(0, 30))`);
     assert.deepEqual(found, [], `${label}: no create/edit/export controls`);
   };
   const rowCount = () => b.evaluate(`document.querySelectorAll(".fabric-explorer-table tbody tr").length`);
@@ -178,7 +184,8 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     assert.match(await text(".module-exit"), /Back to JARC/);
     assert.deepEqual(await jarcCalls(), [], "no /workspaces or /boards request");
     assert.equal(await text(".fx-appbar__title"), "Fabric Data");
-    assert.equal(await b.evaluate(`document.querySelector("#fabric-tab-inventory").getAttribute("aria-selected")`), "true");
+    assert.equal(await b.evaluate(`document.querySelector("#fabric-obj-inventory-all").getAttribute("aria-current")`), "page", "Objects: Inventory › All records");
+    assert.equal(await has(".fx-appbar__tab, .fx-appbar [role='tablist']"), false, "no app-bar tabs");
     // The page itself doesn't scroll; the grid does.
     const box = await json(`(() => { const g = document.querySelector('[data-grid="inventory"]'); g.scrollTop = 600; return { page: document.scrollingElement.scrollHeight, view: innerHeight, scrollY, gridScroll: g.scrollHeight > g.clientHeight, gridTop: g.scrollTop }; })()`);
     assert.ok(box.page <= box.view + 1, `the page doesn't scroll: ${JSON.stringify(box)}`);
@@ -215,7 +222,11 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     assert.ok(await wait(`(window.__calls || []).some((c) => c.url.includes("/inventory/records?") && !c.url.includes("Item_Description"))`), "re-requested without the column");
     last = await lastRecords("inventory");
     assert.deepEqual(new URLSearchParams(last.url.split("?")[1]).get("fields").split(","), INV_DEFAULTS.filter((f) => f !== "Item_Description"));
-    const stored = await b.evaluate(`localStorage.getItem("jarc.fabric.columns.inventory")`);
+    // Per person and dataset ("jarc.fabric.columns.<user id>.inventory"); the old unscoped key is not used.
+    const colKeys = await json(`Object.keys(localStorage).filter((k) => k.startsWith("jarc.fabric.columns."))`);
+    assert.equal(colKeys.length, 1, `one column key ${JSON.stringify(colKeys)}`);
+    assert.match(colKeys[0], /^jarc\.fabric\.columns\.[A-Za-z0-9._-]+\.inventory$/, "keyed by person and dataset");
+    const stored = await b.evaluate(`localStorage.getItem(${JSON.stringify(colKeys[0])})`);
     assert.deepEqual(JSON.parse(stored), INV_DEFAULTS.filter((f) => f !== "Item_Description"), "names only");
     const all = await json("Object.entries(localStorage)");
     assert.doesNotMatch(JSON.stringify(all), /Synthetic Co|DOC-SYN|ITEM-SYN|WH-/, "no Fabric value in browser storage");
@@ -233,26 +244,39 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     await click('[data-action="fabric-x-clear"][data-focus-key="clear-top"]');
     assert.ok(await wait("document.querySelectorAll('.fabric-explorer-table tbody tr').length === 100"));
 
-    // A filter from the schema (entryType). The filter bar is collapsed by default (no chips); Filters opens it.
-    assert.equal(await b.evaluate(`document.querySelector("#fabric-inventory-filters").hidden`), true, "filter bar collapsed by default");
-    assert.ok(await has(".fx-filterbar.is-collapsed"));
+    // Phase 7: a condition from the Filters builder (Entry type is one of Sale, chosen in the server's value list). The builder is
+    // closed by default and there are no chips; Filters opens it; Apply sends filter= (base64url JSON), not the old entryType=.
+    assert.equal(await has("#fabric-inventory-fb"), false, "builder closed by default");
     assert.equal(await has(".fx-chip--filter"), false, "no chips without a filter");
-    assert.equal(await b.evaluate(`document.querySelector('[data-action="fabric-x-filters"]').getAttribute("aria-expanded")`), "false");
-    await click('[data-action="fabric-x-filters"]');
-    assert.ok(await wait(`document.querySelector("#fabric-inventory-filters")?.hidden === false`), "Filters opens the bar");
-    assert.ok(await has("#fabric-inventory-f-entryType"), "entryType filter rendered");
-    await setValue("#fabric-inventory-f-entryType", "Sale");
-    assert.ok(await wait(`(window.__calls || []).some((c) => c.url.includes("entryType=Sale"))`));
+    const filtersBtn = '[data-action="fabric-x-filters"][data-ds="inventory"][data-focus-key="filters"]';
+    assert.equal(await b.evaluate(`document.querySelector(${JSON.stringify(filtersBtn)}).getAttribute("aria-expanded")`), "false");
+    await click(filtersBtn);
+    assert.ok(await wait(`!!document.querySelector("#fabric-inventory-fb")`), "Filters opens the builder");
+    await click('[data-action="fabric-f-add"][data-path=""]');
+    assert.ok(await wait(`!!document.querySelector('[data-action="fabric-f-field"][data-field="Entry_Type"]')`), "the field list");
+    await click('[data-action="fabric-f-field"][data-field="Entry_Type"]');
+    assert.ok(await wait(`!!document.querySelector('[data-action="fabric-f-values"][data-path="0"]')`));
+    await click('[data-action="fabric-f-values"][data-path="0"]');
+    assert.ok(await wait(`[...document.querySelectorAll('#fabric-inventory-fb-vp [role="option"]')].some((o) => /^Sale/.test(o.textContent))`), "values from the server");
+    assert.ok((await calls()).some((c) => c.url.startsWith("/api/v1/fabric/inventory/values?") && c.url.includes("field=Entry_Type")), "the list came from /values");
+    await b.evaluate(`[...document.querySelectorAll('#fabric-inventory-fb-vp [role="option"]')].find((o) => /^Sale/.test(o.textContent)).click()`);
+    await click('#fabric-inventory-fb-vp [data-fvp="apply"]');
+    assert.ok(await wait(`/Sale/.test(document.querySelector("#fabric-inventory-fb .fx-fb__tags")?.textContent || "")`), "the value is chosen");
+    const beforeApply = (await calls()).length;
+    await click('[data-action="fabric-f-apply"][data-ds="inventory"]');
+    assert.ok(await wait(`(window.__calls || []).slice(${beforeApply}).some((c) => c.url.includes("/inventory/records?") && c.url.includes("filter="))`), "filter= sent");
+    const sentFilter = new URLSearchParams((await lastRecords("inventory")).url.split("?")[1]).get("filter");
+    assert.deepEqual(JSON.parse(Buffer.from(sentFilter, "base64url").toString("utf8")), { v: 1, op: "and", items: [{ field: "Entry_Type", op: "in", values: ["Sale"] }] });
+    assert.ok(!(await lastRecords("inventory")).url.includes("entryType="), "not the legacy parameter");
     assert.ok(await wait(`(() => { const rows = [...document.querySelectorAll(".fabric-explorer-table tbody tr")]; return rows.length > 0 && rows.every((tr) => ${cell("tr", "Entry_Type")}.textContent === "Sale"); })()`), "only Sale rows");
-    // A chip for the active filter, kept when the bar is closed again; the Filters button counts it.
+    // A chip for the condition, with its own ×; the Filters button counts it; the builder is closed and focus is back on Filters.
     assert.ok(await wait(`[...document.querySelectorAll(".fx-chip--filter")].some((c) => /Sale/.test(c.textContent))`), "a chip for the filter");
     assert.match(await text('[data-action="fabric-x-filters"] .fx-badge'), /1/);
-    await click('[data-action="fabric-x-filters"]');
-    assert.ok(await wait(`document.querySelector("#fabric-inventory-filters")?.hidden === true`), "the bar closes");
-    assert.ok(await has(".fx-chip--filter"), "the chip stays visible");
+    assert.equal(await has("#fabric-inventory-fb"), false, "Apply closes the builder");
+    assert.equal(await b.evaluate("document.activeElement?.dataset.action"), "fabric-x-filters", "focus back on Filters");
     const beforeChip = (await calls()).length;
     await click('.fx-chip--filter [data-action="fabric-x-chip"]');
-    assert.ok(await wait(`(window.__calls || []).slice(${beforeChip}).some((c) => c.url.includes("/inventory/records?") && !c.url.includes("entryType="))`), "removing the chip drops the filter");
+    assert.ok(await wait(`(window.__calls || []).slice(${beforeChip}).some((c) => c.url.includes("/inventory/records?") && !c.url.includes("filter="))`), "removing the chip drops the filter");
     assert.ok(await wait("document.querySelectorAll('.fabric-explorer-table tbody tr').length === 100 && !document.querySelector('.fx-chip--filter')"));
 
     // Sort header (Entry_No → the entryNo sort).
@@ -261,11 +285,20 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     // entryNo is listed one company at a time (schema sorts[].requiresCompany, dateRange false): nothing is sent until a
     // company is chosen, and then never with dates.
     await click('[data-action="fabric-x-sort"][data-sort="entryNo"]');
-    assert.ok(await wait(`/one company at a time/.test(document.querySelector("#fabric-inventory-range-help")?.textContent || "")`), "asks for a company");
+    assert.ok(await wait(`/one company at a time/.test(document.querySelector("#fabric-inventory-problem")?.textContent || "")`), "asks for a company");
     assert.equal((await calls()).filter((c) => c.url.includes("sort=entryNo")).length, 0, "no request the server would refuse");
+    // Phase 7: the company is a "Company equals …" condition in the builder (sent as company=, left out of filter=).
+    await click(filtersBtn);
+    assert.ok(await wait(`!!document.querySelector("#fabric-inventory-fb #fabric-inventory-from")`));
     assert.equal(await b.evaluate(`document.querySelector("#fabric-inventory-from").disabled`), true, "dates don't apply");
-    await setValue("#fabric-inventory-f-company", "Synthetic Co A");
-    assert.ok(await wait(`(window.__calls || []).some((c) => c.url.includes("sort=entryNo") && c.url.includes("company=Synthetic+Co+A") && c.status === 200)`), "sorted request with the company");
+    await click('[data-action="fabric-f-add"][data-path=""]');
+    await click('[data-action="fabric-f-field"][data-field="Company"]');
+    assert.ok(await wait(`!!document.querySelector('[data-action="fabric-f-op"][data-path="0"]')`));
+    await setValue('[data-action="fabric-f-op"][data-path="0"]', "eq");
+    assert.ok(await wait(`!!document.querySelector("#fabric-inventory-fb-value-0")`));
+    await setValue("#fabric-inventory-fb-value-0", "Synthetic Co A", "input");
+    await click('[data-action="fabric-f-apply"][data-ds="inventory"]');
+    assert.ok(await wait(`(window.__calls || []).some((c) => c.url.includes("sort=entryNo") && c.url.includes("company=Synthetic+Co+A") && !c.url.includes("filter=") && c.status === 200)`), "sorted request with the company");
     assert.ok((await calls()).filter((c) => c.url.includes("sort=entryNo")).every((c) => !c.url.includes("dateFrom")));
     assert.ok(await wait(`document.querySelector('[data-sort="entryNo"]')?.closest("th")?.getAttribute("aria-sort") === "descending"`));
     assert.ok(await wait("document.querySelectorAll('.fabric-explorer-table tbody tr').length > 0"));
@@ -373,8 +406,8 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     assert.ok(await wait(`document.querySelectorAll("#fx-rrows-inventory tr").length === 87`), "every field incl. sensitive");
     assert.match(await text("#fx-rrows-inventory"), /Cost_Amount_Actual/);
     assert.ok(await b.evaluate(`[...document.querySelectorAll("#fx-rrows-inventory tr")].some((tr) => tr.querySelector("code.fx-allfields__name")?.textContent === "Cost_Amount_Actual" && tr.querySelector(".fx-chip--restricted"))`), "the sensitive field is marked");
-    // Clean up the choice for the next person in this browser.
-    await b.evaluate(`localStorage.removeItem("jarc.fabric.columns.inventory")`);
+    // Clean up the choice (column keys are per person now, so another person never reads it anyway).
+    await b.evaluate(`Object.keys(localStorage).filter((k) => k.startsWith("jarc.fabric.columns.")).forEach((k) => localStorage.removeItem(k))`);
     await noErrors("sensitive inventory");
   });
 
@@ -407,11 +440,19 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
       const { window: w } = await lastRecords("sales");
       assert.deepEqual(w, { field: "invoice_date", dateFrom: "2026-03-02", dateTo: "2026-03-31", defaulted: true }, "30 days ending at the latest date");
       assert.ok(!new URLSearchParams(last.url.split("?")[1]).has("dateFrom"), "the browser leaves the window to the server");
-      assert.equal(await b.evaluate(`document.querySelector("#fabric-sales-from").value`), w.dateFrom);
-      assert.equal(await b.evaluate(`document.querySelector("#fabric-sales-to").value`), w.dateTo);
+      // Phase 7: the date window lives in the Filters builder (a required block), so it is read with the builder open.
+      assert.equal(await has("#fabric-sales-from"), false, "the window inputs exist only inside the open builder");
+      await click('[data-action="fabric-x-filters"][data-ds="sales"][data-focus-key="filters"]');
+      assert.ok(await wait(`!!document.querySelector("#fabric-sales-fb #fabric-sales-from")`), "Filters opens the builder with the date window");
+      // The window was left to the server (defaulted), so the inputs stay empty ("leave both empty for the default window")
+      // and the help names the server's window; the grid footer shows it too (below).
+      assert.equal(await b.evaluate(`document.querySelector("#fabric-sales-from").value`), "");
+      assert.equal(await b.evaluate(`document.querySelector("#fabric-sales-to").value`), "");
+      assert.match(ascii(await text("#fabric-sales-range-help")), new RegExp(`Up to 92 days.*default window is ${w.dateFrom} - ${w.dateTo}`));
+      await click('[data-action="fabric-f-cancel"][data-ds="sales"][data-focus-key="fb-close"]');
+      assert.ok(await wait(`!document.querySelector("#fabric-sales-fb")`), "Cancel closes the builder");
       assert.match(ascii(await text(".fabric-window")), /Mar 2, 2026 - Mar 31, 2026/);
       assert.deepEqual(await headers(), ["invoice_date", "Company", "invoice_id", "customer_name", "invoice_item_name", "invoice_item_quantity", "invoice_item_amount", "sales_data_source"]);
-      assert.match(await text("#fabric-root .fabric-help"), /Up to 92 days/);
       await noErrors("sales indexed");
     } finally { /* the index stays for the deep-link test */ }
   });
@@ -419,15 +460,16 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
   test("4. API Management: only for the Fabric API administrator; create Sales-only, see the secret once, list, revoke", async () => {
     await signIn(people.reader);
     await openApp("/fabric/inventory");
-    assert.ok(await wait("!!document.querySelector('#fabric-tab-inventory')"));
-    assert.equal(await has("#fabric-tab-api"), false, "no API Management tab for a reader");
+    assert.ok(await wait("!!document.querySelector('#fabric-obj-inventory')"));
+    assert.equal(await has("#fabric-obj-api"), false, "no API Management in the Objects panel for a reader");
+    assert.doesNotMatch(await text("#fabric-objects"), /API Management/);
     await openApp("/fabric/api");
-    assert.ok(await wait("!!document.querySelector('#fabric-tab-inventory.active')"), "/fabric/api falls back to a dataset tab");
+    assert.ok(await wait("document.querySelector('#fabric-obj-inventory-all')?.getAttribute('aria-current') === 'page'"), "/fabric/api falls back to a dataset");
     assert.equal(await has("#fabric-api-body"), false);
 
     await signIn(people.admin);
     await openApp("/fabric/api");
-    assert.ok(await wait("!!document.querySelector('#fabric-tab-api.active') && !!document.querySelector('[data-action=\"fabric-api-new\"]')", 15000), "API Management");
+    assert.ok(await wait("document.querySelector('#fabric-obj-api')?.getAttribute('aria-current') === 'page' && !!document.querySelector('[data-action=\"fabric-api-new\"]')", 15000), "API Management");
     await click('[data-action="fabric-api-new"]');
     assert.ok(await wait("!!document.querySelector('form[data-action=\"fabric-api-create-form\"]')"));
     await setValue('form[data-action="fabric-api-create-form"] input[name="name"]', "Synthetic BI", "input");
@@ -480,7 +522,7 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     const rows = () => json(`[...document.querySelectorAll(".fabric-api-tokens tbody tr")].map((tr) => ({ name: tr.querySelector("th strong")?.textContent || "", owner: tr.querySelector('[data-label="Owner"]')?.textContent || "", revoke: !!tr.querySelector('[data-action="fabric-api-revoke"]') }))`);
     await signIn(people.regular);
     await openApp("/fabric/api");
-    assert.ok(await wait("!!document.querySelector('#fabric-tab-api.active') && !!document.querySelector('.fabric-api .fx-api__intro')", 15000), "API Management for a regular administrator");
+    assert.ok(await wait("document.querySelector('#fabric-obj-api')?.getAttribute('aria-current') === 'page' && !!document.querySelector('.fabric-api .fx-api__intro')", 15000), "API Management for a regular administrator");
     assert.match(await text(".fx-api__intro"), /Your Fabric API keys: you can revoke only the keys you created/);
     assert.equal(await has(".fabric-api-tokens tbody tr"), false, "Ada's key (test 4) isn't listed");
     await click('[data-action="fabric-api-new"]');
@@ -518,7 +560,7 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     await signIn(people.reader);
     await openInventoryList("/fabric/inventory");
     assert.equal(await text(".fx-appbar__title"), "Fabric Data");
-    assert.equal(await b.evaluate(`document.querySelector("#fabric-tab-inventory").getAttribute("aria-selected")`), "true", "the Inventory tab");
+    assert.equal(await b.evaluate(`document.querySelector("#fabric-obj-inventory-all").getAttribute("aria-current")`), "page", "Inventory in the Objects panel");
     // A sales record link, opened directly.
     await openApp("/fabric/sales");
     assert.ok(await wait("document.querySelectorAll('.fabric-explorer-table tbody tr').length > 0", 15000));
@@ -544,8 +586,8 @@ describe("Fabric Data in the real app (headless browser)", { skip: BROWSER ? fal
     assert.ok(await wait(`location.pathname === "/fabric/sales" && document.querySelectorAll('.fabric-explorer-table tbody tr').length > 0 && !document.querySelector("#fx-rrows-sales")`), "Back shows the list");
     await b.evaluate("history.forward()");
     assert.ok(await wait(`/^\\/fabric\\/sales\\/records\\//.test(location.pathname) && document.querySelectorAll("#fx-rrows-sales tr").length > 0`), "Forward shows the record again");
-    // Switching tabs, then Back.
-    await click("#fabric-tab-inventory");
+    // Switching datasets in the Objects panel, then Back.
+    await click("#fabric-obj-inventory");
     assert.ok(await wait(`location.pathname === "/fabric/inventory" && document.querySelectorAll('.fabric-explorer-table tbody tr').length > 0`));
     await b.evaluate("history.back()");
     assert.ok(await wait(`/^\\/fabric\\/sales\\/records\\//.test(location.pathname) && document.querySelectorAll("#fx-rrows-sales tr").length > 0`), "Back returns to the sales record");

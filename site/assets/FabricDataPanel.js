@@ -10,6 +10,8 @@
 class FabricDataPanel {
   static SECTIONS = [["inventory", "Inventory", "database"], ["sales", "Sales", "records"], ["invoices", "Invoices", "columns"], ["api", "API Management", "lock"]];
   static DATASET_VIEWS = ["inventory", "sales"];
+  // Actions the panel hands to the explorer named by data-ds: its list (x), filter builder (f), column menus (c) and record page (r).
+  static EXPLORER_PREFIXES = ["fabric-x-", "fabric-f-", "fabric-c-", "fabric-r-"];
   static DETAIL_TABS = [["overview", "Overview"], ["lines", "Sales Lines"], ["fields", "All Fields"], ["keys", "Keys"]];
   static INVOICE_SORTS = ["invoiceDate", "invoiceNo", "customerName", "amount"];
   static DEFAULT_DAYS = 30;
@@ -212,20 +214,24 @@ class FabricDataPanel {
   syncUrl() { this.c.syncBoardUrl?.(); }
 
   // ---- The page
-  // The Fabric application (an app module, AppModules.js): a compact app bar (icon, name, section tabs, Read-only, connection
-  // status, Refresh), then .fx-app__body (#fabric-root), which fills the rest of the viewport. The explorer, record page and
-  // API Management draw inside the body; only their own inner regions scroll (fabric-ui.css).
+  // The Fabric application (an app module, AppModules.js): a compact app bar (Objects button, icon, name, the open section,
+  // Read-only, connection status, Refresh), then .fx-app__split: the Objects panel (FabricObjects.js, primary navigation) and
+  // .fx-app__body (#fabric-root), which fill the rest of the viewport. The explorer, record page and API Management draw inside
+  // the body; only their own inner regions scroll (fabric-ui.css).
   html() {
     if (!this.visible) return `<div class="fx-app fx-app--closed"><header class="fx-appbar"><span class="fx-appbar__icon" aria-hidden="true">${icon("database")}</span><h1 class="fx-appbar__title">Fabric Data</h1></header><div class="fx-app__body"><div class="fx-status fx-status--info fx-app__notice" role="status"><span class="fx-status__text">Fabric Data is available only to the people a JARC administrator has named.</span></div></div></div>`;
     if (!this.sections().some(([id]) => id === (this.route.view === "invoice" ? "invoices" : this.route.view))) this.route = { view: this.defaultView(), company: null, invoiceNo: "" };
     this.scheduleEnsure();
-    const v = this.route.view, active = v === "invoice" ? "invoices" : v;
-    const tabs = this.sections().map(([id, label, ic]) => { const on = id === active; return `<button type="button" role="tab" id="fabric-tab-${id}" data-action="fabric-section" data-section="${id}" aria-selected="${on}" aria-controls="fabric-root" tabindex="${on ? 0 : -1}" class="fx-appbar__tab${on ? " is-active active" : ""}">${icon(ic)}<span>${label}</span></button>`; }).join("");
-    return `<div class="fx-app" data-fx-view="${this.attr(v)}"><header class="fx-appbar"><span class="fx-appbar__icon" aria-hidden="true">${icon("database")}</span><h1 class="fx-appbar__title">Fabric Data</h1>
-      <nav class="fx-appbar__tabs" role="tablist" aria-label="Fabric Data sections">${tabs}</nav>
+    const v = this.route.view, active = v === "invoice" ? "invoices" : v, section = this.sections().find(([id]) => id === active)?.[1] || "";
+    // Primary navigation is the Objects panel (FabricObjects.js) left of the body; the app bar names the open section.
+    const objects = typeof FabricObjects === "function";
+    return `<div class="fx-app" data-fx-view="${this.attr(v)}"><header class="fx-appbar">${objects ? FabricObjects.toggleHtml(this) : ""}<span class="fx-appbar__icon" aria-hidden="true">${icon("database")}</span><h1 class="fx-appbar__title">Fabric Data</h1>
+      <span class="fx-appbar__section"><span class="fx-appbar__sep" aria-hidden="true">/</span><span id="fabric-section-title">${this.esc(section)}</span></span>
       <div class="fx-appbar__chips"><span class="fx-chip fx-chip--readonly" title="Nothing here can be changed">${icon("lock")}<span>Read-only</span></span><span id="fabric-conn" class="fx-appbar__conn">${this.connectionHtml()}</span><button type="button" class="fx-btn fx-btn--icon" data-action="fabric-refresh" data-focus-key="refresh" aria-label="Refresh" title="Refresh">${icon("refresh")}</button></div></header>
-      <div id="fabric-status" class="fx-app__status">${this.statusHtml()}</div><p id="fabric-live" class="sr-only" role="status" aria-live="polite">${this.esc(this.announced)}</p><div id="fabric-root" class="fx-app__body fabric-root" role="tabpanel" aria-labelledby="fabric-tab-${active}" data-module-scroll data-focus-key="fabric-body">${this.body()}</div></div>`;
+      <div id="fabric-status" class="fx-app__status">${this.statusHtml()}</div><p id="fabric-live" class="sr-only" role="status" aria-live="polite">${this.esc(this.announced)}</p><div class="fx-app__split">${objects ? FabricObjects.html(this) : ""}<div id="fabric-root" class="fx-app__body fabric-root" role="region" aria-labelledby="fabric-section-title" data-module-scroll data-focus-key="fabric-body">${this.body()}</div></div></div>`;
   }
+  // The Objects panel on its own (FabricSavedFilters calls this once its list has answered); the rest stays as it is.
+  redrawObjects() { if (typeof FabricObjects === "function") FabricObjects.redraw(this); }
 
   // ---- Status (GET /fabric/status, once per section entry and on Refresh): the app bar's connection chip and, under the bar,
   // one compact fx-status line with its technical details collapsed. The explorers read statusFor(dataset).
@@ -609,10 +615,21 @@ class FabricDataPanel {
     const plain = !event || (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && (event.button === undefined || event.button === 0));
     if (target.tagName === "A" && !plain) return;
     if (target.tagName === "A") event?.preventDefault?.();
-    // fabric-x-…: the explorer; fabric-r-…: the record page (FabricRecordView, through its explorer). Both name data-ds.
-    if (action.startsWith("fabric-x-") || action.startsWith("fabric-r-")) { this.explorerFor(target)?.onAction(action, target, event); return; }
+    // fabric-o-…: the Objects panel (FabricObjects.js).
+    if (action.startsWith("fabric-o-")) { if (typeof FabricObjects === "function") FabricObjects.onAction(this, action, target, event); return; }
+    // fabric-s-…: saved filters (FabricSavedFilters.js). Chosen in the Objects panel, the dataset is shown first.
+    if (action.startsWith("fabric-s-")) { this.savedFilterAction(action, target, event); return; }
+    // fabric-x-… / fabric-f-… / fabric-c-…: the explorer (its filter builder and column menus); fabric-r-…: the record page
+    // (FabricRecordView, through its explorer). All name data-ds.
+    if (FabricDataPanel.EXPLORER_PREFIXES.some((p) => action.startsWith(p))) { this.explorerFor(target)?.onAction(action, target, event); return; }
     if (action === "fabric-status-details") { this.statusOpen = !this.statusOpen; this.redrawStatus(); return; }
-    if (action === "fabric-section") { this.openSection(target.dataset.section); return; }
+    if (action === "fabric-section") {
+      const id = target.dataset.section, fromObjects = Boolean(target.closest?.("#fabric-objects")) && typeof FabricObjects === "function";
+      if (fromObjects) { FabricObjects.afterChoice(this, id); if (FabricObjects.PARENTS.includes(id)) { FabricObjects.state(this).open.add(id); FabricObjects.save(this); } }
+      this.openSection(id, { focus: !fromObjects });
+      if (fromObjects) FabricObjects.focusAfterChoice(this, id);
+      return;
+    }
     if (action === "fabric-open-invoice") { const c = target.dataset.company; this.openInvoice(c === "~" ? null : c, target.dataset.invoice); return; }
     if (action === "fabric-back") { this.openSection("invoices"); return; }
     if (action === "fabric-refresh") { this.refresh(); return; }
@@ -628,11 +645,27 @@ class FabricDataPanel {
   // The explorer an event belongs to: its data-ds names one of the fixed datasets.
   explorerFor(target) { const ds = target?.dataset?.ds; return this.isDataset(ds) && this.datasetAllowed(ds) ? this.explorers[ds] : null; }
   focusTab(prefix, id) { if (typeof document !== "undefined") document.querySelector(`#${prefix}-${id}`)?.focus?.(); }
-  openSection(id) {
+  // Opens a section (a dataset's list, Invoices or API Management). focus: false when the caller places focus itself.
+  openSection(id, { focus = true } = {}) {
     if (!this.sections().some(([s]) => s === id)) return;
     this.route = { view: id, company: null, invoiceNo: "" };
     if (this.isDataset(id)) this.explorers[id].openRecord("");
-    this.c.update(); this.focusTab("fabric-tab", id);
+    this.c.update();
+    if (focus) this.focusTab("fabric-obj", id);
+  }
+  // fabric-s-… (saved filters, FabricSavedFilters.js). From the Objects panel, the filter's dataset list is shown first (route
+  // only); the explorer then hands the action to the saved-filters module, which applies the filter. A full redraw follows a choice
+  // made in the panel, so the panel, the app bar and the address bar all show it.
+  savedFilterAction(action, target, event) {
+    const x = this.explorerFor(target);
+    if (!x) return;
+    const objects = typeof FabricObjects === "function" && Boolean(target.closest?.("#fabric-objects"));
+    if (objects) {
+      FabricObjects.afterChoice(this, `${x.ds}-saved-${target.dataset.id || ""}`);
+      if (this.route.view !== x.ds || x.recordId) { this.route = { view: x.ds, company: null, invoiceNo: "" }; x.openRecord(""); }
+    }
+    x.onAction?.(action, target, event); // the explorer hands fabric-s-… to FabricSavedFilters (02-audit-and-architecture §2g)
+    if (objects) { this.c.update(); FabricObjects.focusAfterChoice(this, `${x.ds}-saved-${target.dataset.id || ""}`); }
   }
   openInvoice(company, invoiceNo) {
     if (!FabricDataPanel.validSegment(invoiceNo) || (company !== null && !FabricDataPanel.validSegment(company))) return;
@@ -681,7 +714,7 @@ class FabricDataPanel {
   onInput(target, event) {
     const action = target.dataset?.action;
     if (action?.startsWith("fabric-api-")) { this.api?.onInput?.(target); return; }
-    if (action?.startsWith("fabric-x-") || action?.startsWith("fabric-r-")) { this.explorerFor(target)?.onInput(target, event); return; }
+    if (this.explorerAction(action)) { this.explorerFor(target)?.onInput(target, event); return; }
     if (action === "fabric-search") {
       const view = "invoices";
       this.drafts[view] = target.value;
@@ -708,7 +741,7 @@ class FabricDataPanel {
   onChange(target) {
     const action = target.dataset?.action;
     if (action?.startsWith("fabric-api-")) { this.api?.onChange?.(target); return; }
-    if (action?.startsWith("fabric-x-") || action?.startsWith("fabric-r-")) { this.explorerFor(target)?.onChange(target); return; }
+    if (this.explorerAction(action)) { this.explorerFor(target)?.onChange(target); return; }
     if (action === "fabric-filter") {
       const view = "invoices";
       const name = target.dataset.filter;
@@ -723,12 +756,17 @@ class FabricDataPanel {
   onSubmit(action, form) {
     if (action.startsWith("fabric-api-")) { this.api?.onSubmit(action, form); return; }
     if (action === "fabric-x-form") { this.explorerFor(form)?.onSubmit(); return; }
+    if (this.explorerAction(action)) { this.explorerFor(form)?.onSubmit(action, form); return; }
     if (action === "fabric-filter-form") { this.commitSearch("invoices"); }
   }
-  // Arrow keys, Home and End move between the tabs of this section (role="tablist"), and open the one reached.
-  // Other keys inside the section go to the open explorer (its grid and record page keys), when it handles keys.
+  // Inputs, changes and forms of the explorer's parts (x, f, c, r) and of saved filters (s): the explorer named by data-ds.
+  explorerAction(action) { return typeof action === "string" && (FabricDataPanel.EXPLORER_PREFIXES.some((p) => action.startsWith(p)) || action.startsWith("fabric-s-")); }
+  // Keys inside the Objects panel go to it (tree keys, the drawer's Escape and focus trap). Arrow keys, Home and End move between
+  // the tabs of the v1 invoice page (role="tablist"), and open the one reached. Other keys inside the section go to the open
+  // explorer (its grid and record page keys), when it handles keys.
   onKeydown(event) {
-    const tab = event.target?.closest?.('.fx-appbar__tabs [role="tab"], .fabric-tabs [role="tab"]');
+    if (typeof FabricObjects === "function" && this.c.model?.screen === "fabric" && event.target?.closest?.("#fabric-objects") && FabricObjects.onKeydown(this, event)) return;
+    const tab = event.target?.closest?.('.fabric-tabs [role="tab"]');
     if (!tab || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       if (!tab && this.c.model?.screen === "fabric" && event.target?.closest?.("#fabric-root")) this.explorer?.onKeydown?.(event);
       return;

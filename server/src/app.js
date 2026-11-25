@@ -37,6 +37,8 @@ const { apiTokenRoutes } = require("./routes/api-tokens");
 const { externalApiRoutes, windowLimiter, FAILED_AUTH } = require("./routes/external-api");
 const { externalFabricRoutes } = require("./routes/external-fabric");
 const { fabricApiTokenRoutes } = require("./routes/fabric-api-tokens");
+const { fabricSavedFilterRoutes } = require("./routes/fabric-saved-filters");
+const { validate: validateFabricFilter } = require("./fabric/filter-model");
 const { fabricDataRouter, requireFabricDataRead, canReadFabric, canReadFabricSensitive, canReadFabricCost, canManageFabricApi, canOverseeFabricApi, DATASET_NAMES } = require("./fabric");
 const { version } = require("../package.json");
 
@@ -108,6 +110,9 @@ function createApp({ fabricData = null, apiTokens = null, features = {}, reposit
   // inflate: false — compressed (gzip/deflate/br) request bodies are refused with 415 before anything is read or
   // decompressed. JARC's browser app never sends them, and this parser runs before authentication, so decompression
   // would be reachable without signing in (body-parser advisory GHSA-27r3-jxmh-p828).
+  // Saved Fabric filters take small bodies only (a filter is at most 4 KB canonical): their own 32 KB parser runs first, so the
+  // app-wide 10 MB parser below sees the body as already read and skips it (L3, Fabric phase 7 security review).
+  if (fabric) api.use("/fabric/saved-filters", express.json({ limit: "32kb", strict: true, inflate: false }));
   api.use(express.json({ limit: JSON_BODY_LIMIT, strict: true, inflate: false }));
   api.use(healthRoutes({ environment, version, database: dataLayer?.connection ?? null }));
   api.use(authConfigRoutes({ mode: auth ? "entra" : "dev", entra: auth?.entra }));
@@ -175,7 +180,10 @@ function createApp({ fabricData = null, apiTokens = null, features = {}, reposit
     // Fabric Data routes: GET/HEAD only, session only (a bearer token here is 401), readers only (403 FABRIC_DATA_FORBIDDEN).
     // The v1 invoice views only with FABRIC_INVOICE_VIEWS=true (never under /external/fabric). Ends in its own JSON 404:
     // nothing under /api/v1/fabric falls through to the routers below.
-    if (fabric) api.use("/fabric", identify, requireFabricDataRead({ config: fabric.config, tenantId: auth.entra.tenantId }), fabricDataRouter({ service: fabric.service, logger, invoiceViews: fabric.config.invoiceViews === true, ...(fabric.limiter ? { limiter: fabric.limiter } : {}) }), apiNotFound);
+    // Saved filters (JARC's own database, session + CSRF, readers only; never for tokens), before the GET-only data router.
+    if (fabric && dataLayer?.repos?.fabricSavedFilters) api.use("/fabric/saved-filters", identify, requireFabricDataRead({ config: fabric.config, tenantId: auth.entra.tenantId }), fabricSavedFilterRoutes({ repo: dataLayer.repos.fabricSavedFilters, validateFilter: validateFabricFilter }), apiNotFound);
+    // advanced (this session mount only): filter= / orderBy= / searchField=, schema capabilities and GET /:dataset/values.
+    if (fabric) api.use("/fabric", identify, requireFabricDataRead({ config: fabric.config, tenantId: auth.entra.tenantId }), fabricDataRouter({ service: fabric.service, logger, invoiceViews: fabric.config.invoiceViews === true, advanced: true, values: fabric.values || null, ...(fabric.limiter ? { limiter: fabric.limiter } : {}) }), apiNotFound);
     if (accountService) api.use(identify, accountRoutes({ services: dataLayer.services, repos: dataLayer.repos }));
     api.use(identify, meRoutes({ repos: dataLayer.repos, mode: auth ? "entra" : "dev", access }), memberRoutes({ services: dataLayer.services, access, repos: dataLayer.repos }), resourceRoutes({ services: dataLayer.services, access, features: enabled }));
     // Files columns (attachments in GridFS).

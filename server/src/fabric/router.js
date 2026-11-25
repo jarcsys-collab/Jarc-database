@@ -35,11 +35,16 @@ const BUSY_RETRY_AFTER_S = 2;
 function accessOf(raw) {
   const list = raw?.datasets instanceof Set ? [...raw.datasets] : Array.isArray(raw?.datasets) ? raw.datasets : [];
   const sensitive = typeof raw?.sensitive === "boolean" ? raw.sensitive === true : raw?.cost === true;
-  return { datasets: new Set(DATASET_NAMES.filter((n) => list.includes(n))), sensitive, cost: sensitive };
+  // via and the caller id bind cursors to the caller who received them (service.listRecords).
+  const via = raw?.via === "session" || raw?.via === "token" ? raw.via : null;
+  return { datasets: new Set(DATASET_NAMES.filter((n) => list.includes(n))), sensitive, cost: sensitive, via, actorId: via === "session" ? String(raw.actorId) : undefined, tokenId: via === "token" ? String(raw.tokenId) : undefined };
 }
 
 // invoiceViews: mount the v1 invoice endpoints (the session API only, and only with FABRIC_INVOICE_VIEWS=true).
-function fabricDataRouter({ service, limiter = fabricLimiter(), perCallerInFlight = PER_CALLER_IN_FLIGHT, logger = console, now = () => new Date(), invoiceViews = false }) {
+// advanced: the session API only (app.js). Adds filter= / orderBy= / searchField= to /:dataset/records, the capability metadata to
+// /:dataset/schema and GET /:dataset/values (values: a FabricValues from values.js). Without it (the Fabric API tokens) every one
+// of these stays an unknown parameter (400) or path (404), and the schema is unchanged.
+function fabricDataRouter({ service, limiter = fabricLimiter(), perCallerInFlight = PER_CALLER_IN_FLIGHT, logger = console, now = () => new Date(), invoiceViews = false, advanced = false, values = null }) {
   if (!service) throw new Error("fabricDataRouter needs the Fabric service.");
   const router = express.Router();
   const send = (res, body) => res.status(200).json(body);
@@ -102,8 +107,10 @@ function fabricDataRouter({ service, limiter = fabricLimiter(), perCallerInFligh
       send(res, await service.getLine(key.company, key.invoiceNo, v.lineId(req.params.lineId), a));
     });
   }
-  router.get("/:dataset/schema", async (req, res) => { const name = datasetOf(req); v.noParams(req.query); send(res, service.schema(name, access(req))); });
-  router.get("/:dataset/records", async (req, res) => { const name = datasetOf(req); send(res, await service.listRecords(name, req.query, access(req))); });
+  const opts = advanced ? [{ advanced: true }] : [];
+  router.get("/:dataset/schema", async (req, res) => { const name = datasetOf(req); v.noParams(req.query); send(res, service.schema(name, access(req), ...opts)); });
+  router.get("/:dataset/records", async (req, res) => { const name = datasetOf(req); send(res, await service.listRecords(name, req.query, access(req), ...opts)); });
+  if (advanced && values) router.get("/:dataset/values", async (req, res) => { const name = datasetOf(req); send(res, await values.list(name, req.query, access(req))); });
   router.get("/:dataset/records/:id", async (req, res) => {
     const name = datasetOf(req);
     v.noParams(req.query);

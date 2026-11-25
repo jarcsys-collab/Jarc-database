@@ -1,0 +1,142 @@
+/* Fabric Data advanced filter builder (FabricFilterBuilder.js) and the explorer's filter chips and header marks (Phase 7).
+   Scoped under .fx-app; tokens (--fx-*) from fabric-ui.css with fallbacks, so light and dark follow the app. The builder is an
+   anchored popover under the Filters button (it overlays the grid and never shrinks it); on phones a full-screen drawer. */
+
+.fx-app .fx-explorer .fx-fbpop { position: relative; display: inline-flex; }
+.fx-app .fx-fb { position: absolute; top: calc(100% + 4px); left: 0; z-index: 40; display: flex; flex-direction: column; width: 720px; max-width: calc(100vw - 32px); max-height: min(640px, calc(100dvh - 180px)); min-height: 200px; box-sizing: border-box; margin: 0; border: 1px solid var(--fx-border-strong, #a7b9cc); border-radius: var(--fx-radius, 3px); background: var(--fx-surface, #fff); color: var(--fx-text-c, #1d2b38); box-shadow: 0 8px 24px rgb(0 0 0 / .22); font-size: var(--fx-text-sm, 12px); white-space: normal; }
+.fx-app .fx-fb__head { display: flex; align-items: center; gap: 8px; flex: none; min-height: 32px; padding: 2px 4px 2px 10px; border-bottom: 1px solid var(--fx-border-light, #d3dde7); background: var(--fx-panel, #f4f7fa); }
+.fx-app .fx-fb__title { margin: 0; font-size: var(--fx-text, 13px); font-weight: 700; color: var(--fx-heading, #1f3d5c); }
+.fx-app .fx-fb__state { color: var(--fx-muted, #4b6178); font-size: 11px; }
+.fx-app .fx-fb__state.is-draft { color: var(--fx-warn-fg, #7a4b00); font-weight: 600; }
+.fx-app .fx-fb__close { margin-left: auto; }
+.fx-app .fx-fb__body { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 8px 10px; display: grid; gap: 8px; align-content: start; }
+.fx-app .fx-fb__foot { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: none; padding: 6px 10px; border-top: 1px solid var(--fx-border-light, #d3dde7); background: var(--fx-panel, #f4f7fa); }
+.fx-app .fx-fb__spacer { flex: 1 1 auto; }
+.fx-app .fx-fb__summary { flex: 1 1 100%; margin: 0; color: var(--fx-err-fg, #8a1c1c); font-weight: 600; }
+.fx-app .fx-fb__notice { margin: 0; color: var(--fx-muted, #4b6178); }
+
+/* The date window: its own block (required in Sales: a "required" tag, no remove button). */
+.fx-app .fx-fb__window { margin: 0; padding: 6px 8px 8px; border: 1px solid var(--fx-border, #b9c8d7); border-radius: var(--fx-radius, 3px); min-width: 0; }
+.fx-app .fx-fb__window.is-required { border-left: 3px solid var(--fx-info, #1f6fb2); }
+.fx-app .fx-fb__window legend { padding: 0 4px; font-weight: 600; color: var(--fx-label, #3b5068); }
+.fx-app .fx-fb__req { display: inline-block; margin-left: 4px; padding: 0 6px; border-radius: 8px; background: var(--fx-info, #1f6fb2); color: #fff; font-size: 10px; font-weight: 600; vertical-align: 1px; }
+.fx-app .fx-fb__row { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.fx-app .fx-fb__lbl { display: grid; gap: 2px; color: var(--fx-label, #3b5068); }
+.fx-app .fx-fb__help { margin: 4px 0 0; color: var(--fx-muted, #4b6178); font-size: 11px; }
+
+/* Groups and conditions */
+.fx-app .fx-fb__group { display: grid; gap: 4px; min-width: 0; }
+.fx-app .fx-fb__group--d2 { padding: 6px 8px; border: 1px dashed var(--fx-border, #b9c8d7); border-radius: var(--fx-radius, 3px); background: var(--fx-zebra, #f7f9fb); }
+.fx-app .fx-fb__grouphead { display: flex; align-items: center; gap: 6px; }
+.fx-app .fx-fb__join { display: inline-flex; align-items: center; gap: 6px; color: var(--fx-label, #3b5068); }
+.fx-app .fx-fb__jointext { color: var(--fx-label, #3b5068); }
+.fx-app .fx-fb__items { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.fx-app .fx-fb__empty { padding: 4px 0; color: var(--fx-muted, #4b6178); font-style: italic; list-style: none; }
+.fx-app .fx-fb__cond { position: relative; display: grid; gap: 2px; }
+.fx-app .fx-fb__condrow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.fx-app .fx-fb__cond.is-invalid .fx-fb__condrow { outline: 1px solid var(--fx-err-bd, #d9a3a3); outline-offset: 2px; border-radius: 2px; }
+.fx-app .fx-fb__groupfoot { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.fx-app .fx-fb__limit { color: var(--fx-muted, #4b6178); font-size: 11px; }
+.fx-app .fx-fb__err { margin: 0; color: var(--fx-err-fg, #8a1c1c); font-size: 11px; font-weight: 600; }
+.fx-app .fx-fb__field { display: inline-flex; align-items: center; gap: 6px; height: var(--fx-h-input, 26px); max-width: 260px; min-width: 150px; padding: 0 6px; border: 1px solid var(--fx-border-input, #7f95ac); border-radius: var(--fx-radius-sm, 2px); background: var(--fx-surface, #fff); color: var(--fx-text-c, #1d2b38); font: inherit; text-align: left; cursor: pointer; }
+.fx-app .fx-fb__fieldlabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-app .fx-fb__fieldlabel.is-empty { color: var(--fx-muted, #4b6178); }
+.fx-app .fx-fb__fieldid, .fx-app .fx-fb__opt code { font-family: var(--fx-font-mono, ui-monospace, Consolas, monospace); font-size: 10px; color: var(--fx-muted, #4b6178); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-app .fx-fb__kind { flex: none; padding: 0 4px; border: 1px solid var(--fx-border, #b9c8d7); border-radius: 6px; color: var(--fx-muted, #4b6178); font-size: 10px; line-height: 14px; }
+.fx-app .fx-fb__kind.is-bad { color: var(--fx-err-fg, #8a1c1c); border-color: var(--fx-err-bd, #d9a3a3); }
+.fx-app .fx-fb__caret { margin-left: auto; color: var(--fx-muted, #4b6178); font-size: 10px; }
+.fx-app .fx-fb__op { max-width: 240px; }
+.fx-app .fx-fb__vals { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; flex: 1 1 180px; }
+.fx-app .fx-fb__val { height: var(--fx-h-input, 26px); min-width: 0; width: 160px; max-width: 100%; padding: 0 6px; border: 1px solid var(--fx-border-input, #7f95ac); border-radius: var(--fx-radius-sm, 2px); background: var(--fx-surface, #fff); color: var(--fx-text-c, #1d2b38); font: inherit; box-sizing: border-box; }
+.fx-app .fx-fb__val[aria-invalid="true"], .fx-app .fx-fb__window input[aria-invalid="true"] { border-color: var(--fx-err-fg, #8a1c1c); }
+.fx-app .fx-fb__n { width: 72px; }
+.fx-app .fx-fb__and { color: var(--fx-muted, #4b6178); }
+.fx-app .fx-fb__tools { display: inline-flex; gap: 2px; margin-left: auto; }
+.fx-app .fx-fb__tags { display: inline-flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.fx-app .fx-fb__placeholder { color: var(--fx-muted, #4b6178); font-style: italic; }
+.fx-app .fx-fb__tag { display: inline-flex; align-items: center; gap: 2px; max-width: 220px; height: 20px; padding: 0 2px 0 6px; border: 1px solid var(--fx-border, #b9c8d7); border-radius: 10px; background: var(--fx-panel, #f4f7fa); }
+.fx-app .fx-fb__tagtext { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-app .fx-fb__tagx { position: relative; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--fx-muted, #4b6178); font: inherit; font-size: 13px; line-height: 1; cursor: pointer; }
+.fx-app .fx-fb__tagx::after { content: ""; position: absolute; inset: -4px; }
+.fx-app .fx-fb__tagx:hover { background: var(--fx-hover, #e3ecf5); color: var(--fx-text-c, #1d2b38); }
+.fx-app .fx-fb__taginput { width: 180px; }
+
+/* The field list (searchable; label, id and type badge) and the value picker mount */
+.fx-app .fx-fb__picker { position: absolute; top: 30px; left: 0; z-index: 5; display: flex; flex-direction: column; gap: 4px; width: 340px; max-width: calc(100% - 8px); max-height: 300px; padding: 6px; border: 1px solid var(--fx-border-strong, #a7b9cc); border-radius: var(--fx-radius, 3px); background: var(--fx-surface, #fff); box-shadow: 0 6px 18px rgb(0 0 0 / .18); box-sizing: border-box; }
+.fx-app .fx-fb__pickersearch { width: 100%; flex: none; }
+.fx-app .fx-fb__fields { list-style: none; margin: 0; padding: 0; overflow: auto; overscroll-behavior: contain; flex: 1 1 auto; min-height: 0; }
+.fx-app .fx-fb__fields li[hidden] { display: none; }
+.fx-app .fx-fb__opt { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 6px; width: 100%; min-height: 26px; padding: 2px 6px; border: 0; border-radius: var(--fx-radius-sm, 2px); background: none; color: var(--fx-text-c, #1d2b38); font: inherit; text-align: left; cursor: pointer; }
+.fx-app .fx-fb__opt:hover, .fx-app .fx-fb__opt:focus-visible { background: var(--fx-hover, #e3ecf5); }
+.fx-app .fx-fb__opt.is-current { background: var(--fx-selected, #c5daf0); font-weight: 600; }
+.fx-app .fx-fb__optlabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-app .fx-fb__none { margin: 0; color: var(--fx-muted, #4b6178); }
+.fx-app .fx-fb__vpick { flex: 1 1 100%; max-height: 340px; overflow: auto; padding: 6px; border: 1px solid var(--fx-border, #b9c8d7); border-radius: var(--fx-radius, 3px); background: var(--fx-surface, #fff); }
+
+/* Chips: a locked (required) chip has no ×; a nested group's chips are bracketed with its AND/OR. */
+.fx-app .fx-explorer .fx-chip--filter.is-locked { padding-right: 8px; border-style: dashed; }
+.fx-app .fx-explorer .fx-chipgroup { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; padding: 1px 4px; border: 1px dashed var(--fx-border, #b9c8d7); border-radius: 12px; }
+.fx-app .fx-explorer .fx-chipgroup__join, .fx-app .fx-explorer .fx-chipgroup__op { color: var(--fx-muted, #4b6178); font-size: 11px; }
+/* A filtered column: a small filter mark after its header label. */
+.fx-app .fx-explorer .fx-col-filtered { display: inline-flex; margin-left: 3px; color: var(--fx-info, #1f6fb2); vertical-align: -2px; }
+.fx-app .fx-explorer .fx-col-filtered .icon { width: 12px; height: 12px; }
+.fx-app .fx-explorer .fx-explorer__msg { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.fx-app .fx-fb :is(button, select, input):focus-visible { outline: 2px solid var(--fx-focus, #1f6fb2); outline-offset: 1px; }
+
+/* Touch: 16px text in inputs (no zoom on focus), 34px targets. */
+@media (pointer: coarse), (max-width: 1024px) {
+  .fx-app .fx-fb :is(input, select), .fx-app .fx-fb .fx-fb__field { min-height: 34px; font-size: 16px; }
+  .fx-app .fx-fb__tagx::after { inset: -8px; }
+  .fx-app .fx-fb__opt { min-height: 36px; }
+}
+/* Tablets: anchored to the toolbar's right edge (as the column chooser), always inside the viewport. */
+@media (max-width: 1024px) {
+  .fx-app .fx-explorer .fx-fbpop { position: static; }
+  .fx-app .fx-fb { left: auto; right: 8px; width: min(720px, calc(100% - 16px)); max-width: none; }
+}
+/* Phones: a full-screen drawer with its own scroll; the footer (Apply / Cancel) stays on screen. */
+@media (max-width: 620px) {
+  .fx-app .fx-fb { position: fixed; inset: 0; z-index: 1000; width: 100%; max-width: none; max-height: none; height: 100dvh; border: 0; border-radius: 0; }
+  .fx-app .fx-fb__condrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+  .fx-app .fx-fb__field, .fx-app .fx-fb__op, .fx-app .fx-fb__vals { grid-column: 1 / -1; max-width: none; width: 100%; }
+  .fx-app .fx-fb__val, .fx-app .fx-fb__taginput { flex: 1 1 120px; width: auto; }
+  .fx-app .fx-fb__tools { grid-column: 1 / -1; justify-content: flex-end; }
+  .fx-app .fx-fb__picker { position: static; width: 100%; max-width: none; grid-column: 1 / -1; }
+  .fx-app .fx-fb__foot .fx-btn { flex: 1 1 auto; justify-content: center; min-height: 40px; }
+  .fx-app .fx-fb__foot .fx-fb__spacer { display: none; }
+  /* Browser review (13-browser-responsive-review.md, D1): the drawer sits inside the toolbar's stacking context (z-index 5),
+     so the JARC top bar (z-index 20) covered its title and × close. Lift the toolbar while it holds the open builder. */
+  .fx-app .fx-explorer__toolbar:has(.fx-fb) { z-index: 1000; }
+}
+
+/* ---- Saved filters (FabricSavedFilters.js; 13-browser-responsive-review.md, D6). The toolbar group is compact so the explorer
+   toolbar stays on one row at 1440 px with the Objects panel open: 4 px gaps, 8 px button padding, the open filter's name cut
+   with an ellipsis (its full name is in the chip's tooltip). From 1025 px the search box may give way down to 128 px, and
+   "Saved filter:" and Manage's label are read out (aria-label, tooltips) but not drawn. */
+.fx-app .fx-sf-bar { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+.fx-app .fx-explorer .fx-sf-bar .fx-btn { gap: 4px; padding: 0 8px; }
+.fx-app .fx-sf-bar__current { max-width: 200px; min-width: 0; }
+.fx-app .fx-sf-bar__current .fx-chip__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fx-app .fx-sf-bar__dirty { color: var(--fx-warn-fg, #5a4a12); white-space: nowrap; }
+@media (min-width: 1025px) {
+  .fx-app .fx-explorer__toolbar .fx-search { flex: 1 1 128px; min-width: 128px; max-width: 260px; }
+  .fx-app .fx-sf-bar__current { max-width: 180px; }
+  .fx-app .fx-explorer .fx-sf-bar .fx-sf-bar__manage { width: 28px; padding: 0; justify-content: center; }
+  .fx-app .fx-sf-bar__current > .fx-chip__label, .fx-app .fx-sf-bar__manage > span { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+}
+/* The Manage saved filters dialog (fx-dialog in .fx-api-overlay): a plain list of rows, each with its name and spaced actions. */
+.fx-sf-overlay .fx-sf-manage { list-style: none; margin: 0; padding: 0; display: grid; border: 1px solid var(--fx-border-light); border-radius: var(--fx-radius, 3px); background: var(--fx-surface); }
+.fx-sf-overlay .fx-sf-manage__row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; padding: 6px 8px; border-top: 1px solid var(--fx-border-light); }
+.fx-sf-overlay .fx-sf-manage__row:first-child { border-top: 0; }
+.fx-sf-overlay .fx-sf-manage__row.is-current { background: var(--fx-field-ro); box-shadow: inset 3px 0 0 var(--fx-info); }
+.fx-sf-overlay .fx-sf-manage__name { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; color: var(--fx-text-c); }
+.fx-sf-overlay .fx-sf-manage__name small { color: var(--fx-muted); font-weight: 400; }
+.fx-sf-overlay .fx-sf-manage__warn { color: var(--fx-warn-fg) !important; }
+.fx-sf-overlay .fx-sf-manage__actions { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.fx-sf-overlay .fx-sf-manage__actions .fx-btn { height: 24px; padding: 0 8px; font-size: var(--fx-text-sm, 12px); }
+@media (pointer: coarse), (max-width: 1024px) { .fx-sf-overlay .fx-sf-manage__actions .fx-btn { height: 34px; } }
+@media (forced-colors: active) {
+  .fx-app .fx-fb, .fx-app .fx-fb__field, .fx-app .fx-fb__tag, .fx-app .fx-fb__window { border-color: CanvasText; }
+  .fx-sf-overlay .fx-sf-manage, .fx-sf-overlay .fx-sf-manage__row { border-color: CanvasText; }
+}
