@@ -12,6 +12,23 @@ const { ApiTokenService } = require("../src/services/api-token-service");
 const W1 = new ObjectId(), W2 = new ObjectId(), USER = new ObjectId();
 const mk = (ws, extra = {}) => ({ _id: new ObjectId(), workspaceId: ws, name: "b", columns: [], groups: [], ...extra });
 
+// A MongoDB inclusion projection (dotted paths) applied to a plain document: decisions see what a projected read returns.
+function project(doc, projection) {
+  if (!projection) return doc;
+  const out = {};
+  for (const path of Object.keys(projection)) {
+    const parts = path.split(".");
+    let src = doc, dst = out;
+    for (let i = 0; i < parts.length; i += 1) {
+      if (src === null || typeof src !== "object" || !(parts[i] in src)) break;
+      if (i === parts.length - 1) { dst[parts[i]] = src[parts[i]]; break; }
+      src = src[parts[i]];
+      dst = dst[parts[i]] = dst[parts[i]] && typeof dst[parts[i]] === "object" ? dst[parts[i]] : {};
+    }
+  }
+  return out;
+}
+
 function makeRepos({ role = null, boards = [], records = [], workspaces = [W1, W2] } = {}) {
   const calls = { findManyByIds: [] };
   const eq = (a, b) => String(a) === String(b);
@@ -25,7 +42,7 @@ function makeRepos({ role = null, boards = [], records = [], workspaces = [W1, W
     boards: {
       async findById(id) { return boards.find((b) => eq(b._id, id)) || null; },
       async workspaceOf(id) { const b = boards.find((x) => eq(x._id, id)); return b ? { _id: b._id, workspaceId: b.workspaceId } : null; },
-      async findManyByIds(ids, projection) { calls.findManyByIds.push({ n: ids.length, projection }); return boards.filter((b) => ids.some((id) => eq(id, b._id))); }
+      async findManyByIds(ids, projection) { calls.findManyByIds.push({ n: ids.length, projection }); return boards.filter((b) => ids.some((id) => eq(id, b._id))).map((b) => project(b, projection)); }
     },
     records: { async findById(id) { return records.find((r) => eq(r._id, id)) || null; } },
     workspaces: { async findById(id) { return workspaces.find((w) => eq(w, id)) ? { _id: id } : null; } },

@@ -47,7 +47,23 @@ const CAP = Object.freeze({
   COMMENT_MODERATE: "comment.moderate"
 });
 const ALL_CAPS = Object.freeze(Object.values(CAP));
-const KNOWN = new Set(ALL_CAPS);
+
+// A read-only set of capabilities (plan 35 R2-1: Object.freeze doesn't freeze a Set, so a frozen Set can still be .add()ed).
+// The members live in a private field; only has / size / iteration are offered, and the instance is frozen. Not a Set
+// (Set.prototype.add.call on it throws).
+class CapSet {
+  #set;
+  constructor(values) { this.#set = new Set(values); Object.freeze(this); }
+  has(cap) { return this.#set.has(cap); }
+  get size() { return this.#set.size; }
+  values() { return this.#set.values(); }
+  keys() { return this.#set.values(); }
+  forEach(fn, thisArg) { for (const cap of this.#set) fn.call(thisArg, cap, cap, this); }
+  [Symbol.iterator]() { return this.#set.values(); }
+  toJSON() { return [...this.#set]; }
+}
+Object.freeze(CapSet.prototype);
+const KNOWN = new CapSet(ALL_CAPS);
 
 const BOARD_ROLES = Object.freeze(["VIEWER", "CONTRIBUTOR", "EDITOR", "OWNER"]);
 const BOARD_RANK = Object.freeze({ VIEWER: 1, CONTRIBUTOR: 2, EDITOR: 3, OWNER: 4 });
@@ -78,12 +94,12 @@ const MIN_BOARD_ROLE = Object.freeze({
   [CAP.COMMENT_MODERATE]: "OWNER"
 });
 
-const REAL_ROW = Object.freeze(new Set([CAP.BOARD_PERMISSIONS, CAP.WORKSPACE_MEMBERS, CAP.COMMENT_MODERATE]));
+const REAL_ROW = new CapSet([CAP.BOARD_PERMISSIONS, CAP.WORKSPACE_MEMBERS, CAP.COMMENT_MODERATE]);
 // Still allowed on a read-only synchronized board. Not comment.moderate: comment-service refuses every comment write there,
 // moderation included (plan 30 §9, divergence 2). Not form.design: creating a form there is refused (form-service).
-const READ_ONLY_KEEPS = Object.freeze(new Set([CAP.BOARD_VIEW, CAP.RECORD_VIEW, CAP.VIEWS_PERSONAL, CAP.BOARD_ORGANIZE, CAP.BOARD_ARCHIVE, CAP.BOARD_DELETE, CAP.BOARD_MOVE, CAP.BOARD_PERMISSIONS, CAP.WORKSPACE_MEMBERS]));
+const READ_ONLY_KEEPS = new CapSet([CAP.BOARD_VIEW, CAP.RECORD_VIEW, CAP.VIEWS_PERSONAL, CAP.BOARD_ORGANIZE, CAP.BOARD_ARCHIVE, CAP.BOARD_DELETE, CAP.BOARD_MOVE, CAP.BOARD_PERMISSIONS, CAP.WORKSPACE_MEMBERS]);
 // What an API token can ever hold (scope "read" only today). Future write scopes = scope ∩ the owner's capability.
-const TOKEN_CAPS = Object.freeze(new Set([CAP.BOARD_VIEW, CAP.RECORD_VIEW]));
+const TOKEN_CAPS = new CapSet([CAP.BOARD_VIEW, CAP.RECORD_VIEW]);
 
 // Today's workspace roles → the board role they imply (P4-0 fixed ladder; D-C2).
 const TODAY_TO_BOARD = Object.freeze({ VIEWER: "VIEWER", MEMBER: "EDITOR", WORKSPACE_ADMIN: "OWNER", SYSTEM_ADMIN: "OWNER" });
@@ -94,22 +110,22 @@ const impliedBoardRole = (workspaceRole /* , board */) => mapToday(workspaceRole
 const atLeastBoard = (role, minimum) => Boolean(role) && BOARD_RANK[role] >= BOARD_RANK[minimum];
 const isCap = (cap) => KNOWN.has(cap);
 
-// The capabilities of one person on one board. Pure.
+// The capabilities of one person on one board, as a read-only CapSet. Pure.
 //   boardRole   the board role (null: the board is not visible: no capability at all)
 //   realRole    today's workspace role through a REAL membership or SYSTEM_ADMIN (membershipOnly), or null
 //   readOnly    the board is a read-only synchronized board
 //   mode        "session" | "token"
 function capabilitiesFor({ boardRole, realRole = null, readOnly = false, mode = "session" } = {}) {
-  const caps = new Set();
-  if (!boardRole || !BOARD_RANK[boardRole]) return Object.freeze(caps);
+  const caps = [];
+  if (!boardRole || !BOARD_RANK[boardRole]) return new CapSet(caps);
   const realBoardRole = mapToday(realRole);
   for (const cap of ALL_CAPS) {
     if (mode === "token" && !TOKEN_CAPS.has(cap)) continue;
     if (readOnly && !READ_ONLY_KEEPS.has(cap)) continue;
     const role = REAL_ROW.has(cap) ? realBoardRole : boardRole;
-    if (atLeastBoard(role, MIN_BOARD_ROLE[cap])) caps.add(cap);
+    if (atLeastBoard(role, MIN_BOARD_ROLE[cap])) caps.push(cap);
   }
-  return Object.freeze(caps);
+  return new CapSet(caps);
 }
 
 // Why a capability is missing (for require()'s error), given the same inputs. Pure.
@@ -124,4 +140,4 @@ function missingReason(cap, { boardRole, realRole = null, readOnly = false, mode
   return null;
 }
 
-module.exports = { CAP, ALL_CAPS, BOARD_ROLES, BOARD_RANK, MIN_BOARD_ROLE, REAL_ROW, READ_ONLY_KEEPS, TOKEN_CAPS, TODAY_TO_BOARD, mapToday, impliedBoardRole, atLeastBoard, isCap, capabilitiesFor, missingReason };
+module.exports = { CapSet, CAP, ALL_CAPS, BOARD_ROLES, BOARD_RANK, MIN_BOARD_ROLE, REAL_ROW, READ_ONLY_KEEPS, TOKEN_CAPS, TODAY_TO_BOARD, mapToday, impliedBoardRole, atLeastBoard, isCap, capabilitiesFor, missingReason };

@@ -25,6 +25,24 @@ const board = (ws, readOnly) => ({ _id: new ObjectId(), workspaceId: ws, name: "
 const BOARDS = { mine: board(W1, false), mineRO: board(W1, true), other: board(W2, false), otherRO: board(W2, true) };
 const RECORDS = Object.fromEntries(Object.entries(BOARDS).map(([k, b]) => [k, { _id: new ObjectId(), boardId: b._id, workspaceId: b.workspaceId, values: {} }]));
 
+// A MongoDB inclusion projection (dotted paths) applied to a plain document, so decisions are made on what a projected read
+// really returns (the merged _id / workspaceId / source.readOnly), not on the whole fixture.
+function project(doc, projection) {
+  if (!projection) return doc;
+  const out = {};
+  for (const path of Object.keys(projection)) {
+    const parts = path.split(".");
+    let src = doc, dst = out;
+    for (let i = 0; i < parts.length; i += 1) {
+      if (src === null || typeof src !== "object" || !(parts[i] in src)) break;
+      if (i === parts.length - 1) { dst[parts[i]] = src[parts[i]]; break; }
+      src = src[parts[i]];
+      dst = dst[parts[i]] = dst[parts[i]] && typeof dst[parts[i]] === "object" ? dst[parts[i]] : {};
+    }
+  }
+  return out;
+}
+
 function makeRepos(membershipRole) {
   const counts = { findActive: 0, listForUser: 0, boardFindById: 0, workspaceOf: 0, findManyByIds: 0, recordFindById: 0 };
   const boards = Object.values(BOARDS), records = Object.values(RECORDS);
@@ -39,7 +57,7 @@ function makeRepos(membershipRole) {
     boards: {
       async findById(id) { counts.boardFindById += 1; return boards.find((b) => eq(b._id, id)) || null; },
       async workspaceOf(id) { counts.workspaceOf += 1; const b = boards.find((x) => eq(x._id, id)); return b ? { _id: b._id, workspaceId: b.workspaceId } : null; },
-      async findManyByIds(ids) { counts.findManyByIds += 1; return boards.filter((b) => ids.some((id) => eq(id, b._id))); }
+      async findManyByIds(ids, projection) { counts.findManyByIds += 1; return boards.filter((b) => ids.some((id) => eq(id, b._id))).map((b) => project(b, projection)); }
     },
     records: { async findById(id) { counts.recordFindById += 1; return records.find((r) => eq(r._id, id)) || null; } },
     workspaces: { async findById(id) { return [W1, W2].find((w) => eq(w, id)) ? { _id: id } : null; } }
@@ -101,7 +119,12 @@ describe("capability definitions", () => {
     assert.deepEqual(caps.TODAY_TO_BOARD, { VIEWER: "VIEWER", MEMBER: "EDITOR", WORKSPACE_ADMIN: "OWNER", SYSTEM_ADMIN: "OWNER" });
     assert.equal(caps.mapToday(null), null);
     assert.equal(caps.mapToday("CONTRIBUTOR"), null);
-    assert.ok(Object.isFrozen(caps.capabilitiesFor({ boardRole: "OWNER" })));
+    // Read-only (plan 35 R2-1): no add / delete / clear, and Set methods can't be borrowed onto it.
+    const owner = caps.capabilitiesFor({ boardRole: "OWNER" });
+    assert.ok(owner instanceof caps.CapSet && owner.has(CAP.BOARD_DELETE));
+    assert.equal(typeof owner.add, "undefined"); assert.equal(typeof owner.delete, "undefined"); assert.equal(typeof owner.clear, "undefined");
+    assert.throws(() => Set.prototype.add.call(owner, "x"), TypeError);
+    for (const s of [caps.REAL_ROW, caps.READ_ONLY_KEEPS, caps.TOKEN_CAPS]) assert.ok(s instanceof caps.CapSet);
     assert.equal(caps.capabilitiesFor({ boardRole: null }).size, 0);
     assert.deepEqual(Object.keys(RECIPES).sort(), [...caps.ALL_CAPS].sort(), "every capability has a today recipe");
   });
@@ -260,7 +283,7 @@ describe("batched evaluation (no N+1)", () => {
     for (const policy of POLICIES) for (const persona of ["none", "MEMBER", "SYSTEM_ADMIN"]) {
       const repos = makeRepos(persona === "MEMBER" ? "MEMBER" : null);
       const all = [...Object.values(BOARDS), ...targets];
-      repos.boards.findManyByIds = async (ids, projection) => { repos.counts.findManyByIds += 1; repos.lastProjection = projection; return all.filter((b) => ids.some((id) => id.equals(b._id))); };
+      repos.boards.findManyByIds = async (ids, projection) => { repos.counts.findManyByIds += 1; repos.lastProjection = projection; return all.filter((b) => ids.some((id) => id.equals(b._id))).map((b) => project(b, projection)); };
       const access = new Access(repos, { policy });
       const ctx = access.context({ userId: USER, kind: "entra", isSystemAdmin: persona === "SYSTEM_ADMIN" });
       await ctx.visibility(); await ctx.visibility();
