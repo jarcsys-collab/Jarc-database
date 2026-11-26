@@ -12,7 +12,11 @@ function condition(ds, cond, row, now) {
   const kind = fm.fieldKind(ds, cond.field);
   if (!kind || !fm.BY_KIND[kind].includes(cond.op)) throw new Error("employees: the filter model was not validated.");
   const v = row.values[cond.field] ?? null;
-  const eq = (want) => (want === null ? v === null : v === want);
+  // A multi-valued field (descriptor multiValued, P2 jarcWorkspaces) holds null or a non-empty list: eq / in match when any
+  // element matches, ne / nin when none does (the negations below), blank when there is no element. Number fields (P2
+  // jarcMemberships) hold a JS number or null; the validated value is decimal text.
+  const multi = Array.isArray(v);
+  const eq = (want) => (want === null ? v === null : multi ? v.includes(want) : kind === "number" ? typeof v === "number" && v === Number(want) : v === want);
   switch (cond.op) {
     case "blank": case "isNull": case "missing": return v === null;
     case "notBlank": return v !== null;
@@ -25,6 +29,17 @@ function condition(ds, cond, row, now) {
     if (!(v instanceof Date)) return false;
     const t = v.getTime();
     return (r.from === null || t >= r.from) && (r.to === null || t < r.to);
+  }
+  if (kind === "number" && ["gt", "gte", "lt", "lte", "between"].includes(cond.op)) {
+    if (typeof v !== "number") return false; // blanks never match a comparison
+    const a = Number(cond.value);
+    switch (cond.op) {
+      case "gt": return v > a;
+      case "gte": return v >= a;
+      case "lt": return v < a;
+      case "lte": return v <= a;
+      default: return v >= a && v <= Number(cond.to); // between (inclusive)
+    }
   }
   switch (cond.op) {
     case "eq": return eq(cond.value);
@@ -67,10 +82,14 @@ function searchPredicate(ds, q, searchField) {
 
 // ---- Sorting: orderBy keys, then the profile ID. Blanks come last in either direction. ----
 const collator = new Intl.Collator("en", { sensitivity: "base", numeric: true });
+const textOf = (v) => (Array.isArray(v) ? v.join(", ") : String(v));
 function compareValue(a, b) {
   if (a instanceof Date && b instanceof Date) return a.getTime() - b.getTime();
   if (typeof a === "boolean" && typeof b === "boolean") return Number(a) - Number(b);
-  const x = String(a), y = String(b);
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  // Numbers read back from a cursor are text: the numeric collation below orders them like numbers. A list compares as its
+  // joined text (how records show it).
+  const x = textOf(a), y = textOf(b);
   return collator.compare(x, y) || (x < y ? -1 : x > y ? 1 : 0);
 }
 // keys: [[field, 1 | -1]]. a, b: { id, values }.
@@ -92,11 +111,14 @@ function comparator(keys) {
 // bound to the dataset, filter, q, searchField, order and caller. Another list, a changed filter or another person → 400.
 const CURSOR_KEY = crypto.randomBytes(32);
 const CURSOR_MAX = 2048;
-const enc = (v) => (v === null || v === undefined ? null : v instanceof Date ? { d: v.toISOString() } : typeof v === "boolean" ? { b: v } : { s: String(v) });
+// A list (a multi-valued sort key) is written as its joined text under `l`: it may be longer than one text value (400), and is
+// bounded only by the whole cursor's CURSOR_MAX (checked before decoding).
+const enc = (v) => (v === null || v === undefined ? null : v instanceof Date ? { d: v.toISOString() } : typeof v === "boolean" ? { b: v } : Array.isArray(v) ? { l: textOf(v) } : { s: String(v) });
 function dec(v) {
   if (v === null) return null;
   if (!v || typeof v !== "object" || Array.isArray(v) || Object.keys(v).length !== 1) throw invalid("cursor is not valid.", "cursor", "cursor");
   if (typeof v.s === "string" && v.s.length <= 400) return v.s;
+  if (typeof v.l === "string" && v.l.length <= CURSOR_MAX) return v.l;
   if (typeof v.b === "boolean") return v.b;
   if (typeof v.d === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(v.d)) return new Date(v.d);
   throw invalid("cursor is not valid.", "cursor", "cursor");

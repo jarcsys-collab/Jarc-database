@@ -27,6 +27,12 @@ class MembershipRepository {
 
   listByWorkspace(workspaceId) { return this.collection.find({ workspaceId }, { sort: { createdAt: 1 }, limit: 1000 }).toArray(); }
 
+  // Employee Management P2 (employees/jarc-access.js, read-only): every active and invited membership in one bounded query,
+  // only the fields the access index uses.
+  listForAccessIndex() {
+    return this.collection.find({ status: { $in: ["active", "invited"] } }, { sort: { _id: 1 }, limit: 5000, projection: { _id: 0, workspaceId: 1, userId: 1, role: 1, status: 1, createdAt: 1 } }).toArray();
+  }
+
   countActiveAdmins(workspaceId, { session } = {}) { return this.collection.countDocuments({ workspaceId, role: "WORKSPACE_ADMIN", status: "active" }, { session }); }
 
   async updateRole(id, role, now, { session } = {}) {

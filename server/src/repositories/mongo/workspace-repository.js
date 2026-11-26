@@ -9,6 +9,8 @@ class WorkspaceRepository extends VersionedRepository {
 
   // Workspaces are few (the frontend allows up to 1000), so they are listed in one bounded query.
   list() { return this.collection.find({}, { sort: { position: 1, _id: 1 }, limit: MAX_WORKSPACES }).toArray(); }
+  // Employee Management P2 (employees/jarc-access.js, read-only): the same list, only ID, name and archived.
+  listForAccessIndex() { return this.collection.find({}, { sort: { position: 1, _id: 1 }, limit: MAX_WORKSPACES, projection: { _id: 1, name: 1, archived: 1 } }).toArray(); }
 
   async nextPosition({ session } = {}) {
     const last = await this.collection.findOne({}, { sort: { position: -1 }, projection: { position: 1 }, session });

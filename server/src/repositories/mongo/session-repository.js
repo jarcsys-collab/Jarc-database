@@ -34,6 +34,13 @@ class SessionRepository {
 
   findBySecret(sessionSecret) { return this.sessions.findOne({ _id: hash(sessionSecret) }); }
   findById(id) { return this.sessions.findOne({ _id: id }); }
+  // Employee Management P2 (employees/jarc-access.js, read-only): sessions that haven't reached their absolute expiry, only
+  // what the access index needs to mirror auth/session.js (user, identity, JARC.Admin at sign-in, idle expiry, last activity).
+  // _id (the secret's hash) is never read. JARC.Admin sessions first, then the most recently active, so if the cap is ever
+  // reached the sessions dropped are ordinary, old ones (the index marks the answer truncated).
+  listLiveForAccessIndex(now) {
+    return this.sessions.find({ expiresAt: { $gt: now } }, { sort: { isSystemAdmin: -1, lastSeenAt: -1 }, limit: 5000, projection: { _id: 0, userId: 1, tenantId: 1, objectId: 1, isSystemAdmin: 1, expiresAt: 1, idleExpiresAt: 1, lastSeenAt: 1 } }).toArray();
+  }
 
   async touch(id, now, idleMs) { await this.sessions.updateOne({ _id: id }, { $set: { lastSeenAt: now, idleExpiresAt: new Date(now.getTime() + idleMs) } }); }
 

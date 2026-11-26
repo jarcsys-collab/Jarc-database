@@ -173,9 +173,21 @@ class FabricExplorer {
   //   (the region the explorer is drawn in), errorInfo null (FabricDataPanel.errorInfo), schemaLabels false (true: column labels
   //   come from the schema's fields[].label). The column-names key stays "jarc.fabric.columns.<user>.<dataset>" (dataset names
   //   differ per module, so the keys never meet). dateWindow true (false: the data has no date window, so the footer shows no
-  //   "Showing … dates" text and the empty state doesn't suggest other dates).
-  static defaultOptions() { return { apiBase: "/fabric", routeBase: "/fabric", datasets: FabricExplorer.DATASETS, idPattern: FabricExplorer.ID, savedFiltersBase: "/fabric/saved-filters", recordRenderer: null, rootSelector: "#fabric-root", errorInfo: null, schemaLabels: false, dateWindow: true }; }
+  //   "Showing … dates" text and the empty state doesn't suggest other dates). fieldGroups null (an object { "": "Heading",
+  //   "<group>": "Heading" }: the Columns list and the filter's field list get a heading per schema fields[].group, drawn only
+  //   when the schema has fields of at least two of those groups).
+  static defaultOptions() { return { apiBase: "/fabric", routeBase: "/fabric", datasets: FabricExplorer.DATASETS, idPattern: FabricExplorer.ID, savedFiltersBase: "/fabric/saved-filters", recordRenderer: null, rootSelector: "#fabric-root", errorInfo: null, schemaLabels: false, dateWindow: true, fieldGroups: null }; }
   get hasDateWindow() { return this.opts?.dateWindow !== false; }
+  // The fields split into headed groups (options.fieldGroups), in the order the groups are named there; null without the
+  // option or when only one group is present (then the lists stay flat, exactly as before).
+  fieldSections(fields) {
+    const groups = this.opts?.fieldGroups;
+    if (!groups || typeof groups !== "object" || !Array.isArray(fields)) return null;
+    const raw = Array.isArray(this.schema?.data?.fields) ? this.schema.data.fields : [];
+    const groupOf = (name) => { const g = raw.find((f) => f && f.name === name)?.group; return typeof g === "string" && Object.hasOwn(groups, g) ? g : ""; };
+    const sections = Object.keys(groups).map((key) => ({ key, label: String(groups[key] || ""), fields: fields.filter((f) => groupOf(f.name) === key) })).filter((s) => s.fields.length);
+    return sections.length > 1 ? sections : null;
+  }
   constructor(panel, dataset, options = {}) {
     this.p = panel; this.ds = dataset; this.listeners = [];
     const d = FabricExplorer.defaultOptions(), o = options && typeof options === "object" ? options : {};
@@ -855,10 +867,16 @@ class FabricExplorer {
   colCountText() { return `${this.columns.length} of ${this.info.fields.length} columns shown.`; }
   chooserHtml() {
     const ds = this.ds, term = this.columnFilter.trim().toLowerCase();
-    const rows = this.info.fields.map((f) => {
-      const on = this.columns.includes(f.name), label = this.fieldLabel(f.name), key = (label === f.name ? f.name : `${f.name} ${label}`).toLowerCase(), hide = term && !key.includes(term);
+    const keyOf = (f) => { const label = this.fieldLabel(f.name); return (label === f.name ? f.name : `${f.name} ${label}`).toLowerCase(); };
+    const rowOf = (f) => {
+      const on = this.columns.includes(f.name), label = this.fieldLabel(f.name), key = keyOf(f), hide = term && !key.includes(term);
       return `<label class="fabric-check" data-col="${this.attr(key)}" ${hide ? "hidden" : ""}><input type="checkbox" data-action="fabric-x-col" data-ds="${ds}" data-name="${this.attr(f.name)}" data-focus-key="col-${this.attr(f.name)}" ${on ? "checked" : ""}> ${label === f.name ? "" : `<span>${this.esc(label)}</span> `}<code>${this.esc(f.name)}</code> <small class="muted">${this.esc(f.type)}</small></label>`;
-    }).join("");
+    };
+    const sections = this.fieldSections(this.info.fields);
+    const rows = sections ? sections.map((s, i) => {
+      const inner = s.fields.map(rowOf).join(""), id = `fabric-${ds}-colgroup-${i}`, empty = Boolean(term) && s.fields.every((f) => !keyOf(f).includes(term));
+      return `<div class="fabric-chooser-group" role="group" aria-labelledby="${id}" data-col-group${empty ? " hidden" : ""}><p class="fabric-chooser-group__title" id="${id}">${this.esc(s.label)}</p>${inner}</div>`;
+    }).join("") : this.info.fields.map(rowOf).join("");
     return `<div class="fx-explorer__chooser fabric-chooser" id="fabric-${ds}-chooser" role="group" aria-label="Columns"><div class="fabric-chooser-head fx-chooser__head"><span class="fx-search fx-chooser__search"><span class="fx-search__icon" aria-hidden="true">${icon("search")}</span><input id="fabric-${ds}-col-filter" class="fx-search__input" type="search" data-action="fabric-x-col-filter" data-ds="${ds}" value="${this.attr(this.columnFilter)}" maxlength="64" autocomplete="off" placeholder="Find a column" aria-label="Find a column"></span><button type="button" class="fx-btn" data-action="fabric-x-columns-reset" data-ds="${ds}" data-focus-key="cols-reset">Default columns</button><button type="button" class="fx-btn" data-action="fabric-x-columns" data-ds="${ds}" data-focus-key="cols-done">Done</button></div><p class="fabric-help"><span id="fabric-${ds}-col-count">${this.colCountText()}</span> Your choice is remembered in this browser (column names only).</p><div class="fabric-chooser-list" id="fabric-${ds}-col-list">${rows}</div></div>`;
   }
   // While a new page loads, the last page stays on screen (dimmed, aria-busy, paging off) instead of a skeleton: no layout
@@ -886,6 +904,7 @@ class FabricExplorer {
     else results = `<div class="fx-grid__empty quiet-empty fabric-empty">${icon("search")}<span><strong>No rows match</strong><small>${this.hasDateWindow ? "Try other dates, another filter or different search text." : "Try another filter or different search text."}</small></span><button type="button" class="fx-btn" data-action="fabric-x-clear" data-ds="${ds}" data-focus-key="clear">Clear filters</button></div>`;
     const notice = this.notice ? `<p class="fx-status fx-status--info fabric-notice" role="status">${this.esc(this.notice)}</p>` : "";
     if (this.fb.open && this.fb.values) setTimeout(() => this.builder()?.syncPicker?.(this), 0); // mount the value picker once drawn
+    if (this.fb.open) setTimeout(() => this.builder()?.place?.(this), 0); // keep the filter popover inside the viewport once drawn
     return `<div class="fx-explorer__head" id="fabric-${ds}-head">${this.headHtml()}</div>${notice}<div class="fx-explorer__split" id="fabric-${ds}-split"><div class="fx-explorer__main fabric-results" ${s.loading ? 'aria-busy="true"' : ""}>${results}</div></div>`;
   }
   // The column menu trigger (FabricColumnMenu, F3) when loaded, inside the header after the label.
@@ -967,6 +986,8 @@ class FabricExplorer {
     if (typeof document === "undefined") return;
     const term = this.columnFilter.trim().toLowerCase();
     document.querySelectorAll(`#fabric-${this.ds}-col-list [data-col]`).forEach((el) => { el.hidden = Boolean(term && !el.dataset.col.includes(term)); });
+    // Headed groups (options.fieldGroups): a group with no matching column hides with its heading.
+    document.querySelectorAll(`#fabric-${this.ds}-col-list [data-col-group]`).forEach((g) => { g.hidden = ![...g.querySelectorAll("[data-col]")].some((el) => !el.hidden); });
   }
 
   // ---- Events (FabricDataPanel passes every "fabric-x-…" event for this dataset here)
@@ -1015,6 +1036,7 @@ class FabricExplorer {
     if (note && note.textContent !== this.notice) note.textContent = this.notice;
     this.swap(head, this.headHtml(), false, fallback);
     this.builder()?.syncPicker?.(this);
+    this.builder()?.place?.(this);
     return true;
   }
   // A redraw for a view-only change (filter bar, navigation, chooser): no request and no grid rebuild; without the regions on

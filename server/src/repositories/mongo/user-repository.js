@@ -67,6 +67,11 @@ class UserRepository {
 
   // Signed-in Entra people (the accounts Account Management lists), at most 5000.
   listEntra() { return this.collection.find({ source: "entra" }, { sort: { createdAt: 1 }, limit: 5000 }).toArray(); }
+  // Employee Management P2 (employees/jarc-access.js, read-only): the same people, only the fields the access index uses
+  // (identity, status, account, sign-in times; never the name, email or preferences), at most 5000.
+  listEntraForAccessIndex() {
+    return this.collection.find({ source: "entra" }, { sort: { _id: 1 }, limit: 5000, projection: { _id: 1, source: 1, tenantId: 1, entraObjectId: 1, status: 1, account: 1, createdAt: 1, lastLoginAt: 1 } }).toArray();
+  }
 
   countIdentity(tenantId, entraObjectId) { return this.collection.countDocuments({ tenantId, entraObjectId }); }
   // Users with this email whose identity is NOT the given one (an ambiguous email → identity mapping).

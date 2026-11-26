@@ -34,6 +34,13 @@
 .fx-app .emp-group__unassigned { font-style: italic; color: var(--fx-muted); }
 .fx-app .emp-group__total { margin: 0; }
 
+/* P2: headed field groups ("Directory", "JARC access") in Columns and the filter's field list (FabricExplorer fieldGroups). */
+.fx-app .fabric-chooser-group { display: contents; }
+.fx-app .fabric-chooser-group[hidden] { display: none; }
+.fx-app .fabric-chooser-group__title, .fx-app .fx-fb__optgroup-title { display: block; margin: 6px 0 2px; padding: 0 4px; font-size: var(--fx-text-sm); font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--fx-heading); grid-column: 1 / -1; }
+.fx-app .fx-fb__optgroup-list { list-style: none; margin: 0; padding: 0; }
+.fx-app .fx-fb__fields li.fx-fb__optgroup[hidden] { display: none; }
+
 /* The record page without EmployeeProfile.js (fallback only). */
 .fx-app .emp-basic { display: grid; grid-template-columns: minmax(140px, max-content) 1fr; gap: 4px 16px; margin: 8px 0 0; }
 .fx-app .emp-basic > div { display: contents; }

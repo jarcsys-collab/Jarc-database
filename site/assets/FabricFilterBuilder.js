@@ -54,8 +54,46 @@ class FabricFilterBuilder {
     }
     fb.open = true; x.chooser = false;
     x.redrawInPlace();
+    FabricFilterBuilder.place(x);
     x.focus(`[data-focus-key="${focus}"]`);
     return true;
+  }
+
+  // ---- Placement. The popover is anchored under the Filters button (CSS: left 0 from 1025 px, the toolbar's right edge below)
+  // with a fixed 720 px width, and CSS alone can't know where that button sits: with navigation panels open the button can be
+  // far enough right that the popover runs past the viewport. After each draw, on window resize and when the explorer changes
+  // size (a sidebar opening or closing), the popover is shifted left just enough to end MARGIN px inside the viewport (never
+  // past MARGIN on the left) and its width is capped to the viewport. The phone drawer (position: fixed, full screen) is left
+  // alone. Only inline style on the popover changes: its content, focus and ARIA are untouched.
+  static MARGIN = 8;
+  static placeEl(el) {
+    if (!el || typeof window === "undefined" || typeof document === "undefined" || !el.isConnected) return;
+    el.style.transform = ""; el.style.maxWidth = "";
+    let pos = ""; try { pos = getComputedStyle(el).position; } catch { pos = ""; }
+    if (pos === "fixed") return;
+    const m = FabricFilterBuilder.MARGIN, vw = document.documentElement.clientWidth || window.innerWidth;
+    let r = el.getBoundingClientRect();
+    if (r.width > vw - 2 * m) { el.style.maxWidth = `${Math.max(0, vw - 2 * m)}px`; r = el.getBoundingClientRect(); }
+    let dx = 0;
+    if (r.right > vw - m) dx = vw - m - r.right;
+    if (r.left + dx < m) dx = m - r.left;
+    if (Math.abs(dx) >= 0.5) el.style.transform = `translateX(${Math.round(dx)}px)`;
+    FabricFilterBuilder.watch(el);
+  }
+  static place(x) { if (typeof document !== "undefined" && x?.fb?.open) FabricFilterBuilder.placeEl(document.querySelector(`#fabric-${x.ds}-fb`)); }
+  static placeAll() { if (typeof document !== "undefined") document.querySelectorAll(".fx-app .fx-fb").forEach((el) => FabricFilterBuilder.placeEl(el)); }
+  // One window resize listener and one ResizeObserver (on the explorer holding an open popover), set up on first use.
+  static watching = null;
+  static watch(el) {
+    if (typeof window === "undefined") return;
+    if (!FabricFilterBuilder.watching) {
+      let queued = false;
+      const later = () => { if (queued) return; queued = true; (window.requestAnimationFrame || setTimeout)(() => { queued = false; FabricFilterBuilder.placeAll(); }); };
+      window.addEventListener?.("resize", later);
+      FabricFilterBuilder.watching = { later, observer: typeof ResizeObserver === "function" ? new ResizeObserver(later) : null, seen: new WeakSet() };
+    }
+    const w = FabricFilterBuilder.watching, box = el.closest?.(".fx-explorer");
+    if (w.observer && box && !w.seen.has(box)) { w.seen.add(box); w.observer.observe(box); }
   }
   static close(x, { focus = true } = {}) {
     const fb = x.fb; FabricFilterBuilder.destroyPicker(x);
@@ -191,10 +229,13 @@ class FabricFilterBuilder {
   // The searchable field list: friendly label, exact id and a type badge; only filterable fields. Typing filters in place.
   static pickerHtml(x, path) {
     const ds = x.ds, pid = FabricFilterBuilder.pid(path), current = FabricFilterBuilder.M().at(x.fb.draft, path)?.field || "";
-    const rows = x.filterFields().map((f) => {
+    const rowOf = (f) => {
       const label = x.fieldLabel(f.name), key = `${label} ${f.name}`.toLowerCase();
       return `<li role="presentation" data-fb-key="${x.attr(key)}"><button type="button" role="option" class="fx-fb__opt${f.name === current ? " is-current" : ""}" aria-selected="${f.name === current}" data-action="fabric-f-field" data-ds="${ds}" data-path="${path}" data-field="${x.attr(f.name)}" data-focus-key="fb-opt-${x.attr(f.name)}"><span class="fx-fb__optlabel">${x.esc(label)}</span><code>${x.esc(f.name)}</code><span class="fx-fb__kind">${FabricFilterBuilder.KIND_BADGE[f.kind] || ""}</span></button></li>`;
-    }).join("");
+    };
+    const fields = x.filterFields(), sections = typeof x.fieldSections === "function" ? x.fieldSections(fields) : null;
+    // Headed groups (the explorer's fieldGroups option): a listbox group per heading; flat otherwise, as before.
+    const rows = sections ? sections.map((s, i) => `<li role="group" class="fx-fb__optgroup" aria-labelledby="fabric-${ds}-fb-g${i}-${pid}" data-fb-group><span class="fx-fb__optgroup-title" id="fabric-${ds}-fb-g${i}-${pid}" role="presentation">${x.esc(s.label)}</span><ul role="presentation" class="fx-fb__optgroup-list">${s.fields.map(rowOf).join("")}</ul></li>`).join("") : fields.map(rowOf).join("");
     return `<div class="fx-fb__picker" id="fabric-${ds}-fb-picker" role="group" aria-label="Choose a field"><span class="fx-search fx-fb__pickersearch"><span class="fx-search__icon" aria-hidden="true">${typeof icon === "function" ? icon("search") : ""}</span><input id="fabric-${ds}-fb-fieldq" class="fx-search__input" type="search" data-action="fabric-f-fieldq" data-ds="${ds}" data-path="${path}" data-focus-key="fb-fieldq" maxlength="64" autocomplete="off" placeholder="Find a field" aria-label="Find a field" aria-controls="fabric-${ds}-fb-fields-${pid}"></span><ul class="fx-fb__fields" id="fabric-${ds}-fb-fields-${pid}" role="listbox" aria-label="Fields">${rows || `<li class="fx-fb__empty">No fields can be filtered.</li>`}</ul><p class="fx-fb__none" data-fb-none hidden>No field matches.</p></div>`;
   }
   static conditionHtml(x, c, path) {
@@ -270,6 +311,7 @@ class FabricFilterBuilder {
     if (typeof document === "undefined") return;
     const t = String(term || "").trim().toLowerCase(); let shown = 0;
     document.querySelectorAll(`#fabric-${x.ds}-fb-picker [data-fb-key]`).forEach((li) => { const hide = Boolean(t && !li.dataset.fbKey.includes(t)); li.hidden = hide; if (!hide) shown += 1; });
+    document.querySelectorAll(`#fabric-${x.ds}-fb-picker [data-fb-group]`).forEach((g) => { g.hidden = ![...g.querySelectorAll("[data-fb-key]")].some((li) => !li.hidden); });
     const none = document.querySelector(`#fabric-${x.ds}-fb-picker [data-fb-none]`); if (none) none.hidden = shown > 0;
   }
   static visibleOptions(x) { if (typeof document === "undefined") return []; return [...document.querySelectorAll(`#fabric-${x.ds}-fb-picker [data-fb-key]:not([hidden]) [role="option"]`)]; }

@@ -39,6 +39,30 @@ const FIELDS = Object.freeze({
 const FIELD_NAMES = Object.freeze(Object.keys(FIELDS));
 const DEFAULT_COLUMNS = Object.freeze(["displayName", "jobTitle", "department", "officeLocation", "mail"]);
 
+// P2 (Employee Access Visibility): the JARC access fields, computed by jarc-access.js from JARC's own database (never from the
+// directory source). Only in the descriptors of jarcAccess callers (EMPLOYEE_ADMIN_OIDS, access.js); a viewer's descriptor
+// doesn't contain them, so naming one anywhere (fields, filter, orderBy, values, a saved filter) is the existing "Unknown
+// field." 400, and the name is never echoed. group "jarc": the Columns picker and Advanced Filters group them.
+// multi: a list of values (jarcWorkspaces): eq / in match when any element matches, ne / nin when none does, blank = no
+// element (query.js); value lists count each element (service.js); a record carries one sorted string joined by ", "
+// (outValue). Default columns and sorting are unchanged (P1).
+const JARC_FIELDS = Object.freeze({
+  jarcAccount: Object.freeze({ label: "JARC account", type: "string", category: true, group: "jarc" }),
+  jarcStatus: Object.freeze({ label: "JARC account status", type: "string", category: true, group: "jarc" }),
+  jarcAdmin: Object.freeze({ label: "JARC administrator", type: "string", category: true, group: "jarc" }),
+  jarcAccessSource: Object.freeze({ label: "How JARC access is granted", type: "string", category: true, group: "jarc" }),
+  jarcWorkspaceRole: Object.freeze({ label: "Highest workspace role (membership)", type: "string", category: true, group: "jarc" }),
+  jarcMemberships: Object.freeze({ label: "Workspace memberships", type: "number", group: "jarc" }),
+  jarcWorkspaces: Object.freeze({ label: "Member of workspaces", type: "string", category: true, multi: true, group: "jarc" }),
+  jarcDisabledWithAccess: Object.freeze({ label: "Disabled in Entra, still has JARC access", type: "bool", group: "jarc" }),
+  jarcSignedInNow: Object.freeze({ label: "Signed in to JARC now", type: "bool", group: "jarc" }),
+  jarcRegistered: Object.freeze({ label: "First JARC sign-in", type: "date", group: "jarc" }),
+  jarcLastSignIn: Object.freeze({ label: "Last JARC sign-in", type: "date", group: "jarc" })
+});
+const JARC_FIELD_NAMES = Object.freeze(Object.keys(JARC_FIELDS));
+// Every API field (P1 and P2) by name: what the service reads labels and types from.
+const ALL_FIELDS = Object.freeze({ ...FIELDS, ...JARC_FIELDS });
+
 const isMember = (r) => typeof r.values.accountType === "string" && r.values.accountType.toLowerCase() === "member";
 const isGuest = (r) => typeof r.values.accountType === "string" && r.values.accountType.toLowerCase() === "guest";
 const DATASET_DEFS = Object.freeze({
@@ -52,28 +76,36 @@ const ADMIN_DATASETS = Object.freeze(DATASET_NAMES.filter((n) => DATASET_DEFS[n]
 const VIEWER_DATASETS = Object.freeze(DATASET_NAMES.filter((n) => !DATASET_DEFS[n].admin));
 
 const freezeDeep = (v) => { if (v && typeof v === "object" && !Object.isFrozen(v)) { Object.freeze(v); Object.values(v).forEach(freezeDeep); } return v; };
-function descriptor(name) {
+// jarc: the P2 descriptor (P1 fields, then the JARC access fields). Without it the descriptor is exactly P1's: same fields,
+// same order, no multiValued entries, so viewers' schema, records, values and saved filters don't change.
+function descriptor(name, { jarc = false } = {}) {
   const def = DATASET_DEFS[name];
-  const fields = FIELD_NAMES.filter((f) => def.admin || !FIELDS[f].admin);
+  const fields = [...FIELD_NAMES.filter((f) => def.admin || !FIELDS[f].admin), ...(jarc ? JARC_FIELD_NAMES : [])];
   return freezeDeep({
     name, label: def.label, admin: def.admin, base: def.base,
-    fields, types: Object.fromEntries(fields.filter((f) => FIELDS[f].type !== "string").map((f) => [f, FIELDS[f].type])),
+    fields, types: Object.fromEntries(fields.filter((f) => ALL_FIELDS[f].type !== "string").map((f) => [f, ALL_FIELDS[f].type])),
     sensitive: [], blankDateFields: [],
     dateField: "accountCreated",
-    filtering: { categories: fields.filter((f) => FIELDS[f].category), valueSearch: fields.filter((f) => FIELDS[f].valueSearch), disabled: [] },
-    searchFields: fields.filter((f) => FIELDS[f].search).map((f) => [f, "contains"]),
+    filtering: { categories: fields.filter((f) => ALL_FIELDS[f].category), valueSearch: fields.filter((f) => ALL_FIELDS[f].valueSearch), disabled: [] },
+    searchFields: fields.filter((f) => ALL_FIELDS[f].search).map((f) => [f, "contains"]),
     sorts: { name: { lead: "displayName", keys: [["displayName", 1], ["_id", 1]] } },
     defaultSort: "name",
-    defaultColumns: [...DEFAULT_COLUMNS]
+    defaultColumns: [...DEFAULT_COLUMNS],
+    ...(jarc ? { jarc: true, multiValued: fields.filter((f) => ALL_FIELDS[f].multi) } : {})
   });
 }
 const DATASETS = Object.freeze(Object.fromEntries(DATASET_NAMES.map((n) => [n, descriptor(n)])));
-const datasetNamed = (name) => (typeof name === "string" && Object.hasOwn(DATASETS, name) ? DATASETS[name] : null);
+const JARC_DATASETS = Object.freeze(Object.fromEntries(DATASET_NAMES.map((n) => [n, descriptor(n, { jarc: true })])));
+// opts.jarc: the caller's descriptor carries the JARC access fields (access.jarcAccess with the access index wired).
+const datasetNamed = (name, { jarc = false } = {}) => (typeof name === "string" && Object.hasOwn(DATASETS, name) ? (jarc ? JARC_DATASETS : DATASETS)[name] : null);
+const isJarcField = (f) => typeof f === "string" && Object.hasOwn(JARC_FIELDS, f);
 
-// Self-check at load: nothing never-loadable is projected; every dataset names only allow-listed API fields.
+// Self-check at load: nothing never-loadable is projected; every dataset names only allow-listed API fields; P1 descriptors
+// never carry a JARC access field.
 for (const f of NEVER_LOADED) if (f !== "_id" && Object.hasOwn(PROJECTION, f)) throw new Error("employees/fields: a never-loaded source field is projected.");
 if (PROJECTION._id !== 0) throw new Error("employees/fields: the projection must exclude _id.");
 for (const ds of Object.values(DATASETS)) for (const f of [...ds.fields, ...ds.defaultColumns]) if (!FIELDS[f]) throw new Error("employees/fields: unknown API field.");
+for (const ds of Object.values(JARC_DATASETS)) for (const f of ds.fields) if (!ALL_FIELDS[f]) throw new Error("employees/fields: unknown API field.");
 
 // ---- Normalising one projected source document ----
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -100,22 +132,46 @@ function emailDomain(mail, upn) {
   const domain = at >= 0 ? source.slice(at + 1).trim().toLowerCase() : "";
   return /^[a-z0-9.-]{1,253}$/.test(domain) ? domain : null;
 }
-// → { oid, values } or null when the document has no valid GUID user_id (acceptance rejects such snapshots).
+// Office privacy (P2 §6): some directory entries hold a phone number in the office field (for example "9999-9999"). Phones are
+// never shown, so such an office becomes null (the Unassigned / blank bucket) when it holds a phone-like run. The text is
+// NFKC-normalised first (full-width digits become ASCII); then digit groups are joined whenever what separates them holds no
+// letter (any spaces or punctuation: - – / _ , . ( ) + and so on) or only a lone "x" / "ext" (an extension). One joined run
+// with at least 7 digits hides the value. Names and room codes ("Head Office", "B-204", "Room 3.14", "Level 12", "Warehouse 1",
+// "Bldg 2, Floor 10", "Unit 12/14") stay. Applied here, once per snapshot build, so records, profiles, q search, filters,
+// groups and value lists never see the value.
+// Known false positives (also hidden): all-numeric codes of 7+ digits ("2024-0001", "1234567"), date-like values ("2024-01-15",
+// "15/01/2024"), and numbers only punctuation apart that total 7+ digits ("Unit 1200/345", "12-34-567", "Rooms 101, 102, 103").
+const DIGIT_GROUP = /\p{Nd}+/gu;
+const JOINING_GAP = /^[^\p{L}]*(?:(?:x|ext)[^\p{L}]*)?$/iu;
+function phoneLike(value) {
+  const t = String(value).normalize("NFKC");
+  let run = 0, end = -1;
+  for (const m of t.matchAll(DIGIT_GROUP)) {
+    run = end >= 0 && JOINING_GAP.test(t.slice(end, m.index)) ? run + m[0].length : m[0].length;
+    if (run >= 7) return true;
+    end = m.index + m[0].length;
+  }
+  return false;
+}
+const office = (v) => { const t = text(v); return t !== null && phoneLike(t) ? { value: null, withheld: true } : { value: t, withheld: false }; };
+// → { oid, values, officeWithheld } or null when the document has no valid GUID user_id (acceptance rejects such snapshots).
 function normalize(doc) {
   const oid = typeof doc?.user_id === "string" && GUID.test(doc.user_id.trim()) ? doc.user_id.trim().toLowerCase() : null;
   if (!oid) return null;
   const mail = text(doc.mail) ?? text(doc.email_address);
   const upn = text(doc.user_principal_name);
+  const officeLocation = office(doc.office_location);
   return {
     oid,
     values: Object.freeze({
       displayName: text(doc.display_name), givenName: text(doc.first_name), surname: text(doc.last_name), mail, userPrincipalName: upn,
-      jobTitle: text(doc.job_title), department: text(doc.department), officeLocation: text(doc.office_location),
+      jobTitle: text(doc.job_title), department: text(doc.department), officeLocation: officeLocation.value,
       emailDomain: emailDomain(mail, upn), accountEnabled: bool(doc.account_enabled), accountType: text(doc.user_type), accountCreated: date(doc.created_datetime)
-    })
+    }),
+    officeWithheld: officeLocation.withheld
   };
 }
-// A value as JSON carries it (dates as ISO strings).
-const outValue = (v) => (v instanceof Date ? v.toISOString() : v === undefined ? null : v);
+// A value as JSON carries it (dates as ISO strings; a multi-valued field as one string, its sorted values joined by ", ").
+const outValue = (v) => (v instanceof Date ? v.toISOString() : Array.isArray(v) ? (v.length ? v.join(", ") : null) : v === undefined ? null : v);
 
-module.exports = { SOURCE_FIELDS, NEVER_LOADED, PROJECTION, FIELDS, FIELD_NAMES, DEFAULT_COLUMNS, DATASETS, DATASET_NAMES, ADMIN_DATASETS, VIEWER_DATASETS, datasetNamed, normalize, outValue, emailDomain, GUID };
+module.exports = { SOURCE_FIELDS, NEVER_LOADED, PROJECTION, FIELDS, FIELD_NAMES, DEFAULT_COLUMNS, DATASETS, DATASET_NAMES, ADMIN_DATASETS, VIEWER_DATASETS, datasetNamed, normalize, outValue, emailDomain, GUID, JARC_FIELDS, JARC_FIELD_NAMES, ALL_FIELDS, JARC_DATASETS, isJarcField, phoneLike };

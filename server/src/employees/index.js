@@ -4,8 +4,11 @@
 //
 //   const employees = createEmployees({ config: config.employees, logger });   // nothing connects until the first request
 //   app: api.use("/admin/employees", identify, employeeRoutes({ employees, savedFilterRepo: dataLayer.repos.employeeSavedFilters }));
-//   /features: employees: employees.accessFor(req.actor)   → { view, admin, datasets }
+//   /features: employees: employees.accessFor(req.actor)   → { view, admin, datasets, jarcAccess }
+//   P2: app.js also builds new JarcAccessIndex({ repos: dataLayer.repos, access, tenantId, ... }) (jarc-access.js) and passes it
+//   to employeeRoutes as jarcAccess. It reads JARC's own database only, lazily (nothing runs until an admin asks).
 const { EmployeeSourceConnection } = require("./connection");
+const { JarcAccessIndex } = require("./jarc-access");
 const { EmployeeSnapshot, directorySource } = require("./snapshot");
 const { EmployeeService } = require("./service");
 const { employeeRoutes } = require("./router");
@@ -28,4 +31,4 @@ function createEmployees({ config, logger = console, createClient, source, idKey
   return { config, connection, snapshot, service, accessFor, access: { accessFor }, close: () => (connection ? connection.close() : Promise.resolve()) };
 }
 
-module.exports = { createEmployees, employeeRoutes, employeeAccessFor, profileId, DATASETS, DATASET_NAMES };
+module.exports = { createEmployees, employeeRoutes, employeeAccessFor, profileId, DATASETS, DATASET_NAMES, JarcAccessIndex };

@@ -255,7 +255,8 @@ describe("Employee Management security (real app)", () => {
       }
     }
     const status = (await as("owner", "GET", `${BASE}/status`)).body;
-    assert.deepEqual(status.access, { datasets: DATASETS, admin: true });
+    // P2: the admin (only) gets jarcAccess; viewers' access objects are unchanged (line 230).
+    assert.deepEqual(status.access, { datasets: DATASETS, admin: true, jarcAccess: true });
   });
 
   // ---- Saved filters ----
@@ -345,7 +346,7 @@ describe("Employee Management security (real app)", () => {
 
   // ---- /features ----
   test("/features: employees flags only for the listed; Fabric flags identical with the feature off (separate lists)", async () => {
-    const expect = { owner: { view: true, admin: true, datasets: DATASETS }, viewer: { view: true, admin: false, datasets: ["active"] }, guestViewer: { view: true, admin: false, datasets: ["active"] }, fabricOnly: { view: false, admin: false, datasets: [] }, outsider: { view: false, admin: false, datasets: [] } };
+    const expect = { owner: { view: true, admin: true, datasets: DATASETS, jarcAccess: true }, viewer: { view: true, admin: false, datasets: ["active"] }, guestViewer: { view: true, admin: false, datasets: ["active"] }, fabricOnly: { view: false, admin: false, datasets: [] }, outsider: { view: false, admin: false, datasets: [] } };
     for (const [who, flags] of Object.entries(expect)) {
       const on = (await as(who, "GET", "/api/v1/features")).body.features;
       const off = (await as(who, "GET", "/api/v1/features", undefined, undefined, offApp)).body.features;

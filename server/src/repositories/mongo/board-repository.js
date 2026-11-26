@@ -36,6 +36,11 @@ class BoardRepository extends VersionedRepository {
     if (!ids.length) return Promise.resolve([]);
     return this.collection.find({ _id: { $in: ids } }, { sort: { workspaceId: 1, position: 1, _id: 1 }, limit: ids.length, projection: { _id: 1, workspaceId: 1, name: 1, archived: 1, position: 1 } }).toArray();
   }
+  // Employee Management P2 (employees/jarc-access.js, read-only): every board in one bounded query, only ID, workspace, name,
+  // public number, archived and whether it is a read-only synchronized board (never the columns or views).
+  listForAccessIndex() {
+    return this.collection.find({}, { sort: { workspaceId: 1, position: 1, _id: 1 }, limit: 5000, projection: { _id: 1, workspaceId: 1, name: 1, publicId: 1, archived: 1, "source.readOnly": 1 } }).toArray();
+  }
   // API tokens: a workspace's boards as a list to choose from (ID, name, archived), without each board's configuration.
   listSummariesByWorkspace(workspaceId) {
     return this.collection.find({ workspaceId }, { sort: { position: 1, _id: 1 }, limit: MAX_BOARDS_PER_WORKSPACE, projection: { _id: 1, workspaceId: 1, name: 1, archived: 1, position: 1 } }).toArray();

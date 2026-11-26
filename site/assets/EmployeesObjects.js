@@ -63,14 +63,21 @@ class EmployeesObjects {
       if (s.open.has("saved")) { try { items = saved.navItems(x); } catch { items = []; } }
       out.push({ id: "saved", label: "My saved filters", icon: "filter", ds, saved: true, items: Array.isArray(items) ? items.filter((i) => i && EmployeesObjects.ITEM_ID.test(String(i.id || ""))) : null });
     }
-    if (panel.admin) for (const ds of EmployeesPanel.ADMIN_DATASETS) if (panel.datasetAllowed(ds)) out.push({ id: ds, label: EmployeesPanel.DATASETS[ds], icon: EmployeesObjects.ADMIN_ICONS[ds], href: `${base}/${ds}`, action: "emp-o-ds", ds, admin: true });
+    if (panel.admin) for (const ds of EmployeesPanel.ADMIN_DATASETS) {
+      if (!panel.datasetAllowed(ds)) continue;
+      out.push({ id: ds, label: EmployeesPanel.DATASETS[ds], icon: EmployeesObjects.ADMIN_ICONS[ds], href: `${base}/${ds}`, action: "emp-o-ds", ds, admin: true });
+      // P2, only with jarcAccess: Disabled accounts that still have JARC access (the Disabled list with one filter).
+      if (ds === "disabled" && typeof panel.jarcDisabledAvailable === "function" && panel.jarcDisabledAvailable()) out.push({ id: "jarc-disabled", label: "Disabled with JARC access", icon: "flag", href: panel.jarcDisabledHref(), action: "emp-o-jarc-disabled", ds, admin: true });
+    }
     return out;
   }
   static currentId(panel, nodes = EmployeesObjects.nodes(panel)) {
     const r = panel.route || {};
     if (r.view === "group") return `group-${r.group}`;
     const saved = nodes.find((n) => n.saved && n.ds === r.ds)?.items?.find((i) => i.current);
-    return saved ? `saved-${saved.id}` : r.ds || "active";
+    if (saved) return `saved-${saved.id}`;
+    if (typeof panel.isJarcDisabledView === "function" && panel.isJarcDisabledView()) return "jarc-disabled";
+    return r.ds || "active";
   }
 
   // ---- Drawing (FabricObjects' classes: fabric-objects.css applies under .fx-app)
@@ -174,6 +181,13 @@ class EmployeesObjects {
       EmployeesObjects.afterChoice(panel, ds);
       panel.openDataset(ds, { clear: true, focus: false });
       EmployeesObjects.focusAfterChoice(panel, ds);
+      return;
+    }
+    if (action === "emp-o-jarc-disabled") {
+      if (typeof panel.jarcDisabledAvailable !== "function" || !panel.jarcDisabledAvailable()) return;
+      EmployeesObjects.afterChoice(panel, "jarc-disabled");
+      panel.openJarcDisabled({ focus: false });
+      EmployeesObjects.focusAfterChoice(panel, "jarc-disabled");
       return;
     }
     if (action === "emp-o-group") {

@@ -9,6 +9,9 @@
 // Read-only and request-free. Only the allow-listed fields below are ever read from record.values: anything else the response
 // may hold (phones, IDs, unknown keys) is never drawn. A missing value reads "Not recorded"; nothing is inferred or invented.
 // Nothing is written to localStorage, sessionStorage or IndexedDB.
+//
+// P2: for people with access.jarcAccess (explorer.p.jarcAccess) the page has two tabs, Profile (the page above, unchanged) and
+// JARC access (EmployeeAccess.js, loaded by the panel; address …/records/{id}/access). Everyone else gets no tab bar at all.
 class EmployeeProfile {
   static ID = /^[A-Za-z0-9_-]{22}$/;
   // The allow-list: API field name → default label (the schema's label wins when present).
@@ -118,8 +121,41 @@ class EmployeeProfile {
     const ingested = EmployeeProfile.utcTime(snap.ingestedAt);
     const stale = snap.stale === true ? `<div class="fx-status fx-status--warn emp-p__banner" role="status"><span class="fx-status__msg">This directory snapshot may be out of date: the latest update couldn't be checked. The details shown are from the last snapshot loaded.</span></div>` : "";
     const footer = `<p class="emp-p__source">Source: Microsoft Entra ID directory snapshot · updated ${ingested ? `<time datetime="${a(ingested.iso)}">${e(ingested.text)}</time>` : "unknown"}. Read-only: changes are made in Microsoft Entra ID.</p>`;
-    const body = `${disabled}${stale}${head}<div class="emp-p__sections">${EmployeeProfile.section(ds, "identity", "Identity", identity)}${EmployeeProfile.section(ds, "contact", "Contact", contact)}${EmployeeProfile.section(ds, "org", "Organization", org)}${EmployeeProfile.section(ds, "account", "Directory account", account)}</div>${footer}`;
-    return shell(e(name), body);
+    const sections = `<div class="emp-p__sections">${EmployeeProfile.section(ds, "identity", "Identity", identity)}${EmployeeProfile.section(ds, "contact", "Contact", contact)}${EmployeeProfile.section(ds, "org", "Organization", org)}${EmployeeProfile.section(ds, "account", "Directory account", account)}</div>${footer}`;
+    const tabs = EmployeeProfile.tabs(explorer);
+    if (!tabs) return shell(e(name), `${disabled}${stale}${head}${sections}`);
+    // Employee administrators (access.jarcAccess): two tabs, Profile (the page above, unchanged) and JARC access.
+    const inner = tabs.tab === "access" ? EmployeeProfile.accessHtml(explorer, tabs.state) : sections;
+    return shell(e(name), `${disabled}${stale}${head}${EmployeeProfile.tabBarHtml(explorer, tabs.tab)}<div class="emp-p__panel" role="tabpanel" id="emp-p-panel-${ds}" aria-labelledby="emp-p-tab-${tabs.tab}-${ds}" tabindex="-1" data-tab="${tabs.tab}">${inner}</div>`);
+  }
+
+  // ---- Tabs (only for people with access.jarcAccess; the panel says so through explorer.p). Anyone else gets no tab bar.
+  static TABS = [["profile", "Profile"], ["access", "JARC access"]];
+  static access() { try { return typeof EmployeeAccess === "function" && typeof EmployeeAccess.html === "function" ? EmployeeAccess : null; } catch { return null; } }
+  // { tab: "profile" | "access", state } when the tabs are drawn, else null.
+  static tabs(explorer) {
+    const p = explorer?.p;
+    if (!p || p.jarcAccess !== true || !EmployeeProfile.access()) return null;
+    let tab = "profile", state = null;
+    try { tab = typeof p.profileTabFor === "function" && p.profileTabFor(explorer) === "access" ? "access" : "profile"; } catch { tab = "profile"; }
+    if (tab === "access") { try { state = typeof p.accessState === "function" ? p.accessState(explorer) : null; } catch { state = null; } }
+    return { tab, state };
+  }
+  static accessHtml(explorer, state) { try { const h = EmployeeProfile.access().html(explorer, state); return typeof h === "string" ? h : ""; } catch { return ""; } }
+  static tabBarHtml(explorer, current) {
+    const ds = EmployeeProfile.safeDs(explorer), a = (v) => EmployeeProfile.attr(explorer, v);
+    const buttons = EmployeeProfile.TABS.map(([id, label]) => {
+      const on = id === current;
+      return `<button type="button" role="tab" class="emp-p__tab${on ? " is-active" : ""}" id="emp-p-tab-${id}-${ds}" data-action="emp-p-tab" data-tab="${id}" data-ds="${a(ds)}" data-focus-key="emp-p-tab-${id}" aria-selected="${on}"${on ? ` aria-controls="emp-p-panel-${ds}"` : ""} tabindex="${on ? 0 : -1}">${label}</button>`;
+    }).join("");
+    return `<div class="emp-p__tabs" role="tablist" aria-label="Profile sections">${buttons}</div>`;
+  }
+  static selectTab(explorer, tab, { focus = true } = {}) {
+    const p = explorer?.p;
+    if (!EmployeeProfile.TABS.some(([id]) => id === tab) || typeof p?.setProfileTab !== "function") return false;
+    p.setProfileTab(explorer, tab);
+    if (focus) EmployeeProfile.doc()?.querySelector?.(`#emp-p-tab-${tab}-${EmployeeProfile.safeDs(explorer)}`)?.focus?.();
+    return true;
   }
 
   // ---- Focus hooks (the directory panel calls these after drawing)
@@ -178,10 +214,25 @@ class EmployeeProfile {
       return true;
     }
     if (action === "emp-p-retry") { if (typeof explorer?.retry === "function") explorer.retry(); else explorer?.refresh?.(); return true; }
+    if (action === "emp-p-tab") { EmployeeProfile.selectTab(explorer, String(target?.dataset?.tab ?? "")); return true; }
+    if (action === "emp-p-access-retry") { explorer?.p?.retryAccess?.(explorer); return true; }
     return false;
+  }
+  // The tab bar (APG tabs, automatic activation): ← / → move to the other tab and open it; Home / End the first / last.
+  static onTabKey(explorer, event) {
+    const t = event?.target;
+    if (t?.getAttribute?.("role") !== "tab" || !t.closest?.(".emp-p__tabs") || event.altKey || event.ctrlKey || event.metaKey) return false;
+    const ids = EmployeeProfile.TABS.map(([id]) => id), i = ids.indexOf(String(t.dataset?.tab ?? ""));
+    if (i < 0) return false;
+    const next = { ArrowRight: (i + 1) % ids.length, ArrowLeft: (i - 1 + ids.length) % ids.length, Home: 0, End: ids.length - 1 }[event.key];
+    if (next === undefined) return false;
+    event.preventDefault?.();
+    if (ids[next] !== ids[i]) EmployeeProfile.selectTab(explorer, ids[next]);
+    return true;
   }
   // Escape (outside text fields) goes back to the list. Returns true when handled.
   static onKeydown(explorer, event) {
+    if (EmployeeProfile.onTabKey(explorer, event)) return true;
     if (event?.key !== "Escape" || event.defaultPrevented) return false;
     const tag = String(event.target?.tagName || "").toUpperCase();
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || event.target?.isContentEditable) return false;

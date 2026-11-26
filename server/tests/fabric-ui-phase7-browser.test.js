@@ -226,6 +226,8 @@ describe("Fabric Data Phase 7 in the real app (headless browser)", { skip: BROWS
         if (width <= 620) assert.ok(fb.width >= width - 1, `${label}: full-width drawer`); else assert.ok(fb.width <= 722, `${label}: compact popover`);
         assert.ok((await box('[data-action="fabric-f-apply"][data-ds="inventory"]'))?.inside && (await box('[data-action="fabric-f-cancel"][data-focus-key="fb-cancel"]'))?.inside, `${label}: Apply and Cancel on screen`);
         // Nothing (the JARC top bar) covers the builder's title and × close.
+        // Regression (popover placement): a popover (not the phone drawer) keeps an 8 px margin to the viewport's edges.
+        if (width > 620) { const vw = await b.evaluate("document.documentElement.clientWidth"); assert.ok(fb.left >= 7 && fb.right <= vw - 7, `${label}: builder 8 px inside the viewport ${JSON.stringify({ ...fb, vw })}`); }
         const topmost = (sel) => b.evaluate(`(() => { const el = document.querySelector(${JSON.stringify(sel)}); const r = el.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!hit && (hit === el || el.contains(hit)); })()`);
         assert.ok(await topmost("#fabric-inventory-fb .fx-fb__close"), `${label}: the builder's × is not covered`);
         assert.ok(await topmost("#fabric-inventory-fb-title"), `${label}: the builder's title is not covered`);

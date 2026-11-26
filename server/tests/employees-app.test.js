@@ -63,10 +63,11 @@ describe("createApp({ employees })", { skip: wired ? false : "app.js doesn't acc
     assert.equal(sf.status, 201);
   });
 
-  test("/features: employees { view, admin, datasets } for this caller", async () => {
+  test("/features: employees { view, admin, datasets, jarcAccess } for this caller (jarcAccess = admin, P2)", async () => {
     const origin = issuer.config.appOrigin;
     const flag = async (person) => (await (await signedIn(on.url, origin, person)).request("GET", "/api/v1/features")).body.features.employees;
-    assert.deepEqual(await flag(persons.owner), { view: true, admin: true, datasets: ["active", "all", "disabled", "guests"] });
+    assert.deepEqual(await flag(persons.owner), { view: true, admin: true, datasets: ["active", "all", "disabled", "guests"], jarcAccess: true });
+    // Viewers and outsiders never see the P2 key.
     assert.deepEqual(await flag(persons.viewer), { view: true, admin: false, datasets: ["active"] });
     assert.deepEqual(await flag(persons.outsider), { view: false, admin: false, datasets: [] });
   });

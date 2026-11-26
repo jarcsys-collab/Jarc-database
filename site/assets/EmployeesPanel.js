@@ -7,6 +7,8 @@
 // Pages: /admin/employees → /admin/employees/active; /admin/employees/{active|all|disabled|guests}[/records/{id}];
 // /admin/employees/groups/{department|jobTitle|officeLocation|emailDomain} (counts per value, "Unassigned" for blank).
 // all / disabled / guests only with employees.admin; anyone else (and anyone without employees.view) gets the no-access state.
+// P2 (employees.jarcAccess, the employee administrators): a profile's JARC access tab, /admin/employees/{ds}/records/{id}/access,
+// loaded from …/records/{id}/jarc-access (EmployeeAccess.js draws it), and the "Disabled with JARC access" navigation item.
 //
 // Nothing read here is ever stored in the browser: no localStorage, IndexedDB or BoardCache. The only browser-storage entries are
 // the explorer's column NAMES (FabricExplorer's "jarc.fabric.columns.<user>.<active|all|disabled|guests>") and the Objects panel's expanded node IDs
@@ -20,7 +22,10 @@ class EmployeesPanel {
   static GROUPS = [["department", "Department"], ["jobTitle", "Job title"], ["officeLocation", "Office"], ["emailDomain", "Email domain"]];
   static GROUP_LIMIT = 500;
   static ID = /^[A-Za-z0-9_-]{22}$/;
-  static PATH = /^\/admin\/employees(?:\/(active|all|disabled|guests)(?:\/records\/([A-Za-z0-9_-]{22}))?|\/groups\/(department|jobTitle|officeLocation|emailDomain))?\/?$/;
+  // A profile's JARC access tab (P2, employee administrators only) is /admin/employees/{ds}/records/{id}/access.
+  static PATH = /^\/admin\/employees(?:\/(active|all|disabled|guests)(?:\/records\/([A-Za-z0-9_-]{22})(\/access)?)?|\/groups\/(department|jobTitle|officeLocation|emailDomain))?\/?$/;
+  // The administrators' "Disabled with JARC access" list: the Disabled accounts list with this one condition.
+  static JARC_DISABLED_FILTER = { v: 1, op: "and", items: [{ field: "jarcDisabledWithAccess", op: "isTrue" }] };
   static ROOT = "#employees-root";
   // Actions handed to the explorer named by data-ds: its list (x), filter builder (f), column menus (c), record page (r).
   static EXPLORER_PREFIXES = ["fabric-x-", "fabric-f-", "fabric-c-", "fabric-r-"];
@@ -43,19 +48,19 @@ class EmployeesPanel {
     const m = EmployeesPanel.PATH.exec(pathname);
     const query = typeof FabricExplorer === "function" ? FabricExplorer.parseQuery(search) : null;
     if (!m) return { view: "list", ds: "active", recordId: "", query: null, unknown: true };
-    if (m[3]) return { view: "group", group: m[3] };
-    return { view: "list", ds: m[1] || "active", recordId: m[2] || "", query };
+    if (m[4]) return { view: "group", group: m[4] };
+    return { view: "list", ds: m[1] || "active", recordId: m[2] || "", query, ...(m[2] && m[3] ? { tab: "access" } : {}) };
   }
   static formatPath(route) {
     const r = route || { view: "list", ds: "active" };
     if (r.view === "group" && EmployeesPanel.GROUPS.some(([f]) => f === r.group)) return { path: `${EmployeesPanel.BASE}/groups/${r.group}`, search: "" };
     const ds = EmployeesPanel.DATASET_VIEWS.includes(r.ds) ? r.ds : "active";
-    const rec = r.recordId && EmployeesPanel.ID.test(r.recordId) ? `/records/${encodeURIComponent(r.recordId)}` : "";
+    const rec = r.recordId && EmployeesPanel.ID.test(r.recordId) ? `/records/${encodeURIComponent(r.recordId)}${r.tab === "access" ? "/access" : ""}` : "";
     return { path: `${EmployeesPanel.BASE}/${ds}${rec}`, search: typeof FabricExplorer === "function" && r.query ? FabricExplorer.formatQuery(r.query) : "" };
   }
   static samePath(a, b) {
     const x = EmployeesPanel.parsePath(a), y = EmployeesPanel.parsePath(b);
-    return Boolean(x && y) && x.view === y.view && (x.ds ?? "") === (y.ds ?? "") && (x.group ?? "") === (y.group ?? "") && (x.recordId ?? "") === (y.recordId ?? "");
+    return Boolean(x && y) && x.view === y.view && (x.ds ?? "") === (y.ds ?? "") && (x.group ?? "") === (y.group ?? "") && (x.recordId ?? "") === (y.recordId ?? "") && (x.tab ?? "") === (y.tab ?? "");
   }
   static groupLabel(field) { return EmployeesPanel.GROUPS.find(([f]) => f === field)?.[1] || ""; }
   // A failed request → { kind, code, message, reference, status }. Never the server's own text (it could echo a value).
@@ -92,7 +97,9 @@ class EmployeesPanel {
     this.explorers = Object.fromEntries(EmployeesPanel.DATASET_VIEWS.map((ds) => [ds, new FabricExplorer(this, ds, {
       apiBase: EmployeesPanel.BASE, routeBase: EmployeesPanel.BASE, datasets: EmployeesPanel.DATASETS, idPattern: EmployeesPanel.ID,
       savedFiltersBase: `${EmployeesPanel.BASE}/saved-filters`, recordRenderer: profile || EmployeesPanel.BASIC_RECORD, rootSelector: EmployeesPanel.ROOT,
-      errorInfo: (e) => EmployeesPanel.errorInfo(e), schemaLabels: true, dateWindow: false // the directory has no date window
+      errorInfo: (e) => EmployeesPanel.errorInfo(e), schemaLabels: true, dateWindow: false, // the directory has no date window
+      // P2: the JARC fields (schema group "jarc", only in administrators' schemas) get their own heading in Columns and Filters.
+      fieldGroups: { "": "Directory", jarc: "JARC access" }
     })]));
     this.reset();
     for (const name of ["jarc-session-expired", "jarc-access-denied", "jarc-account-pending"]) window.addEventListener?.(name, () => this.forget());
@@ -105,6 +112,7 @@ class EmployeesPanel {
     try { if (typeof FabricSavedFilters === "function") for (const x of Object.values(this.explorers || {})) FabricSavedFilters.forget(x); } catch { /* not loaded */ }
     this.status = null; this.statusLoading = false; this.statusError = null;
     this.groups = {}; this.denied = false; this.forbiddenView = false; this.announced = "";
+    this.access = EmployeesPanel.slot(); this.profileTab = { ds: "", id: "", tab: "" };
   }
   forget() { this.reset(); }
   static slot() { return { key: null, data: null, loading: false, error: null, seq: 0 }; }
@@ -113,6 +121,9 @@ class EmployeesPanel {
   get features() { const f = this.c.model.features?.employees; return f && typeof f === "object" ? f : null; }
   get visible() { return Boolean(this.features?.view === true && this.adapter?.request); }
   get admin() { return Boolean(this.visible && this.features?.admin === true); }
+  // P2: JARC access visibility (employee administrators only). /features says so (employees.jarcAccess); a status answer that
+  // says otherwise wins. The server refuses the access endpoint and the JARC fields to everyone else either way.
+  get jarcAccess() { return Boolean(this.admin && this.features?.jarcAccess === true && this.status?.access?.jarcAccess !== false); }
   datasetAllowed(ds) {
     if (!this.visible || !EmployeesPanel.DATASET_VIEWS.includes(ds)) return false;
     if (ds === "active") return true;
@@ -136,19 +147,65 @@ class EmployeesPanel {
       const ds = this.isDataset(r.ds) ? r.ds : "active";
       // A dataset this person may not open (a typed or shared address): the no-access state, and nothing is requested.
       if (!this.datasetAllowed(ds)) { this.forbiddenView = true; this.route = { view: "list", ds, group: "" }; }
-      else { const x = this.explorers[ds]; if (r.query) x.applyQuery(r.query); x.openRecord(r.recordId || ""); this.route = { view: "list", ds, group: "" }; }
+      else {
+        const x = this.explorers[ds]; if (r.query) x.applyQuery(r.query); x.openRecord(r.recordId || ""); this.route = { view: "list", ds, group: "" };
+        if (x.recordId) this.profileTab = { ds, id: x.recordId, tab: r.tab === "access" ? "access" : "profile" };
+      }
     }
     return before !== this.routeKey();
   }
-  routeKey() { return JSON.stringify([this.route, this.forbiddenView, ...Object.values(this.explorers).map((x) => x.state())]); }
+  routeKey() { return JSON.stringify([this.route, this.forbiddenView, this.profileTab, ...Object.values(this.explorers).map((x) => x.state())]); }
   routeForUrl() {
     if (!this.visible) return { view: "list", ds: "active" };
     if (this.route.view === "group") return { view: "group", group: this.route.group };
     const ds = this.route.ds;
     if (!this.datasetAllowed(ds)) return { view: "list", ds };
     const x = this.explorers[ds];
-    return { view: "list", ds, recordId: x.recordId, query: x.query };
+    return { view: "list", ds, recordId: x.recordId, query: x.query, ...(this.profileTabFor(x) === "access" ? { tab: "access" } : {}) };
   }
+
+  // ---- The profile's tabs (P2): "profile" | "access", per open profile. Without jarcAccess it is always "profile" (no tab bar,
+  // and an /access address shows the profile; the address bar then drops "/access").
+  profileTabFor(x) {
+    if (!x?.recordId || !this.jarcAccess) return "profile";
+    const t = this.profileTab;
+    return t.ds === x.ds && t.id === x.recordId && t.tab === "access" ? "access" : "profile";
+  }
+  setProfileTab(x, tab) {
+    if (!x?.recordId || !this.jarcAccess || this.explorer !== x) return;
+    const next = tab === "access" ? "access" : "profile";
+    if (this.profileTabFor(x) === next) return;
+    this.profileTab = { ds: x.ds, id: x.recordId, tab: next };
+    this.c.update();
+    this.ensure();
+    this.announce(next === "access" ? "JARC access" : "Profile");
+  }
+  accessPath(x) { return `${EmployeesPanel.BASE}/${encodeURIComponent(x.ds)}/records/${encodeURIComponent(x.recordId)}/jarc-access`; }
+  // What the JARC access tab draws: { data, loading, error } for the open profile, or an empty loading state.
+  accessState(x) {
+    const s = this.access;
+    return x?.recordId && s.key === this.accessPath(x) ? s : { data: null, loading: true, error: null };
+  }
+  ensureAccess({ keep = false } = {}) {
+    const x = this.explorer;
+    if (!x?.recordId || this.profileTabFor(x) !== "access") return;
+    const path = this.accessPath(x), slot = this.access;
+    if (slot.key === path && !keep) return;
+    this.loadAccess(slot, path, keep && slot.key === path);
+  }
+  // A failed access request never closes the directory (a 403 here means only this tab is refused); it is shown in the tab.
+  async loadAccess(slot, path, keep) {
+    const seq = ++slot.seq;
+    if (!keep) slot.data = null;
+    slot.key = path; slot.loading = true; slot.error = null; this.redraw();
+    try { const data = await this.adapter.request("GET", path); if (slot.seq !== seq) return; slot.data = data && typeof data === "object" && !Array.isArray(data) ? data : null; if (!slot.data) slot.error = { kind: "generic", code: "INTERNAL_ERROR", message: "The JARC access details didn't load.", reference: "", status: null }; }
+    catch (error) { if (slot.seq !== seq) return; slot.data = null; slot.error = EmployeesPanel.errorInfo(error); }
+    finally { if (slot.seq === seq) slot.loading = false; }
+    if (this.denied) return;
+    this.redraw();
+    this.announce(slot.error ? "JARC access couldn't be loaded." : "JARC access loaded.");
+  }
+  retryAccess() { this.access.key = null; this.ensureAccess(); }
   urlFor() { return EmployeesPanel.formatPath(this.routeForUrl()); }
   syncUrl() { this.c.syncBoardUrl?.(); }
 
@@ -172,6 +229,7 @@ class EmployeesPanel {
   }
   sectionLabel() {
     if (this.route.view === "group") return `Group by ${EmployeesPanel.groupLabel(this.route.group).toLowerCase()}`;
+    if (this.isJarcDisabledView()) return "Disabled with JARC access";
     return EmployeesPanel.DATASETS[this.route.ds] || "";
   }
   html() {
@@ -243,6 +301,9 @@ class EmployeesPanel {
     if (this.forbiddenView) return;
     if (this.route.view === "group") { this.ensureGroup(this.route.group); return; }
     this.explorer?.ensure();
+    // A profile closed (Back, another list): its tab choice is dropped, so the next profile opens on Profile.
+    if (!this.explorer?.recordId && this.profileTab.id) this.profileTab = { ds: "", id: "", tab: "" };
+    this.ensureAccess();
   }
   async loadStatus() {
     if (this.statusLoading) return;
@@ -352,6 +413,30 @@ class EmployeesPanel {
     this.c.update();
     if (focus) this.focus("[data-focus-key='results'], h2");
   }
+  // P2 (employee administrators with jarcAccess): "Disabled with JARC access" = the Disabled accounts list filtered on
+  // jarcDisabledWithAccess is true, through the explorer's ordinary filter (so chips, Clear filters, saved filters and the
+  // address work as for any filter). Its query, address and whether it is the list shown now:
+  jarcDisabledQuery() {
+    const M = typeof FabricFilterModel === "function" ? FabricFilterModel : null, model = JSON.parse(JSON.stringify(EmployeesPanel.JARC_DISABLED_FILTER));
+    return { ...FabricExplorer.emptyQuery(), filter: M ? M.canonical(model) : model };
+  }
+  jarcDisabledAvailable() { return this.jarcAccess && this.datasetAllowed("disabled"); }
+  jarcDisabledHref() { const u = EmployeesPanel.formatPath({ view: "list", ds: "disabled", query: this.jarcDisabledQuery() }); return `${u.path}${u.search}`; }
+  isJarcDisabledView() {
+    if (!this.jarcDisabledAvailable() || this.route.view !== "list" || this.route.ds !== "disabled" || this.forbiddenView) return false;
+    const x = this.explorers.disabled, q = x.query, want = this.jarcDisabledQuery();
+    return !q.q && FabricExplorer.formatQuery({ ...want, limit: q.limit, orderBy: q.orderBy, sort: q.sort, dir: q.dir }) === FabricExplorer.formatQuery(q);
+  }
+  openJarcDisabled({ focus = true } = {}) {
+    if (!this.jarcDisabledAvailable()) return;
+    const x = this.explorers.disabled;
+    try { if (typeof FabricSavedFilters === "function") FabricSavedFilters.clearCurrent(x); } catch { /* not loaded */ }
+    x.applyQuery({ ...this.jarcDisabledQuery(), limit: x.query.limit, orderBy: x.query.orderBy });
+    x.openRecord("");
+    this.forbiddenView = false; this.route = { view: "list", ds: "disabled", group: "" };
+    this.c.update();
+    if (focus) this.focus("[data-focus-key='results'], h2");
+  }
   openGroup(field, { focus = true } = {}) {
     if (!EmployeesPanel.groupLabel(field)) return;
     this.forbiddenView = false; this.route = { view: "group", ds: "active", group: field };
@@ -368,11 +453,13 @@ class EmployeesPanel {
     this.status = null; this.statusError = null;
     if (this.route.view === "group") { this.ensureGroup(this.route.group, { keep: true }); this.loadStatus(); return; }
     this.explorer?.refresh();
+    this.ensureAccess({ keep: true });
     this.loadStatus().then(() => this.ensure());
   }
   retry() {
     if (this.statusError) { this.statusError = null; this.status = null; }
     for (const g of Object.values(this.groups)) if (g.error) g.key = null;
+    if (this.access.error) this.access.key = null;
     this.explorer?.retry();
     this.c.update();
   }

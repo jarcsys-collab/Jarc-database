@@ -91,6 +91,7 @@ class EmployeeSnapshot {
     this.version += 1;
     this.ok();
     this.logger.info?.(`[employees] snapshot loaded: ${built.snap.count} accounts`);
+    this.logger.info?.(`[employees] office values withheld: ${built.officeWithheld}`);
   }
 
   ok() { this.checkedAt = this.now(); this.failure = null; }
@@ -99,12 +100,15 @@ class EmployeeSnapshot {
     this.logger.warn?.(`[employees] snapshot ${reason === "snapshot_rejected" ? `rejected (${detail})` : `check failed: ${describe(error)}`}${this.snap ? "; serving the last good snapshot" : ""}`);
   }
 
-  // Acceptance + normalisation. → { ok: true, snap } | { ok: false, reason }
+  // Acceptance + normalisation. → { ok: true, snap, officeWithheld } | { ok: false, reason }
+  // oidById (P2): profile ID → lowercase object ID, the only link from a directory record to a JARC user (jarc-access.js). It is
+  // a non-enumerable property holding a Map, so it never reaches JSON, a response or a log; nothing outside the access index
+  // reads it.
   build(docs, rawMax) {
     if (!Array.isArray(docs) || !docs.length) return { ok: false, reason: "empty" };
     if (docs.length > SCAN_MAX) return { ok: false, reason: "too_large" };
-    const records = [], byId = new Map(), oids = new Set();
-    let newest = null;
+    const records = [], byId = new Map(), oids = new Set(), oidById = new Map();
+    let newest = null, officeWithheld = 0;
     for (const doc of docs) {
       const n = normalize(doc);
       if (!n) return { ok: false, reason: "invalid_id" };
@@ -113,13 +117,16 @@ class EmployeeSnapshot {
       const id = profileId(this.idKey, n.oid);
       if (byId.has(id)) return { ok: false, reason: "duplicate_id" };
       const record = Object.freeze({ id, values: n.values });
-      records.push(record); byId.set(id, record);
+      records.push(record); byId.set(id, record); oidById.set(id, n.oid);
+      if (n.officeWithheld) officeWithheld += 1;
       const at = iso(doc.ingestion_datetime);
       if (at && (!newest || at > newest)) newest = at;
     }
     if (this.snap && records.length < Math.ceil(this.snap.count * MIN_RATIO)) return { ok: false, reason: "count_drop" };
     const loadedAt = new Date(this.now()).toISOString();
-    return { ok: true, snap: Object.freeze({ records: Object.freeze(records), byId, count: records.length, ingestedAt: newest ?? iso(rawMax), rawMax, loadedAt }) };
+    const snap = { records: Object.freeze(records), byId, count: records.length, ingestedAt: newest ?? iso(rawMax), rawMax, loadedAt };
+    Object.defineProperty(snap, "oidById", { value: oidById, enumerable: false });
+    return { ok: true, snap: Object.freeze(snap), officeWithheld };
   }
 
   // { ingestedAt, loadedAt, checkedAt, stale, staleReason? } for responses.

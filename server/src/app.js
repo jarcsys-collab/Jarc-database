@@ -22,7 +22,7 @@ const { canManageDrive, actorCanManageDrive } = require("./integrations/google-d
 const { Access } = require("./auth/access");
 const { apiNotFound, errorHandler, sendError } = require("./middleware/errors");
 const { securityHeaders, cspReportHandler } = require("./middleware/security-headers");
-const { employeeRoutes } = require("./employees");
+const { employeeRoutes, JarcAccessIndex } = require("./employees");
 const { ActivityStream } = require("./realtime/activity-stream");
 const { eventRoutes, entraSessionCheck } = require("./routes/events");
 const { fileRoutes } = require("./routes/files");
@@ -68,8 +68,9 @@ const BOARD_LINK_PATH = /^\/boards\/[^/]{1,200}\/?$/;
 // FABRIC_INVOICE_VIEWS.
 const FABRIC_LINK_PATH = /^\/fabric\/((inventory|sales)(\/records\/[^/]{1,64})?|api)\/?$/;
 const FABRIC_INVOICE_LINK_PATH = /^\/fabric\/invoices(\/[^/]{1,400}\/[^/]{1,400})?\/?$/;
-// People directory (Employee Management) links: the screen itself asks the server what this person may see.
-const EMPLOYEES_LINK_PATH = /^\/admin\/employees(?:\/(?:active|all|disabled|guests)(?:\/records\/[A-Za-z0-9_-]{22})?|\/groups\/(?:department|jobTitle|officeLocation|emailDomain))?\/?$/;
+// People directory (Employee Management) links: the screen itself asks the server what this person may see. …/records/{id}/access
+// is the profile's JARC access tab (P2; the page shows it only to Employee Management admins).
+const EMPLOYEES_LINK_PATH = /^\/admin\/employees(?:\/(?:active|all|disabled|guests)(?:\/records\/[A-Za-z0-9_-]{22}(?:\/access)?)?|\/groups\/(?:department|jobTitle|officeLocation|emailDomain))?\/?$/;
 const rootRelative = (html) => html.replace(/(\s(?:href|src))="assets\//g, '$1="/assets/');
 
 // An optional feature not stated is off in production and on elsewhere.
@@ -211,9 +212,17 @@ function createApp({ securityHeadersOptions = {}, employees: employeesOption = n
     // apiTokenAdmin: whether THIS caller is a JARC API administrator (only to show or hide the Developer sections).
     // fabricData (only while it's on): what THIS caller may do there; apiTokens: whether Fabric API tokens can exist at all.
     // Employee Management (People directory): only the employee lists decide; never Fabric lists or workspace roles.
-    if (employees) api.use("/admin/employees", identify, employeeRoutes({ employees, savedFilterRepo: dataLayer.repos.employeeSavedFilters || null, logger }));
+    // P2 (Employee Access Visibility, EMPLOYEE_ADMIN_OIDS only): the JARC access index reads JARC's own users, memberships,
+    // workspaces, boards and live sessions (bounded, read-only) and mirrors THIS app's Access (same policy, beta open editing and
+    // account mode), tenant and API administrators. Lazy: nothing is read until an admin asks.
+    // features: which of the actions it describes exist on this server at all (spreadsheet imports and the monday.com integration
+    // are mounted only when on, lines below).
+    const jarcAccess = employees && auth ? new JarcAccessIndex({ repos: dataLayer.repos, access, tenantId: auth.entra.tenantId, apiAdminObjectIds: tokenService ? apiTokens.adminObjectIds || [] : null, employeesConfig: employees.config, features: { spreadsheetImports: Boolean(enabled.spreadsheetImports && dataLayer.services?.importJobs), mondayIntegration: Boolean(dataLayer.services?.integration) }, logger }) : null;
+    if (employees) api.use("/admin/employees", identify, employeeRoutes({ employees, savedFilterRepo: dataLayer.repos.employeeSavedFilters || null, jarcAccess, logger }));
+    // employees.jarcAccess only when true (an admin, with the index wired): viewers and outsiders never see the key.
+    const employeeFlags = (actor) => { const { jarcAccess: jarc, ...flags } = employees.accessFor(actor); return { ...flags, ...(jarc === true && jarcAccess ? { jarcAccess: true } : {}) }; };
     api.get("/features", identify, (req, res) => {
-      const fabricFlags = { ...(fabricAccessFor ? { fabricData: { ...fabricAccessFor(req.actor), apiTokens: Boolean(tokenService) } } : {}), ...(employees ? { employees: employees.accessFor(req.actor) } : {}) };
+      const fabricFlags = { ...(fabricAccessFor ? { fabricData: { ...fabricAccessFor(req.actor), apiTokens: Boolean(tokenService) } } : {}), ...(employees ? { employees: employeeFlags(req.actor) } : {}) };
       res.status(200).set("Cache-Control", "no-store").json({ features: tokenService ? { ...enabled, apiTokens: true, apiTokenAdmin: tokenService.isAdmin(req.actor), ...fabricFlags } : { ...enabled, ...fabricFlags } });
     });
     api.use(identify, preferenceRoutes({ repos: dataLayer.repos }));

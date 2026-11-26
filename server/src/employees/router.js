@@ -3,6 +3,7 @@
 // (/api/v1/admin/employees):
 //   GET /status
 //   GET /:ds/schema | /:ds/records | /:ds/records/:id | /:ds/values         ds ∈ active | all | disabled | guests
+//   GET /:ds/records/:id/jarc-access                                        P2: EMPLOYEE_ADMIN_OIDS only (jarcAccess)
 //   GET|POST /saved-filters/:ds, PUT|DELETE /saved-filters/:ds/:id          (routes/employee-saved-filters.js)
 // Who: EMPLOYEE_VIEWER_OIDS / EMPLOYEE_ADMIN_OIDS within the tenant only (access.js). A bearer token is refused (401), no
 // session → 401, anyone else → 403 EMPLOYEES_FORBIDDEN on every path (records, IDs and saved filters included). An admin
@@ -19,8 +20,11 @@ const READS_PER_WINDOW = 60, WINDOW_MS = 10 * 1000, PER_CALLER_IN_FLIGHT = 4;
 // employees: createEmployees(...) result ({ service, accessFor }). savedFilterRepo: dataLayer.repos.employeeSavedFilters (or
 // null: no saved filter paths). limiter: (userKey) → boolean for the data routes. savedFilters: { readLimiter, writeLimiter,
 // maxPerDataset } passed to the saved filter routes (tests).
-function employeeRoutes({ employees, savedFilterRepo = null, limiter = searchLimiter({ perWindow: READS_PER_WINDOW, windowMs: WINDOW_MS }), savedFilters = {}, logger = console, perCallerInFlight = PER_CALLER_IN_FLIGHT }) {
+// jarcAccess (P2): the JARC access index (jarc-access.js JarcAccessIndex), or null. Without it (P1 mounts, tests) nobody gets
+// jarcAccess: the JARC fields and GET /:ds/records/:id/jarc-access don't exist for anyone (403 EMPLOYEES_FORBIDDEN on that path).
+function employeeRoutes({ employees, savedFilterRepo = null, jarcAccess = null, limiter = searchLimiter({ perWindow: READS_PER_WINDOW, windowMs: WINDOW_MS }), savedFilters = {}, logger = console, perCallerInFlight = PER_CALLER_IN_FLIGHT }) {
   if (!employees?.service || typeof employees.accessFor !== "function") throw new Error("employeeRoutes needs createEmployees(...).");
+  if (jarcAccess && typeof jarcAccess.current !== "function") throw new Error("employeeRoutes jarcAccess must be a JarcAccessIndex.");
   const { service } = employees;
   const router = express.Router();
   const send = (res, body) => res.status(200).set("Cache-Control", "no-store").json(body);
@@ -33,7 +37,8 @@ function employeeRoutes({ employees, savedFilterRepo = null, limiter = searchLim
     if (!req.actor) return sendError(res, 401, "UNAUTHENTICATED", "Sign in to JARC to use Employee Management.");
     const access = employees.accessFor(req.actor);
     if (!access.view) return sendError(res, 403, "EMPLOYEES_FORBIDDEN", MESSAGES.EMPLOYEES_FORBIDDEN);
-    req.employeeAccess = Object.freeze({ ...access, datasets: Object.freeze([...access.datasets]), who: String(req.actor.userId) });
+    const { jarcAccess: jarcGranted, ...p1 } = access;
+    req.employeeAccess = Object.freeze({ ...p1, datasets: Object.freeze([...access.datasets]), who: String(req.actor.userId), ...(jarcGranted === true && jarcAccess ? { jarcAccess: true } : {}) });
     return next();
   });
 
@@ -53,11 +58,14 @@ function employeeRoutes({ employees, savedFilterRepo = null, limiter = searchLim
     return next();
   });
 
-  router.get("/status", async (req, res) => send(res, await service.status(req.query, req.employeeAccess)));
+  // The index only for jarcAccess callers; everyone else's requests never touch it.
+  const jarcOf = (req) => (req.employeeAccess.jarcAccess === true ? jarcAccess : null);
+  router.get("/status", async (req, res) => send(res, await service.status(req.query, req.employeeAccess, jarcOf(req))));
   router.get("/:ds/schema", (req, res) => send(res, service.schema(req.params.ds, req.query, req.employeeAccess)));
-  router.get("/:ds/records", async (req, res) => send(res, await service.listRecords(req.params.ds, req.query, req.employeeAccess)));
-  router.get("/:ds/records/:id", async (req, res) => send(res, await service.getRecord(req.params.ds, req.params.id, req.query, req.employeeAccess)));
-  router.get("/:ds/values", async (req, res) => send(res, await service.values(req.params.ds, req.query, req.employeeAccess)));
+  router.get("/:ds/records", async (req, res) => send(res, await service.listRecords(req.params.ds, req.query, req.employeeAccess, jarcOf(req))));
+  router.get("/:ds/records/:id", async (req, res) => send(res, await service.getRecord(req.params.ds, req.params.id, req.query, req.employeeAccess, jarcOf(req))));
+  router.get("/:ds/records/:id/jarc-access", async (req, res) => send(res, await service.jarcAccessOf(req.params.ds, req.params.id, req.query, req.employeeAccess, jarcOf(req))));
+  router.get("/:ds/values", async (req, res) => send(res, await service.values(req.params.ds, req.query, req.employeeAccess, jarcOf(req))));
   router.use((req, res) => { const e = employeeError("NOT_FOUND"); sendError(res, e.status, e.code, e.message); });
 
   // Known errors keep their code; anything else is logged by route (never its message, the path or the query) and is a 500.
