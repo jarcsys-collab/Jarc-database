@@ -67,6 +67,16 @@
 .column-settings-panel .eyebrow .icon { width: 13px; height: 13px; vertical-align: -2px; margin-right: 2px; }
 @media (max-width: 640px) { .column-settings-panel .column-settings-section { padding: 16px; } }
 
+/* ---- Column display settings (G3; ColumnSettings.formatSection, AppView.cell). Display only, theme tokens only. ---- */
+.column-format-section .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.column-format-section .form-grid .full { grid-column: 1 / -1; }
+.column-format-preview { margin: 0; color: var(--muted); }
+.column-format-preview strong { color: var(--text); font-variant-numeric: tabular-nums; }
+@media (max-width: 480px) { .column-format-section .form-grid { grid-template-columns: minmax(0, 1fr); } }
+.cell.is-number.is-align-left .cell-display { justify-content: flex-start; }
+/* Wrapped text: at most 3 lines, so row heights stay bounded for the row windowing. */
+.cell.is-wrap .cell-text { white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; }
+
 /* ---- Inline rename of a new column (AppController.startInlineRename) ---- */
 .editable-table thead th.is-renaming .column-header { gap: 4px; }
 .column-rename-input { flex: 1; min-width: 60px; font: inherit; font-size: 12px; font-weight: 600; color: var(--text); background: var(--surface); border: 1px solid var(--focus); border-radius: 5px; padding: 3px 6px; outline: 0; box-shadow: 0 0 0 3px var(--ring); }

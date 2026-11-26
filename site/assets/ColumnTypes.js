@@ -215,25 +215,142 @@
     return OK;
   }
 
+  // ---- Column display settings (G3 / D12: the optional column `settings` object) -----------------------------------------
+  // Display only: nothing here changes a stored value, and sorting, filters, search, CSV export and the APIs keep the raw
+  // value. One allow-listed shape per type; unknown keys, wrong kinds and out-of-range values are refused (never dropped).
+  // A key equal to its default is not stored, and settings with nothing left are absent (null): untouched columns never gain
+  // the field. The server (domain/board-schema.js) validates every write with cleanSettings; the browser formats with it.
+  const SETTINGS_MAX_JSON = 4096; // 05 §4.2: ≤ 4 KB of JSON per column (today's shapes are far smaller)
+  const AFFIX_MAX = 8;
+  const DATE_FORMATS = Object.freeze(["medium", "long", "iso", "dmy", "mdy"]);
+  function freezeAll(o) { Object.values(o).forEach((v) => { if (v && typeof v === "object") freezeAll(v); }); return Object.freeze(o); }
+  const SETTINGS_SCHEMA = freezeAll({
+    number: { precision: { kind: "int", min: 0, max: 6 }, thousands: { kind: "bool", default: true }, prefix: { kind: "affix", default: "" }, suffix: { kind: "affix", default: "" }, align: { kind: "enum", values: ["right", "left"], default: "right" } },
+    date: { displayFormat: { kind: "enum", values: [...DATE_FORMATS], default: "medium" }, weekday: { kind: "bool", default: false } },
+    text: { wrap: { kind: "bool", default: false } },
+    link: { display: { kind: "enum", values: ["url", "text"], default: "url" } }
+  });
+  // A plain object (from JSON, a literal or a structured clone, also from another realm): no class instances, no arrays.
+  const plainObject = (v) => {
+    if (v === null || typeof v !== "object" || Array.isArray(v) || Object.prototype.toString.call(v) !== "[object Object]") return false;
+    const proto = Object.getPrototypeOf(v);
+    return proto === null || Object.getPrototypeOf(proto) === null;
+  };
+  const schemaFor = (type) => (typeof type === "string" && Object.hasOwn(SETTINGS_SCHEMA, type) ? SETTINGS_SCHEMA[type] : null);
+  // { ok: true, settings: object | null } or { ok: false, message }. null / undefined / {} (or all defaults) → settings null.
+  function cleanSettings(type, raw) {
+    if (raw === undefined || raw === null) return { ok: true, settings: null };
+    if (!plainObject(raw)) return { ok: false, message: "must be an object" };
+    let size = 0;
+    try { size = JSON.stringify(raw).length; } catch { return { ok: false, message: "can't be read" }; }
+    if (size > SETTINGS_MAX_JSON) return { ok: false, message: "are too large" };
+    const keys = Object.keys(raw);
+    if (!keys.length) return { ok: true, settings: null };
+    const schema = schemaFor(type);
+    if (!schema) return { ok: false, message: "aren't available for this column type" };
+    const out = {};
+    for (const key of keys) {
+      const rule = Object.hasOwn(schema, key) ? schema[key] : null;
+      if (!rule) return { ok: false, message: `have an unknown setting "${String(key).slice(0, 40)}"` };
+      const value = raw[key];
+      if (rule.kind === "bool" && typeof value !== "boolean") return { ok: false, message: `need ${key} to be true or false` };
+      if (rule.kind === "int" && (!Number.isInteger(value) || value < rule.min || value > rule.max)) return { ok: false, message: `need ${key} to be a whole number from ${rule.min} to ${rule.max}` };
+      if (rule.kind === "enum" && !rule.values.includes(value)) return { ok: false, message: `need ${key} to be one of ${rule.values.join(", ")}` };
+      if (rule.kind === "affix" && (typeof value !== "string" || [...value].length > AFFIX_MAX || HIDDEN.test(value) || /[<>]/.test(value))) return { ok: false, message: `need ${key} to be text of at most ${AFFIX_MAX} characters (no < or >)` };
+      if (Object.hasOwn(rule, "default") && value === rule.default) continue;
+      out[key] = value;
+    }
+    return { ok: true, settings: Object.keys(out).length ? out : null };
+  }
+  // The settings that still apply after a type change: keys the new type doesn't define are dropped, the rest re-checked.
+  function settingsForType(type, settings) {
+    const schema = schemaFor(type);
+    if (!schema || !plainObject(settings)) return null;
+    const r = cleanSettings(type, Object.fromEntries(Object.entries(settings).filter(([k]) => Object.hasOwn(schema, k))));
+    return r.ok ? r.settings : null;
+  }
+  const settingsOf = (column) => (column && plainObject(column.settings) ? column.settings : null);
+
+  // Formatting (pure; display text only). Each returns null when the column has no setting that changes the display, so
+  // the caller keeps today's rendering exactly.
+  const NUMBER_FORMATS = new Map();
+  function numberFormatter(precision, grouping) {
+    const key = `${precision ?? "a"}|${grouping}`;
+    if (!NUMBER_FORMATS.has(key)) NUMBER_FORMATS.set(key, new Intl.NumberFormat(undefined, { minimumFractionDigits: precision ?? 0, maximumFractionDigits: precision ?? 10, useGrouping: grouping }));
+    return NUMBER_FORMATS.get(key);
+  }
+  function formatNumber(value, column) {
+    const s = settingsOf(column);
+    if (!s) return null;
+    const text = String(value ?? "");
+    const n = Number(value);
+    if (text.trim() === "" || !Number.isFinite(n)) return text;
+    const body = numberFormatter(s.precision, s.thousands !== false).format(Math.abs(n));
+    const negative = n < 0 && /[1-9]/.test(body);
+    return `${negative ? "-" : ""}${s.prefix || ""}${body}${s.suffix || ""}`;
+  }
+  const MONTHS = Object.freeze(["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]);
+  const WEEKDAYS = Object.freeze(["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]);
+  function formatDate(value, column) {
+    const s = settingsOf(column);
+    if (!s) return null;
+    const text = String(value ?? "");
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text.slice(0, 10));
+    if (!m) return text;
+    const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+    const at = new Date(Date.UTC(y, mo - 1, d));
+    if (Number.isNaN(at.getTime()) || at.getUTCFullYear() !== y || at.getUTCMonth() !== mo - 1 || at.getUTCDate() !== d) return text;
+    const format = s.displayFormat || "medium";
+    const out = format === "iso" ? `${m[1]}-${m[2]}-${m[3]}`
+      : format === "dmy" ? `${m[3]}/${m[2]}/${m[1]}`
+        : format === "mdy" ? `${m[2]}/${m[3]}/${m[1]}`
+          : format === "long" ? `${MONTHS[mo - 1]} ${d}, ${y}`
+            : `${MONTHS[mo - 1].slice(0, 3)} ${d}, ${y}`;
+    if (!s.weekday) return out;
+    const day = WEEKDAYS[at.getUTCDay()];
+    return `${format === "long" ? day : day.slice(0, 3)}, ${out}`;
+  }
+  // A link shown as text: the address without its scheme, a leading "www." or a trailing "/". The link it opens is unchanged.
+  function formatLink(value, column) {
+    const s = settingsOf(column);
+    if (!s || s.display !== "text") return null;
+    const text = String(value ?? "").trim();
+    return text.replace(/^(?:https?:\/\/|mailto:|tel:)/i, "").replace(/^www\./i, "").replace(/\/$/, "") || text;
+  }
+  // The display text of one cell, or null for today's rendering (no settings, or none that applies to this type).
+  function displayText(column, value) {
+    if (!settingsOf(column)) return null;
+    if (column.type === "number") return formatNumber(value, column);
+    if (column.type === "date") return formatDate(value, column);
+    if (column.type === "link") return formatLink(value, column);
+    return null;
+  }
+  // Presentation of the cell (not its text): { align: "left" | null, wrap }.
+  function cellLayout(column) {
+    const s = settingsOf(column) || {};
+    return { align: column?.type === "number" && s.align === "left" ? "left" : null, wrap: column?.type === "text" && s.wrap === true };
+  }
+
   // ---- The 15 types ------------------------------------------------------------------------------------------------------
   // legacyCategory: the group shown by today's Add column chooser (BoardModel.columnTypes). category: the picker's group.
   // renderer / editor: the AppView methods that draw and edit the cell today (referenced, not reimplemented).
-  // settings: the settings panels the type supports among labels / options / default / numberFormat / textFormat.
+  // settings: the settings panels the type supports among labels / options / default / numberFormat / dateFormat /
+  // textFormat (the last three edit the column's display `settings`, settingsSchema below).
   // requires: what must be available for the type to be added ("relations": the Connect switch; "files": attachment
   // storage; "connectColumn": a Connect column on the board).
   const ALL_ACTIONS = { changeType: true, settings: true, sort: true, filter: true, group: false, duplicate: true };
   const DEFS = [
-    { id: "text", label: "Text", iconName: "text", category: "essentials", legacyCategory: "Basic", description: "Names, notes and short values", keywords: ["notes", "description", "words", "name"], renderer: "cellDisplay", editor: "cellInput", inputType: "text", settings: ["default"] },
-    { id: "number", label: "Number", iconName: "hash", category: "essentials", legacyCategory: "Basic", description: "Quantities, amounts and scores", keywords: ["amount", "price", "qty", "quantity", "count", "cost", "total"], renderer: "number", editor: "cellInput", inputType: "number", settings: ["default"] },
+    { id: "text", label: "Text", iconName: "text", category: "essentials", legacyCategory: "Basic", description: "Names, notes and short values", keywords: ["notes", "description", "words", "name"], renderer: "cellDisplay", editor: "cellInput", inputType: "text", settings: ["default", "textFormat"] },
+    { id: "number", label: "Number", iconName: "hash", category: "essentials", legacyCategory: "Basic", description: "Quantities, amounts and scores", keywords: ["amount", "price", "qty", "quantity", "count", "cost", "total"], renderer: "number", editor: "cellInput", inputType: "number", settings: ["default", "numberFormat"] },
     { id: "status", label: "Status", iconName: "tag", category: "essentials", legacyCategory: "Selection", description: "Track progress with labelled stages", keywords: ["state", "stage", "progress", "phase"], renderer: "cellLabel", editor: "showCellOptions", settings: ["labels"], actions: { group: true } },
     { id: "dropdown", label: "Dropdown", iconName: "dropdown", category: "more", legacyCategory: "Selection", description: "Pick one or several values from your own list", keywords: ["select", "tags", "options", "category", "choice", "list"], renderer: "cellLabel", editor: "showCellOptions", settings: ["options"], actions: { group: true } },
     { id: "checkbox", label: "Checkbox", iconName: "checkbox", category: "more", legacyCategory: "Selection", description: "Yes or no, done or not done", keywords: ["done", "tick", "boolean", "yes", "no", "check"], renderer: "cellDisplay", editor: "toggle", settings: [], actions: { group: true } },
     { id: "priority", label: "Priority", iconName: "flag", category: "more", legacyCategory: "Selection", description: "Low, medium, high or critical", keywords: ["urgency", "importance", "severity"], renderer: "cellLabel", editor: "showCellOptions", settings: ["labels"], actions: { group: true } },
     { id: "owner", label: "People", iconName: "user", category: "essentials", legacyCategory: "People", description: "Assign one or more colleagues", keywords: ["person", "owner", "assignee", "assign", "who", "people"], renderer: "people", editor: "showCellOptions", settings: [], actions: { group: true } },
-    { id: "date", label: "Date", iconName: "calendar", category: "essentials", legacyCategory: "Dates", description: "Deadlines, milestones and events", keywords: ["deadline", "due", "calendar", "when", "day"], renderer: "date", editor: "cellInput", inputType: "date", settings: ["default"] },
+    { id: "date", label: "Date", iconName: "calendar", category: "essentials", legacyCategory: "Dates", description: "Deadlines, milestones and events", keywords: ["deadline", "due", "calendar", "when", "day"], renderer: "date", editor: "cellInput", inputType: "date", settings: ["default", "dateFormat"] },
     { id: "email", label: "Email", iconName: "mail", category: "more", legacyCategory: "Contact", description: "Email addresses", keywords: ["mail", "e-mail", "address"], renderer: "cellDisplay", editor: "cellInput", inputType: "email", settings: ["default"] },
     { id: "phone", label: "Phone", iconName: "phone", category: "more", legacyCategory: "Contact", description: "Phone numbers", keywords: ["tel", "mobile", "telephone", "cell"], renderer: "cellDisplay", editor: "cellInput", inputType: "tel", settings: ["default"] },
-    { id: "link", label: "Link", iconName: "link", category: "more", legacyCategory: "Contact", description: "Web addresses", keywords: ["url", "website", "web", "hyperlink"], renderer: "cellDisplay", editor: "cellInput", inputType: "url", settings: ["default"] },
+    { id: "link", label: "Link", iconName: "link", category: "more", legacyCategory: "Contact", description: "Web addresses", keywords: ["url", "website", "web", "hyperlink"], renderer: "cellDisplay", editor: "cellInput", inputType: "url", settings: ["default", "textFormat"] },
     { id: "group", label: "Group", iconName: "group", category: "more", legacyCategory: "Organization", description: "Sort records into this board's groups", keywords: ["section", "bucket"], renderer: "pill", editor: "showCellOptions", settings: ["default"], actions: { changeType: false } },
     { id: "files", label: "Files", iconName: "paperclip", category: "more", legacyCategory: "Files", description: "PDFs and photos (JPEG, PNG, WebP), up to 10 MB each", keywords: ["attachment", "upload", "document", "pdf", "photo", "image"], renderer: "filesCell", editor: "showFilesPanel", settings: [], requires: "files", actions: { changeType: false, filter: false } },
     { id: "connect", label: "Connect boards", iconName: "link", category: "relations", legacyCategory: "Boards", description: "Link records of another board (nothing is copied)", keywords: ["relation", "related", "lookup", "board", "linked"], renderer: "relationDisplay", editor: "showConnectPicker", settings: [], requires: "relations", needsSetup: true, actions: { changeType: false } },
@@ -267,6 +384,8 @@
       multi: id === "owner" || id === "connect" ? "always" : id === "dropdown" ? "optional" : "never",
       searchable: SEARCHABLE.includes(id),
       settings: d.settings,
+      // The allow-listed display settings of this type ({ key: { kind, min, max, values, default } }), or null.
+      settingsSchema: schemaFor(id),
       actions: { ...ALL_ACTIONS, ...(d.actions || {}) },
       renderer: d.renderer, editor: d.editor, inputType: d.inputType || null,
       requires: d.requires || null, needsSetup: Boolean(d.needsSetup), readOnly: Boolean(d.readOnly),
@@ -349,6 +468,7 @@
   return Object.freeze({
     IDS, PRIMARY_KEY, OPTION_TYPES, FALLBACK_OPTIONS, NEW_OPTIONS, SEARCHABLE, LIMITS, CATEGORIES, PICKER_ORDER, LINK_SCHEMES, TYPED_MAX,
     ids, get, list, search, categories, conversionTargets, canConvert, columnActions, defaultName, chooserEntries, newOptions, fallbackOptions,
-    isMultiColumn, validate, checkTyped, iconSvg: svg
+    isMultiColumn, validate, checkTyped, iconSvg: svg,
+    SETTINGS_SCHEMA, SETTINGS_MAX_JSON, DATE_FORMATS, cleanSettings, settingsForType, displayText, cellLayout, formatNumber, formatDate, formatLink
   });
 });

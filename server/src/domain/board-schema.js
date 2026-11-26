@@ -5,6 +5,7 @@ const { fail, isObject, isPrimitive, isSafeKey, text, color, bool, RECORD_ID_KEY
 const { ApiError } = require("../middleware/errors");
 const { cleanFilter, cleanOrderBy } = require("./record-filter");
 const { checkTyped, TYPED_VALUE_TYPES } = require("../validation/record-values");
+const { cleanSettings, settingsForType } = require("./column-types");
 
 const COLUMN_TYPES = Object.freeze(["text", "number", "status", "dropdown", "checkbox", "priority", "owner", "date", "email", "phone", "link", "group", "files", "connect", "mirror"]);
 // connect: cells hold linked record IDs (24 hex) of one other board, column.link = { boardId }; "multiple" allows several.
@@ -14,7 +15,10 @@ const COLUMN_TYPES = Object.freeze(["text", "number", "status", "dropdown", "che
 const MIRROR_SHOWS = Object.freeze(["list", "count", "sum", "avg", "min", "max", "earliest", "latest"]);
 const RECORD_REF = /^[0-9a-f]{24}$/;
 const PRIMARY_KEY = "serial"; // the required Item column; its key never changes (label may)
-const COLUMN_FIELDS = ["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection", "colors", "multiple", "description", "link", "mirror"];
+// settings (G3 / D12): optional DISPLAY configuration (number, date, text and link formats), validated per type by the shared
+// registry (site/assets/ColumnTypes.js cleanSettings). It never changes a stored value. Absent or null = defaults; a PATCH
+// that leaves it out keeps the stored one (validation/resources.js boardPatch, preserve-when-absent).
+const COLUMN_FIELDS = ["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection", "colors", "multiple", "description", "link", "mirror", "settings"];
 // Columns whose cells may hold several values (stored as a list of strings): People always (several assignees), and a
 // Dropdown set to "multiple". People entries are "user:<user ID>" for signed-in employees, or (older data) plain text.
 const MAX_MULTI_VALUES = 100;
@@ -95,6 +99,12 @@ function normalizeColumn(column, where = "a column") {
     result.mirror = { via: m.via, column: m.column, show: m.show ?? "list" };
   } else if (result.type === "mirror") fail(`Mirror column "${column.key}" needs a Connect column and a column to show.`);
   if ((result.type === "connect" || result.type === "mirror") && (result.required || hasValue(result.defaultValue))) fail(`Column "${column.key}" can't be required or have a default value.`);
+  // Display settings: an allow-listed shape per type; defaults are not stored, so nothing left → no field.
+  if (column.settings !== undefined && column.settings !== null) {
+    const checked = cleanSettings(result.type, column.settings);
+    if (!checked.ok) fail(`The display settings of column "${column.key}" ${checked.message}.`);
+    if (checked.settings) result.settings = checked.settings;
+  }
   return result;
 }
 
@@ -334,5 +344,5 @@ function optionsPlan(column, items) {
 module.exports = {
   COLUMN_TYPES, MIRROR_SHOWS, RECORD_REF, PRIMARY_KEY, LIMITS, GROUP_ID, VIEW_ID, LEGACY_DEFAULT_COLUMNS, LEGACY_DEFAULT_GROUPS, BLANK_BOARD_COLUMNS, OPTION_TYPES, USER_REF,
   newGroupId, newViewId, normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, splitSavedViews, viewState, groupColumnOf, checkValue, hasValue,
-  valueList, sameValue, isMultiColumn, effectiveOptions, valueFits, convertValue, optionsPlan
+  valueList, sameValue, isMultiColumn, effectiveOptions, valueFits, convertValue, optionsPlan, settingsForType
 };

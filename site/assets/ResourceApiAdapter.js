@@ -104,6 +104,8 @@ class ResourceApiAdapter {
   static USER_KEY = "jarc-resource-user";
   static USER_FIELDS = Object.freeze(["currentWorkspaceId", "currentBoardId", "currentView", "screen", "settings", "profile", "notifications", "recentBoards", "recentRecords", "recentCommands", "feedSeenAt", "collapsedGroups"]);
   static COLUMN_FIELDS = Object.freeze(["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection", "colors", "multiple", "description", "link", "mirror"]);
+  // Column display settings (G3 / D12) are sent only to a server whose /features says columnSettings: true (it accepts and
+  // keeps them). Against an older server the field is never sent, and the panel that edits it is not shown.
   static OPTION_TYPES = Object.freeze(["status", "dropdown", "priority"]);
   static FALLBACK_OPTIONS = Object.freeze({ status: ["New", "In Progress", "Waiting", "Completed", "Cancelled", "Review", "Defective", "Clear"], priority: ["Low", "Medium", "High", "Critical"] });
   // Deleting shared data is only expected from these operations. Anything else that would delete server data (for
@@ -401,7 +403,7 @@ class ResourceApiAdapter {
     return this.background(`/boards/${board.id}/related?ids=${ids.slice(0, 200).map(encodeURIComponent).join(",")}`);
   }
   async searchStatus() { return this.background("/search/status"); }
-  async features() { return this.background("/features"); }
+  async features() { const out = await this.background("/features"); this.columnSettings = out?.features?.columnSettings === true; return out; }
   // Board search beyond what's loaded (a large board): the server finds matches among all the board's records, and those
   // not loaded here are fetched so they appear like any other row. { records: model rows newly loaded, more }.
   async searchBoard(boardId, q) {
@@ -773,6 +775,9 @@ class ResourceApiAdapter {
       if (out.multiple === true && out.type === "dropdown") out.multiple = true; else delete out.multiple;
       if (typeof out.description === "string" && out.description.trim()) out.description = out.description.trim().slice(0, 500); else delete out.description;
       if (!(typeof out.width === "number" && Number.isFinite(out.width) && out.width >= 0 && out.width <= 5000)) delete out.width;
+      // Always present (null = none) when the server supports it, so clearing them is sent and a server copy without them
+      // compares equal to a column without them.
+      if (this.columnSettings === true) out.settings = c.settings && typeof c.settings === "object" && !Array.isArray(c.settings) && Object.keys(c.settings).length ? resourceClone(c.settings) : null;
       return out;
     });
   }

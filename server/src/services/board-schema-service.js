@@ -7,7 +7,7 @@
 // Non-destructive changes (labels, order, visibility, widths, adding groups, saved views) stay on PATCH /boards/:id.
 const validate = require("../validation/resources");
 const { versionParam, queryString } = require("../validation/common");
-const { normalizeColumn, normalizeColumns, groupColumnOf, hasValue, optionsPlan, sameValue, valueList, isMultiColumn, OPTION_TYPES, PRIMARY_KEY } = require("../domain/board-schema");
+const { normalizeColumn, normalizeColumns, groupColumnOf, hasValue, optionsPlan, sameValue, valueList, isMultiColumn, settingsForType, OPTION_TYPES, PRIMARY_KEY } = require("../domain/board-schema");
 const { SYNC_LIMITS, MESSAGES, conversionPlanner, convertCell, describeType } = require("../domain/column-conversion");
 const { ApiError } = require("../middleware/errors");
 const { notFound, conflict, activityEntry } = require("./shared");
@@ -41,6 +41,9 @@ function convertedColumn(column, to) {
   delete updated.multiple;
   if (to.multiple) updated.multiple = true;
   if (!OPTION_TYPES.includes(to.type)) delete updated.colors;
+  // Display settings follow the new type: keys it doesn't define are dropped (05 §4.2); nothing left → none.
+  const settings = settingsForType(to.type, column.settings);
+  if (settings) updated.settings = settings; else delete updated.settings;
   // The default is configuration, not data: kept only if it stays exactly valid, otherwise none.
   const d = updated.defaultValue;
   if (Array.isArray(d) || (hasValue(d) && !(() => { const cell = convertCell(d, column, to, updated); return cell.ok && cell.next === undefined; })())) updated.defaultValue = "";

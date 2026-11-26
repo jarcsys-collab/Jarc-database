@@ -853,8 +853,21 @@ class BoardModel {
   renameColumn(key, label) { const column=this.board.columns.find((item)=>item.key===key); const clean=String(label||"").trim(); if(!column||!clean)return false; this.snapshot("Column rename undone"); column.label=clean; this.log(`Renamed column to ${clean}`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key}); return true; }
   deleteColumn(key) { if(key==="serial")return false; const index=this.board.columns.findIndex((item)=>item.key===key); if(index<0)return false; this.snapshot("Column deletion undone"); const [column]=this.board.columns.splice(index,1); this.rows.forEach((row)=>{delete row[key];}); this.log(`Deleted ${column.label} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,affectsRecords:true}); return true; }
   moveColumn(key, direction) { if(this.activeView){const order=this.orderedColumns.map((c)=>c.key),i=order.indexOf(key),t=i+(direction==="left"?-1:1);if(key==="serial"||i<0||t<1||t>=order.length)return false;[order[i],order[t]]=[order[t],order[i]];this.viewOrder=order;return true;} const index=this.board.columns.findIndex((item)=>item.key===key); const target=index+(direction==="left"?-1:1); if(key==="serial"||index<0||target<1||target>=this.board.columns.length)return false; this.snapshot("Column reorder undone"); [this.board.columns[index],this.board.columns[target]]=[this.board.columns[target],this.board.columns[index]]; this.save({op:"updateColumns",boardId:this.board.id,columnKey:key}); return true; }
-  duplicateColumn(key) { const source=this.board.columns.find((item)=>item.key===key); if(!source)return false; this.snapshot("Column duplication undone"); const copy={...source,key:`custom_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,label:`${source.label} copy`,required:false,options:[...source.options],...(source.colors?{colors:[...source.colors]}:{})}; this.board.columns.splice(this.board.columns.indexOf(source)+1,0,copy); this.rows.forEach((row)=>{row[copy.key]=Array.isArray(row[source.key])?[...row[source.key]]:row[source.key]??copy.defaultValue;}); this.log(`Duplicated ${source.label} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:copy.key,copyFrom:source.key,affectsRecords:true}); return copy; }
+  duplicateColumn(key) { const source=this.board.columns.find((item)=>item.key===key); if(!source)return false; this.snapshot("Column duplication undone"); const copy={...source,key:`custom_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,label:`${source.label} copy`,required:false,options:[...source.options],...(source.colors?{colors:[...source.colors]}:{}),...(source.settings?{settings:{...source.settings}}:{})}; this.board.columns.splice(this.board.columns.indexOf(source)+1,0,copy); this.rows.forEach((row)=>{row[copy.key]=Array.isArray(row[source.key])?[...row[source.key]]:row[source.key]??copy.defaultValue;}); this.log(`Duplicated ${source.label} column`); this.save({op:"updateColumns",boardId:this.board.id,columnKey:copy.key,copyFrom:source.key,affectsRecords:true}); return copy; }
   updateColumnConfig(config) { this.snapshot("Column settings undone"); Object.entries(config).forEach(([key, value]) => { const column=this.board.columns.find((item)=>item.key===key); if(column)Object.assign(column,value); }); this.save({op:"updateColumns",boardId:this.board.id,columnKeys:Object.keys(config)}); }
+  // Column display settings (G3 / D12): only when the server keeps them (/features columnSettings), checked with the shared
+  // registry rules (ColumnTypes.cleanSettings, the same the server applies). Display only: no record value changes. One Undo
+  // step. Returns true (saved), false (nothing changed or not available) or { error } (refused).
+  get columnSettingsAvailable(){return Boolean(this.serverBacked&&this.features?.columnSettings===true&&columnRegistry()?.cleanSettings);}
+  setColumnSettings(key,raw){
+    if(!this.columnSettingsAvailable||this.board.source?.readOnly)return false;
+    const column=this.board.columns.find((item)=>item.key===key);if(!column)return false;
+    const checked=columnRegistry().cleanSettings(column.type,raw);if(!checked.ok)return {error:`Display settings ${checked.message}.`};
+    if(JSON.stringify(column.settings||null)===JSON.stringify(checked.settings))return false;
+    this.snapshot("Column format undone");
+    if(checked.settings)column.settings=checked.settings;else delete column.settings;
+    this.log(`Changed the display of column ${column.label}`);this.save({op:"updateColumns",boardId:this.board.id,columnKey:key});return true;
+  }
   saveView(name) { const clean = name.trim(); if (!clean) return false; const view={ id: Date.now(), name: clean, status: this.status, query: this.query, grouped: this.grouped, sortDirection: this.sortDirection, view:this.currentView, visibleColumns:this.board.columns.filter(c=>c.visible!==false).map(c=>c.key), density:this.settings.density, sortKey:this.sortKey,quickFilter:this.quickFilter,showArchived:this.showArchived,columnOrder:this.board.columns.map(c=>c.key),columnWidths:Object.fromEntries(this.board.columns.map(c=>[c.key,c.width])) }; this.board.savedViews.push(view); this.activeSavedViewId=view.id; this.save({op:"updateViews",boardId:this.board.id}); return true; }
   // Opens a view: its type, filters, sorting, grouping and (if it has its own) visible columns. The board's columns —
   // order, widths, visibility in Main Table — are never changed by opening a view (older views that stored a column
@@ -1324,6 +1337,8 @@ class BoardModel {
     // A dropdown only offers its own options, so keep existing values selectable.
     if(type==="dropdown")column.options=[...new Set([...(column.options||[]),...this.rows.flatMap((row)=>this.valueList(row[key]))])];
     if(!["status","priority","dropdown"].includes(type))delete column.colors;
+    // Display settings follow the new type, as on the server (keys it doesn't define are dropped; Undo restores them).
+    if(column.settings){const kept=columnRegistry()?.settingsForType?.(type,column.settings)||null;if(kept)column.settings=kept;else delete column.settings;}
     delete column.multiple;
     if(!this.valueFits(column.defaultValue,type)||Array.isArray(column.defaultValue))column.defaultValue="";
     const from=this.columnType(column.type)?.label||column.type;

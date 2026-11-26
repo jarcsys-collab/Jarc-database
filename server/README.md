@@ -214,6 +214,24 @@ imports data. Not a member → 404; not allowed → 403. Every check uses the st
 Labels, column order, visibility, widths, adding/renaming groups and saved views use `PATCH /api/v1/boards/:boardId`.
 Board lists include `recordCount` (active records).
 
+**Column display settings** (`settings`, optional, G3 / D12). Display only: stored values never change, and sorting, filters,
+search, CSV export (raw stored values) and every API keep the raw value. One allow-listed shape per type, checked by the
+registry shared with the browser (`site/assets/ColumnTypes.js` `cleanSettings`, through `domain/column-types.js`), at most
+4 KB of JSON; unknown keys, wrong kinds and out-of-range values are `400 VALIDATION_ERROR`:
+- number: `precision` (0–6; absent = automatic), `thousands` (default `true`), `prefix` / `suffix` (≤ 8 characters, no `<` `>`), `align` (`right` | `left`)
+- date: `displayFormat` (`medium` "Mar 5, 2026" | `long` | `iso` | `dmy` | `mdy`), `weekday` (default `false`)
+- text: `wrap` (default `false`, up to 3 lines); link: `display` (`url` | `text`: the address without `https://` / `www.`)
+
+Values equal to the default are not stored, and a column with nothing left has no `settings` field (no migration; existing
+columns are unchanged). `PATCH /boards/:id` with `columns`: a column sent **without** `settings` keeps the stored ones (pages
+that don't know the field never erase it); `settings: null` clears them; an object replaces them. `POST …/columns` accepts
+them; a type change keeps only the keys the new type defines. The same permission as other column edits (MEMBER; not on
+read-only synced boards). The session API returns `settings` on the column (additive); the external Board API and the Fabric
+API don't expose it. `GET /api/v1/features` has `columnSettings: true` (a capability of this version, not a switch); the
+browser sends `settings` only when it is true. **Rollback floor:** once any column has `settings`, a release older than this
+one refuses every `PATCH` that includes them (`unknown setting "settings"`) and drops them on a `PATCH` from an older page;
+rolling back below it needs the settings removed first (a data change needing approval).
+
 **Column type changes** (`src/domain/column-conversion.js`, `BoardSchemaService.changeType`). A change is made only when it
 is lossless on **every** record of the board (one column of every record is read; never loaded rows or a sample), and it is
 checked again inside the transaction that writes. Otherwise nothing is written and the answer is `400 CONVERSION_REFUSED`

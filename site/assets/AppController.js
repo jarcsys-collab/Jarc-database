@@ -1305,6 +1305,15 @@ class AppController {
       this.runBusy(event.submitter,()=>this.model.groupHistory("Column settings undone",()=>{if(named)this.model.editColumn(column.key,{label,description});if(Object.keys(patch).length)this.model.updateColumnConfig({[column.key]:patch});}),()=>{this.view.closeOverlay();this.update();this.view.toast(`${label} updated for everyone on this board`,true);});
       return;
     }
+    // The settings panel's Display section (G3): one Undo step; refused shapes never reach the server (the same rules run there).
+    if (action === "column-format-form") {
+      const column=this.model.board.columns.find((c)=>c.key===data.key); if(!column||!window.ColumnSettings)return;
+      const raw=ColumnSettings.formatFromForm(column.type,data);
+      const check=window.ColumnTypes?.cleanSettings?.(column.type,raw); if(check&&!check.ok){this.view.showDialogError(`Display settings ${check.message}.`);return;}
+      if(JSON.stringify(column.settings||null)===JSON.stringify(check?.settings??null)){this.view.closeOverlay();return;}
+      this.runBusy(event.submitter,()=>{const r=this.model.setColumnSettings(column.key,raw);return r===true?undefined:false;},()=>{this.view.closeOverlay();this.update();this.view.toast(`${column.label} display updated for everyone on this board`,true);});
+      return;
+    }
     if (action === "rename-column-form") { this.runBusy(event.submitter,()=>this.model.editColumn(data.key,{label:data.label,description:data.description})?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast("Column updated",true);}); }
     if (action === "column-options-form") { this.pendingOptions={key:data.key,items:[...event.target.querySelectorAll(".option-row")].map((row)=>{const input=row.querySelector(".option-name");return {from:input.dataset.from||null,to:input.value,color:row.querySelector(".option-color")?.value||""};})}; this.applyColumnOptions(false,event.submitter); }
     if (action === "column-width-form") { const width=Number(data.width); if(!Number.isFinite(width))return; this.runBusy(event.submitter,()=>{this.model.resizeColumn(data.key,width);},()=>{this.view.closeOverlay();this.update();this.view.toast(this.model.activeView?"Width changed in this view. Save to this view to keep it.":"Column width saved");}); }

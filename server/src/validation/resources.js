@@ -51,6 +51,21 @@ function boardCreate(raw, { actorId, now }) {
   return result;
 }
 
+// Column display settings (G3 / D12), preserve-when-absent: the incoming column list replaces the stored one, but a column
+// sent WITHOUT a `settings` field keeps the stored settings of the same key (and type), so a page that doesn't know about
+// settings (an older browser tab, a script) never erases them. `settings: null` clears them; an object is validated and
+// replaces them (board-schema normalizeColumn). The request body itself is not modified.
+function keepStoredSettings(columns, stored) {
+  if (!Array.isArray(columns)) return columns;
+  const byKey = new Map((stored || []).filter((c) => c && c.settings).map((c) => [c.key, c]));
+  if (!byKey.size) return columns;
+  return columns.map((c) => {
+    if (!isObject(c) || Object.hasOwn(c, "settings") || typeof c.key !== "string") return c;
+    const old = byKey.get(c.key);
+    return old && old.type === c.type ? { ...c, settings: old.settings } : c;
+  });
+}
+
 // Column changes through PATCH are limited to changes that never rewrite record values: add columns, rename labels,
 // reorder, show/hide, width, required, default, options and connection. Removing a column or changing a column's
 // type would change stored values, so those need a dedicated endpoint (later stage) and are rejected here.
@@ -61,7 +76,7 @@ function boardPatch(raw, board, { actorId, now, canEditShared = true }) {
   const set = pickFields(body, BOARD_SIMPLE_FIELDS);
   let removedGroupIds = [];
   if (body.columns !== undefined) {
-    const columns = normalizeColumns(body.columns);
+    const columns = normalizeColumns(keepStoredSettings(body.columns, board.columns));
     const next = new Map(columns.map((c) => [c.key, c]));
     for (const column of board.columns) {
       if (!next.has(column.key)) fail(`Column "${column.label || column.key}" can't be removed with a board update.`);

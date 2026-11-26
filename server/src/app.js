@@ -236,7 +236,9 @@ function createApp({ securityHeadersOptions = {}, employees: employeesOption = n
     api.get("/features", identify, (req, res) => {
       const health = healthFlags(req.actor);
       const fabricFlags = { ...(fabricAccessFor ? { fabricData: { ...fabricAccessFor(req.actor), apiTokens: Boolean(tokenService) } } : {}), ...(employees ? { employees: employeeFlags(req.actor) } : {}), ...(health ? { systemHealth: health } : {}) };
-      res.status(200).set("Cache-Control", "no-store").json({ features: tokenService ? { ...enabled, apiTokens: true, apiTokenAdmin: tokenService.isAdmin(req.actor), ...fabricFlags } : { ...enabled, ...fabricFlags } });
+      // columnSettings: a capability of this server version, not a switch (no variable): it accepts, validates and keeps
+      // column display `settings` (G3 / D12). Browsers write them only when it is true, so an older server never sees them.
+      res.status(200).set("Cache-Control", "no-store").json({ features: tokenService ? { ...enabled, columnSettings: true, apiTokens: true, apiTokenAdmin: tokenService.isAdmin(req.actor), ...fabricFlags } : { ...enabled, columnSettings: true, ...fabricFlags } });
     });
     api.use(identify, preferenceRoutes({ repos: dataLayer.repos }));
     if (dataLayer.services?.integration) api.use(identify, integrationRoutes({ integration: dataLayer.services.integration, access }));

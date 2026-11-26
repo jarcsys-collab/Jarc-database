@@ -184,10 +184,17 @@ describe("the picker contract", () => {
     for (const d of CT.list({ relationsAvailable: true })) {
       for (const k of ["id", "label", "icon", "category", "keywords", "description", "createPayload", "defaultValue", "settings", "actions", "renderer", "editor", "validate"]) assert.ok(k in d, `${d.id}.${k}`);
       assert.ok(Object.isFrozen(d) && Object.isFrozen(d.actions) && Object.isFrozen(d.keywords));
-      for (const s of d.settings) assert.ok(["labels", "options", "default", "numberFormat", "textFormat"].includes(s));
+      for (const s of d.settings) assert.ok(["labels", "options", "default", "numberFormat", "dateFormat", "textFormat"].includes(s));
+      // G3: a display-format panel id exactly when the type has a display settings schema (and the schema is frozen).
+      assert.equal(d.settings.some((s) => ["numberFormat", "dateFormat", "textFormat"].includes(s)), d.settingsSchema !== null, `${d.id} settings panel ↔ schema`);
+      if (d.settingsSchema) assert.ok(Object.isFrozen(d.settingsSchema));
       assert.deepEqual(Object.keys(d.actions).sort(), ["changeType", "duplicate", "filter", "group", "settings", "sort"]);
       assert.ok(["essentials", "more", "relations"].includes(d.category));
     }
+    // G3: the panels per type (number, date, text and link only; the others unchanged).
+    for (const [id, panels] of [["number", ["default", "numberFormat"]], ["date", ["default", "dateFormat"]], ["text", ["default", "textFormat"]], ["link", ["default", "textFormat"]], ["email", ["default"]], ["phone", ["default"]], ["status", ["labels"]]]) assert.deepEqual([...CT.get(id).settings], panels, id);
+    // The server validates with the same registry module (no second copy of the rules).
+    assert.equal(require("../src/domain/column-types"), CT);
   });
 
   test("today's Add column chooser filter is reproduced by the optional ctx flags", () => {

@@ -1,16 +1,62 @@
 // Column System C1/D: one settings panel per column, in place of the overlapping screens it replaces (the "More settings"
 // drawer, the separate label editor and the one-or-several values switch; the quick Rename dialog stays for the menu).
-// Every section uses an API that exists today, and nothing here adds a stored field (D12, a column `settings` object, is
-// not approved):
+// Every section uses an existing API:
 //   • Name, description, required, field identifier and default value → PATCH the board's columns (BoardModel.editColumn
 //     and updateColumnConfig), as before. The default value is shown for the types whose registry entry lists "default".
 //   • Labels (Status, Priority) and options (Dropdown) → the existing options call (PUT …/columns/:key/options) through
 //     AppController.applyColumnOptions; removing labels that records use still asks first, with the count.
 //     Removing labels is offered to workspace admins only; members can rename, add and reorder.
 //   • Dropdown one ↔ several values → the existing toggle and its S0-A check (toggle-column-multiple), workspace admins only.
-// Number display formats and text presentation have no stored setting today, so there is nothing to show for them.
+//   • Display (G3 / D12: the column's optional `settings`) → BoardModel.setColumnSettings, PATCH the board's columns. Number,
+//     date, text and link formats (registry ids numberFormat / dateFormat / textFormat). Display only: stored values,
+//     sorting, filters, search, CSV export and the APIs keep the raw value. Shown only when the server says it keeps them
+//     (/features columnSettings), so an older server is never sent the field.
 class ColumnSettings {
   constructor(view) { this.view = view; }
+  static SAMPLE_DATE = "2026-03-05";
+  // The Display section for the types whose registry entry lists numberFormat / dateFormat / textFormat; "" otherwise.
+  formatSection(model, c) {
+    const v = this.view, T = window.ColumnTypes, kinds = this.settingsOf(c);
+    if (!T?.cleanSettings || !model.columnSettingsAvailable || !["numberFormat", "dateFormat", "textFormat"].some((k) => kinds.includes(k))) return "";
+    const s = c.settings && typeof c.settings === "object" ? c.settings : {};
+    const option = (value, label, current) => `<option value="${v.attr(value)}" ${String(value) === String(current) ? "selected" : ""}>${v.escape(label)}</option>`;
+    const check = (name, label, on) => `<label class="checkbox-label full"><input type="checkbox" name="${name}" ${on ? "checked" : ""}> ${v.escape(label)}</label>`;
+    let fields = "";
+    if (c.type === "number") {
+      const sample = T.formatNumber("1234.5", { type: "number", settings: { ...s } }) ?? "1,234.5";
+      fields = `<label>Decimal places<select name="precision">${option("", "Automatic", s.precision ?? "")}${[0, 1, 2, 3, 4, 5, 6].map((n) => option(n, String(n), s.precision ?? "")).join("")}</select></label>`
+        + `<label>Alignment<select name="align">${option("right", "Right", s.align || "right")}${option("left", "Left", s.align || "right")}</select></label>`
+        + `<label>Prefix <small class="field-note">e.g. ₱ or $</small><input name="prefix" maxlength="8" value="${v.attr(s.prefix || "")}" autocomplete="off"></label>`
+        + `<label>Suffix <small class="field-note">e.g. kg or %</small><input name="suffix" maxlength="8" value="${v.attr(s.suffix || "")}" autocomplete="off"></label>`
+        + check("thousands", "Thousands separator (1,234)", s.thousands !== false)
+        + `<p class="field-note full column-format-preview">Example: <strong>${v.escape(sample)}</strong></p>`;
+    } else if (c.type === "date") {
+      const example = (format) => T.formatDate(ColumnSettings.SAMPLE_DATE, { type: "date", settings: { displayFormat: format } });
+      const names = { medium: "Short month", long: "Full month", iso: "Year-month-day", dmy: "Day/month/year", mdy: "Month/day/year" };
+      fields = `<label class="full">Date format<select name="displayFormat">${T.DATE_FORMATS.map((f) => option(f, `${names[f]} (${example(f)})`, s.displayFormat || "medium")).join("")}</select></label>`
+        + check("weekday", "Show the day of the week", s.weekday === true);
+    } else if (c.type === "text") {
+      fields = check("wrap", "Wrap long text (up to 3 lines per cell)", s.wrap === true);
+    } else if (c.type === "link") {
+      fields = `<label class="full">Show links as<select name="display">${option("url", "Full address (https://example.com/page)", s.display || "url")}${option("text", "Short text (example.com/page)", s.display || "url")}</select></label>`;
+    }
+    if (!fields) return "";
+    return `<form class="column-settings-section column-format-section" data-action="column-format-form" aria-labelledby="column-settings-format"><h3 id="column-settings-format">Display</h3><p class="field-note">Changes how values look on this board only. Stored values, sorting, filters, search, CSV export and the API stay as they are.</p><input type="hidden" name="key" value="${v.attr(c.key)}"><input type="hidden" name="type" value="${v.attr(c.type)}"><div class="form-grid">${fields}</div><div class="column-settings-actions"><button class="button primary">Save display</button></div></form>`;
+  }
+  // The settings object the Display form describes (the model and server drop defaults and check every value).
+  static formatFromForm(type, data) {
+    const out = {};
+    if (type === "number") {
+      if (data.precision !== undefined && data.precision !== "") out.precision = Number(data.precision);
+      out.thousands = data.thousands === "on" || data.thousands === true;
+      out.prefix = String(data.prefix ?? ""); out.suffix = String(data.suffix ?? "");
+      out.align = data.align === "left" ? "left" : "right";
+    } else if (type === "date") {
+      out.displayFormat = String(data.displayFormat || "medium"); out.weekday = data.weekday === "on" || data.weekday === true;
+    } else if (type === "text") out.wrap = data.wrap === "on" || data.wrap === true;
+    else if (type === "link") out.display = data.display === "text" ? "text" : "url";
+    return out;
+  }
   descriptor(type) { try { return window.ColumnTypes?.get?.(type) || null; } catch { return null; } }
   settingsOf(column) {
     const d = this.descriptor(column.type);
@@ -49,7 +95,9 @@ class ColumnSettings {
     // One ↔ several values goes through POST …/columns/:key/type (WORKSPACE_ADMIN), so only admins see it.
     const multiple = perm.admin && c.type === "dropdown" ?`<section class="column-settings-section" aria-labelledby="column-settings-values"><h3 id="column-settings-values">Values per record</h3><p class="field-note">${c.multiple ? "Each record can hold several options." : "Each record holds one option."} Going back to one value is checked on every record first; nothing is dropped.</p><button type="button" class="button secondary" data-action="toggle-column-multiple" data-key="${v.attr(c.key)}">${c.multiple ? "Allow one value only" : "Allow several values"}</button></section>` : "";
     const groups = c.type === "group" ? `<section class="column-settings-section"><h3>Groups</h3><p class="field-note">This column puts each record in one of the board's groups.</p><button type="button" class="button secondary" data-action="manage-groups">${v.iconHtml("group")} Manage groups</button></section>` : "";
-    const body = perm.edit ? `${section === "labels" ? options + general : general + options}${multiple}${groups}` : '<p class="menu-note">You can view this board. Changing its columns needs an editor.</p>';
+    // Display settings: the same permission as the other column edits (MEMBER, PATCH /boards/:id), never on a read-only board.
+    const format = perm.edit ? this.formatSection(model, c) : "";
+    const body = perm.edit ? `${section === "labels" ? options + general : section === "format" ? format + general + options : general + format + options}${multiple}${groups}` : '<p class="menu-note">You can view this board. Changing its columns needs an editor.</p>';
     return `<div class="overlay drawer-overlay" data-action="close-overlay"><div class="settings-drawer column-settings-drawer column-settings-panel" role="dialog" aria-label="${v.attr(c.label)} settings" data-key="${v.attr(c.key)}" data-section="${v.attr(section)}"><div class="modal-head"><div><div class="eyebrow">${v.columnTypeIcon(c.type)} ${v.escape(typeLabel)} column</div><h2>${v.escape(c.label)} settings</h2><p class="column-scope-note"><span class="column-scope-tag is-board">Everyone on this board</span> Changes here apply to the board itself.</p></div><button type="button" class="icon-button" data-action="close-overlay" aria-label="Close">${v.iconHtml("close")}</button></div><div class="column-settings-body">${body}</div></div></div>`;
   }
 }
