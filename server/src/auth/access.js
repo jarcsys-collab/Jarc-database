@@ -153,8 +153,9 @@ class Access {
   // P4 shared authorization contract (auth/authz-context.js): one context per request. NOT AUTHORITATIVE in P4-0: the helpers
   // above decide every request; the context is proven equal to them (tests/authz-parity.test.js) and no route uses it yet.
   context(actor, options) { return new AuthzContext(this, actor, options); }
-  // One-off checks through a throw-away context (lists and loops must share one context instead).
-  async can(actor, cap, board) { const ctx = this.context(actor); await ctx.visibility(); return ctx.can(cap, board); }
+  // One-off checks through a throw-away context (lists and loops must share one context instead). can() takes a board ID and
+  // loads the board itself; a board object is refused (TypeError), so a caller-built object never authorizes (plan 35 F1).
+  can(actor, cap, boardId) { return this.context(actor).canBoard(cap, boardId); }
   require(actor, cap, boardOrId, options) { return this.context(actor).require(cap, boardOrId, options); }
 }
 

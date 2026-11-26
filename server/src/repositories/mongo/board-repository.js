@@ -4,6 +4,7 @@ const { VersionedRepository, scopedId } = require("./base-repository");
 const { allocateBoardPublicId } = require("../../domain/board-public-id");
 
 const MAX_BOARDS_PER_WORKSPACE = 1000;
+const MAX_BOARDS_BY_IDS = 500; // = authz-context MAX_BOARD_IDS (tests/authz-review.test.js checks they agree)
 
 class BoardRepository extends VersionedRepository {
   constructor(db) { super(db.collection(COLLECTIONS.boards)); this.db = db; }
@@ -48,7 +49,9 @@ class BoardRepository extends VersionedRepository {
   }
   // P4 authorization context (auth/authz-context.js, ctx.boards): boards by ID, wherever they are, in ONE $in read. projection
   // null = whole boards (what Access.board returns). Missing IDs are simply absent. Not used by any route yet (P4-0).
+  // At most MAX_BOARDS_BY_IDS IDs (plan 35 F4; the context refuses earlier with 400 TOO_MANY_BOARDS).
   findManyByIds(ids, projection = null) {
+    if (ids.length > MAX_BOARDS_BY_IDS) return Promise.reject(new RangeError(`findManyByIds: at most ${MAX_BOARDS_BY_IDS} board IDs per read.`));
     if (!ids.length) return Promise.resolve([]);
     return this.collection.find({ _id: { $in: ids } }, { limit: ids.length, ...(projection ? { projection } : {}) }).toArray();
   }
@@ -75,4 +78,4 @@ class BoardRepository extends VersionedRepository {
   }
 }
 
-module.exports = { BoardRepository, MAX_BOARDS_PER_WORKSPACE };
+module.exports = { BoardRepository, MAX_BOARDS_PER_WORKSPACE, MAX_BOARDS_BY_IDS };

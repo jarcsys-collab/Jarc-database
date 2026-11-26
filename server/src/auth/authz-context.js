@@ -16,6 +16,11 @@
 // Errors: not visible → 404 NOT_FOUND ("This board doesn't exist or was deleted."), the same as Access.board; visible but not
 // allowed → 403 FORBIDDEN (or READ_ONLY_BOARD when only the read-only rule refuses). can() never throws an authorization error.
 //
+// Only boards this context loaded itself (ctx.boards / require) are ever decided (plan 35 F1): can() and capabilities() answer
+// "nothing" for any other object, and require() / requireRecord() use a passed object only for its _id and reload it. The boards
+// returned are frozen copies (F2: top level and `source`), so a caller can't change a later decision in the same request.
+// ctx.boards takes inclusion projections only (F3) and at most MAX_BOARD_IDS distinct IDs per call (F4).
+//
 // P4-0: NOT AUTHORITATIVE. No route calls this yet; the existing Access helpers decide every request.
 const { ObjectId } = require("mongodb");
 const { ApiError } = require("../middleware/errors");
@@ -30,6 +35,38 @@ const READ_ONLY = "This board is synchronized from monday.com and is read-only i
 const MEMBERS_ONLY = "Only this workspace's admins can manage its members.";
 // What authorization itself needs from a board, merged into any projection the caller asks for.
 const AUTHZ_FIELDS = Object.freeze({ _id: 1, workspaceId: 1, "source.readOnly": 1 });
+const AUTHZ_PATHS = Object.keys(AUTHZ_FIELDS);
+// F4: distinct board IDs per ctx.boards call (boards.findManyByIds has the same bound). Far above any real request: a token
+// holds at most 100 boards, search reads at most 300, production has fewer than 100 boards in all.
+const MAX_BOARD_IDS = 500;
+
+// F3: → { proj, key } for an inclusion projection (values 1 or true), with AUTHZ_FIELDS merged in; null → the whole board.
+// Refused (programming errors, never sent to the client): exclusions or operators, an empty projection, and path collisions
+// (MongoDB refuses `a` together with `a.b`). An AUTHZ path already covered by a requested parent (`source` covers
+// `source.readOnly`) is not added. The cache key is the full, sorted, normalised path list, so {columns:1} and {columns:0}
+// can never share an entry.
+function normaliseProjection(projection) {
+  if (projection === null || projection === undefined) return { proj: null, key: "*" };
+  if (typeof projection !== "object" || Array.isArray(projection)) throw new Error("AuthzContext.boards: the projection must be an object, or null for the whole board.");
+  const keys = Object.keys(projection);
+  if (!keys.length) throw new Error("AuthzContext.boards: an empty projection; pass null for the whole board.");
+  for (const k of keys) {
+    if (projection[k] !== 1 && projection[k] !== true) throw new Error(`AuthzContext.boards: inclusion projections only (${k}).`);
+    if (k.startsWith("$") || k.split(".").some((part) => !part)) throw new Error(`AuthzContext.boards: invalid projection path (${k}).`);
+  }
+  const paths = new Set(keys);
+  for (const p of AUTHZ_PATHS) if (!keys.some((k) => k === p || p.startsWith(`${k}.`))) paths.add(p);
+  const list = [...paths].sort();
+  for (const a of list) for (const b of list) if (b.startsWith(`${a}.`)) throw new Error(`AuthzContext.boards: projection path collision (${a} / ${b}).`);
+  return { proj: Object.fromEntries(list.map((k) => [k, 1])), key: JSON.stringify(list) };
+}
+
+// F2: what the context hands out and decides on: a frozen shallow copy, with `source` frozen too (the read-only flag).
+function seal(doc) {
+  const copy = { ...doc };
+  if (doc.source && typeof doc.source === "object") copy.source = Object.freeze({ ...doc.source });
+  return Object.freeze(copy);
+}
 
 class AuthzContext {
   constructor(access, actor, { mode = "session", boardIds = null, workspaceIds = null } = {}) {
@@ -46,6 +83,7 @@ class AuthzContext {
     this._visibility = null;
     this._loaded = null;
     this._boards = new Map(); // `${projectionKey}|${boardHex}` → board | null
+    this._own = new WeakSet(); // the boards this context loaded (sealed); the only objects ever decided (F1)
     this._caps = new Map(); // `${boardHex}|${workspaceHex}|${readOnly}` → frozen Set
   }
 
@@ -96,69 +134,87 @@ class AuthzContext {
   inToken(board) {
     return this.mode !== "token" || (this.tokenBoards.has(hex(board._id)) && this.tokenWorkspaces.has(hex(board.workspaceId)));
   }
-  // The board role (P4-0: implied by the workspace role), or null when the board is not visible.
-  boardRole(board) {
-    if (!board || !board.workspaceId || !this.inToken(board)) return null;
-    return impliedBoardRole(this.workspaceRole(board.workspaceId), board);
-  }
+  // Whether this context loaded the object itself (F1). Anything else (a summary projection, a list row, an object built from
+  // a request body, a record) is never decided.
+  owns(board) { return this._own.has(board); }
+  // The board role (P4-0: implied by the workspace role), or null when the board is not visible or not loaded by this context.
+  boardRole(board) { return this.inputs(board).boardRole; }
   inputs(board) {
-    return { boardRole: this.boardRole(board), realRole: board?.workspaceId && this.inToken(board) ? this.realRole(board.workspaceId) : null, readOnly: Boolean(board?.source?.readOnly), mode: this.mode };
+    this.loaded();
+    const known = this.owns(board) && Boolean(board.workspaceId) && this.inToken(board);
+    return {
+      boardRole: known ? impliedBoardRole(this.workspaceRole(board.workspaceId), board) : null,
+      realRole: known ? this.realRole(board.workspaceId) : null,
+      readOnly: Boolean(board?.source?.readOnly),
+      mode: this.mode
+    };
   }
 
-  // ---- Capabilities (sync, memoised per board for this request)
+  // ---- Capabilities (sync, memoised per board for this request). Empty for a board this context didn't load.
   capabilities(board) {
     this.loaded();
-    if (!board || !board.workspaceId) return capabilitiesFor({});
+    if (!this.owns(board) || !board.workspaceId) return capabilitiesFor({});
     const key = `${hex(board._id)}|${hex(board.workspaceId)}|${Boolean(board.source?.readOnly)}`;
     let caps = this._caps.get(key);
     if (!caps) { caps = capabilitiesFor(this.inputs(board)); this._caps.set(key, caps); }
     return caps;
   }
-  can(cap, board) { return isCap(cap) && this.capabilities(board).has(cap); }
+  can(cap, board) { this.loaded(); return isCap(cap) && this.owns(board) && this.capabilities(board).has(cap); }
+  // By ID (the Access.can facade): loads only what authorization needs. An invalid or unknown ID is false.
+  async canBoard(cap, boardId) {
+    if (boardId && typeof boardId === "object" && !(boardId instanceof ObjectId)) throw new TypeError("canBoard takes a board ID, not a board object.");
+    await this.visibility();
+    const id = hex(boardId);
+    if (!id || !HEX.test(id)) return false;
+    const board = (await this.boards([id], AUTHZ_FIELDS)).get(id);
+    return Boolean(board) && this.can(cap, board);
+  }
 
   // ---- Batched loading
   // Boards by ID: ONE repos.boards.findManyByIds ($in) read for the IDs not yet loaded with this projection.
-  // → Map(boardHex → board | null). projection null = the whole board (what Access.board returns).
+  // → Map(boardHex → frozen board | null). projection null = the whole board (what Access.board returns); otherwise an
+  // inclusion projection (F3). More than MAX_BOARD_IDS distinct valid IDs: 400 TOO_MANY_BOARDS, before any read (F4).
   async boards(ids, projection = null) {
+    const { proj, key: pkey } = normaliseProjection(projection);
     const wanted = [...new Set([...ids].map(hex).filter((id) => id && HEX.test(id)))];
-    const pkey = projection ? JSON.stringify(Object.keys(projection).sort()) : "*";
+    if (wanted.length > MAX_BOARD_IDS) throw new ApiError(400, "TOO_MANY_BOARDS", `At most ${MAX_BOARD_IDS} boards can be checked at once.`);
     const todo = wanted.filter((id) => !this._boards.has(`${pkey}|${id}`));
     if (todo.length) {
-      const proj = projection ? { ...projection, ...AUTHZ_FIELDS } : null;
-      const repo = this.repos.boards;
       this.stats.boardReads += 1;
-      const docs = typeof repo.findManyByIds === "function"
-        ? await repo.findManyByIds(todo.map(asId), proj)
-        : (await Promise.all(todo.map((id) => repo.findById(asId(id))))).filter(Boolean); // test doubles only
+      const docs = await this.repos.boards.findManyByIds(todo.map(asId), proj);
       const byId = new Map(docs.map((d) => [hex(d._id), d]));
-      for (const id of todo) this._boards.set(`${pkey}|${id}`, byId.get(id) || null);
+      for (const id of todo) {
+        const doc = byId.get(id);
+        const board = doc ? seal(doc) : null;
+        if (board) this._own.add(board);
+        this._boards.set(`${pkey}|${id}`, board);
+      }
     }
     return new Map(wanted.map((id) => [id, this._boards.get(`${pkey}|${id}`)]));
   }
 
   // ---- Throwing checks
   // → { board, role, boardRole, caps }. 404 when not visible (never reveals existence), 403 when visible but not allowed.
+  // A board this context loaded is decided as is; any other object counts only for its _id and is reloaded (F1).
   async require(cap, boardOrId, { what = "board" } = {}) {
     if (!isCap(cap)) throw new Error(`Unknown capability: ${cap}`);
     await this.visibility();
-    let board = boardOrId;
-    if (!board || typeof board !== "object" || board instanceof ObjectId) {
-      const id = hex(boardOrId);
-      board = id && HEX.test(id) ? (await this.boards([id])).get(id) : null;
-    }
+    if (this.owns(boardOrId)) return this.decide(cap, boardOrId, what);
+    const isObject = boardOrId && typeof boardOrId === "object" && !(boardOrId instanceof ObjectId);
+    const id = hex(isObject ? boardOrId._id : boardOrId);
+    const board = id && HEX.test(id) ? (await this.boards([id])).get(id) : null;
     return this.decide(cap, board, what);
   }
 
   // A record's workspace is its BOARD's (P4-0, as Access.record): the board is loaded; a record whose board is gone is 404.
+  // A record object counts only for its _id: the stored record is read, so its boardId can't be supplied by the caller (F1).
   async requireRecord(cap, recordOrId) {
     if (!isCap(cap)) throw new Error(`Unknown capability: ${cap}`);
     await this.visibility();
-    let record = recordOrId;
-    if (!record || typeof record !== "object" || record instanceof ObjectId) {
-      const id = hex(recordOrId);
-      this.stats.recordReads += 1;
-      record = id && HEX.test(id) ? await this.repos.records.findById(asId(id)) : null;
-    }
+    const isObject = recordOrId && typeof recordOrId === "object" && !(recordOrId instanceof ObjectId);
+    const id = hex(isObject ? recordOrId._id : recordOrId);
+    let record = null;
+    if (id && HEX.test(id)) { this.stats.recordReads += 1; record = await this.repos.records.findById(asId(id)); }
     if (!record) throw notFound("record");
     const board = record.boardId ? (await this.boards([record.boardId])).get(hex(record.boardId)) : null;
     if (!board?.workspaceId) throw notFound("record");
@@ -190,4 +246,4 @@ class AuthzContext {
   }
 }
 
-module.exports = { AuthzContext, AUTHZ_FIELDS };
+module.exports = { AuthzContext, AUTHZ_FIELDS, MAX_BOARD_IDS, normaliseProjection };

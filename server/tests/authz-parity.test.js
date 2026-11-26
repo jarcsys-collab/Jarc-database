@@ -122,12 +122,14 @@ describe("session parity: ctx.can / ctx.require equal today's route checks", () 
         const ctx = access.context(actor);
         assert.ok(ctx instanceof AuthzContext);
         await ctx.visibility();
+        // can() decides only boards the context loaded (plan 35 F1): the same stored board, through ctx.boards.
+        const loadedB = (await ctx.boards([b._id])).get(b._id.toHexString());
         for (const cap of caps.ALL_CAPS) {
           cells += 1;
           const today = await outcome(() => RECIPES[cap]({ access, actor, repos, b, r }));
           const isRecordCap = [CAP.RECORD_VIEW, CAP.RECORD_EDIT_VALUES, CAP.RECORD_DELETE, CAP.COMMENT_MODERATE].includes(cap);
           const viaCtx = await outcome(() => (isRecordCap ? ctx.requireRecord(cap, r._id) : ctx.require(cap, b._id)));
-          const allowed = ctx.can(cap, b);
+          const allowed = ctx.can(cap, loadedB);
           // Status always; the error code too, except comment moderation, where today the read-only guard runs before the
           // moderator check (READ_ONLY_BOARD vs FORBIDDEN, both 403: plan 30 §9).
           const same = today.status === viaCtx.status && allowed === (today.status === 200) && (cap === CAP.COMMENT_MODERATE || today.code === viaCtx.code);
@@ -170,15 +172,20 @@ describe("session parity: ctx.can / ctx.require equal today's route checks", () 
 
   test("Access.can / Access.require facades agree with the context", async () => {
     const { access, actor } = world({ policy: "role_based", betaOpenEditing: false, accountMode: "off", persona: "MEMBER", account: null });
-    assert.equal(await access.can(actor, CAP.COLUMN_CREATE, BOARDS.mine), true);
-    assert.equal(await access.can(actor, CAP.COLUMN_DESTRUCTIVE, BOARDS.mine), false);
+    assert.equal(await access.can(actor, CAP.COLUMN_CREATE, BOARDS.mine._id), true);
+    assert.equal(await access.can(actor, CAP.COLUMN_CREATE, BOARDS.mine._id.toHexString()), true);
+    assert.equal(await access.can(actor, CAP.COLUMN_DESTRUCTIVE, BOARDS.mine._id), false);
+    assert.equal(await access.can(actor, CAP.BOARD_VIEW, "not-an-id"), false);
+    await assert.rejects(() => access.can(actor, CAP.COLUMN_CREATE, BOARDS.mine), TypeError); // takes an ID (plan 35 F1)
     assert.equal((await access.require(actor, CAP.COLUMN_CREATE, BOARDS.mine._id)).board._id, BOARDS.mine._id);
   });
 
   test("a record whose board copy drifted is authorised (and returned) with its board's workspace, as Access.record", async () => {
-    const { access, actor } = world({ policy: "role_based", betaOpenEditing: false, accountMode: "off", persona: "MEMBER", account: null });
+    const { repos, access, actor } = world({ policy: "role_based", betaOpenEditing: false, accountMode: "off", persona: "MEMBER", account: null });
+    // The STORED record's copy drifted (requireRecord reads the stored record; a passed object counts only for its _id).
     const drifted = { ...RECORDS.mine, workspaceId: W2 };
-    const { record } = await access.context(actor).requireRecord(CAP.RECORD_VIEW, drifted);
+    repos.records.findById = async (id) => (String(id) === String(drifted._id) ? drifted : null);
+    const { record } = await access.context(actor).requireRecord(CAP.RECORD_VIEW, { _id: drifted._id });
     assert.equal(String(record.workspaceId), String(W1));
     assert.equal(access.drift.count, 1);
   });
@@ -190,11 +197,13 @@ describe("session parity: ctx.can / ctx.require equal today's route checks", () 
       const roleOf = (id) => (roles ? roles.get(id.toHexString()) : globalRole);
       const ctx = access.context(actor);
       await ctx.visibility();
+      const loaded = await ctx.boards(Object.values(BOARDS).map((b) => b._id), { name: 1 });
       for (const b of Object.values(BOARDS)) {
         // SearchService.scope only lists boards of visible workspaces; canEdit is asked of those.
         const listed = !roles || roles.has(b.workspaceId.toHexString());
-        assert.equal(ctx.can(CAP.BOARD_VIEW, b), listed, label(s, " board.view vs search scope"));
-        if (listed) assert.equal(ctx.can(CAP.RECORD_EDIT_VALUES, b), SearchService.prototype.canEdit({ roleOf }, b), label(s, " canEdit"));
+        const lb = loaded.get(b._id.toHexString());
+        assert.equal(ctx.can(CAP.BOARD_VIEW, lb), listed, label(s, " board.view vs search scope"));
+        if (listed) assert.equal(ctx.can(CAP.RECORD_EDIT_VALUES, lb), SearchService.prototype.canEdit({ roleOf }, b), label(s, " canEdit"));
         const event = { workspaceId: b.workspaceId.toHexString(), action: "record.updated" };
         const visible = !event.workspaceId || roles === null || roles.has(event.workspaceId);
         assert.equal(await ctx.canSeeEvent(event), visible, label(s, " event"));
@@ -218,14 +227,16 @@ describe("token parity: mode token equals ApiTokenService.roleOf ∩ the token's
         const owner = Object.freeze({ userId: USER, kind: "api_token_owner", isSystemAdmin: false, account: actor.account });
         const ctx = access.context(owner, { mode: "token", boardIds: tb.map((b) => b._id), workspaceIds: tw });
         await ctx.visibility();
+        const loaded = await ctx.boards(Object.values(BOARDS).map((b) => b._id));
         for (const b of Object.values(BOARDS)) {
           // routes/external-api.js scopedBoard: in doc.boardIds, and the board's workspace is one of the token's that the owner
           // can read now (authorize → roleOf).
           const reach = tb.includes(b) && tw.some((w) => w.equals(b.workspaceId)) && Boolean(await tokens.roleOf(owner, b.workspaceId));
+          const lb = loaded.get(b._id.toHexString());
           for (const cap of caps.ALL_CAPS) {
             cells += 1;
             const want = reach && caps.TOKEN_CAPS.has(cap); // read scope only (readOnlyGuard refuses every write)
-            if (ctx.can(cap, b) !== want) mismatches.push(`${label(s)} token ${tb.length}b/${tw.length}w ${cap}: want ${want}`);
+            if (ctx.can(cap, lb) !== want) mismatches.push(`${label(s)} token ${tb.length}b/${tw.length}w ${cap}: want ${want}`);
           }
         }
       }
@@ -278,9 +289,10 @@ describe("batched evaluation (no N+1)", () => {
     repos.memberships.listForUser = async (...a) => { if (fail) { fail = false; throw new Error("db down"); } return real(...a); };
     const ctx = new Access(repos, {}).context({ userId: USER, kind: "entra", isSystemAdmin: false });
     await assert.rejects(() => ctx.visibility(), /db down/);
-    assert.throws(() => ctx.can(CAP.BOARD_VIEW, BOARDS.mine), /await ctx.visibility/);
+    const mine = (await ctx.boards([BOARDS.mine._id])).get(BOARDS.mine._id.toHexString());
+    assert.throws(() => ctx.can(CAP.BOARD_VIEW, mine), /await ctx.visibility/);
     await ctx.visibility();
-    assert.equal(ctx.can(CAP.BOARD_VIEW, BOARDS.mine), true);
+    assert.equal(ctx.can(CAP.BOARD_VIEW, mine), true);
   });
 });
 

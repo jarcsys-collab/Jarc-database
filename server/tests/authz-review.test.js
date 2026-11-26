@@ -1,6 +1,6 @@
 // Independent security review of the P4 authorization foundation (fb1b301; plan 35). In-memory only: no MongoDB, no network.
-// Plain tests pin behaviour the review VERIFIED. Tests marked { todo } state the behaviour the review asks for before merge
-// (findings F1–F5 in plan 35); they report as TODO, not as failures, and start passing when the finding is fixed.
+// Plain tests pin behaviour the review VERIFIED, and the fixes of findings F1–F4 and F9 (plan 35 §7). F5 stays { todo }: it is
+// fixed by D-C7 (a workspace context) in P4-4, not in this foundation.
 const { test, describe } = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
@@ -65,7 +65,8 @@ describe("verified: token identity and scope", () => {
       const access = new Access(makeRepos({ role: "WORKSPACE_ADMIN", boards: [b] }), s);
       const ctx = access.context(actor(true), { mode: "token", boardIds: [b._id], workspaceIds: [W1] });
       await ctx.visibility();
-      assert.deepEqual([...ctx.capabilities(b)].sort(), [...TOKEN_CAPS].sort(), JSON.stringify(s));
+      const lb = (await ctx.boards([b._id])).get(b._id.toHexString());
+      assert.deepEqual([...ctx.capabilities(lb)].sort(), [...TOKEN_CAPS].sort(), JSON.stringify(s));
       for (const cap of ALL_CAPS.filter((c) => !TOKEN_CAPS.has(c))) assert.equal(await status(ctx.require(cap, b._id)), 403, cap);
       assert.equal(await ctx.canSeeEvent({ workspaceId: W1.toHexString() }), false);
     }
@@ -75,7 +76,7 @@ describe("verified: token identity and scope", () => {
     const access = new Access(makeRepos({ role: "WORKSPACE_ADMIN", boards: [b] }), { policy: "development_shared" });
     const ctx = access.context(actor(), { mode: "token", boardIds: [], workspaceIds: [] });
     await ctx.visibility();
-    assert.equal(ctx.can(CAP.BOARD_VIEW, b), false);
+    assert.equal(ctx.can(CAP.BOARD_VIEW, (await ctx.boards([b._id])).get(b._id.toHexString())), false);
     assert.equal(await status(ctx.require(CAP.BOARD_VIEW, b._id)), 404);
     assert.equal(ctx.visibleWorkspaceIds().size, 0);
   });
@@ -95,7 +96,7 @@ describe("verified: token identity and scope", () => {
       const loaded = await ctx.boards([inBoth, notInToken, movedOut, archived].map((b) => b._id), { columns: 1 });
       for (const t of loaded.values()) assert.equal(ctx.can(CAP.BOARD_VIEW, t), restrictedFor(t), `${JSON.stringify(s)} ${role}`);
       // As restrictedFor, the context ignores `archived`: scopedBoard's archived filter must stay in the route (plan 30 §8).
-      assert.equal(ctx.can(CAP.BOARD_VIEW, archived), true);
+      assert.equal(ctx.can(CAP.BOARD_VIEW, loaded.get(archived._id.toHexString())), true);
     }
   });
 });
@@ -114,39 +115,100 @@ describe("verified: performance (no N+1)", () => {
   });
 });
 
-describe("findings (todo until fixed; plan 35)", () => {
-  test("F1: can() on a board object without `source` (e.g. findSummariesByIds) must not treat a read-only board as writable", { todo: "F1: only ctx-loaded boards (or boards carrying source) may be decided" }, async () => {
-    const ro = mk(W1, { source: { provider: "monday", readOnly: true } });
+describe("findings F1–F4, F9 (fixed; plan 35 §7)", () => {
+  test("F1: can() on a board object without `source` (e.g. findSummariesByIds) must not treat a read-only board as writable", async () => {
+    const ro = mk(W1, { source: { provider: "monday", readOnly: true } }), rw = mk(W1);
     const summary = { _id: ro._id, workspaceId: ro.workspaceId, name: ro.name, archived: false, position: 1 }; // findSummariesByIds projection
-    const ctx = new Access(makeRepos({ role: "MEMBER", boards: [ro] }), {}).context(actor());
+    const ctx = new Access(makeRepos({ role: "MEMBER", boards: [ro, rw] }), {}).context(actor());
     await ctx.visibility();
     assert.equal(ctx.can(CAP.RECORD_EDIT_VALUES, summary), false);
+    assert.equal(ctx.can(CAP.BOARD_VIEW, summary), false); // not loaded by the context: never decided
+    assert.equal(ctx.capabilities(summary).size, 0);
+    assert.equal(ctx.boardRole(summary), null);
+    assert.equal(ctx.can(CAP.RECORD_EDIT_VALUES, rw), false); // even the repository's own object (not this context's copy)
+    const loaded = await ctx.boards([ro._id, rw._id], { name: 1 });
+    assert.equal(ctx.can(CAP.RECORD_EDIT_VALUES, loaded.get(ro._id.toHexString())), false); // read-only, from the stored board
+    assert.equal(ctx.can(CAP.BOARD_VIEW, loaded.get(ro._id.toHexString())), true);
+    assert.equal(ctx.can(CAP.RECORD_EDIT_VALUES, loaded.get(rw._id.toHexString())), true);
   });
-  test("F1b: require() given a caller-built object must not trust its workspaceId", { todo: "F1: require(cap, object) skips the database" }, async () => {
-    const hidden = mk(W2);
-    const ctx = new Access(makeRepos({ role: "WORKSPACE_ADMIN", boards: [hidden] }), {}).context(actor());
+  test("F1b: require() given a caller-built object must not trust its workspaceId", async () => {
+    const hidden = mk(W2), visible = mk(W1, { source: { provider: "monday", readOnly: true } });
+    const ctx = new Access(makeRepos({ role: "WORKSPACE_ADMIN", boards: [hidden, visible] }), {}).context(actor());
     const spoofed = { _id: hidden._id, workspaceId: W1 }; // e.g. built from a request body
     assert.equal(await status(ctx.require(CAP.RECORD_CREATE, spoofed)), 404);
+    // A spoofed `source` is ignored too: the stored board is read-only.
+    assert.equal(await status(ctx.require(CAP.RECORD_CREATE, { _id: visible._id, workspaceId: W1, source: { readOnly: false } })), 403);
+    assert.equal(await status(ctx.require(CAP.BOARD_VIEW, { workspaceId: W1 })), 404); // no _id: nothing to load
   });
-  test("F2: memoised boards must not be shared mutable state (a mutated board must not change later decisions)", { todo: "F2: freeze or copy memoised boards" }, async () => {
+  test("F1c: requireRecord() given a record object uses only its _id (the stored record's board decides)", async () => {
+    const mine = mk(W1), hidden = mk(W2), r = { _id: new ObjectId(), boardId: hidden._id, workspaceId: W2 };
+    const ctx = new Access(makeRepos({ role: "WORKSPACE_ADMIN", boards: [mine, hidden], records: [r] }), {}).context(actor());
+    assert.equal(await status(ctx.requireRecord(CAP.RECORD_VIEW, { _id: r._id, boardId: mine._id, workspaceId: W1 })), 404);
+    assert.equal(await status(ctx.requireRecord(CAP.RECORD_VIEW, { boardId: mine._id })), 404);
+  });
+  test("F1d: the Access.can facade takes a board ID, never a board object", async () => {
     const b = mk(W1);
+    const access = new Access(makeRepos({ role: "MEMBER", boards: [b] }), {});
+    assert.equal(await access.can(actor(), CAP.RECORD_CREATE, b._id), true);
+    assert.equal(await access.can(actor(), CAP.RECORD_CREATE, new ObjectId()), false);
+    await assert.rejects(() => access.can(actor(), CAP.RECORD_CREATE, b), TypeError);
+  });
+  test("F2: memoised boards must not be shared mutable state (a mutated board must not change later decisions)", async () => {
+    const b = mk(W1, { source: { provider: "monday", readOnly: false } });
     const ctx = new Access(makeRepos({ role: "WORKSPACE_ADMIN", boards: [b] }), {}).context(actor());
     const { board } = await ctx.require(CAP.BOARD_MOVE, b._id);
+    assert.ok(Object.isFrozen(board) && Object.isFrozen(board.source));
+    assert.notEqual(board, b); // a copy: the repository's object is never handed out
     try { board.workspaceId = W2; } catch { /* frozen: fine */ }
+    try { board.source.readOnly = true; } catch { /* frozen: fine */ }
+    assert.equal(String(b.workspaceId), String(W1));
     assert.equal(await status(ctx.require(CAP.BOARD_VIEW, b._id)), 200);
+    assert.equal(await status(ctx.require(CAP.RECORD_CREATE, b._id)), 200);
   });
-  test("F3: the projection cache key must include values ({columns:0} is not {columns:1})", { todo: "F3: key by JSON of sorted entries; refuse exclusion projections" }, async () => {
+  test("F3: the projection cache key includes values; inclusion projections only; no `source` path collision", async () => {
     const b = mk(W1);
     const repos = makeRepos({ role: "VIEWER", boards: [b] });
     const ctx = new Access(repos, {}).context(actor());
     await ctx.boards([b._id], { columns: 1 });
-    await ctx.boards([b._id], { columns: 0 });
+    await ctx.boards([b._id], { columns: true }); // same normalised projection: memoised
+    assert.equal(repos.calls.findManyByIds.length, 1);
+    await ctx.boards([b._id], { columns: 1, groups: 1 }); // different projection: its own read
     assert.equal(repos.calls.findManyByIds.length, 2);
+    for (const bad of [{ columns: 0 }, { columns: -1 }, { columns: { $slice: 1 } }, {}, { columns: 1, "columns.key": 1 }, { "workspaceId.x": 1 }, { $where: 1 }, [], "columns"]) {
+      await assert.rejects(() => ctx.boards([b._id], bad), /AuthzContext\.boards/, JSON.stringify(bad));
+    }
+    assert.equal(repos.calls.findManyByIds.length, 2); // refused before any read
+    await ctx.boards([b._id], { source: 1 });
+    assert.deepEqual(repos.calls.findManyByIds[2].projection, { _id: 1, source: 1, workspaceId: 1 }); // `source` covers source.readOnly
+    await ctx.boards([b._id], { "source.provider": 1 });
+    assert.deepEqual(Object.keys(repos.calls.findManyByIds[3].projection).sort(), ["_id", "source.provider", "source.readOnly", "workspaceId"]);
   });
-  test("F4: ctx.boards / findManyByIds must be bounded", { todo: "F4: refuse (or chunk) more than a fixed number of IDs" }, async () => {
+  test("F4: ctx.boards / findManyByIds are bounded (500 distinct IDs per call)", async () => {
+    const { MAX_BOARD_IDS } = require("../src/auth/authz-context");
+    const { BoardRepository, MAX_BOARDS_BY_IDS } = require("../src/repositories/mongo/board-repository");
+    assert.equal(MAX_BOARD_IDS, 500);
+    assert.equal(MAX_BOARDS_BY_IDS, MAX_BOARD_IDS);
     const repos = makeRepos({ role: "VIEWER" });
     const ctx = new Access(repos, {}).context(actor());
-    await assert.rejects(() => ctx.boards(Array.from({ length: 5001 }, () => new ObjectId())));
+    await assert.rejects(() => ctx.boards(Array.from({ length: 5001 }, () => new ObjectId())), (e) => e.status === 400 && e.code === "TOO_MANY_BOARDS");
+    await assert.rejects(() => ctx.boards(Array.from({ length: 501 }, () => new ObjectId())), (e) => e.code === "TOO_MANY_BOARDS");
+    assert.equal(repos.calls.findManyByIds.length, 0); // refused before any read
+    assert.equal((await ctx.boards(Array.from({ length: 500 }, () => new ObjectId()))).size, 500);
+    const same = new ObjectId(); // duplicates count once
+    assert.equal((await ctx.boards(Array.from({ length: 2000 }, () => same))).size, 1);
+    let touched = false;
+    const repo = new BoardRepository({ collection: () => ({ find() { touched = true; return { toArray: async () => [] }; } }) });
+    await assert.rejects(() => repo.findManyByIds(Array.from({ length: 501 }, () => new ObjectId())), RangeError);
+    assert.equal(touched, false);
+    assert.deepEqual(await repo.findManyByIds(Array.from({ length: 500 }, () => new ObjectId())), []);
+  });
+  test("F9: no test-double fallback: the context always uses boards.findManyByIds (08 W9)", async () => {
+    const text = require("node:fs").readFileSync(require("node:path").join(__dirname, "../src/auth/authz-context.js"), "utf8");
+    assert.equal(/typeof\s+\w+(\.\w+)*\.findManyByIds/.test(text), false);
+    const repos = makeRepos({ role: "VIEWER" });
+    delete repos.boards.findManyByIds;
+    const ctx = new Access(repos, {}).context(actor());
+    await assert.rejects(() => ctx.boards([new ObjectId()]), TypeError);
   });
   test("F5: workspace.manageMembers on a board whose workspace is gone is 404 for SYSTEM_ADMIN, as access.workspace", { todo: "F5: workspace-level caps need the workspace (D-C7)" }, async () => {
     const orphan = mk(new ObjectId());
