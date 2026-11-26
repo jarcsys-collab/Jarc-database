@@ -46,6 +46,12 @@ class BoardRepository extends VersionedRepository {
     if (!ids.length) return Promise.resolve([]);
     return this.collection.find({ _id: { $in: ids } }, { sort: { workspaceId: 1, position: 1, _id: 1 }, limit: ids.length, projection: { _id: 1, workspaceId: 1, name: 1, archived: 1, position: 1 } }).toArray();
   }
+  // P4 authorization context (auth/authz-context.js, ctx.boards): boards by ID, wherever they are, in ONE $in read. projection
+  // null = whole boards (what Access.board returns). Missing IDs are simply absent. Not used by any route yet (P4-0).
+  findManyByIds(ids, projection = null) {
+    if (!ids.length) return Promise.resolve([]);
+    return this.collection.find({ _id: { $in: ids } }, { limit: ids.length, ...(projection ? { projection } : {}) }).toArray();
+  }
   // Employee Management P2 (employees/jarc-access.js, read-only): every board in one bounded query, only ID, workspace, name,
   // public number, archived and whether it is a read-only synchronized board (never the columns or views).
   listForAccessIndex() {

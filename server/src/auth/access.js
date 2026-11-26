@@ -29,6 +29,7 @@
 const { ApiError } = require("../middleware/errors");
 const { notFound } = require("../services/shared");
 const { capWorkspaceRole } = require("./accounts");
+const { AuthzContext } = require("./authz-context");
 
 const RANK = Object.freeze({ VIEWER: 1, MEMBER: 2, WORKSPACE_ADMIN: 3, SYSTEM_ADMIN: 4 });
 const ACCESS_POLICIES = Object.freeze(["role_based", "development_shared"]);
@@ -148,6 +149,13 @@ class Access {
   }
 
   static atLeast(role, minimum) { return Boolean(role) && RANK[role] >= RANK[minimum]; }
+
+  // P4 shared authorization contract (auth/authz-context.js): one context per request. NOT AUTHORITATIVE in P4-0: the helpers
+  // above decide every request; the context is proven equal to them (tests/authz-parity.test.js) and no route uses it yet.
+  context(actor, options) { return new AuthzContext(this, actor, options); }
+  // One-off checks through a throw-away context (lists and loops must share one context instead).
+  async can(actor, cap, board) { const ctx = this.context(actor); await ctx.visibility(); return ctx.can(cap, board); }
+  require(actor, cap, boardOrId, options) { return this.context(actor).require(cap, boardOrId, options); }
 }
 
 module.exports = { Access, RANK, ACCESS_POLICIES, forbidden };
