@@ -60,6 +60,24 @@ describe("Popover.place (pure)", () => {
     const p = Popover.place({ left: 10, right: 20, top: 10, bottom: 20 }, { width: 5000, height: 5000 }, { width: 800, height: 600 }, "bottom-start");
     assert.equal(p.width, 784); assert.ok(p.maxHeight <= 584);
   });
+  test("near the bottom edge it flips above; maxHeight is the room on the chosen side, so even at maxHeight the rect stays inside", () => {
+    for (const vp of [{ width: 1440, height: 900 }, { width: 1024, height: 600 }, { width: 768, height: 480 }]) for (const h of [180, 420, 2000]) {
+      const size = { width: 360, height: h }, a = { left: 100, right: 140, top: vp.height - 60, bottom: vp.height - 30 };
+      const up = Popover.place(a, size, vp, "bottom-start");
+      assert.equal(up.side, "top", `${vp.height} ${h}`);
+      // At its largest (maxHeight) it ends at the anchor's top (minus the gap) and starts inside the top margin.
+      assert.ok(up.top >= 8 && up.top + up.maxHeight <= a.top - 4 + 0.5, `${vp.height} ${h} → ${JSON.stringify(up)}`);
+      assert.equal(up.maxHeight, Math.min(h, vp.height - 60 - 4 - 8));
+      assert.ok(up.maxHeight <= vp.height - 16);
+      const down = Popover.place({ left: 100, right: 140, top: 20, bottom: 50 }, size, vp, "bottom-start");
+      assert.equal(down.side, "bottom");
+      assert.equal(down.maxHeight, vp.height - 8 - (50 + 4), "below: the room down to the margin");
+      assert.ok(down.top + down.maxHeight <= vp.height - 8);
+    }
+    // right-start: at maxHeight it still ends inside the bottom margin.
+    const r = Popover.place({ left: 100, right: 300, top: 700, bottom: 730 }, { width: 360, height: 100 }, { width: 1440, height: 900 }, "right-start");
+    assert.equal(r.top, 700); assert.equal(r.top + r.maxHeight, 900 - 8);
+  });
 });
 
 const BROWSER = findBrowser();
@@ -145,6 +163,42 @@ describe("Popover.open in a real browser", { skip: BROWSER ? false : "no Chrome 
     assert.deepEqual(sheet, { bottom: 800, modal: "true", backdrop: true });
     await b.tap(195, 30);
     assert.deepEqual(await b.evaluate("({ count: Popover.openCount, closed: window.closes, backdrop: !!document.querySelector('.jarc-popover-backdrop') })"), { count: 0, closed: ["outside"], backdrop: false });
+  });
+
+  test("an anchor near the bottom edge: it flips above and stays inside the viewport, also after its content grows and on resize; position() keeps a stylesheet max-height", async () => {
+    await b.open(page, { width: 1280, height: 720 });
+    const s = await b.evaluate(`(() => {
+      const btn = document.getElementById('a'); btn.style.top = '660px'; btn.style.position = 'fixed';
+      const c = document.createElement('div'); c.innerHTML = '<div id="tall" style="height:300px">Rows</div>';
+      window.pop = Popover.open({ anchor: btn, content: c, label: 'Bottom' });
+      const rect = () => { const r = window.pop.el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom }; };
+      const first = rect(), side = window.pop.el.dataset.side;
+      document.getElementById('tall').style.height = '1400px'; // content grows after it was placed
+      const grown = rect();
+      window.pop.reposition();
+      const replaced = rect();
+      return { side, first, grown, replaced, anchorTop: btn.getBoundingClientRect().top, vh: innerHeight };
+    })()`);
+    assert.equal(s.side, "top");
+    for (const [k, r] of Object.entries({ first: s.first, grown: s.grown, replaced: s.replaced })) {
+      assert.ok(r.top >= 8 - 0.5 && r.bottom <= s.vh - 8 + 0.5, `${k} inside the viewport: ${JSON.stringify(r)}`);
+      assert.ok(r.bottom <= s.anchorTop - 4 + 1, `${k} ends above the anchor: ${JSON.stringify(r)} anchor ${s.anchorTop}`);
+    }
+    await b.evaluate("window.pop.close()");
+    await b.open(page, { width: 1000, height: 600 });
+    await b.evaluate("window.dispatchEvent(new Event('resize'))"); await sleep(60);
+    const fixed = await b.evaluate(`(() => {
+      const btn = document.getElementById('a'); btn.style.top = '540px'; btn.style.position = 'fixed';
+      const css = document.createElement('style'); css.textContent = '.capped{position:fixed;max-height:200px;overflow:auto;width:240px}'; document.head.appendChild(css);
+      const el = document.createElement('div'); el.className = 'capped'; el.innerHTML = '<div style="height:900px">List</div>';
+      el.style.maxHeight = '9999px'; // left over from an earlier placement
+      document.body.appendChild(el);
+      const p = Popover.position(el, btn, { placement: 'bottom-start' }), r = el.getBoundingClientRect();
+      return { side: p.side, top: r.top, bottom: r.bottom, height: r.height, anchorTop: btn.getBoundingClientRect().top, vh: innerHeight };
+    })()`);
+    assert.equal(fixed.side, "top");
+    assert.ok(Math.abs(fixed.height - 200) <= 1, `the stylesheet's 200 px cap is kept: ${JSON.stringify(fixed)}`);
+    assert.ok(fixed.top >= 8 && fixed.bottom <= fixed.anchorTop - 4 + 1, JSON.stringify(fixed));
   });
 
   test("reduced motion: no animation", async () => {

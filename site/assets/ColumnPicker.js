@@ -139,13 +139,12 @@ class ColumnPicker {
     if (window.matchMedia?.("(max-width: 640px)").matches) { panel.classList.add("is-sheet"); panel.style.left = panel.style.top = panel.style.right = panel.style.maxHeight = ""; return; }
     panel.classList.remove("is-sheet");
     // The shared placement (Popover.js): flips above when there is more room there, aligns to the anchor's right edge near
-    // the viewport's right edge, and stays 8 px inside it.
-    // Its height is never raised past what the stylesheet allows (70 vh, 560 px), so a flipped picker ends right above the anchor.
-    if (anchor && window.Popover?.place) {
+    // the viewport's right edge, and stays 8 px inside it. Its height stays within the stylesheet's (70 vh, 560 px) and the
+    // room on its side, so a flipped picker ends right above the anchor.
+    if (anchor && window.Popover?.position) {
       try {
-        panel.style.maxHeight = "";
-        const r = panel.getBoundingClientRect(), p = window.Popover.place(anchor, { width: r.width, height: r.height }, window.Popover.viewport(), "bottom-start", { sheetBelow: 0 });
-        Object.assign(panel.style, { left: `${p.left}px`, top: `${p.top}px`, right: "auto", maxHeight: `${Math.min(p.maxHeight, Math.ceil(r.height))}px` });
+        panel.style.right = "auto";
+        const p = window.Popover.position(panel, anchor, { placement: "bottom-start", sheetBelow: 0 });
         panel.classList.toggle("is-above", p.side === "top");
         return;
       } catch { /* fall back below */ }

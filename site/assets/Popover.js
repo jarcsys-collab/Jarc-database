@@ -50,9 +50,10 @@
       const flip = width > right && leftRoom > right;
       let left = flip ? a.left - GAP - width : a.right + GAP;
       left = clamp(left, m, vw - m - width);
-      const maxHeight = Math.max(Math.min(MIN_HEIGHT, fullHeight), fullHeight);
-      const top = clamp(a.top, m, vh - m - Math.min(h, maxHeight));
-      return { left: Math.round(left), top: Math.round(top), width: Math.round(width), maxHeight, sheet: false, side: flip ? "left" : "right" };
+      const top = Math.round(clamp(a.top, m, vh - m - Math.min(Math.ceil(h), fullHeight)));
+      // Never taller than the room from its top down to the viewport's margin, so content that grows stays inside.
+      const maxHeight = Math.max(0, Math.floor(vh - m - top));
+      return { left: Math.round(left), top, width: Math.round(width), maxHeight, sheet: false, side: flip ? "left" : "right" };
     }
     let left = p === "bottom-end" ? a.right - width : a.left;
     // Near an edge, align to the anchor's other edge first (as FabricColumnMenu.place), then shift inside the viewport.
@@ -61,10 +62,14 @@
     left = clamp(left, m, vw - m - width);
     const below = vh - m - (a.bottom + GAP), above = a.top - GAP - m;
     const up = h > below && above > below;
-    const maxHeight = Math.min(fullHeight, Math.max(Math.min(MIN_HEIGHT, fullHeight), Math.floor(up ? above : below)));
-    let top = up ? a.top - GAP - Math.min(h, maxHeight) : a.bottom + GAP;
-    top = clamp(top, m, vh - m - Math.min(h, maxHeight));
-    return { left: Math.round(left), top: Math.round(top), width: Math.round(width), maxHeight, sheet: false, side: up ? "top" : "bottom" };
+    // The room on the chosen side (at least MIN_HEIGHT: with less, it shifts to stay inside the viewport, over the anchor).
+    const room = Math.min(fullHeight, Math.max(Math.min(MIN_HEIGHT, fullHeight), Math.floor(up ? above : below)));
+    const boxHeight = Math.min(Math.ceil(h), room);
+    const top = Math.round(clamp(up ? a.top - GAP - boxHeight : a.bottom + GAP, m, vh - m - boxHeight));
+    // maxHeight is the space it was placed in. Above the anchor: the height that ends at the anchor (content that grows later
+    // scrolls instead of extending down past the anchor and the viewport). Below: the room down to the viewport's margin.
+    const maxHeight = up ? boxHeight : Math.max(0, Math.floor(vh - m - top));
+    return { left: Math.round(left), top, width: Math.round(width), maxHeight, sheet: false, side: up ? "top" : "bottom" };
   }
   function viewport() {
     const w = typeof window !== "undefined" ? window : {}, d = typeof document !== "undefined" ? document.documentElement : null;
@@ -208,12 +213,14 @@
     return handle;
   }
 
-  // One-off placement of an existing position:fixed element (no listeners, no focus handling).
+  // One-off placement of an existing position:fixed element (no listeners, no focus handling). It is measured without an
+  // inline max-height and never made taller than that, so its own stylesheet's max-height still applies.
   function position(el, anchor, { placement = "bottom-start", sheetBelow = 0 } = {}) {
     if (!el) return null;
+    el.style.maxHeight = "";
     const r = el.getBoundingClientRect();
     const p = place(anchor, { width: r.width, height: r.height }, viewport(), placement, { sheetBelow });
-    if (!p.sheet) Object.assign(el.style, { left: `${p.left}px`, top: `${p.top}px`, maxHeight: `${p.maxHeight}px` });
+    if (!p.sheet) Object.assign(el.style, { left: `${p.left}px`, top: `${p.top}px`, maxHeight: `${Math.min(p.maxHeight, Math.ceil(r.height))}px` });
     return p;
   }
   const closeAll = () => { for (const p of [...stack].reverse()) p.close({ reason: "close", restoreFocus: false }); };

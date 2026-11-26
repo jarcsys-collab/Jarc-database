@@ -1297,7 +1297,7 @@ class AppController {
       if(String(data.connection||"").trim()!==String(column.connection||""))patch.connection=String(data.connection||"").trim();
       const named=label!==column.label||description!==(column.description||"");
       if(!named&&!Object.keys(patch).length){this.view.closeOverlay();return;}
-      this.runBusy(event.submitter,()=>{if(named)this.model.editColumn(column.key,{label,description});if(Object.keys(patch).length)this.model.updateColumnConfig({[column.key]:patch});},()=>{this.view.closeOverlay();this.update();this.view.toast(`${label} updated for everyone on this board`,true);});
+      this.runBusy(event.submitter,()=>this.model.groupHistory("Column settings undone",()=>{if(named)this.model.editColumn(column.key,{label,description});if(Object.keys(patch).length)this.model.updateColumnConfig({[column.key]:patch});}),()=>{this.view.closeOverlay();this.update();this.view.toast(`${label} updated for everyone on this board`,true);});
       return;
     }
     if (action === "rename-column-form") { this.runBusy(event.submitter,()=>this.model.editColumn(data.key,{label:data.label,description:data.description})?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast("Column updated",true);}); }

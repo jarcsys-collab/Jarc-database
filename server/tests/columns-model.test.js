@@ -61,6 +61,45 @@ describe("Browser column rules", () => {
     assert.deepEqual(plain(result.valid[0].tags), ["North", "East"]);
     board.columns = columns;
   });
+
+  test("a column settings save (details and default value together) is ONE Undo step that restores both; the same saves are sent", async () => {
+    const column = { key: "remarks", label: "Notes", type: "text", defaultValue: "", required: false };
+    model.board.columns.push(column);
+    const sent = [], save = model.save;
+    model.save = function (change) { sent.push(plain(change)); return save.call(this, change); };
+    const settingsSave = () => { model.editColumn("remarks", { label: "Remarks", description: "Anything worth knowing" }); model.updateColumnConfig({ remarks: { defaultValue: "None yet", required: true } }); };
+    try {
+      const before = model.history.length;
+      settingsSave();
+      const ungrouped = sent.splice(0);
+      assert.equal(model.history.length, before + 2, "without grouping: two Undo entries");
+      model.undo(); model.undo();
+      sent.splice(0);
+      const start = model.history.length;
+      model.groupHistory("Column settings undone", settingsSave);
+      assert.deepEqual(sent.filter((c) => c.op === "updateColumns"), ungrouped, "the same requests, in the same order");
+      assert.equal(model.history.length, start + 1, "one Undo entry");
+      const now = () => plain(model.board.columns.find((c) => c.key === "remarks"));
+      assert.deepEqual([now().label, now().description, now().defaultValue, now().required], ["Remarks", "Anything worth knowing", "None yet", true]);
+      assert.equal(model.undo(), "Column settings undone");
+      assert.deepEqual([now().label, now().description, now().defaultValue, now().required], ["Notes", undefined, "", false], "one Undo restores the name, description, default value and required together");
+      assert.equal(model.history.length, start);
+      model.redo();
+      assert.deepEqual([now().label, now().defaultValue], ["Remarks", "None yet"], "and one Redo brings both back");
+      model.undo();
+      // Outside a group, snapshots are recorded as before; a nested group joins the outer one.
+      model.groupHistory("Outer", () => model.groupHistory("Inner", settingsSave));
+      assert.equal(model.history.length, start + 1); assert.equal(model.history.at(-1).label, "Outer");
+      model.undo();
+      model.renameColumn("remarks", "Again");
+      assert.equal(model.history.at(-1).label, "Column rename undone");
+      model.undo();
+    } finally {
+      model.save = save;
+      model.board.columns = model.board.columns.filter((c) => c.key !== "remarks");
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  });
 });
 
 describe("Dates don't shift with the time zone", () => {
