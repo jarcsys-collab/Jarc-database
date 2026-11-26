@@ -114,7 +114,8 @@ class UserRepository {
     if (!user?._id) return;
     if (present === true) { await this.collection.updateOne({ _id: user._id }, { $set: { adminRoleSeenAt: now } }); return; }
     const seen = user.adminRoleSeenAt instanceof Date, cleared = user.adminRoleClearedAt instanceof Date;
-    if (seen && !(cleared && user.adminRoleClearedAt >= user.adminRoleSeenAt)) {
+    // Same rule as accounts.adminRoleHeld (held unless cleared is strictly later), so equal timestamps can't lock the role in.
+    if (seen && !(cleared && user.adminRoleClearedAt > user.adminRoleSeenAt)) {
       await this.collection.updateOne({ _id: user._id, adminRoleSeenAt: user.adminRoleSeenAt }, { $set: { adminRoleClearedAt: now } });
     } else if (!seen && !cleared) {
       await this.collection.updateOne({ _id: user._id, adminRoleSeenAt: { $exists: false }, adminRoleClearedAt: { $exists: false } }, { $set: { adminRoleClearedAt: now } });

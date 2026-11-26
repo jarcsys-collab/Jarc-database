@@ -81,10 +81,10 @@ describe("D-H2: P3 never suspends or revokes a recognised JARC administrator", (
     const me = await w.register(0);
     await w.register(3, { adminRoleClearedAt: undefined });
     for (const run of [() => w.suspend(3, w.actorOf(me)), () => w.revoke(3, w.actorOf(me, { isSystemAdmin: true }))]) {
-      await assert.rejects(run(), (e) => code("ADMIN_STATUS_UNKNOWN")(e) && e.details.basis === "unknown" && /sign in to JARC once/.test(e.message) && /disable them in Microsoft Entra ID/.test(e.message));
+      await assert.rejects(run(), (e) => code("ADMIN_STATUS_UNKNOWN")(e) && e.details.basis === "unknown" && /one JARC sign-in/.test(e.message) && /Disabling them in Microsoft Entra ID/.test(e.message) && /API administrator/.test(e.message));
     }
     const view = await w.manage(3, w.actorOf(me));
-    for (const a of ["suspend", "revoke"]) { const x = view.actions.find((y) => y.action === a); assert.equal(x.code, "ADMIN_STATUS_UNKNOWN"); assert.match(x.reason, /sign in to JARC once/); }
+    for (const a of ["suspend", "revoke"]) { const x = view.actions.find((y) => y.action === a); assert.equal(x.code, "ADMIN_STATUS_UNKNOWN"); assert.match(x.reason, /one JARC sign-in/); }
     assert.ok(view.warnings.some((x) => x.code === "ADMIN_STATUS_UNKNOWN"));
     assert.equal(view.account.jarcAdministrator, "unknown");
     assert.equal(await w.statusOf(3), "active");
