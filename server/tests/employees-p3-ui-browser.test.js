@@ -294,7 +294,7 @@ describe("People directory P3 Manage access in the real app (headless browser)",
     // P4-0 (D-H2, fail closed): nobody has seen this person sign in, so whether they are a JARC administrator is unknown and Suspend
     // is refused with the reason; the row says "unknown".
     assert.match(await visibleText(), /JARC administrator\s+JARC administrator role unknown/, await visibleText());
-    assert.match(await visibleText(), /sign in to JARC once/);
+    assert.match(await visibleText(), /one JARC sign-in lets JARC see their role/);
     // Their first sign-in (without the JARC.Admin role) records the observation (routes/auth.js recordAdminRole); simulated here.
     await realDb.collection("users").updateOne({ provisionedAt: { $exists: true }, adminRoleClearedAt: { $exists: false } }, { $set: { adminRoleClearedAt: new Date() } });
     await openManage(2);

@@ -61,6 +61,18 @@ const SENSITIVE_ADMIN_WRITES = Object.freeze([
   // /imports: the spreadsheet import jobs (/imports/:id/…, /workspaces/:id/imports) aren't administrator writes.
   new RegExp(`${API_PREFIX}/imports/?$`, "i")
 ]);
+// P4-0 O5: End sessions needs a RECENT SIGN-IN for every session (with or without the JARC.Admin claim) in every account mode: the
+// session's authentication time (createdAt, set by the sign-in that created it) must be within the admin re-auth age.
+const RECENT_SIGN_IN_WRITES = Object.freeze([new RegExp(`${API_PREFIX}/admin/employees/[^/]+/records/[^/]+/end-sessions/?$`, "i")]);
+function recentSignInRequest(req) {
+  if (!UNSAFE_METHODS.has(req.method)) return false;
+  const path = `${req.baseUrl || ""}${req.path || ""}`;
+  return RECENT_SIGN_IN_WRITES.some((re) => re.test(path));
+}
+function signedInWithin(session, maxAgeMs, now) {
+  const at = session?.createdAt;
+  return at instanceof Date && !Number.isNaN(at.getTime()) && now.getTime() - at.getTime() < maxAgeMs;
+}
 function sensitiveAdminRequest(req, accountMode = "off") {
   if (!UNSAFE_METHODS.has(req.method)) return false;
   const path = `${req.baseUrl || ""}${req.path || ""}`;
@@ -159,6 +171,10 @@ function sessionAuthentication({ sessions, users, entra, accountMode = "off" }) 
     if (freshUntil && freshUntil <= now && sensitiveAdminRequest(req, accountMode)) {
       return sendError(res, 403, "REAUTH_REQUIRED", "For this administrator action, sign in to JARC again. Your administrator sign-in is too old.");
     }
+    // P4-0 O5: End sessions → a sign-in within the re-auth age, whatever the claim or account mode.
+    if (recentSignInRequest(req) && !signedInWithin(session, reauthMs, now)) {
+      return sendError(res, 403, "REAUTH_REQUIRED", "For this administrator action, sign in to JARC again. Your sign-in is too old.");
+    }
     req.adminFreshUntil = freshUntil;
     // account: null while ACCOUNT_MANAGEMENT=off. hasAdminAppRole: the JARC.Admin app role was in the sign-in token.
     // tenantId / entraObjectId: the identity verified at sign-in, checked against the stored user just above.
@@ -199,4 +215,4 @@ function stillAllowed({ sessions, users, accountMode = "off", now = () => new Da
   };
 }
 
-module.exports = { stillSystemAdmin, stillAllowed, PENDING_ALLOWED, ADMIN_REAUTH_MINUTES, sensitiveAdminRequest, adminReauthMs, adminFreshUntil, sessionAuthentication, readCookie, cookieHeader, clearCookie, csrfTokenFor, originAllowed, randomSecret, SESSION_COOKIE, SIGN_IN_COOKIE, UNSAFE_METHODS };
+module.exports = { stillSystemAdmin, stillAllowed, PENDING_ALLOWED, ADMIN_REAUTH_MINUTES, sensitiveAdminRequest, recentSignInRequest, signedInWithin, adminReauthMs, adminFreshUntil, sessionAuthentication, readCookie, cookieHeader, clearCookie, csrfTokenFor, originAllowed, randomSecret, SESSION_COOKIE, SIGN_IN_COOKIE, UNSAFE_METHODS };

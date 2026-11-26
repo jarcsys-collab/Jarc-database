@@ -181,6 +181,38 @@ describe("O5 End sessions (service)", () => {
   });
 });
 
+// ---- The recent sign-in rule (auth/session.js middleware), in every account mode, with and without the claim
+describe("O5 End sessions: recent sign-in in every account mode", () => {
+  const { sessionAuthentication, csrfTokenFor, recentSignInRequest } = require("../src/auth/session");
+  const SECRET = "SyntheticSessionSecretValue0000000000001";
+  const entra = { tenantId: "t", appOrigin: "https://jarc.example.test", sessionIdleMinutes: 30 };
+  const run = async ({ accountMode, isSystemAdmin, ageMin, path: p }) => {
+    const now = Date.now();
+    const user = { _id: "u1", status: "active", tenantId: "t", entraObjectId: "o", account: { status: "active", role: "SUPER_ADMIN", version: 1 } };
+    const session = { _id: "s1", userId: "u1", tenantId: "t", objectId: "o", isSystemAdmin, createdAt: new Date(now - ageMin * 60000), lastSeenAt: new Date(now), idleExpiresAt: new Date(now + 3600000), expiresAt: new Date(now + 7200000) };
+    const mw = sessionAuthentication({ sessions: { findBySecret: async () => session, touch: async () => {}, remove: async () => {} }, users: { findById: async () => user }, entra, accountMode });
+    const headers = { cookie: `__Host-jarc_session=${SECRET}`, origin: entra.appOrigin, "x-csrf-token": csrfTokenFor(SECRET) };
+    const req = { method: "POST", baseUrl: "/api/v1/admin/employees", path: p, get: (h) => headers[h.toLowerCase()] };
+    let out = null, passed = false;
+    const res = { locals: {}, append() {}, status(s) { out = { status: s }; return this; }, set() { return this; }, json(b) { out.body = b; return this; } };
+    await mw(req, res, () => { passed = true; });
+    return passed ? "next" : `${out.status} ${out.body.error.code}`;
+  };
+  const END = "/all/records/SyntheticProfileId0001/end-sessions";
+  test("stale sign-in (61 min): REAUTH_REQUIRED for End sessions in off / staged / enforced, claim or not; fresh (5 min): passes", async () => {
+    for (const accountMode of ["off", "staged", "enforced"]) for (const isSystemAdmin of [false, true]) {
+      assert.equal(await run({ accountMode, isSystemAdmin, ageMin: 61, path: END }), "403 REAUTH_REQUIRED", `${accountMode} claim=${isSystemAdmin}`);
+      assert.equal(await run({ accountMode, isSystemAdmin, ageMin: 5, path: END }), "next", `${accountMode} claim=${isSystemAdmin} fresh`);
+    }
+  });
+  test("the other P3 routes keep their rule: a stale session without the claim passes; under enforced even with the claim", async () => {
+    for (const accountMode of ["off", "staged", "enforced"]) assert.equal(await run({ accountMode, isSystemAdmin: false, ageMin: 61, path: "/all/records/SyntheticProfileId0001/access" }), "next", accountMode);
+    assert.equal(await run({ accountMode: "enforced", isSystemAdmin: true, ageMin: 61, path: "/all/records/SyntheticProfileId0001/memberships" }), "next");
+    assert.equal(await run({ accountMode: "staged", isSystemAdmin: true, ageMin: 61, path: "/all/records/SyntheticProfileId0001/access" }), "403 REAUTH_REQUIRED", "unchanged claim rule");
+    assert.equal(recentSignInRequest({ method: "GET", baseUrl: "/api/v1/admin/employees", path: END }), false, "reads never");
+  });
+});
+
 // ---- Through the real app
 const BASE = "/api/v1/admin/employees";
 const KEYS = ["owner", "admin2", "boss", "viewer", "outsider", "alice", "bob", "carol", "dana"];
@@ -255,6 +287,23 @@ describe("O5 End sessions (real app)", () => {
     const ok = await again.request("POST", path("carol"), { reason: REASON });
     assert.equal(ok.status, 200, JSON.stringify(ok.body)); assert.ok(ok.body.result.sessionsEnded >= 1);
     assert.equal(await liveCount("carol"), 0);
+  });
+
+  test("a recent sign-in is required for EVERY session: an Employee Management admin WITHOUT the claim, signed in over 60 minutes ago, is refused; after a new sign-in, allowed", async () => {
+    assert.ok(await clientOf(app, "bob", true));
+    const owner = await clientOf(app, "owner");
+    const ownerUser = await userOf("owner");
+    const own = await app.db.collection("sessions").find({ userId: ownerUser._id }).toArray();
+    assert.ok(own.length && own.every((s) => s.isSystemAdmin === false), "the owner's session carries no JARC.Admin claim");
+    for (const s of own) await app.db.collection("sessions").updateOne({ _id: s._id }, { $set: { createdAt: new Date(Date.now() - 61 * 60 * 1000) } });
+    const stale = await owner.request("POST", path("bob"), { reason: REASON });
+    assert.equal(stale.status, 403); assert.equal(stale.body.error.code, "REAUTH_REQUIRED");
+    assert.ok(await liveCount("bob") >= 1, "nothing ended");
+    // The other P3 routes keep their rule (no claim → not gated): the same stale session still reads Manage access.
+    assert.equal((await owner.request("GET", `${BASE}/all/records/${idOf("bob")}/manage-access`)).status, 200);
+    const fresh = await clientOf(app, "owner", true);
+    const ok = await fresh.request("POST", path("bob"), { reason: REASON });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body)); assert.ok(ok.body.result.sessionsEnded >= 1);
   });
 
   test("sessions gone and the live stream closed at once (session-ended); the person's cookie no longer works; status unchanged", async () => {
