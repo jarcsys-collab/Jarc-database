@@ -29,7 +29,7 @@ const express = require("express");
 const { allowOnly, parseId, queryString, fail, isSafeKey } = require("../validation/common");
 const { groupColumnOf } = require("../domain/board-schema");
 const { ApiError, sendError, apiNotFound } = require("../middleware/errors");
-const { hex, iso } = require("../api/serialize");
+const { hex, iso, connectRestrictions } = require("../api/serialize");
 const { LOOKS_LIKE_TOKEN } = require("../auth/api-token");
 // The token's workspaces: its workspaceIds when it covers several, else its one workspaceId (services/api-token-service.js).
 const workspacesOf = (doc) => (Array.isArray(doc.workspaceIds) && doc.workspaceIds.length ? doc.workspaceIds : [doc.workspaceId]).filter(Boolean);
@@ -69,12 +69,19 @@ function cellValue(doc, column, board) {
   if (column.key === groupColumnOf(board.columns)?.key) return board.groups.find((g) => g.id === doc.groupId)?.name ?? null;
   return Object.hasOwn(doc.values || {}, column.key) ? doc.values[column.key] ?? null : null;
 }
-const cellToExternal = (doc, column, board) => ({ boardId: hex(board._id), columnId: column.key, columnName: column.label, columnType: column.type, recordId: hex(doc._id), value: cellValue(doc, column, board), updatedAt: iso(doc.updatedAt) });
+// restricted: keys of Connect columns whose linked board this token can't read (D-S0-5; restrictedFor in the routes). A Connect
+// cell holds record IDs of another board: they are returned only when that board is in the token's boards AND in one of its
+// workspaces that the owner can read now. Otherwise the cell is null and named in `restricted`, with no IDs and no count.
+// Link / Email / Phone values are returned exactly as stored (the contract): this API derives no URL or href from them, and new
+// writes are checked (validation/record-values.js).
+const cellToExternal = (doc, column, board, restricted = null) => ({ boardId: hex(board._id), columnId: column.key, columnName: column.label, columnType: column.type, recordId: hex(doc._id), value: restricted?.has(column.key) ? null : cellValue(doc, column, board), ...(restricted?.has(column.key) ? { restricted: true } : {}), updatedAt: iso(doc.updatedAt) });
 // Every requested column is present, so each row of a table has the same shape.
-function recordToExternal(doc, board, columns) {
-  const values = {};
-  for (const column of columns) values[column.key] = cellValue(doc, column, board);
-  return { id: hex(doc._id), workspaceId: hex(doc.workspaceId), boardId: hex(doc.boardId), groupId: doc.groupId ?? null, position: doc.position, archived: Boolean(doc.archived), values, createdAt: iso(doc.createdAt), updatedAt: iso(doc.updatedAt), version: doc.version };
+function recordToExternal(doc, board, columns, restricted = null) {
+  const values = {}, hidden = [];
+  for (const column of columns) {
+    if (restricted?.has(column.key)) { values[column.key] = null; hidden.push(column.key); } else values[column.key] = cellValue(doc, column, board);
+  }
+  return { id: hex(doc._id), workspaceId: hex(doc.workspaceId), boardId: hex(doc.boardId), groupId: doc.groupId ?? null, position: doc.position, archived: Boolean(doc.archived), values, ...(hidden.length ? { restricted: hidden } : {}), createdAt: iso(doc.createdAt), updatedAt: iso(doc.updatedAt), version: doc.version };
 }
 
 // ---- Record pages. Two fixed orders, neither of which changes when other rows are added, edited, moved or removed:
@@ -220,6 +227,21 @@ function externalApiRoutes({ tokens, repos, environment = "development", rate = 
     return board;
   };
   const boardParam = (req) => parseId(req.params.boardId, "boardId");
+  // Connect columns of `board` whose linked board this token can't read (api/serialize.js connectRestrictions); each linked
+  // board is looked up once per request.
+  const restrictedFor = (req, board) => {
+    const seen = req.apiToken.linkedBoards || (req.apiToken.linkedBoards = new Map());
+    return connectRestrictions(board, async (id) => {
+      if (!seen.has(id)) {
+        seen.set(id, (async () => {
+          if (!/^[0-9a-f]{24}$/i.test(id) || !req.apiToken.boardIds.has(id.toLowerCase())) return false;
+          const target = await repos.boards.findById(parseId(id, "boardId"));
+          return Boolean(target && req.apiToken.workspaceIds.has(hex(target.workspaceId)));
+        })());
+      }
+      return seen.get(id);
+    });
+  };
 
   // workspaceId stays the token's first (or only) workspace, as before; workspaceIds lists every workspace it was issued for.
   router.get("/me", async (req, res) => {
@@ -283,7 +305,8 @@ function externalApiRoutes({ tokens, repos, environment = "development", rate = 
     const board = await scopedBoard(req, boardParam(req));
     const column = columnParam(req, board);
     const { items, pagination } = await pageOf(board, parseRecordQuery(req.query, board), [column]);
-    send(res, { items: items.map((r) => cellToExternal(r, column, board)), pagination });
+    const restricted = await restrictedFor(req, board);
+    send(res, { items: items.map((r) => cellToExternal(r, column, board, restricted)), pagination });
   });
 
   router.get("/boards/:boardId/records", async (req, res) => {
@@ -291,7 +314,8 @@ function externalApiRoutes({ tokens, repos, environment = "development", rate = 
     const query = parseRecordQuery(req.query, board, ["columns"]);
     const columns = parseColumns(req.query.columns, board) || board.columns;
     const { items, pagination } = await pageOf(board, query, columns);
-    send(res, { items: items.map((r) => recordToExternal(r, board, columns)), pagination });
+    const restricted = await restrictedFor(req, board);
+    send(res, { items: items.map((r) => recordToExternal(r, board, columns, restricted)), pagination });
   });
   router.get("/boards/:boardId/records/:recordId/columns/:columnId", async (req, res) => {
     const board = await scopedBoard(req, boardParam(req));
@@ -300,7 +324,7 @@ function externalApiRoutes({ tokens, repos, environment = "development", rate = 
     const column = columnParam(req, board);
     const record = await repos.records.findById(recordId);
     if (!record || !record.boardId.equals(board._id) || (record.archived && !wantsArchived(req))) throw missing("record");
-    send(res, { value: cellToExternal(record, column, board) });
+    send(res, { value: cellToExternal(record, column, board, await restrictedFor(req, board)) });
   });
 
   router.get("/records/:recordId", async (req, res) => {
@@ -309,11 +333,11 @@ function externalApiRoutes({ tokens, repos, environment = "development", rate = 
     const record = await repos.records.findById(id);
     if (!record || (record.archived && !wantsArchived(req)) || !req.apiToken.boardIds.has(hex(record.boardId)) || !req.apiToken.workspaceIds.has(hex(record.workspaceId))) throw missing("record");
     const board = await scopedBoard(req, record.boardId).catch((error) => { throw error instanceof ApiError && error.status === 404 ? missing("record") : error; });
-    send(res, { record: recordToExternal(record, board, board.columns) });
+    send(res, { record: recordToExternal(record, board, board.columns, await restrictedFor(req, board)) });
   });
 
   router.use(apiNotFound);
   return router;
 }
 
-module.exports = { externalApiRoutes, windowLimiter, readOnlyGuard, verifiedToken, withinTokenLimit, bearerToken, clientKey, FAILED_AUTH, columnsOf, groupsOf, boardSummary, cellToExternal, parseColumns, projectionFor, recordToExternal, PAGE, RATE, QUERY_TIME_MS };
+module.exports = { externalApiRoutes, windowLimiter, readOnlyGuard, verifiedToken, withinTokenLimit, bearerToken, clientKey, FAILED_AUTH, columnsOf, groupsOf, boardSummary, cellToExternal, parseColumns, projectionFor, recordToExternal, connectRestrictions, PAGE, RATE, QUERY_TIME_MS };

@@ -110,13 +110,21 @@ describe("Schema changes that rewrite records", () => {
     assert.ok((await records(board.id)).every((r) => r.groupId === null), "deleting the group column clears record groups");
   });
 
-  test("change type: the app's conversion rules; dry run reports values that would be cleared", async () => {
-    const { board } = await setup("Type");
+  test("change type: lossy changes are refused with counts (S0-A); lossless ones keep the app's rules", async () => {
+    const { board, records: [, b] } = await setup("Type");
     const dry = await call("POST", `/api/v1/boards/${board.id}/columns/qty/type?dryRun=true`, { expectedVersion: 1, type: "number" });
-    assert.deepEqual(dry.body, { dryRun: true, affected: 1 });
+    assert.equal(dry.body.dryRun, true);
+    assert.equal(dry.body.affected, 1, "affected: values that don't fit (no longer cleared)");
+    assert.equal(dry.body.allowed, false);
+    const refused = await call("POST", `/api/v1/boards/${board.id}/columns/qty/type`, { expectedVersion: 1, type: "number" });
+    assert.equal(refused.status, 400);
+    assert.equal(refused.body.error.code, "CONVERSION_REFUSED");
+    assert.deepEqual(Object.values(bySerial(await records(board.id))).map((r) => r.values.qty), ["12", "abc", ""], "nothing was cleared");
+    assert.equal((await call("PATCH", `/api/v1/records/${b.id}`, { expectedVersion: 1, values: { qty: "7" } })).status, 200);
     const res = await call("POST", `/api/v1/boards/${board.id}/columns/qty/type`, { expectedVersion: 1, type: "number" });
-    assert.equal(res.body.affected, 1);
-    assert.deepEqual(Object.values(bySerial(await records(board.id))).map((r) => r.values.qty), ["12", "", ""]);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.affected, 0);
+    assert.deepEqual(Object.values(bySerial(await records(board.id))).map((r) => r.values.qty), ["12", "7", ""]);
     await call("POST", `/api/v1/boards/${board.id}/columns/status/type`, { expectedVersion: 2, type: "dropdown" });
     const status = (await call("GET", `/api/v1/boards/${board.id}`)).body.board.columns.find((c) => c.key === "status");
     assert.deepEqual(status.options, ["New", "In Progress", "Done"], "a dropdown keeps existing values selectable");

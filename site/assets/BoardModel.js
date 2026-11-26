@@ -200,7 +200,7 @@ class BoardModel {
     if (stale) { this.failure = null; this.saveState = this.pendingSaves ? "saving" : "saved"; this.saveError = ""; }
     else { this.saveState = "error"; this.saveError = result.code; }
     window.dispatchEvent(new CustomEvent("jarc-save", {detail:this.saveState}));
-    window.dispatchEvent(new CustomEvent("jarc-rollback", {detail:{ code: result.code, op: change.op, refreshed: Boolean(stale) }}));
+    window.dispatchEvent(new CustomEvent("jarc-rollback", {detail:{ code: result.code, op: change.op, refreshed: Boolean(stale), columnKey: change.columnKey || null, ...(result.details ? { details: result.details } : {}) }}));
   }
 
   // Applies what the server reported after a save (resource mode): temporary IDs replaced by server IDs, and, after
@@ -544,7 +544,7 @@ class BoardModel {
     if (!this.pendingSaves && !this.failure) { this.saveState = "saved"; this.saveError = ""; window.dispatchEvent(new CustomEvent("jarc-save", {detail:"saved"})); }
     if (outcome.ok) return { ok: true, result };
     // CANCELLED: an earlier optimistic save failed first; report that failure's reason.
-    return { ok: false, result, code: outcome.code === StorageError.CODES.CANCELLED ? (this.saveError || outcome.code) : outcome.code };
+    return { ok: false, result, code: outcome.code === StorageError.CODES.CANCELLED ? (this.saveError || outcome.code) : outcome.code, ...(outcome.details ? { details: outcome.details } : {}) };
   }
 
   normalizeBoards() {

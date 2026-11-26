@@ -812,6 +812,43 @@ class ResourceApiAdapter {
     this.boards.set(boardId, this.boardFrom(board));
     return this.boards.get(boardId);
   }
+  // Change type, checked first on the server (?dryRun=true): counts for EVERY record of the board, not only the loaded
+  // rows. Nothing changes. Resolves { refused, legacy, affected, ...StorageError.conversionDetails }; a server that
+  // answers the check itself with CONVERSION_REFUSED gives refused:true with its counts. Other failures reject.
+  async previewColumnType(boardId, key, type, { multiple = false } = {}) {
+    const id = this.resolve(boardId), s = this.boards.get(id);
+    if (!s) throw new StorageError(StorageError.CODES.NOT_FOUND, "This board no longer exists. Reload to see the latest data.");
+    let body;
+    try { body = await this.request("POST", `/boards/${id}/columns/${encodeURIComponent(key)}/type?dryRun=true`, { expectedVersion: s.version, type, multiple: Boolean(multiple) }); }
+    catch (error) {
+      if (error instanceof StorageError && error.code === StorageError.CODES.CONVERSION_REFUSED) return { refused: true, legacy: false, affected: null, ...(error.details || StorageError.conversionDetails(null)) };
+      throw error;
+    }
+    // The dry run's previewToken goes with the real change, so the server refuses it (PREVIEW_STALE) if the column's
+    // values changed after this check. Only sent when the server gave one (an older server would refuse the field).
+    const token = typeof body?.previewToken === "string" && /^[0-9a-f]{32}$/.test(body.previewToken) ? body.previewToken : null;
+    const tokenKey = `${id}|${key}|${type}|${Boolean(multiple)}`;
+    this.previewTokens ??= new Map();
+    if (token) this.previewTokens.set(tokenKey, { token, at: Date.now() }); else this.previewTokens.delete(tokenKey);
+    return ResourceApiAdapter.conversionImpact(body);
+  }
+  // The token of a recent dry run for this exact change (used once).
+  takePreviewToken(boardId, key, type, multiple) {
+    const tokenKey = `${boardId}|${key}|${type}|${Boolean(multiple)}`, entry = this.previewTokens?.get(tokenKey);
+    this.previewTokens?.delete(tokenKey);
+    return entry && Date.now() - entry.at < 10 * 60 * 1000 ? entry.token : null;
+  }
+  // A dry-run answer → one shape. The full contract has total / populated / convertible / incompatible / lossy; an older
+  // server answers only { affected } (values it would clear): `legacy` then keeps today's confirm, with that whole-board count.
+  static conversionImpact(body) {
+    const src = body && typeof body === "object" ? (body.impact && typeof body.impact === "object" ? body.impact : body.details && typeof body.details === "object" ? body.details : body) : {};
+    const details = StorageError.conversionDetails(src);
+    const full = ["total", "populated", "convertible", "incompatible"].some((k) => Number.isFinite(Number(src[k])) && src[k] !== null && src[k] !== "");
+    const affected = Number.isFinite(Number(src.affected ?? body?.affected)) ? Math.max(0, Math.floor(Number(src.affected ?? body?.affected))) : null;
+    const explicit = [src.refused, src.wouldRefuse, body?.refused, body?.wouldRefuse].some((v) => v === true) || src.allowed === false || body?.allowed === false;
+    const refused = explicit || Boolean(details.reason) || (full && (details.incompatible > 0 || details.lossyTotal > 0));
+    return { ...details, refused, legacy: !full && !explicit && !details.reason, affected };
+  }
   // Column and group changes that rewrite records go to their own endpoints (one server transaction each).
   async schemaCall(method, boardId, path, body) {
     const s = this.boards.get(boardId);
@@ -848,7 +885,11 @@ class ResourceApiAdapter {
     for (const column of targetColumns) {
       const current = this.boards.get(id).columns.find((c) => c.key === column.key);
       const modeChange = current && current.type === "dropdown" && column.type === "dropdown" && Boolean(current.multiple) !== Boolean(column.multiple);
-      if (current && (current.type !== column.type || modeChange)) { await this.schemaCall("POST", id, `/columns/${encodeURIComponent(column.key)}/type`, { type: column.type, multiple: Boolean(column.multiple) }); rewrote = true; }
+      if (current && (current.type !== column.type || modeChange)) {
+        const previewToken = this.takePreviewToken(id, column.key, column.type, Boolean(column.multiple));
+        await this.schemaCall("POST", id, `/columns/${encodeURIComponent(column.key)}/type`, { type: column.type, multiple: Boolean(column.multiple), ...(previewToken ? { previewToken } : {}) });
+        rewrote = true;
+      }
     }
     // 3. Options renamed or removed → server rewrites the values that used them.
     for (const column of targetColumns) {

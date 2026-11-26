@@ -1,5 +1,6 @@
 // API representation of stored documents. One rule everywhere: responses carry `id` (a string), never `_id`;
 // references are ID strings; dates are ISO 8601 strings. Internal fields (importId, devKey) are not returned.
+const { unsafeValueKeys } = require("../validation/record-values");
 const hex = (id) => (id ? id.toHexString() : null);
 const iso = (date) => (date instanceof Date ? date.toISOString() : null);
 const withLegacy = (doc, result) => (doc.legacyId === undefined ? result : { ...result, legacyId: doc.legacyId });
@@ -37,12 +38,33 @@ function boardToApi(doc, { personal = null } = {}) {
   });
 }
 
-function recordToApi(doc) {
+// options (optional, so `.map(recordToApi)` is unchanged; a number there is the array index and is ignored):
+//   board       the record's board: Link / Email / Phone cells that new writes would refuse (validation/record-values.js) are
+//               listed in `unsafeValues` (keys only). Their values are returned unchanged and are never rewritten.
+//   restricted  a Set of Connect column keys whose linked board the reader can't view (connectRestrictions): those cells are
+//               left out of `values` and listed in `restricted`, with no IDs and no count.
+function recordToApi(doc, options) {
+  const { board = null, restricted = null } = options !== null && typeof options === "object" ? options : {};
+  const values = { ...doc.values };
+  const hidden = restricted?.size ? Object.keys(values).filter((k) => restricted.has(k)) : [];
+  for (const key of hidden) delete values[key];
+  const unsafe = board ? unsafeValueKeys(board, values) : [];
   return withLegacy(doc, {
-    id: hex(doc._id), workspaceId: hex(doc.workspaceId), boardId: hex(doc.boardId), values: { ...doc.values }, groupId: doc.groupId ?? null,
+    id: hex(doc._id), workspaceId: hex(doc.workspaceId), boardId: hex(doc.boardId), values, groupId: doc.groupId ?? null,
     position: doc.position, archived: doc.archived, pinned: doc.pinned, createdBy: hex(doc.createdBy), updatedBy: hex(doc.updatedBy),
-    createdAt: iso(doc.createdAt), updatedAt: iso(doc.updatedAt), version: doc.version
+    createdAt: iso(doc.createdAt), updatedAt: iso(doc.updatedAt), version: doc.version,
+    ...(unsafe.length ? { unsafeValues: unsafe } : {}), ...(hidden.length ? { restricted: hidden } : {})
   });
+}
+// The Connect columns of `board` whose linked board fails canView(boardIdHex) → Promise<boolean>, each linked board asked once.
+async function connectRestrictions(board, canView) {
+  const answers = new Map(), restricted = new Set();
+  for (const column of (board?.columns || []).filter((c) => c.type === "connect")) {
+    const id = String(column.link?.boardId || "");
+    if (!answers.has(id)) answers.set(id, id ? Promise.resolve(canView(id)).catch(() => false) : Promise.resolve(false));
+    if (!await answers.get(id)) restricted.add(column.key);
+  }
+  return restricted;
 }
 
 // Activity entries (read-only). ObjectIds inside changes become strings; imported entries keep the old author text.
@@ -77,4 +99,4 @@ function attachmentToApi(doc) {
   };
 }
 
-module.exports = { workspaceToApi, boardToApi, recordToApi, activityToApi, memberToApi, userToApi, attachmentToApi, hex, iso };
+module.exports = { workspaceToApi, boardToApi, recordToApi, connectRestrictions, activityToApi, memberToApi, userToApi, attachmentToApi, hex, iso };

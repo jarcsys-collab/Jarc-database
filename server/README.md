@@ -204,7 +204,7 @@ imports data. Not a member → 404; not allowed → 403. Every check uses the st
 | POST | `/api/v1/boards/:boardId/records/delete` | `{ records: [{ id, expectedVersion }] }` — multi-delete; already-deleted records are skipped |
 | POST | `/api/v1/boards/:boardId/columns` | Add a column (`index`, `copyFrom` to duplicate); existing records are filled in the same transaction |
 | DELETE | `/api/v1/boards/:boardId/columns/:key` | Delete a column and its values (`?expectedVersion=&dryRun=`) |
-| POST | `/api/v1/boards/:boardId/columns/:key/type` | Change type; values converted with the app's rules (`?dryRun=true` → `{ affected }`) |
+| POST | `/api/v1/boards/:boardId/columns/:key/type` | Change type `{ expectedVersion, type, multiple?, previewToken? }`; only when lossless on every record, else `400 CONVERSION_REFUSED` (see below; `?dryRun=true` → `{ dryRun, affected, ...counts, previewToken }`) |
 | PUT | `/api/v1/boards/:boardId/columns/:key/options` | Rename/remove options; values that used them are rewritten (`?dryRun=true`) |
 | DELETE | `/api/v1/boards/:boardId/groups/:groupId` | Delete a group, moving its records (`?expectedVersion=&moveTo=<groupId>|none`) |
 | POST | `/api/v1/boards/:boardId/move` | Move a board (and its records) to another workspace |
@@ -213,6 +213,28 @@ imports data. Not a member → 404; not allowed → 403. Every check uses the st
 
 Labels, column order, visibility, widths, adding/renaming groups and saved views use `PATCH /api/v1/boards/:boardId`.
 Board lists include `recordCount` (active records).
+
+**Column type changes** (`src/domain/column-conversion.js`, `BoardSchemaService.changeType`). A change is made only when it
+is lossless on **every** record of the board (one column of every record is read; never loaded rows or a sample), and it is
+checked again inside the transaction that writes. Otherwise nothing is written and the answer is `400 CONVERSION_REFUSED`
+(`409` with `reason: "PREVIEW_STALE"`), whose message ends with **"Your data has not been changed."** and whose `details` are
+`{ from, to, total, populated, convertible, incompatible, lossy, examples, reason, allowed: false, tooLarge, rewrites, limits }`:
+- `reason`: `INCOMPATIBLE_VALUES`, `PEOPLE_REFERENCES` (People columns with values can't change type), `TOO_MANY_OPTIONS`
+  (a Dropdown would need more than its option limit), `BOARD_TOO_LARGE` or `PREVIEW_STALE`.
+- `lossy` counts values by cause: `truncatedMulti` (several entries → one; several-value Dropdown → one value, Status, Text…),
+  `leadingZero` (`00123` → number), `longNumber` (more than 15 significant digits), `invalidDate`, `ambiguousDate`
+  (`03/04/2026`), `tooManyOptions` (labels over the limit), `peopleReferences`.
+- `examples`: at most 3 values that don't fit, masked (digits → 9, letters → a, at most 20 characters); never logged.
+- Strict rules: **Number** accepts `-`, digits and one `.` only (no thousands separators, spaces, `+`, exponent or leading
+  zeros, at most 15 significant digits); **Date** accepts real `YYYY-MM-DD` dates only; **Link / Email / Phone** use the value
+  rules below; **Checkbox** accepts `true` / `yes` / `1` (ticked) and empty.
+- **BOARD_TOO_LARGE:** boards with more than **2,000** records, or more than 2,000 values to rewrite, are refused (with their
+  counts) until the resumable converter exists. Add a new column of the type you need instead.
+- **Stale preview:** the dry run returns a `previewToken` over the board version and the column's values; sending it with the
+  change refuses it (`409 PREVIEW_STALE`) if any value changed in between. A stale `expectedVersion` is `409 CONFLICT`.
+- Refused before any value is read (`400 VALIDATION_ERROR`): the Item column, to or from Connect, Mirror, Files or Group.
+  A duplicated column (`copyFrom`) must keep the original's type and one/several setting, and a Connect column's linked
+  board (`link.boardId`) can't be changed once set.
 
 IDs are 24-character strings (`id`); dates are ISO 8601. Errors always use
 `{ "error": { "code": "...", "message": "...", "details"? } }`. Unknown `/api` paths return a JSON 404.
@@ -342,6 +364,12 @@ Reading, with `Authorization: Bearer <token>` only: `GET /api/v1/external/` + `m
 **Board and column IDs:** a board's API ID is its existing ID, and a column's is its existing `key`, unique on its board. Neither changes when something is renamed, reordered, hidden or moved, or when a column's type changes, so existing boards need no migration. IDs are identifiers, not secrets. Deleting a column records its key on the board (`retiredColumns`), and that key can't go to another column; undo may restore the same column, with the same type, within 24 hours. Columns deleted before this existed left no record, but JARC generates a random key for each new column, so they can only be reused by a direct API call that names the old key.
 
 **Record IDs:** a record's permanent ID is its existing `_id` (no migration, no second ID field). Boards on the server show it as a read-only **Record ID** column (not "Item ID", because imported and migrated boards can have their own *Item ID* business column, such as monday.com item numbers or codes like BH-112…, which stay ordinary columns). The row menu offers **Copy Record ID** and **API Information** (`GET /api/v1/external/records/:id`). It doesn't change on rename, edit, group move or reorder, and a deleted record's ID is never reused. **Moving a record to another board creates a new Record ID**: the move is a delete and a create. Sorting and exact search use the reserved key `__record_id` in `orderBy` and filters (`{ key: "__record_id", cmp: "in", values: [ids] }`); no column may use that key.
+
+**Link, Email and Phone values** (`src/validation/record-values.js`). Every new write into a column of these types is checked on the server: record create, update and batches, form submissions, spreadsheet imports into an existing board and monday.com imports. Text and every other column type are not checked. A refusal is `400 VALIDATION_ERROR` with `details: { field, reason }` and a message naming the column; the value is never repeated in the message, the details or the log.
+- **Link:** `http://` or `https://` URLs, also `mailto:` and `tel:`, or text without a scheme (`www.example.com` is stored as typed and isn't clickable until it has `https://`). Any other scheme is refused (`javascript:`, `data:`, `vbscript:`, `file:`, `blob:`, `about:`, `ftp:`, …), including when it is disguised by case, leading spaces, tabs, new lines or other control characters, HTML entities, percent-encoding or full-width letters. Control and invisible characters are refused anywhere. At most 2,048 characters.
+- **Email:** one address (`name@example.com`); a `mailto:` prefix is removed. **Phone:** digits, a leading `+`, spaces, `( ) - .` and an optional extension (`x 12`, `ext. 12`, `#12`); a `tel:` prefix is removed. Surrounding spaces are trimmed for all three.
+- **Values stored before this rule are never changed or deleted.** They read back exactly as stored (the session API also lists such cells in `unsafeValues` where a route passes the board), and the app opens only `http`, `https`, `mailto` and `tel` links. Saving one again, even unchanged, is refused: replace or clear it. Other columns of the same edit are unaffected.
+- **Token API:** values are returned exactly as stored, as before; the API builds no URL or link field from them. A **Connect** cell (record IDs of another board) is returned only when the linked board is one of the token's boards in a workspace its owner can read; otherwise the value is `null` and the record lists the column's ID (`columnId`, the column key) in `restricted` (a single cell has `restricted: true`), with no IDs and no count.
 
 Full usage, with Power BI, Power Automate, n8n, JavaScript and cURL examples, is in JARC under **Developer → Documentation** (profile menu). **Developer → Boards & Columns** lists every board's and column's API ID and address, the board and column menus have **API Information**, and the API Explorer previews responses through the person's own session (`GET /api/v1/me/api-explorer/boards/:boardId`). Tokens belong in a secure backend or approved secret store, never in public JavaScript.
 

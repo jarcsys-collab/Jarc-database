@@ -150,17 +150,34 @@ describe("Columns and notifications (real app, headless browser)", { skip: BROWS
     assert.equal((await record(ana, "L-1")).values.status, "In progress");
   });
 
-  test("one value only: a confirmation when cells hold several, then each keeps its first value", async () => {
+  test("one value only: refused while any cell holds several (nothing changed); allowed when every cell has at most one", async () => {
     await addRecord("M-1", { tags: ["South", "West"] });
     await openBoard(ana);
-    await click(ana, 'th[data-column-key="tags"] .column-menu-button'); await click(ana, '.column-menu-popover [data-action="toggle-column-multiple"]'); await sleep(250);
-    assert.match(await text(ana, "#overlay-root h2"), /Allow one value in Tags\?/);
-    await click(ana, '[data-action="confirm-column-single"]'); await saved(ana); await sleep(300);
-    assert.equal((await api(ana, "GET", `/boards/${board.id}`)).body.board.columns.find((c) => c.key === "tags").multiple, undefined);
-    assert.equal((await record(ana, "M-1")).values.tags, "South");
-    await click(ana, 'th[data-column-key="tags"] .column-menu-button'); await click(ana, '.column-menu-popover [data-action="toggle-column-multiple"]'); await saved(ana); await sleep(300);
+    await click(ana, 'th[data-column-key="tags"] .column-menu-button'); await click(ana, '.column-menu-popover [data-action="toggle-column-multiple"]');
+    // S0-A: the server's dry run over the whole board refuses the change (D-1 and M-1 hold two entries each).
+    assert.ok(await ana.waitFor("!!document.querySelector('.conversion-refused')", 6000), "refusal dialog");
+    assert.match(await text(ana, "#overlay-root h2"), /Tags.*wasn't converted/);
+    assert.match(await text(ana, ".conversion-lead"), /Your data has not been changed/);
+    assert.match(await text(ana, ".conversion-reasons"), /2 values have several entries/);
+    assert.equal(await ana.evaluate("!!document.querySelector('[data-action=confirm-column-single]')"), false, "no way to keep only the first values");
+    await click(ana, ".conversion-refused .button.primary"); await sleep(200);
     assert.equal((await api(ana, "GET", `/boards/${board.id}`)).body.board.columns.find((c) => c.key === "tags").multiple, true);
-    assert.deepEqual((await record(ana, "M-1")).values.tags, ["South"]);
+    assert.deepEqual((await record(ana, "D-1")).values.tags, ["North", "East"]);
+    assert.deepEqual((await record(ana, "M-1")).values.tags, ["South", "West"]);
+    // A several-values column whose cells hold at most one entry each: the change is made at once, nothing dropped.
+    const current = (await api(ana, "GET", `/boards/${board.id}`)).body.board;
+    const areas = { key: "areas", label: "Areas", type: "dropdown", multiple: true, options: ["North", "South"] };
+    assert.equal((await api(ana, "PATCH", `/boards/${board.id}`, { expectedVersion: current.version, columns: [...current.columns, areas] })).status, 200);
+    const m1 = await record(ana, "M-1");
+    assert.equal((await api(ana, "PATCH", `/records/${m1.id}`, { expectedVersion: m1.version, values: { areas: ["South"] } })).status, 200);
+    await openBoard(ana);
+    await click(ana, 'th[data-column-key="areas"] .column-menu-button'); await click(ana, '.column-menu-popover [data-action="toggle-column-multiple"]'); await saved(ana); await sleep(500);
+    assert.equal(await ana.evaluate("!!document.querySelector('.conversion-refused')"), false, "not refused");
+    assert.equal((await api(ana, "GET", `/boards/${board.id}`)).body.board.columns.find((c) => c.key === "areas").multiple, undefined);
+    assert.equal((await record(ana, "M-1")).values.areas, "South");
+    await click(ana, 'th[data-column-key="areas"] .column-menu-button'); await click(ana, '.column-menu-popover [data-action="toggle-column-multiple"]'); await saved(ana); await sleep(300);
+    assert.equal((await api(ana, "GET", `/boards/${board.id}`)).body.board.columns.find((c) => c.key === "areas").multiple, true);
+    assert.deepEqual((await record(ana, "M-1")).values.areas, ["South"]);
   });
 
   test("column menu: duplicate (with values), width, delete with confirmation", async () => {
@@ -187,8 +204,9 @@ describe("Columns and notifications (real app, headless browser)", { skip: BROWS
       await openBoard(b);
       assert.equal(await text(b, cell("L-1", "status")), "In progress");
       assert.equal(await text(b, cell("C-1", "due")), "Oct 5, 2026");
-      // D-1 kept its first tag when Tags was switched to one value and back (earlier test).
-      assert.deepEqual(await b.evaluate(`[...document.querySelectorAll(${JSON.stringify(cell("D-1", "tags"))} + " .pill")].map(p => p.textContent)`), ["North"]);
+      // D-1 kept both tags: switching Tags to one value was refused (earlier test). M-1's Areas went to one value and back.
+      assert.deepEqual(await b.evaluate(`[...document.querySelectorAll(${JSON.stringify(cell("D-1", "tags"))} + " .pill")].map(p => p.textContent)`), ["North", "East"]);
+      assert.deepEqual(await b.evaluate(`[...document.querySelectorAll(${JSON.stringify(cell("M-1", "areas"))} + " .pill")].map(p => p.textContent)`), ["South"]);
       assert.equal(await b.evaluate(`document.querySelector(${JSON.stringify(cell("P-1", "owner"))} + " .people-stack")?.title`), "Ana Reyes, Ben Cruz");
     }
   });

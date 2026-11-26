@@ -879,12 +879,15 @@ class AppController {
     if (action === "column-width") { const column=this.model.board.columns.find((c)=>c.key===target.dataset.key); if(column)this.view.overlay(`<form class="modal small-modal" data-action="column-width-form"><div class="modal-head"><div><div class="eyebrow">${this.view.escape(column.label)}</div><h2>Column width</h2></div>${this.view.closeButton()}</div><input type="hidden" name="key" value="${this.view.attr(column.key)}"><label>Width in pixels<input name="width" type="number" min="100" max="600" step="10" required value="${Math.round(this.view.colWidth(column))}"></label><p class="field-note">Between 100 and 600. You can also drag the edge of the column header.</p><div class="modal-actions"><button type="button" class="button secondary" data-action="close-overlay">Cancel</button><button class="button primary">Save width</button></div></form>`); return; }
     if (action === "toggle-column-multiple") {
       const column=this.model.board.columns.find((c)=>c.key===target.dataset.key); if(!column)return;
+      // With the server, several → one is checked on the whole board first (never the loaded rows).
+      if(column.multiple&&typeof this.model.storage?.adapter?.previewColumnType==="function"){this.checkSingleValue(column,target);return;}
       const crowded=column.multiple?this.model.rows.filter((r)=>this.model.valueList(r[column.key]).length>1).length:0;
       if(crowded){this.view.showConfirm(`Allow one value in ${column.label}?`,`${crowded} record${crowded===1?" has":"s have"} several values. Each will keep only its first value.`,"confirm-column-single",column.key,"Keep first values");return;}
+      this.conversionContext={column:column.label,target:column.multiple?"one value per cell":"several values per cell"};
       this.runBusy(target,()=>this.model.setColumnMultiple(column.key,!column.multiple)?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast(column.multiple?`${column.label} allows several values`:`${column.label} allows one value`);});
       return;
     }
-    if (action === "confirm-column-single") { const key=target.dataset.payload; this.runBusy(target,()=>this.model.setColumnMultiple(key,false)?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast("Each record kept its first value");}); return; }
+    if (action === "confirm-column-single") { const key=target.dataset.payload; this.conversionContext={column:this.model.board.columns.find((c)=>c.key===key)?.label||"",target:"one value per cell"}; this.runBusy(target,()=>this.model.setColumnMultiple(key,false)?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast("Each record kept its first value");}); return; }
     if (action === "move-option-row") { const row=target.closest(".option-row"), sibling=target.dataset.direction==="up"?row.previousElementSibling:row.nextElementSibling; if(sibling){ if(target.dataset.direction==="up")sibling.before(row); else sibling.after(row); target.focus(); } return; }
     if (action === "duplicate-column") { const copy=this.model.duplicateColumn(target.dataset.key); this.view.closeOverlay(); this.update(); if(copy)this.view.toast("Column duplicated"); }
     if (action === "request-delete-column") {
@@ -1255,7 +1258,7 @@ class AppController {
     if (action === "record-form" && data.id && event.target.dataset.conflicts && !event.target.dataset.conflictsSeen) { event.target.dataset.conflictsSeen="1"; this.view.formNotice(event.target, event.target.querySelector(".form-live-notice")?.innerHTML.replace("Saving will replace", "Save again to replace")||"A colleague changed this record. Save again to keep your values.","warning"); return; }
     if (action === "record-form") { const edit=Boolean(data.id); const fd=new FormData(event.target); this.model.board.columns.filter((column)=>this.model.isMultiColumn(column)&&event.target.querySelector(`[name="${CSS.escape(column.key)}"]`)).forEach((column)=>{data[column.key]=fd.getAll(column.key);}); this.model.board.columns.filter((column)=>column.type==="checkbox").forEach((column)=>{data[column.key]=Boolean(data[column.key]);});
       // Editing: send only what changed in this form, so fields a colleague updated meanwhile aren't overwritten.
-      if(edit&&event.target.dataset.initial){const initial=JSON.parse(event.target.dataset.initial),now=this.view.formValues(event.target);for(const key of Object.keys(initial))if(JSON.stringify(initial[key])===JSON.stringify(now[key]))delete data[key];} this.runBusy(event.submitter,()=>{this.model.upsert(data);},()=>{this.view.closeOverlay();this.update();this.view.toast(edit?"Record updated":"Record added");}); }
+      if(edit&&event.target.dataset.initial){const initial=JSON.parse(event.target.dataset.initial),now=this.view.formValues(event.target);for(const key of Object.keys(initial))if(JSON.stringify(initial[key])===JSON.stringify(now[key]))delete data[key];} this.validationHint=this.typedValidationHint(data); this.runBusy(event.submitter,()=>{this.model.upsert(data);},()=>{this.view.closeOverlay();this.update();this.view.toast(edit?"Record updated":"Record added");}); }
     if (action === "board-form") { this.runBusy(event.submitter,()=>{if(data.id){this.model.renameBoard(data.id,data.name);const b=this.model.workspace.boards.find(b=>b.id===data.id);b.description=data.description;this.model.save({op:"updateBoard",boardId:data.id});}else{this.model.currentWorkspaceId=data.workspace;this.model.createBoard(data.name,data.description,data.template);}},()=>{this.view.closeOverlay();this.update();this.view.toast(data.id?"Board renamed":"Board created");}); }
     if (action === "invite-form") { if(this.model.addMember(data)){this.view.closeOverlay();this.update();this.view.toast("Member added");}else this.view.showMessage("Member not added","Use a unique email address."); }
     if (action === "global-search-form") this.globalSearch(data.term);
@@ -1412,9 +1415,12 @@ class AppController {
 
   focusItem(id) { requestAnimationFrame(()=>{ const cell=this.cellButton(id,"serial"); cell?.scrollIntoView({block:"nearest",inline:"nearest"}); cell?.focus(); }); }
   loadAvatar(file) { if(!file)return; if(file.size>1024*1024){this.view.showMessage("Photo is too large","Choose an image smaller than 1 MB.");return;} const reader=new FileReader(); reader.onload=()=>{this.model.setAvatar(reader.result);this.view.showProfileSettings(this.model);this.view.toast("Profile photo updated");}; reader.onerror=()=>this.view.showMessage("Photo not loaded","The selected image could not be read."); reader.readAsDataURL(file); }
-  // A cell starting with = + - @ (or tab/carriage return) can run as a formula in Excel, Sheets or LibreOffice, so it is
-  // exported with a leading apostrophe. Plain numbers in Number columns (e.g. -5) are left as numbers.
-  csvCell(value,column=null){ let text=String(value??""); const plainNumber=column?.type==="number"&&/^-?\d+(\.\d+)?$/.test(text.trim()); if(!plainNumber&&/^[=+\-@\t\r]/.test(text))text="'"+text; return `"${text.replaceAll('"','""')}"`; }
+  // Spreadsheet formula injection. A cell starting with = + - @, a tab, a carriage return or a line feed, or the
+  // full-width ＝ ＋ － ＠, can run as a formula in Excel, Sheets or LibreOffice, so it is exported with a leading
+  // apostrophe. Only the exported file changes: stored values never do. Every cell goes through here: headers, text,
+  // option labels, People and Connect names, Mirror values. The one (narrow) exemption: a valid plain number in a
+  // Number column (-5, -0.25) stays a number, so negative amounts still add up; "-5 kg" or "-1+2" there is prefixed.
+  csvCell(value,column=null){ let text=String(value??""); const plainNumber=column?.type==="number"&&/^-?\d+(\.\d+)?$/.test(text.trim()); if(!plainNumber&&/^[=+\-@\t\r\n＝＋－＠]/.test(text))text="'"+text; return `"${text.replaceAll('"','""')}"`; }
   // Exports are async-shaped so a future server-generated export can replace them without changing callers.
   csvHeader(){return this.model.board.columns.map((field)=>this.csvCell(field.label)).join(",");}
   csvLine(row){return this.model.board.columns.map((field)=>this.csvCell(this.model.isMultiColumn(field)?this.model.valueText(field,row[field.key]):row[field.key],field)).join(",");}
@@ -1571,9 +1577,24 @@ class AppController {
   // and offer a single user-triggered Retry when it can help. Busy (pessimistic) operations report in their dialog.
   onRollback(detail){
     if(this.busy||!this.ready)return;
+    // A column change the server refused (PATCH columns, Undo of a type change…): nothing was changed and retrying
+    // can't help, so the failed attempt is dropped and the same refusal dialog as Change type explains why.
+    if(detail?.code===StorageError.CODES.CONVERSION_REFUSED){
+      this.model.discardFailedSave?.(); this.update(); this.saveFeedback();
+      const column=this.model.board?.columns.find((c)=>c.key===detail.columnKey), to=detail.details?.to&&this.model.columnType(detail.details.to);
+      this.view.showConversionRefused({column:column?.label||"",target:to?.label||"",details:detail.details||StorageError.conversionDetails(null)});
+      return;
+    }
     this.update();
     // Resource mode already loaded the server's latest copy after a conflict, so the message says so.
-    const info=detail?.refreshed?StorageError.describeRefreshed(detail.code):StorageError.describe(detail?.code);
+    let info=detail?.refreshed?StorageError.describeRefreshed(detail.code):StorageError.describe(detail?.code);
+    // A refused link / email / phone value from a cell just edited: say what the server expects for that type.
+    // The server's reason (details.reason) decides the wording; without one, the type of the cell just edited.
+    if(detail?.code===StorageError.CODES.VALIDATION_ERROR){
+      const recent=this.lastTypedEdit&&Date.now()-this.lastTypedEdit.at<60000?this.lastTypedEdit:null;
+      const typed=this.valueRefusalMessage(detail.details,recent)||(recent&&this.typedValidationMessage(recent.type)?`${recent.label} not saved: ${this.typedValidationMessage(recent.type)}`:"");
+      if(typed){info={...info,message:typed};this.lastTypedEdit=null;}
+    }
     // One save-error toast at a time: a newer failure replaces the previous message instead of stacking.
     document.querySelectorAll('.toast[data-kind="save-error"]').forEach((toast)=>toast.remove());
     const toast=this.view.toast(info.message,info.retryable?{label:"Retry",onClick:()=>this.retrySave()}:false);
@@ -1586,14 +1607,24 @@ class AppController {
   // Destructive/structural actions: the change is saved first and applied only after storage accepts it
   // (model.applyAfterSave), so a failure leaves the data and the open dialog exactly as they were.
   async runBusy(button,perform,onSuccess){
+    // conversionContext: set just before by a column type change ({column, target} labels for a refusal dialog).
+    // validationHint: a type-specific message for a refused link / email / phone value (record form).
+    const context=this.conversionContext, hint=this.validationHint; this.conversionContext=null; this.validationHint="";
     if(this.busy)return false;
     this.busy=true; this.view.clearDialogError(); this.view.setBusy(button,true);
-    let ok=false,skipped=false,message="";
-    try{ const outcome=await this.model.applyAfterSave(perform); ok=outcome.ok; skipped=outcome.skipped&&!outcome.ok; if(!ok)message=StorageError.describe(outcome.code).message; }
+    let ok=false,skipped=false,message="",refusal=null;
+    try{ const outcome=await this.model.applyAfterSave(perform); ok=outcome.ok; skipped=outcome.skipped&&!outcome.ok;
+      if(!ok){ message=StorageError.describe(outcome.code).message;
+        if(outcome.code===StorageError.CODES.CONVERSION_REFUSED)refusal=outcome.details||StorageError.conversionDetails(null);
+        else if(outcome.code===StorageError.CODES.VALIDATION_ERROR)message=this.valueRefusalMessage(outcome.details)||hint||message; } }
     catch(error){ message=error?.message||StorageError.describe(StorageError.CODES.INTERNAL_ERROR).message; }
     this.busy=false; this.view.setBusy(button,false);
     if(ok){ onSuccess(); return true; }
     if(skipped)return false;
+    // The server refused a column conversion: the refusal dialog (counts by reason, masked examples, no convert button).
+    // The values changed after the dry run (PREVIEW_STALE): nothing changed; Try again runs a fresh check.
+    if(refusal?.reason==="preview_stale"&&context?.key){ this.view.showConversionCheckFailed({column:context.column,target:context.target,text:"The column changed since you checked. Review again.",key:context.key,type:context.type}); this.saveFeedback(); return false; }
+    if(refusal){ this.view.showConversionRefused({column:context?.column||"",target:context?.target||"",details:refusal}); this.saveFeedback(); return false; }
     this.view.showDialogError(`${message} Nothing was changed.`);
     this.saveFeedback(); return false;
   }
@@ -2082,15 +2113,17 @@ class AppController {
       return;
     }
     if(column&&value!==input.dataset.original){
+      // Links: only http, https, mailto and tel (the server refuses other schemes on new writes, e.g. javascript:).
+      const typed=value.trim()&&((column.type==="link"&&(!input.checkValidity()||!this.view.safeHref(value,"link")))||(column.type==="email"&&!input.checkValidity()))?this.typedValidationMessage(column.type):"";
       if(column.required&&!value.trim())note=`${column.label} can't be empty`;
+      else if(typed)note=`${column.label} not saved: ${typed}`;
       else if(!input.checkValidity())note=`${column.label} not saved: ${input.validationMessage}`;
-      else this.model.updateCell(id,field,value);
+      else { if(["link","email","phone"].includes(column.type))this.lastTypedEdit={type:column.type,label:column.label,at:Date.now()}; this.model.updateCell(id,field,value); }
     }
     this.patchCell(id,field,move!=="none");
-    if(!note&&column?.type==="link"&&value.trim()&&value!==input.dataset.original&&!this.view.safeHref(value,"link"))note="Saved as text — only http, https, mailto and tel links can be opened.";
     if(note)this.view.toast(note);
     // A refused value: the cell briefly shows the problem where it happened (the toast carries the message).
-    if(note&&!(column?.type==="link"&&!column.required&&input.checkValidity()))this.view.play(this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"] td[data-column-key="${CSS.escape(field)}"]`),"cell-rejected");
+    if(note)this.view.play(this.root.querySelector(`tr[data-record-context="${CSS.escape(String(id))}"] td[data-column-key="${CSS.escape(field)}"]`),"cell-rejected");
     if(move==="next"||move==="prev"){const cell=this.cellButton(id,field);(this.adjacentCell(cell,move==="next"?1:-1)||cell)?.focus();}
   }
   cancelCell(input){input.dataset.done="1";this.patchCell(this.model.idOf(input.dataset.id),input.dataset.field,true);}
@@ -2228,14 +2261,90 @@ class AppController {
     document.addEventListener("pointermove",move,{passive:false});document.addEventListener("pointerup",up);document.addEventListener("pointercancel",cleanup);document.addEventListener("keydown",onKey,true);
   }
   selectOverlayInput(selector){requestAnimationFrame(()=>{const input=this.root.querySelector(`#overlay-root ${selector}`);input?.focus();input?.select();});}
-  // Change a column's type. Values that can't be kept are only cleared after an explicit confirmation.
+  // Change a column's type. With the JARC server, the whole board is checked first (POST …/type?dryRun=true) and ITS
+  // counts are used, never a count of the loaded rows. A conversion that would lose or garble values is refused: a
+  // dialog gives the counts by reason and masked examples, with no convert button. A lossless one gets a simple confirm
+  // (when there are values) and Undo. Browser storage (no server) holds every record, so its local count stays as before.
   changeColumnType(key,type,confirmed=false,button=null){
     const column=this.model.board.columns.find((c)=>c.key===key), meta=this.model.columnType(type); if(!column||!meta)return;
     if(column.key==="serial"){this.view.showMessage("Type not changed","The primary column always stays text.");return;}
-    const impact=this.model.typeChangeImpact(key,type);
+    const server=typeof this.model.storage?.adapter?.previewColumnType==="function";
+    if(server&&!confirmed){this.checkColumnType(column,type,meta,button);return;}
+    const impact=server?0:this.model.typeChangeImpact(key,type);
     if(impact&&!confirmed){this.view.showConfirm(`Change "${column.label}" to ${meta.label}?`,`${impact} record${impact===1?" has a value":"s have values"} that can't be stored as ${meta.label}. ${impact===1?"It":"They"} will be cleared. You can undo this right afterwards.`,"confirm-change-type",`${key}|${type}`,"Change type");return;}
-    const label=column.label; let result; this.runBusy(button,()=>{result=this.model.changeColumnType(key,type);},()=>{this.view.closeOverlay();this.update();
-    if(result)this.view.toast(`${label} is now ${meta.label}${result.cleared?` · ${result.cleared} value${result.cleared===1?"":"s"} cleared`:""}`,true);});
+    this.convertColumnType(column,type,meta,button);
+  }
+  convertColumnType(column,type,meta,button){
+    const label=column.label, server=typeof this.model.storage?.adapter?.previewColumnType==="function"; let result;
+    this.conversionContext={column:label,target:meta.label,key:column.key,type};
+    this.runBusy(button,()=>{result=this.model.changeColumnType(column.key,type);},()=>{this.view.closeOverlay();this.update();
+    // The local "cleared" count covers loaded rows only; with the server a conversion that clears values is refused.
+    if(result)this.view.toast(`${label} is now ${meta.label}${!server&&result.cleared?` · ${result.cleared} value${result.cleared===1?"":"s"} cleared`:""}`,true);});
+  }
+  // The server's dry run for a type change, then the matching dialog. Nothing changes until the person confirms.
+  async checkColumnType(column,type,meta,button){
+    if(this.busy||this.checkingType)return;
+    const boardId=this.model.board.id, payload=`${column.key}|${type}`, n=(v)=>Number(v||0).toLocaleString();
+    this.checkingType=true; this.view.clearDialogError(); this.view.setBusy(button,true);
+    let impact=null,failure=null;
+    try{ await this.model.whenSaved?.(); impact=await this.model.storage.adapter.previewColumnType(boardId,column.key,type,{multiple:false}); }
+    catch(error){ failure=error; }
+    finally{ this.checkingType=false; this.view.setBusy(button,false); }
+    if(this.model.board?.id!==boardId)return; // the person opened another board meanwhile
+    column=this.model.board.columns.find((c)=>c.key===column.key); if(!column)return; // the column was deleted meanwhile
+    if(failure){
+      const C=StorageError.CODES, code=failure?.code;
+      const text=code===C.CONFLICT?"This board was just changed by someone else. JARC is loading the latest version; try again in a moment."
+        :code===C.FORBIDDEN||code===C.UNAUTHENTICATED||code===C.NOT_FOUND?StorageError.describe(code).message
+        :code===C.OFFLINE?"Can't reach the JARC server, so the column's values couldn't be checked."
+        :"JARC couldn't check this column's values just now.";
+      if(code===C.CONFLICT)window.dispatchEvent(new CustomEvent("jarc-board-revalidate",{detail:{boardId}}));
+      this.view.showConversionCheckFailed({column:column.label,target:meta.label,text,key:column.key,type,retry:![C.FORBIDDEN,C.UNAUTHENTICATED,C.NOT_FOUND].includes(code)});
+      return;
+    }
+    if(impact.refused){this.view.showConversionRefused({column:column.label,target:meta.label,details:impact});return;}
+    if(impact.legacy){ // an older server: only the whole-board count of values it would clear
+      if(impact.affected){const k=impact.affected;this.view.showConfirm(`Change "${column.label}" to ${meta.label}?`,`${n(k)} record${k===1?" on this board has a value":"s on this board have values"} that can't be stored as ${meta.label}. ${k===1?"It":"They"} will be cleared. You can undo this right afterwards.`,"confirm-change-type",payload,"Change type");return;}
+      this.convertColumnType(column,type,meta,button); return;
+    }
+    if(!impact.populated){this.convertColumnType(column,type,meta,button);return;} // no values: nothing to convert or lose
+    const total=impact.total??impact.populated, p=impact.populated;
+    this.view.showConfirm(`Change "${column.label}" to ${meta.label}?`,`Checked all ${n(total)} record${total===1?"":"s"} on this board. ${p===1?"The 1 value":`All ${n(p)} values`} can be stored as ${meta.label}, so nothing will be lost. You can undo this right afterwards.`,"confirm-change-type",payload,"Change type");
+  }
+  // Dropdown several values → one, with the server: its dry run over every record. Any cell with several values is
+  // refused (truncatedMulti, nothing dropped); otherwise the change is made at once, with Undo.
+  async checkSingleValue(column,button){
+    if(this.busy||this.checkingType)return;
+    const boardId=this.model.board.id, target="one value per cell";
+    this.checkingType=true; this.view.setBusy(button,true);
+    let impact=null,failure=null;
+    try{ await this.model.whenSaved?.(); impact=await this.model.storage.adapter.previewColumnType(boardId,column.key,"dropdown",{multiple:false}); }
+    catch(error){ failure=error; }
+    finally{ this.checkingType=false; this.view.setBusy(button,false); }
+    if(this.model.board?.id!==boardId)return;
+    column=this.model.board.columns.find((c)=>c.key===column.key); if(!column?.multiple)return;
+    if(failure){const C=StorageError.CODES;if(failure?.code===C.CONFLICT)window.dispatchEvent(new CustomEvent("jarc-board-revalidate",{detail:{boardId}}));this.view.showMessage("Column not changed",`${failure?.code===C.CONFLICT?"This board was just changed by someone else. Try again in a moment.":"JARC couldn't check this column's values just now. Try again in a moment."} Your data has not been changed.`);return;}
+    if(impact.refused){this.view.showConversionRefused({column:column.label,target,details:impact});return;}
+    if(impact.legacy&&impact.affected){this.view.showConfirm(`Allow one value in ${column.label}?`,`${Number(impact.affected).toLocaleString()} record${impact.affected===1?" on this board has":"s on this board have"} several values. Each will keep only its first value.`,"confirm-column-single",column.key,"Keep first values");return;}
+    this.conversionContext={column:column.label,target};
+    this.runBusy(button,()=>this.model.setColumnMultiple(column.key,false)?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast(`${column.label} allows one value`);});
+  }
+  // What the server expects for each validated type (shown when it refuses a value).
+  typedValidationMessage(type){return {link:"Links must start with http://, https://, mailto: or tel: (for example https://example.com).",email:"Enter a valid email address.",phone:"Enter a valid phone number."}[type]||"";}
+  // The server's reason for a refused link / email / phone value (StorageError.valueDetails) → "<Column> not saved: …".
+  // fallback: { type, label } of the field just edited, when the server named no field.
+  valueRefusalMessage(details,fallback=null){
+    if(!details?.reason)return "";
+    const column=details.field?this.model.board?.columns.find((c)=>c.key===details.field):null, type=column?.type||fallback?.type, label=column?.label||fallback?.label||"The value";
+    const text={scheme:this.typedValidationMessage("link"),"invalid-url":this.typedValidationMessage("link"),"invalid-email":this.typedValidationMessage("email"),"invalid-phone":this.typedValidationMessage("phone"),"control-characters":"Remove tabs, line breaks and other control characters.","too-long":"This value is too long.",type:this.typedValidationMessage(type)||"This value doesn't fit the column's type."}[details.reason];
+    return text?`${label} not saved: ${text}`:"";
+  }
+  // The record form: a type-specific message if the server refuses the link / email / phone values it sends.
+  typedValidationHint(data){
+    const fields=this.model.board.columns.filter((c)=>["link","email","phone"].includes(c.type)&&c.key in data&&String(data[c.key]??"").trim());
+    if(!fields.length)return "";
+    const bad=fields.find((c)=>!this.view.safeHref(data[c.key],c.type))||(fields.length===1?fields[0]:null);
+    return bad?`${bad.label} not saved: ${this.typedValidationMessage(bad.type)}`:"";
   }
   // Save edited options. Removing options that records still use needs confirmation; renames carry values along.
   applyColumnOptions(confirmed=false,button=null){

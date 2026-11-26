@@ -6,6 +6,8 @@ const AS_TEXT = new Set(["people", "person", "multiple-person", "timeline", "tag
 const SKIPPED = new Set(["file", "subtasks", "subitems", "button", "doc", "direct_doc", "board_relation", "dependency", "integration"]);
 
 const parse = (s) => { try { return s ? JSON.parse(s) : null; } catch { return null; } };
+const { checkTyped } = require("../../validation/record-values");
+const typedOrEmpty = (type, raw) => { const out = checkTyped(type, typeof raw === "string" ? raw : ""); return out.reason ? "" : out.value; };
 const safeKey = (id) => `m_${String(id).replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 40)}`;
 const HEX = /^#[0-9a-f]{6}$/i;
 
@@ -49,9 +51,12 @@ function mapValue(targetType, cv, column) {
     case "number": { const n = Number(String(text).replace(/,/g, "")); return text !== "" && Number.isFinite(n) ? String(n) : ""; }
     case "date": { const d = value?.date || text.slice(0, 10); return /^\d{4}-\d{2}-\d{2}$/.test(d || "") ? d : ""; }
     case "checkbox": return value?.checked === true || value?.checked === "true";
-    case "email": { const e = value?.email || text; return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e || "") ? e.slice(0, 320) : ""; }
-    case "phone": return String(value?.phone || text).slice(0, 100);
-    case "link": { const u = value?.url || text; return /^https?:\/\/\S+$/i.test(u || "") ? u.slice(0, 2000) : ""; }
+    // Link / Email / Phone: the same rules as every other write (validation/record-values.js). A value that fails them is
+    // left empty, never stored and never linked; the migration engine keeps the raw value in the record's migration metadata
+    // with the issue "value-not-convertible" (migration/monday/columns.js). Links from monday stay http(s) only, as before.
+    case "email": return typedOrEmpty("email", value?.email || text);
+    case "phone": return typedOrEmpty("phone", String(value?.phone || text));
+    case "link": { const u = String(value?.url || text || "").trim(); return /^https?:\/\//i.test(u) ? typedOrEmpty("link", u) : ""; }
     case "status": return text.slice(0, 200);
     case "dropdown": { const list = text ? [...new Set(text.split(",").map((s) => s.trim()).filter(Boolean))].slice(0, 100) : []; return column?.multiple ? list : list[0] || ""; }
     default: return text.slice(0, 10000);

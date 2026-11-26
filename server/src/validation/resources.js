@@ -4,6 +4,7 @@ const { fail, requireBody, allowOnly, text, color, bool, finiteNumber, version, 
 const { ObjectId } = require("mongodb");
 const recordFilter = require("../domain/record-filter");
 const { iconValue } = require("./appearance");
+const { typedValue } = require("./record-values");
 const { normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, groupColumnOf, checkValue, hasValue, isMultiColumn, valueList, PRIMARY_KEY, LIMITS, COLUMN_TYPES } = require("../domain/board-schema");
 
 const POSITION = { min: -1e15, max: 1e15 };
@@ -67,6 +68,8 @@ function boardPatch(raw, board, { actorId, now, canEditShared = true }) {
       if (next.get(column.key).type !== column.type) fail(`The type of column "${column.label || column.key}" can't be changed with a board update.`);
       // One value ↔ several values rewrites stored values: POST /boards/:id/columns/:key/type { type, multiple }.
       if (Boolean(next.get(column.key).multiple) !== Boolean(column.multiple)) fail(`Switching "${column.label || column.key}" between one and several values can't be done with a board update.`);
+      // A Connect column's stored IDs belong to its linked board: pointing it at another board would discard them (S0-A).
+      if (column.type === "connect" && column.link?.boardId && next.get(column.key).link?.boardId !== column.link.boardId) fail(`The board that "${column.label || column.key}" links to can't be changed. Add a new Connect column instead.`);
     }
     for (const column of columns) assertNotRetired(board, column);
     if (groupColumnOf(columns)?.key !== groupColumnOf(board.columns)?.key) fail("The board's group column can't be changed with a board update.");
@@ -99,8 +102,10 @@ function recordValues(values, board, { creating }) {
     if (!column) fail(`"${key.slice(0, 40)}" is not a column of this board.`);
     if (key === groupKey) fail(`Set the record's group with groupId, not values.${key}.`);
     checkValue(column, value);
-    if (column.required && !hasValue(value)) fail(`${column.label || column.key} is required.`);
-    clean[key] = value;
+    // Link / Email / Phone: scheme and format rules on every new write (validation/record-values.js); other types unchanged.
+    const stored = typedValue(column, value);
+    if (column.required && !hasValue(stored)) fail(`${column.label || column.key} is required.`);
+    clean[key] = stored;
   }
   if (creating) {
     // Like the frontend: columns without a value start with their default (checkboxes start unticked).
@@ -303,10 +308,12 @@ function columnAdd(raw, board) {
 
 function columnType(raw) {
   const body = requireBody(raw);
-  allowOnly(body, ["expectedVersion", "type", "multiple"], "the type change");
+  allowOnly(body, ["expectedVersion", "type", "multiple", "previewToken"], "the type change");
   if (!COLUMN_TYPES.includes(body.type)) fail("type is not a supported column type.");
   if (body.multiple !== undefined && typeof body.multiple !== "boolean") fail("multiple must be true or false.");
-  return { expectedVersion: version(body.expectedVersion), type: body.type, multiple: body.multiple === true };
+  // previewToken (optional): from the dry run; the change is refused (409) if the column's values changed since.
+  if (body.previewToken !== undefined && (typeof body.previewToken !== "string" || !/^[0-9a-f]{32}$/.test(body.previewToken))) fail("previewToken must be the token returned by the dry run.");
+  return { expectedVersion: version(body.expectedVersion), type: body.type, multiple: body.multiple === true, ...(body.previewToken !== undefined ? { previewToken: body.previewToken } : {}) };
 }
 
 function columnOptions(raw) {

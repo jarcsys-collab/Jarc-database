@@ -283,9 +283,9 @@ describe("Columns, groups and saved views", () => {
   test("type change, option rename/remove, duplicate and delete column go through the schema endpoints", async () => {
     const model = await tab();
     const board = await newBoard(model);
-    model.upsert({ serial: "A", status: "New", notes: "12" }); model.upsert({ serial: "B", status: "Done", notes: "text" }); await settle(model);
+    model.upsert({ serial: "A", status: "New", notes: "12" }); model.upsert({ serial: "B", status: "Done", notes: "34" }); await settle(model);
     requests = [];
-    same(model.changeColumnType("notes", "number"), { cleared: 1 }); await settle(model);
+    same(model.changeColumnType("notes", "number"), { cleared: 0 }); await settle(model);
     model.editColumnOptions("status", [{ from: "New", to: "Open" }, { from: "In Progress", to: "In Progress" }]); await settle(model);
     const copy = model.duplicateColumn("status"); await settle(model);
     const gone = await model.applyAfterSave(() => model.deleteColumn("received"));
@@ -298,7 +298,7 @@ describe("Columns, groups and saved views", () => {
     const local = Object.fromEntries(model.rows.map((r) => [r.serial, r]));
     for (const serial of ["A", "B"]) for (const key of ["notes", "status", copy.key]) assert.equal(server[serial][key], local[serial][key], `${serial}.${key} same on server and in the app`);
     // "Done" isn't one of the app's built-in status options, so the option edit leaves it alone (same as the app).
-    same([server.A.status, server.B.status, server.B.notes], ["Open", "Done", ""]);
+    same([server.A.status, server.B.status, server.B.notes], ["Open", "Done", "34"]); // a lossless conversion keeps the value (S0-A)
     assert.ok(!("received" in server.A));
   });
 
@@ -415,7 +415,7 @@ describe("Conflicts, failures and Retry", () => {
     assert.equal(b.rows.find((r) => r.id === id).status, "In Progress", "B now shows A's saved value");
     assert.equal(b.failure, null, "nothing left for Retry to re-send");
     assert.equal(b.saveState, "saved");
-    same(rollbackEvents(b).at(-1), { code: "CONFLICT", op: "updateRecord", refreshed: true });
+    same(rollbackEvents(b).at(-1), { code: "CONFLICT", op: "updateRecord", refreshed: true, columnKey: null });
     assert.equal(b.browser.window.StorageError.describeRefreshed("CONFLICT").message, "This item was changed by another user. The latest version has been loaded.");
     b.updateCell(id, "notes", "B again"); await settle(b);
     assert.equal((await serverRecords(board.id))[0].values.notes, "B again", "B can keep working on the latest version");

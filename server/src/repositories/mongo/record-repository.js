@@ -100,6 +100,17 @@ class RecordRepository extends VersionedRepository {
     return this.collection.find({ boardId: scopedId(boardId, "boardId") }, { sort: { position: 1, _id: 1 }, session }).toArray();
   }
 
+  // Every record of one board, archived ones included (a type change must account for all of them).
+  countAllForBoard(boardId, { session } = {}) {
+    return this.collection.countDocuments({ boardId: scopedId(boardId, "boardId") }, { session });
+  }
+
+  // One column's stored values for every record of a board, as a cursor (read with next()): projection on that column
+  // only, in _id order, so a full-board check never loads whole records. key: an existing, validated column key.
+  columnValues(boardId, key, { session } = {}) {
+    return this.collection.find({ boardId: scopedId(boardId, "boardId") }, { projection: { _id: 1, [`values.${key}`]: 1 }, sort: { _id: 1 }, batchSize: 1000, session });
+  }
+
   findManyInBoard(boardId, ids, { session } = {}) {
     return this.collection.find({ boardId: scopedId(boardId, "boardId"), _id: { $in: ids } }, { session }).toArray();
   }

@@ -25,8 +25,35 @@ StorageError.CODES = Object.freeze({
   OFFLINE: "OFFLINE", INTERNAL_ERROR: "INTERNAL_ERROR",
   ACCOUNT_DISABLED: "ACCOUNT_DISABLED", // Entra sign-in: the JARC account is disabled
   ACCOUNT_PENDING: "ACCOUNT_PENDING",   // Account Management: the JARC account is waiting for approval
+  CONVERSION_REFUSED: "CONVERSION_REFUSED", // a column type change the server refused (values incompatible or lossy); nothing changed
   CANCELLED: "CANCELLED"              // internal: a queued save skipped because an earlier save failed
 });
+// CONVERSION_REFUSED (and a type-change dry run) carry counts in `details`. Only numbers, known reason codes and at most
+// three short masked examples are kept; any other server text is dropped, so nothing raw from the server is ever shown.
+// Reasons are compared in lower case (the server sends e.g. "BOARD_TOO_LARGE"); unknown reasons are dropped.
+StorageError.CONVERSION_REASONS = Object.freeze(["board_too_large", "incompatible_values", "people_references", "too_many_options", "preview_stale"]);
+StorageError.LOSSY_KEYS = Object.freeze(["truncatedMulti", "leadingZero", "longNumber", "invalidDate", "ambiguousDate", "tooManyOptions", "peopleReferences"]);
+StorageError.conversionDetails = (raw) => {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const count = (v) => (Number.isFinite(Number(v)) && v !== null && v !== "" && typeof v !== "boolean" && Number(v) >= 0 ? Math.floor(Number(v)) : null);
+  const type = (v) => (typeof v === "string" && /^[a-z][a-z_]{0,30}$/.test(v) ? v : null);
+  const lossy = {};
+  for (const key of StorageError.LOSSY_KEYS) { const n = count(src.lossy?.[key]); if (n) lossy[key] = n; }
+  const examples = (Array.isArray(src.examples) ? src.examples : []).filter((e) => typeof e === "string" && e.trim()).slice(0, 3)
+    // eslint-disable-next-line no-control-regex
+    .map((e) => { const t = e.replace(/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/g, " ").trim(); return t.length > 60 ? `${t.slice(0, 59)}…` : t; });
+  const named = typeof src.reason === "string" ? src.reason.toLowerCase() : null;
+  const reason = StorageError.CONVERSION_REASONS.includes(named) ? named : null;
+  const out = { from: type(src.from), to: type(src.to), total: count(src.total), populated: count(src.populated), convertible: count(src.convertible), incompatible: count(src.incompatible) || 0, lossy, examples, reason, tooLarge: src.tooLarge === true || reason === "board_too_large" };
+  out.lossyTotal = Object.values(lossy).reduce((a, b) => a + b, 0);
+  return out;
+};
+// VALIDATION_ERROR details for a refused link / email / phone value: { field, reason } with a known reason, else null.
+StorageError.VALUE_REASONS = Object.freeze(["scheme", "invalid-url", "control-characters", "too-long", "type", "invalid-email", "invalid-phone"]);
+StorageError.valueDetails = (raw) => {
+  if (!raw || typeof raw !== "object" || !StorageError.VALUE_REASONS.includes(raw.reason)) return null;
+  return { field: typeof raw.field === "string" && /^[A-Za-z0-9_.-]{1,100}$/.test(raw.field) ? raw.field : null, reason: raw.reason };
+};
 // The one place that turns an error code into user-facing text. Never includes raw exceptions, stacks or tokens.
 // retryable: a user-triggered Retry can help. offline: the connection to the data service is down.
 StorageError.describe = (codeOrError) => {
@@ -41,6 +68,7 @@ StorageError.describe = (codeOrError) => {
     [C.UNAUTHENTICATED]: ["Your session has expired. Sign in again to keep working.", false],
     [C.ACCOUNT_DISABLED]: ["Your JARC account doesn't have access. Contact a JARC administrator.", false],
     [C.ACCOUNT_PENDING]: ["Your JARC account is waiting for approval by a JARC administrator.", false],
+    [C.CONVERSION_REFUSED]: ["This column can't be converted because some existing values are incompatible or could lose information. Your data has not been changed.", false],
     [C.FORBIDDEN]: ["You don't have permission to make this change.", false],
     [C.CONFLICT]: ["Someone else changed this item. Reload to see the latest version.", false],
     [C.PAYLOAD_TOO_LARGE]: ["This is too large to save.", false],
@@ -193,10 +221,18 @@ class ApiAdapter {
       }
       if (!response.ok) {
         // Only the error code is read from the body (never its text): it tells a disabled account from other 403s.
-        let serverCode = null;
-        try { serverCode = (await response.json())?.error?.code ?? null; } catch { /* not JSON */ }
+        // CONVERSION_REFUSED also keeps its counts (sanitised by StorageError.conversionDetails; no server text).
+        let serverCode = null, serverDetails = null;
+        try { const failure = (await response.json())?.error; serverCode = failure?.code ?? null; serverDetails = failure?.details ?? null; } catch { /* not JSON */ }
         let error;
-        if (serverCode === StorageError.CODES.ACCOUNT_DISABLED) {
+        if (serverCode === StorageError.CODES.CONVERSION_REFUSED && [400, 409, 422].includes(response.status)) {
+          error = fail(StorageError.CODES.CONVERSION_REFUSED, null, { status: response.status, serverCode });
+          error.details = StorageError.conversionDetails(serverDetails);
+        } else if (serverCode === StorageError.CODES.VALIDATION_ERROR && response.status === 400 && StorageError.valueDetails(serverDetails)) {
+          // A refused link / email / phone value: which field and why (a known reason code), never the value or any text.
+          error = fail(StorageError.CODES.VALIDATION_ERROR, null, { status: response.status, serverCode });
+          error.details = StorageError.valueDetails(serverDetails);
+        } else if (serverCode === StorageError.CODES.ACCOUNT_DISABLED) {
           error = fail(StorageError.CODES.ACCOUNT_DISABLED, null, { status: response.status });
           window.dispatchEvent?.(new CustomEvent("jarc-access-denied"));
         } else if (serverCode === StorageError.CODES.ACCOUNT_PENDING) {
@@ -302,7 +338,7 @@ class StorageService {
         this.generation += 1;
         const failure = StorageError.from(error);
         if (StorageError.describe(failure.code).offline) this.setConnection("offline");
-        return { ok: false, code: failure.code, message: failure.message, reconcile: error?.reconcile || null };
+        return { ok: false, code: failure.code, message: failure.message, reconcile: error?.reconcile || null, details: [StorageError.CODES.CONVERSION_REFUSED, StorageError.CODES.VALIDATION_ERROR].includes(failure.code) ? failure.details || null : null };
       }
     };
     const result = this.queue.then(run);

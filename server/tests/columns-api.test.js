@@ -90,10 +90,16 @@ describe("Columns and values (development API)", () => {
     const patched = board.columns.map((c) => (c.key === "tags" ? { ...c, multiple: false } : c));
     const refused = await call("PATCH", `/boards/${board.id}`, { expectedVersion: board.version, columns: patched });
     assert.equal(refused.status, 400);
+    // Several → one would drop entries: refused (S0-A), nothing changed, until each cell has at most one entry.
+    const truncating = await call("POST", `/boards/${board.id}/columns/tags/type`, { expectedVersion: board.version, type: "dropdown", multiple: false });
+    assert.equal(truncating.status, 400);
+    assert.equal(truncating.body.error.details.lossy.truncatedMulti, 1);
+    assert.deepEqual((await call("GET", `/records/${a.id}`)).body.record.values.tags, ["South", "East"]);
+    assert.equal((await call("PATCH", `/records/${a.id}`, { expectedVersion: a.version, values: { tags: ["South"] } })).status, 200);
     const toSingle = await call("POST", `/boards/${board.id}/columns/tags/type`, { expectedVersion: board.version, type: "dropdown", multiple: false });
     assert.equal(toSingle.status, 200, JSON.stringify(toSingle.body));
     assert.equal(toSingle.body.board.columns.find((c) => c.key === "tags").multiple, undefined);
-    assert.equal((await call("GET", `/records/${a.id}`)).body.record.values.tags, "South", "several → one keeps the first");
+    assert.equal((await call("GET", `/records/${a.id}`)).body.record.values.tags, "South", "a one-entry list becomes its value");
     const toMulti = await call("POST", `/boards/${board.id}/columns/region/type`, { expectedVersion: toSingle.body.board.version, type: "dropdown", multiple: true });
     assert.equal(toMulti.status, 200);
     assert.deepEqual((await call("GET", `/records/${b.id}`)).body.record.values.region, ["North"], "one → several wraps the value");
@@ -101,14 +107,15 @@ describe("Columns and values (development API)", () => {
     assert.ok(activity.some((e) => e.summary === "Set Tags to allow one value"));
   });
 
-  test("People → text keeps names, never internal IDs", async () => {
+  test("People → text is refused while People values exist (D-S0-3); the references stay, never exposed", async () => {
     const board = await newBoard();
     const record = (await newRecord(board, { owner: [devRef, "Contractor"] })).body.record;
     const res = await call("POST", `/boards/${board.id}/columns/owner/type`, { expectedVersion: board.version, type: "text" });
-    assert.equal(res.status, 200);
-    const value = (await call("GET", `/records/${record.id}`)).body.record.values.owner;
-    assert.equal(value, `${app.devActor.displayName}, Contractor`);
-    assert.doesNotMatch(value, /user:/);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error.code, "CONVERSION_REFUSED");
+    assert.equal(res.body.error.details.lossy.peopleReferences, 1);
+    assert.doesNotMatch(JSON.stringify(res.body), /user:|[0-9a-f]{24}/);
+    assert.deepEqual((await call("GET", `/records/${record.id}`)).body.record.values.owner, [devRef, "Contractor"]);
   });
 
   test("editing labels: rename, recolour, reorder and remove — lists keep their other entries", async () => {

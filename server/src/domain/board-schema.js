@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const { fail, isObject, isPrimitive, isSafeKey, text, color, bool, RECORD_ID_KEY } = require("../validation/common");
 const { ApiError } = require("../middleware/errors");
 const { cleanFilter, cleanOrderBy } = require("./record-filter");
+const { checkTyped, TYPED_VALUE_TYPES } = require("../validation/record-values");
 
 const COLUMN_TYPES = Object.freeze(["text", "number", "status", "dropdown", "checkbox", "priority", "owner", "date", "email", "phone", "link", "group", "files", "connect", "mirror"]);
 // connect: cells hold linked record IDs (24 hex) of one other board, column.link = { boardId }; "multiple" allows several.
@@ -57,6 +58,8 @@ function normalizeColumn(column, where = "a column") {
   };
   if (!isPrimitive(result.defaultValue)) fail(`Column "${column.key}" has an invalid default value.`);
   if (typeof result.defaultValue === "string" && result.defaultValue.length > LIMITS.valueLength) fail(`Column "${column.key}" has a default value that is too long.`);
+  // Link / Email / Phone defaults follow the same rules as new values (S0-A, validation/record-values.js).
+  if (TYPED_VALUE_TYPES.has(result.type) && result.defaultValue) { const r = checkTyped(result.type, result.defaultValue); if (r.reason) fail(`The default for "${column.key}" ${r.message}.`); }
   if (!Array.isArray(result.options) || result.options.length > LIMITS.options || !result.options.every((o) => typeof o === "string" && o.length <= LIMITS.optionLength)) fail(`Column "${column.key}" has invalid options.`);
   result.options = [...result.options];
   // Label colours, in the same order as options ("" = the app's automatic colour). Only for option columns.
@@ -278,6 +281,8 @@ function effectiveOptions(column) {
 }
 
 // Can an existing value be kept when a column becomes `type`? Empty values always fit (BoardModel.valueFits).
+// valueFits / convertValue are kept as the browser-parity reference (tests/columns-model.test.js). Since S0-A the server's
+// type change uses the strict, lossless-only rules of domain/column-conversion.js instead (link / email / phone included).
 function valueFits(value, type) {
   if (!hasValue(value)) return true;
   if (Array.isArray(value)) return !["number", "date", "checkbox"].includes(type) || (value.length === 1 && valueFits(value[0], type));

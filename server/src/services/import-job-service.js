@@ -37,6 +37,9 @@ const PROGRESS_FIELDS = Object.freeze(Object.fromEntries(["workspaceId", "boardI
 const OPEN = ["mapping", "ready", "queued", "running", "paused"], WRITE_PIECES = 20, WRITE_PAUSE_MS = 50, MAX_READING = 2, COLUMN_TYPES = new Set(["text", "number", "date"]);
 const notFound = () => new ApiError(404, "NOT_FOUND", "This import doesn't exist or has ended.");
 const sleep = (ms) => new Promise((r) => { const t = setTimeout(r, ms); t.unref?.(); });
+// One CSV cell, quoted. Text a spreadsheet would run as a formula (= + - @, tab, CR, LF or their full-width forms) gets a
+// leading ' (in the exported file only), the same guard as the browser's CSV export (AppController.csvCell).
+const csvCell = (value) => { let text = String(value ?? ""); if (/^[=+\-@\t\r\n＝＋－＠]/.test(text)) text = `'${text}`; return `"${text.replace(/"/g, '""')}"`; };
 const safeName = (name) => String(name || "file").replace(/[\u0000-\u001f<>]/g, "").slice(-120);
 
 // ---- One cell of the file → one value of the column. Returns { value } (undefined: leave to the column's default) or { error }.
@@ -304,7 +307,7 @@ class ImportJobService {
 
   // Every problem found in the file, as a CSV to download. Row numbers, column names and reasons, never the values.
   reportCsv(job) {
-    const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`, lines = [["Row", "Column", "Problem"].map(q).join(",")];
+    const q = csvCell, lines = [["Row", "Column", "Problem"].map(q).join(",")];
     const list = job.status === "mapping" || job.status === "ready" ? job.validation?.errors || [] : [...(job.validation?.errors || []), ...(job.errors || []).map((e) => ({ row: e.row, column: "", reason: e.reason }))];
     for (const e of list) lines.push([e.row, e.column, e.reason].map(q).join(","));
     if ((job.validation?.errorCount || 0) > (job.validation?.errors?.length || 0)) lines.push(q(`And ${job.validation.errorCount - job.validation.errors.length} more of the same kinds.`));
@@ -582,4 +585,4 @@ function cleanSettings(body, job, board) {
   return out;
 }
 
-module.exports = { ImportJobService, BATCH_ROWS, MAX_ACTIVE_PER_USER, cellValue, dateText, suggestMapping };
+module.exports = { ImportJobService, BATCH_ROWS, MAX_ACTIVE_PER_USER, cellValue, dateText, suggestMapping, csvCell };

@@ -1915,3 +1915,24 @@ tr:hover .record-id-copy, .record-id-copy:focus-visible { opacity: 1; }
   .quick-create-modal .modal-actions { flex-wrap: wrap; }
   .quick-create-modal .modal-actions .button { flex: 1 1 auto; min-height: 44px; }
 }
+
+/* Change type refused (AppView.showConversionRefused): the server's whole-board counts by reason and masked examples.
+   Only Close: nothing can be converted from this dialog. Theme tokens only, so light and dark both follow. */
+.conversion-refused { width: min(520px, 100%); }
+.conversion-refused .modal-head { margin-bottom: 10px; align-items: flex-start; }
+.conversion-refused .modal-head h2 { overflow-wrap: anywhere; }
+.conversion-lead { color: var(--text); font-size: 13px; }
+.conversion-scope { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
+.conversion-reasons { margin: 0 0 14px; padding: 10px 12px 10px 28px; border-radius: var(--radius-md); border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--line)); background: color-mix(in srgb, var(--warning) 9%, var(--surface)); color: var(--text); font-size: 12px; display: grid; gap: 4px; }
+.conversion-examples h3 { font-size: 12px; margin: 0 0 6px; }
+.conversion-examples ul { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.conversion-examples code { display: inline-block; max-width: 100%; overflow-wrap: anywhere; font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; padding: 3px 7px; border-radius: 5px; background: var(--surface-2); border: 1px solid var(--line); color: var(--text); }
+.conversion-help { margin: 0 0 4px; font-size: 12px; }
+.conversion-help summary { cursor: pointer; color: var(--accent-text, var(--accent)); width: max-content; border-radius: 4px; }
+.conversion-help summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.conversion-help p { margin: 6px 0 0; }
+@media (max-width: 620px) {
+  .conversion-refused .modal-actions .button, .conversion-check-failed .modal-actions .button { flex: 1 1 auto; min-height: 44px; }
+}
+/* A stored link with a scheme JARC never opens: shown as text with this small, non-clickable flag. */
+.cell-link-unsafe { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 600; line-height: 16px; white-space: nowrap; cursor: help; color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--line)); }

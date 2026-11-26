@@ -2,17 +2,52 @@
 // change a column's type, edit options (rename/remove), delete a group (moving its records), and move a board to
 // another workspace. Each runs in ONE transaction: the board's version is checked, the board is updated and the
 // board's own records are rewritten with the same rules the browser uses. A dry run returns only the affected count.
+// A type change is the exception (S0-A, changeType below): it is refused unless lossless on the whole board.
 //
 // Non-destructive changes (labels, order, visibility, widths, adding groups, saved views) stay on PATCH /boards/:id.
 const validate = require("../validation/resources");
 const { versionParam, queryString } = require("../validation/common");
-const { normalizeColumns, groupColumnOf, hasValue, valueFits, convertValue, optionsPlan, sameValue, valueList, isMultiColumn, OPTION_TYPES, PRIMARY_KEY, USER_REF } = require("../domain/board-schema");
-const { ObjectId } = require("mongodb");
+const { normalizeColumn, normalizeColumns, groupColumnOf, hasValue, optionsPlan, sameValue, valueList, isMultiColumn, OPTION_TYPES, PRIMARY_KEY } = require("../domain/board-schema");
+const { SYNC_LIMITS, MESSAGES, conversionPlanner, convertCell, describeType } = require("../domain/column-conversion");
 const { ApiError } = require("../middleware/errors");
 const { notFound, conflict, activityEntry } = require("./shared");
 
 const invalid = (message) => new ApiError(400, "VALIDATION_ERROR", message);
 const MAX_RETIRED_COLUMNS = 1000;
+
+// A refused type change: 400 (or 409 for a stale preview) CONVERSION_REFUSED with the full-board counts. The examples are
+// masked, and ApiError details are sent to the caller only (middleware/errors.js never logs them).
+function refusal(status, details) {
+  const { previewToken, ...rest } = details;
+  return new ApiError(status, "CONVERSION_REFUSED", MESSAGES[details.reason] || MESSAGES.INCOMPATIBLE_VALUES, { ...rest, allowed: false });
+}
+
+// Conversions refused whatever the values (unchanged since Stage 11; Connect / Mirror keep their relationship settings).
+function assertConvertible(column, { type, multiple }) {
+  if (column.key === PRIMARY_KEY) throw invalid("The Item column's type can't be changed.");
+  // Connect and Mirror columns need their own settings (which board, which column): add a new column instead.
+  if (["connect", "mirror"].includes(type) || ["connect", "mirror"].includes(column.type)) throw invalid("Connect and Mirror columns can't be converted to or from another type. Add a new column instead.");
+  // A Dropdown can also switch between one value and several (same type, different "multiple").
+  const modeChange = type === "dropdown" && column.type === "dropdown" && multiple !== Boolean(column.multiple);
+  if (column.type === type && !modeChange) throw invalid("The column already has this type.");
+  if (column.type === "group" || type === "group") throw invalid("Changing a column to or from the Group type isn't supported yet.");
+  if (column.type === "files" || type === "files") throw invalid("Files columns can't be changed to or from another type. Add a new column instead.");
+  if (multiple && type !== "dropdown") throw invalid("Only Dropdown columns can allow several values.");
+}
+
+// The column after the change (options of a Dropdown are filled from the values when it is written).
+function convertedColumn(column, to) {
+  const updated = { ...column, type: to.type };
+  delete updated.multiple;
+  if (to.multiple) updated.multiple = true;
+  if (!OPTION_TYPES.includes(to.type)) delete updated.colors;
+  // The default is configuration, not data: kept only if it stays exactly valid, otherwise none.
+  const d = updated.defaultValue;
+  if (Array.isArray(d) || (hasValue(d) && !(() => { const cell = convertCell(d, column, to, updated); return cell.ok && cell.next === undefined; })())) updated.defaultValue = "";
+  return updated;
+}
+
+const typeLabel = (t, m) => (t === "dropdown" && m ? "dropdown (several values)" : t);
 
 class BoardSchemaService {
   constructor({ repos, connection, searchIndex = null }) { Object.assign(this, { repos, connection, searchIndex }); }
@@ -54,6 +89,9 @@ class BoardSchemaService {
     const board = await this.repos.boards.findById(boardId);
     if (!board) throw notFound("board");
     const { expectedVersion, column, index, copyFrom } = validate.columnAdd(raw, board);
+    // A duplicate copies values verbatim, so it must keep the original's type and mode: otherwise it would be a type
+    // change that skips the conversion checks (the app's duplicate always keeps them).
+    if (copyFrom && (copyFrom.type !== column.type || Boolean(copyFrom.multiple) !== Boolean(column.multiple))) throw invalid("A duplicated column keeps the original column's type. Duplicate it first, then change the copy's type.");
     return this.change(boardId, expectedVersion, actor, {
       action: "column.added",
       build: (current, records) => {
@@ -103,47 +141,73 @@ class BoardSchemaService {
     });
   }
 
+  // Column type change (Column System S0-A). Allowed only when it is lossless on EVERY record of the board
+  // (domain/column-conversion.js); otherwise refused with 400 CONVERSION_REFUSED and full-board counts, and nothing changes.
+  //   - The check reads one column of every record (projection), never loaded rows or a sample.
+  //   - The commit re-checks inside the same transaction that writes, after the board version check (409 CONFLICT when
+  //     stale); an optional previewToken from the dry run must still match (409 CONVERSION_REFUSED / PREVIEW_STALE).
+  //   - Boards over SYNC_LIMITS are refused (BOARD_TOO_LARGE) until the resumable engine exists; their counts are taken
+  //     outside any transaction.
+  //   - Records whose stored value stays the same are not rewritten; if none change, only the column definition is written.
+  // Response (unchanged contract): { board, affected: 0, recordsChanged }. Dry run: { dryRun, affected, ...details }.
   async changeType(boardId, key, raw, query, actor) {
     const dryRun = validate.dryRunParam(query);
-    const { expectedVersion, type, multiple } = validate.columnType(raw);
-    return this.change(boardId, expectedVersion, actor, {
-      dryRun, action: "column.type_changed",
-      build: async (board, records) => {
-        const column = this.column(board, key);
-        if (key === PRIMARY_KEY) throw invalid("The Item column's type can't be changed.");
-        // Connect and Mirror columns need their own settings (which board, which column): add a new column instead.
-        if (["connect", "mirror"].includes(type) || ["connect", "mirror"].includes(column.type)) throw invalid("Connect and Mirror columns can't be converted to or from another type. Add a new column instead.");
-        // A Dropdown can also switch between one value and several (same type, different "multiple").
-        const modeChange = type === "dropdown" && column.type === "dropdown" && multiple !== Boolean(column.multiple);
-        if (column.type === type && !modeChange) throw invalid("The column already has this type.");
-        if (column.type === "group" || type === "group") throw invalid("Changing a column to or from the Group type isn't supported yet.");
-        if (column.type === "files" || type === "files") throw invalid("Files columns can't be changed to or from another type. Add a new column instead.");
-        if (multiple && type !== "dropdown") throw invalid("Only Dropdown columns can allow several values.");
-        // People entries that become plain text keep the person's name, never their internal ID.
-        const refs = [...new Set(records.flatMap((r) => valueList(r.values[key])).filter((v) => USER_REF.test(v)))];
-        const people = refs.length ? await this.repos.users.findByIds(refs.map((r) => new ObjectId(r.slice(5)))) : [];
-        const names = new Map(people.map((u) => [`user:${u._id.toHexString()}`, u.displayName || u.email || "Unknown user"]));
-        const changes = [];
-        let cleared = 0;
-        const newValues = new Map();
-        for (const record of records) {
-          const value = record.values[key];
-          if (hasValue(value) && !valueFits(value, type)) cleared += 1;
-          const next = value === undefined && type !== "checkbox" ? undefined : convertValue(value, type, { multiple, names });
-          newValues.set(record, next);
-          if (next !== undefined && !sameValue(next, value)) changes.push({ record, set: { [`values.${key}`]: next } });
-        }
-        const updated = { ...column, type };
-        delete updated.multiple;
-        if (multiple) updated.multiple = true;
-        if (!["status", "priority", "dropdown"].includes(type)) delete updated.colors;
-        // A dropdown only offers its own options, so keep existing values selectable (BoardModel parity).
-        if (type === "dropdown") updated.options = [...new Set([...(column.options || []), ...[...newValues.values()].flatMap(valueList)])];
-        if (!valueFits(updated.defaultValue, type) || Array.isArray(updated.defaultValue)) updated.defaultValue = "";
-        const describe = (t, m) => (t === "dropdown" && m ? "dropdown (several values)" : t);
-        return { boardSet: { columns: board.columns.map((c) => (c.key === key ? updated : c)) }, changes, affected: cleared, summary: modeChange ? `Set ${column.label} to allow ${multiple ? "several values" : "one value"}` : `Changed ${column.label} from ${describe(column.type, column.multiple)} to ${describe(type, multiple)}` };
-      }
-    });
+    const { expectedVersion, type, multiple, previewToken } = validate.columnType(raw);
+    const to = { type, multiple };
+    const load = async (session) => {
+      const board = await this.repos.boards.findById(boardId, { session });
+      if (!board) throw notFound("board");
+      if (board.version !== expectedVersion) throw conflict("board", board);
+      const column = this.column(board, key);
+      assertConvertible(column, to);
+      return { board, column, toColumn: convertedColumn(column, to) };
+    };
+    const scan = async ({ board, column, toColumn }, session) => {
+      const planner = conversionPlanner({ board, column, to, toColumn });
+      const cursor = this.repos.records.columnValues(boardId, key, { session });
+      try { for (let doc = await cursor.next(); doc; doc = await cursor.next()) planner.add(doc._id, doc.values?.[key]); }
+      finally { await cursor.close?.(); }
+      return planner.finish();
+    };
+    if (dryRun) {
+      const { details } = await scan(await load(undefined), undefined);
+      return { dryRun: true, affected: details.incompatible, ...details };
+    }
+    const TOO_LARGE = Symbol("too large");
+    let result;
+    try {
+      result = await this.connection.withTransaction(async (session) => {
+        const loaded = await load(session);
+        // Too large for one transaction: leave it before reading any value (the counts are taken below, outside it).
+        if (await this.repos.records.countAllForBoard(boardId, { session }) > SYNC_LIMITS.records) throw TOO_LARGE;
+        const plan = await scan(loaded, session);
+        if (previewToken !== undefined && plan.details.previewToken !== previewToken) throw refusal(409, { ...plan.details, reason: "PREVIEW_STALE" });
+        if (!plan.details.allowed) throw refusal(400, plan.details);
+        return this.writeConversion(loaded, plan, { expectedVersion, actor, session });
+      });
+    } catch (error) {
+      if (error !== TOO_LARGE) throw error;
+      const { details } = await scan(await load(undefined), undefined);
+      throw refusal(400, { ...details, tooLarge: true, reason: details.reason && details.reason !== "BOARD_TOO_LARGE" ? details.reason : "BOARD_TOO_LARGE" });
+    }
+    this.searchIndex?.refreshBoard(boardId); // a change of type can change what is searchable on every record
+    return result;
+  }
+
+  async writeConversion({ board, column, toColumn }, plan, { expectedVersion, actor, session }) {
+    const key = column.key, now = new Date();
+    // The converted column is validated like any column (option caps and lengths, D4); other columns are left as stored.
+    const updated = normalizeColumn(plan.options ? { ...toColumn, options: plan.options } : toColumn, `Column "${key}"`);
+    const columns = board.columns.map((c) => (c.key === key ? updated : c));
+    if (!await this.repos.boards.updateVersioned(board._id, expectedVersion, { columns, updatedAt: now }, { session })) throw conflict("board", board);
+    const updates = plan.changes.map(({ id, next }) => ({
+      filter: { _id: id, boardId: board._id },
+      update: { $set: { [`values.${key}`]: next, updatedBy: actor.userId, updatedAt: now }, $inc: { version: 1 } }
+    }));
+    if (updates.length) await this.repos.records.bulkUpdate(updates, { session });
+    const summary = column.type === toColumn.type ? `Set ${column.label} to allow ${toColumn.multiple ? "several values" : "one value"}` : `Changed ${column.label} from ${typeLabel(column.type, column.multiple)} to ${typeLabel(toColumn.type, toColumn.multiple)}`;
+    await this.repos.activities.append(activityEntry({ workspaceId: board.workspaceId, boardId: board._id, actorUserId: actor.userId, actorName: actor.displayName, action: "column.type_changed", entityType: "board", entityId: board._id, summary, changes: [{ field: `columns.${key}.type`, from: describeType(column.type, column.multiple), to: describeType(toColumn.type, toColumn.multiple) }], now }), { session });
+    return { board: { ...board, columns, updatedAt: now, version: board.version + 1 }, affected: 0, recordsChanged: updates.length };
   }
 
   async editOptions(boardId, key, raw, query, actor) {
