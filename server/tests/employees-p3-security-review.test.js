@@ -97,15 +97,22 @@ describe("service-level probes", () => {
     assert.ok(warning);
     assert.deepEqual(warning.workspaces, ["Synthetic WS"]);
     assert.match(warning.message, /Synthetic WS/);
-    for (const a of ["suspend", "revoke"]) assert.deepEqual(view.actions.find((x) => x.action === a).warnings.map((x) => x.code), ["LAST_WORKSPACE_ADMIN_OF"], a);
-    assert.equal(view.actions.find((x) => x.action === "suspend").allowed, true, "a warning, not a refusal");
-    const res = await w.service.changeAccess("all", w.idOf(3), { action: "suspend", expectedState: "active", expectedVersion: 0, reason: "Synthetic reason" }, ADMIN, w.actorOf(me));
-    assert.equal(res.result.to, "suspended");
-    // With a second ACTIVE admin there is no warning.
+    // P4-0: the warning stays, and Suspend / Revoke are now refused (LAST_USABLE_WORKSPACE_ADMIN), naming the workspace.
+    for (const a of ["suspend", "revoke"]) {
+      const action = view.actions.find((x) => x.action === a);
+      assert.equal(action.allowed, false, a);
+      assert.equal(action.code, "LAST_USABLE_WORKSPACE_ADMIN", a);
+      assert.match(action.reason, /Synthetic WS/, a);
+    }
+    await assert.rejects(w.service.changeAccess("all", w.idOf(3), { action: "suspend", expectedState: "active", expectedVersion: 0, reason: "Synthetic reason" }, ADMIN, w.actorOf(me)), (e) => e.status === 409 && e.code === "LAST_USABLE_WORKSPACE_ADMIN" && /Synthetic WS/.test(e.message));
+    assert.equal((await w.db.collection("users").findOne({ _id: target._id })).status, "active", "nothing changed");
+    // With a second ACTIVE admin there is no warning, and the suspend goes through.
     const third = await w.register(5);
     await w.repos.memberships.add({ workspaceId: ws, userId: third._id, role: "WORKSPACE_ADMIN", now });
     const after = await w.service.manageAccess("all", w.idOf(3), ADMIN, w.actorOf(me));
     assert.ok(!after.warnings.some((x) => x.code === "LAST_WORKSPACE_ADMIN_OF"));
+    const res = await w.service.changeAccess("all", w.idOf(3), { action: "suspend", expectedState: "active", expectedVersion: 0, reason: "Synthetic reason" }, ADMIN, w.actorOf(me));
+    assert.equal(res.result.to, "suspended");
   });
 
   test("FIXED (3): revoke reads the ACTIVE tokens directly, so an older active token behind 1000 revoked ones is revoked too", async () => {

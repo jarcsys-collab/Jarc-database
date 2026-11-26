@@ -347,9 +347,14 @@ describe("P3 Access Administration (real app)", () => {
       const r = await act("owner", "revoke", { reason: "Synthetic", confirm: "REVOKE" });
       assert.equal(r.status, 403); assert.equal(r.body.error.code, "SELF_LOCKOUT");
       assert.equal((await userOf("owner")).status, "active");
-      // admin2 is listed too; the owner stays active, so suspending admin2 is allowed (and restored right after).
-      assert.equal((await act("admin2", "suspend", { reason: "Synthetic check" })).status, 200);
-      assert.equal((await act("admin2", "restore")).status, 200);
+      // admin2 is listed too; the owner stays active, so suspending admin2 is allowed (and restored right after). P4-0: admin2 is
+      // the only usable admin of Beta WS (LAST_USABLE_WORKSPACE_ADMIN), so Beta WS gets a usable co-admin for this check first.
+      const coAdmin = { workspaceId: W["Beta WS"], userId: (await userOf("viewer"))._id };
+      await app.repos.memberships.add({ ...coAdmin, role: "WORKSPACE_ADMIN", now: new Date() });
+      try {
+        assert.equal((await act("admin2", "suspend", { reason: "Synthetic check" })).status, 200);
+        assert.equal((await act("admin2", "restore")).status, 200);
+      } finally { await app.db.collection("workspaceMembers").deleteOne(coAdmin); }
       clients.delete(`${app.url}|admin2`);
     });
 

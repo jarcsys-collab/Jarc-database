@@ -26,6 +26,7 @@ StorageError.CODES = Object.freeze({
   ACCOUNT_DISABLED: "ACCOUNT_DISABLED", // Entra sign-in: the JARC account is disabled
   ACCOUNT_PENDING: "ACCOUNT_PENDING",   // Account Management: the JARC account is waiting for approval
   CONVERSION_REFUSED: "CONVERSION_REFUSED", // a column type change the server refused (values incompatible or lossy); nothing changed
+  REAUTH_REQUIRED: "REAUTH_REQUIRED",   // P4-0: a sensitive administrator write needs a recent sign-in (the session stays valid)
   CANCELLED: "CANCELLED"              // internal: a queued save skipped because an earlier save failed
 });
 // CONVERSION_REFUSED (and a type-change dry run) carry counts in `details`. Only numbers, known reason codes and at most
@@ -69,6 +70,7 @@ StorageError.describe = (codeOrError) => {
     [C.ACCOUNT_DISABLED]: ["Your JARC account doesn't have access. Contact a JARC administrator.", false],
     [C.ACCOUNT_PENDING]: ["Your JARC account is waiting for approval by a JARC administrator.", false],
     [C.CONVERSION_REFUSED]: ["This column can't be converted because some existing values are incompatible or could lose information. Your data has not been changed.", false],
+    [C.REAUTH_REQUIRED]: ["For security, sign in again to continue this administrator action.", false],
     [C.FORBIDDEN]: ["You don't have permission to make this change.", false],
     [C.CONFLICT]: ["Someone else changed this item. Reload to see the latest version.", false],
     [C.PAYLOAD_TOO_LARGE]: ["This is too large to save.", false],
@@ -238,6 +240,10 @@ class ApiAdapter {
         } else if (serverCode === StorageError.CODES.ACCOUNT_PENDING) {
           error = fail(StorageError.CODES.ACCOUNT_PENDING, null, { status: response.status });
           window.dispatchEvent?.(new CustomEvent("jarc-account-pending"));
+        } else if (serverCode === StorageError.CODES.REAUTH_REQUIRED && response.status === 403) {
+          // P4-0: the administrator sign-in is too old for this action. The session stays valid; the app offers "Sign in again".
+          error = fail(StorageError.CODES.REAUTH_REQUIRED, null, { status: response.status, serverCode });
+          window.dispatchEvent?.(new CustomEvent("jarc-reauth-required"));
         } else if (this.csrfToken && (response.status === 401 || serverCode === "CSRF_INVALID")) {
           // The signed-in session ended (expired, signed out elsewhere, or no longer valid): nothing is retried.
           error = fail(StorageError.CODES.UNAUTHENTICATED, null, { status: response.status });

@@ -126,7 +126,12 @@ describe("design warnings (not refusals)", () => {
     w.index.invalidate();
     const v = await w.service.manageAccess("all", w.idOf(3), ADMIN, w.actorOf(actorDoc));
     assert.ok(v.warnings.some((x) => x.code === "TARGET_JARC_ADMIN"));
-    assert.equal(v.actions.find((a) => a.action === "suspend").allowed, true, "a warning, not a refusal");
+    // P4-0: TARGET_JARC_ADMIN is now also a refusal (409), unless the acting administrator is a JARC administrator themselves
+    // (a JARC.Admin role holder only).
+    const suspend = v.actions.find((a) => a.action === "suspend");
+    assert.equal(suspend.allowed, false, "P4-0: a warning and a refusal");
+    assert.equal(suspend.code, "TARGET_JARC_ADMIN");
+    assert.equal((await w.service.manageAccess("all", w.idOf(3), ADMIN, { ...w.actorOf(actorDoc), isSystemAdmin: true })).actions.find((a) => a.action === "suspend").allowed, true, "a JARC administrator may still suspend a JARC.Admin holder");
     const superAdmin = await w.register(5, { account: { status: "active", role: "SUPER_ADMIN", version: 1 } });
     assert.ok(superAdmin);
     assert.ok((await w.service.manageAccess("all", w.idOf(5), ADMIN, w.actorOf(actorDoc))).warnings.some((x) => x.code === "TARGET_JARC_ADMIN"));

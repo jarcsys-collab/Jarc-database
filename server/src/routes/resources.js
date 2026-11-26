@@ -49,6 +49,8 @@ function resourceRoutes({ services, access, features = { personalViews: true, co
   // Every values object a write carries: one record (values), a batch create (records[].values), a bulk update (items[].values).
   const valuesIn = (body) => (isObject(body) ? [body.values, ...(Array.isArray(body.records) ? body.records.map((r) => r?.values) : []), ...(Array.isArray(body.items) ? body.items.map((i) => i?.values) : [])].filter(isObject) : []);
   const columnsIn = (body) => (isObject(body) ? [...(Array.isArray(body.columns) ? body.columns : []), ...(isObject(body.column) ? [body.column] : []), ...(body.type === "connect" ? [body] : [])].filter(isObject) : []);
+  // A record as the API returns it, with its board's workspace (the stored copy can lag a board move; P4-0).
+  const inBoard = (board) => (doc) => recordToApi(doc.workspaceId?.equals?.(board.workspaceId) ? doc : { ...doc, workspaceId: board.workspaceId });
   const reading = (req) => { const id = req.actor?.userId, hex = typeof id?.toHexString === "function" ? id.toHexString() : typeof id === "string" ? id : ""; return { me: /^[0-9a-f]{24}$/.test(hex) ? `user:${hex}` : null }; };
 
   // ---- Workspaces
@@ -130,7 +132,7 @@ function resourceRoutes({ services, access, features = { personalViews: true, co
   router.get("/boards/:boardId/records", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "VIEWER");
     const page = await services.records.list(board._id, req.query, reading(req));
-    send(res, 200, { items: page.items.map(recordToApi), nextCursor: page.nextCursor, limit: page.limit });
+    send(res, 200, { items: page.items.map(inBoard(board)), nextCursor: page.nextCursor, limit: page.limit });
   });
   router.get("/boards/:boardId/records/count", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "VIEWER");
@@ -155,7 +157,7 @@ function resourceRoutes({ services, access, features = { personalViews: true, co
     writable(board);
     noQuery(req);
     await related.checkLinks(req.actor, board, valuesIn(req.body), { allowWrite: features.connectBoards });
-    send(res, 200, { items: (await services.records.updateMany(board._id, req.body, req.actor, peopleRule(req))).map(recordToApi) });
+    send(res, 200, { items: (await services.records.updateMany(board._id, req.body, req.actor, peopleRule(req))).map(inBoard(board)) });
   });
   router.post("/boards/:boardId/records/delete", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "MEMBER");
@@ -217,9 +219,8 @@ function resourceRoutes({ services, access, features = { personalViews: true, co
     noQuery(req);
     const { workspaceId: target } = validate.boardMove(requireBody(req.body));
     await access.workspace(req.actor, target, "WORKSPACE_ADMIN");
+    // The move also aligns the workspace copies on the board's records, attachments and comments (bounded batches, P4-0).
     const result = await services.schema.moveBoard(board._id, req.body, req.actor);
-    await services.files?.moveBoard(board._id, target);
-    await services.comments?.repos.comments.moveBoard(board._id, target);
     send(res, 200, { board: await boardOut(req, result.board), recordsMoved: result.records });
   });
   router.get("/boards/:boardId/activity", async (req, res) => {

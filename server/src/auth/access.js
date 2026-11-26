@@ -32,13 +32,17 @@ const { capWorkspaceRole } = require("./accounts");
 
 const RANK = Object.freeze({ VIEWER: 1, MEMBER: 2, WORKSPACE_ADMIN: 3, SYSTEM_ADMIN: 4 });
 const ACCESS_POLICIES = Object.freeze(["role_based", "development_shared"]);
+const sameId = (a, b) => Boolean(a && b) && (typeof a.equals === "function" ? a.equals(b) : String(a) === String(b));
 const forbidden = (message = "You don't have permission to do this in this workspace.") => new ApiError(403, "FORBIDDEN", message);
 
 class Access {
-  constructor(repos, { policy = "role_based", betaOpenEditing = false, accountMode = "off" } = {}) {
+  constructor(repos, { policy = "role_based", betaOpenEditing = false, accountMode = "off", logger = null } = {}) {
     if (!ACCESS_POLICIES.includes(policy)) throw new Error(`Unknown access policy: ${policy}`);
     if (!["off", "staged", "enforced"].includes(accountMode)) throw new Error(`Unknown account management mode: ${accountMode}`);
     this.repos = repos;
+    this.logger = logger;
+    // Records seen with a workspace copy that differs from their board's (see record()).
+    this.drift = { count: 0, boards: new Set() };
     this.accountMode = accountMode;
     this.enforced = accountMode === "enforced";
     // What the environment asked for, and what is in effect (enforced accounts switch open access off).
@@ -101,10 +105,35 @@ class Access {
     return { board, role: await this.check(actor, board.workspaceId, minimum, "board") };
   }
 
+  // A record's workspace is its BOARD's workspace (P4-0, F10). record.workspaceId is only a copy, which a board move running at
+  // the same moment can leave behind, so it never decides access: a mismatch is data drift (counted, logged once per board)
+  // and the record is returned with the board's workspace, so every later check and write (comments, mentions, moderation,
+  // activity entries, responses) uses the board's too. A record whose board is gone does not exist.
+  // Cost: one extra _id lookup with a two-field projection.
   async record(actor, recordId, minimum) {
     const record = await this.repos.records.findById(recordId);
     if (!record) throw notFound("record");
-    return { record, role: await this.check(actor, record.workspaceId, minimum, "record") };
+    const board = await this.boardWorkspace(record.boardId);
+    if (!board?.workspaceId) throw notFound("record");
+    const same = sameId(record.workspaceId, board.workspaceId);
+    if (!same) this.noteDrift(board);
+    const role = await this.check(actor, board.workspaceId, minimum, "record");
+    return { record: same ? record : { ...record, workspaceId: board.workspaceId }, role };
+  }
+
+  // { _id, workspaceId } of a board (repositories without the projected read fall back to the whole board).
+  boardWorkspace(boardId) {
+    if (!boardId) return null;
+    const boards = this.repos.boards;
+    return typeof boards.workspaceOf === "function" ? boards.workspaceOf(boardId) : boards.findById(boardId);
+  }
+
+  noteDrift(board) {
+    this.drift.count += 1;
+    const key = String(board._id);
+    if (this.drift.boards.has(key) || this.drift.boards.size >= 1000) return;
+    this.drift.boards.add(key);
+    this.logger?.warn?.(`[access] a record's workspace copy differs from its board's (board ${key}); access follows the board`);
   }
 
   requireSystemAdmin(actor) {

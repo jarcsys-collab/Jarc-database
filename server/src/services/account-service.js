@@ -3,7 +3,8 @@
 //
 //   who        only an active Super Admin account, re-checked inside each change's transaction
 //   self       nobody changes their own role or status (no self-demotion, no self-block)
-//   last       the last active Super Admin can't be demoted or blocked
+//   last       the last active Super Admin can't be demoted or blocked; the last usable Workspace admin of a workspace can't be
+//              blocked (or, enforced, given a role capped below WORKSPACE_ADMIN): 409 LAST_USABLE_WORKSPACE_ADMIN (P4-0)
 //   escalation granting SUPER_ADMIN needs the JARC.Admin app role on the granting administrator's sign-in and the
 //              typed confirmation "GRANT SUPER ADMIN"; nobody else can grant anything (Admins can't reach these routes)
 //   versions   every change names the account version it was based on (expectedVersion); a stale one is refused (409)
@@ -16,7 +17,7 @@ const { ObjectId } = require("mongodb");
 const { ApiError } = require("../middleware/errors");
 const { requireBody, allowOnly, parseId, fail } = require("../validation/common");
 const { ROLES: WORKSPACE_ROLES } = require("../repositories/mongo/membership-repository");
-const { ACCOUNT_ROLES, WORKSPACE_CAP, WORKSPACE_RANK, accountOf, isActiveSuperAdmin, capWorkspaceRole, superAdminEligibility, CONFIRM } = require("../auth/accounts");
+const { ACCOUNT_ROLES, WORKSPACE_CAP, WORKSPACE_RANK, accountOf, isActiveSuperAdmin, capWorkspaceRole, superAdminEligibility, usableWorkspaceAdmin, CONFIRM } = require("../auth/accounts");
 
 const forbidden = (message) => new ApiError(403, "FORBIDDEN", message);
 const notFound = () => new ApiError(404, "NOT_FOUND", "This account doesn't exist.");
@@ -169,12 +170,34 @@ class AccountService {
       if (approval || (fields.status === "active" && before.status !== "active")) Object.assign(fields, { approvedBy: actor.userId, approvedByName: actor.displayName ?? null, approvedAt: now });
       const next = await this.repos.users.updateAccount(id, expectedVersion, fields, now, { session });
       if (!next) throw conflict();
+      // P4-0: a change that makes the person no longer a usable Workspace admin (blocked, or under enforced a role capped below
+      // WORKSPACE_ADMIN) is refused where no other usable admin would remain (the transaction rolls back).
+      if (usableWorkspaceAdmin(doc, this.mode) && !usableWorkspaceAdmin(next, this.mode)) await this.keepUsableAdmins(id, session);
       const changes = ["status", "role"].filter((f) => fields[f] !== undefined && fields[f] !== before[f]).map((f) => ({ field: f, from: before[f], to: fields[f] }));
       await this.repos.accountAudit.append({ action, targetUserId: id, actorUserId: actor.userId, actorName: actor.displayName ?? null, changes, at: now }, { session });
       return next;
     });
     const [row] = await this.decorate([updated]);
     return row;
+  }
+
+  // P4-0: the usable-admin rule of Employee Management P3 (employees/access-admin.js soleUsableAdminOf) and MembershipService
+  // (countUsableAdmins), inside the caller's transaction: every workspace where the person is an active WORKSPACE_ADMIN has its
+  // membersVersion touched (so a concurrent membership change or a co-admin's block conflicts), then must keep another usable
+  // admin; otherwise 409 LAST_USABLE_WORKSPACE_ADMIN naming those workspaces.
+  async keepUsableAdmins(userId, session) {
+    const ids = [...new Map((await this.repos.memberships.listActiveAdminRowsForUser(userId, { session })).map((r) => [hex(r.workspaceId), r.workspaceId])).values()];
+    const sole = [];
+    for (const ws of ids) {
+      await this.repos.workspaces.touchMembers(ws, { session });
+      const others = (await this.repos.memberships.listActiveAdmins(ws, { session })).filter((r) => !r.userId.equals(userId));
+      const users = await this.repos.users.findByIdsIn([...new Map(others.map((r) => [hex(r.userId), r.userId])).values()], { session });
+      if (!users.some((u) => usableWorkspaceAdmin(u, this.mode))) sole.push(ws);
+    }
+    if (!sole.length) return;
+    const names = new Map((await this.repos.workspaces.list()).map((w) => [hex(w._id), w.name]));
+    const list = sole.map((x) => names.get(hex(x)) || "Untitled workspace").sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base", numeric: true }));
+    throw new ApiError(409, "LAST_USABLE_WORKSPACE_ADMIN", `This person is the only usable Workspace admin of: ${list.join(", ")}. Make someone else an admin of ${list.length === 1 ? "that workspace" : "those workspaces"} first.`, { workspaces: list });
   }
 
   // ---- Workspace access (explicit memberships)

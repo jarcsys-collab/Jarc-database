@@ -1,6 +1,9 @@
 // Records: always on an existing board, and always in that board's workspace (workspaceId is copied from the board,
 // never taken from the request). Updates and deletes are version checked: a stale expectedVersion gets 409.
+// The copy can lag a board move made at the same moment (P4-0): creates read the board again after writing and correct
+// what they wrote (board-workspace-sync.js), and activity entries and responses always use the board's workspace.
 const { ObjectId } = require("mongodb");
+const { settleRecords } = require("./board-workspace-sync");
 const validate = require("../validation/resources");
 const { applyVersionedUpdate } = require("../repositories/mongo/base-repository");
 const { notFound, missingOrStale, activityEntry, appendActivity } = require("./shared");
@@ -113,11 +116,14 @@ class RecordService {
       createdBy: actor.userId, updatedBy: actor.userId, createdAt: now, updatedAt: now, version: 1
     };
     await this.repos.records.insert(doc);
-    if (!await this.repos.boards.findById(boardId)) {
+    // Read the board again: gone → remove the record; moved meanwhile → this record follows it.
+    const current = await settleRecords(this.repos, boardId, doc.workspaceId, [doc._id]);
+    if (!current) {
       await this.repos.records.deleteVersioned(doc._id, 1);
       throw notFound("board");
     }
-    await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: board.workspaceId, boardId, recordId: doc._id, actorUserId: actor.userId, actorName: actor.displayName, action: "record.created", entityType: "record", entityId: doc._id, now }));
+    doc.workspaceId = current.workspaceId;
+    await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: doc.workspaceId, boardId, recordId: doc._id, actorUserId: actor.userId, actorName: actor.displayName, action: "record.created", entityType: "record", entityId: doc._id, now }));
     this.searchIndex?.refresh(boardId, [doc._id]);
     return doc;
   }
@@ -135,12 +141,12 @@ class RecordService {
     for (const field of ["groupId", "position", "archived", "pinned"]) if (change[field] !== undefined) set[field] = change[field];
     const before = await this.repos.records.updateVersioned(id, expectedVersion, set);
     if (!before) throw await missingOrStale(this.repos.records, id, "record");
-    const after = applyVersionedUpdate(before, set);
+    const after = { ...applyVersionedUpdate(before, set), workspaceId: board.workspaceId };
     const changes = [
       ...Object.entries(change.values || {}).filter(([key, value]) => !sameValue(before.values[key], value)).map(([key, value]) => ({ field: `values.${key}`, from: before.values[key] ?? null, to: value })),
       ...["groupId", "position", "archived", "pinned"].filter((f) => change[f] !== undefined && before[f] !== change[f]).map((f) => ({ field: f, from: before[f] ?? null, to: change[f] }))
     ];
-    await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: record.workspaceId, boardId: record.boardId, recordId: id, actorUserId: actor.userId, actorName: actor.displayName, action: "record.updated", entityType: "record", entityId: id, changes, now }));
+    await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: board.workspaceId, boardId: record.boardId, recordId: id, actorUserId: actor.userId, actorName: actor.displayName, action: "record.updated", entityType: "record", entityId: id, changes, now }));
     this.searchIndex?.refresh(record.boardId, [id]);
     return after;
   }
@@ -148,7 +154,8 @@ class RecordService {
   async delete(id, expectedVersion, actor) {
     const record = await this.get(id);
     if (!await this.repos.records.deleteVersioned(id, expectedVersion)) throw await missingOrStale(this.repos.records, id, "record");
-    await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: record.workspaceId, boardId: record.boardId, recordId: id, actorUserId: actor.userId, actorName: actor.displayName, action: "record.deleted", entityType: "record", entityId: id, summary: String(record.values?.serial ?? "").slice(0, 200), now: new Date() }));
+    const board = await this.repos.boards.workspaceOf(record.boardId); // the entry goes to the board's workspace, not the copy's
+    await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: board?.workspaceId ?? record.workspaceId, boardId: record.boardId, recordId: id, actorUserId: actor.userId, actorName: actor.displayName, action: "record.deleted", entityType: "record", entityId: id, summary: String(record.values?.serial ?? "").slice(0, 200), now: new Date() }));
     this.searchIndex?.refresh(record.boardId, [id]);
   }
 }
@@ -171,7 +178,10 @@ RecordService.prototype.createMany = async function createMany(boardId, raw, act
     await this.repos.records.insertMany(docs, { session });
     await this.repos.activities.append(activityEntry({ workspaceId: board.workspaceId, boardId, actorUserId: actor.userId, actorName: actor.displayName, action: "records.created", entityType: "board", entityId: boardId, summary: `Added ${docs.length} records`, now }), { session });
   });
-  if (!await this.repos.boards.findById(boardId)) { await this.repos.records.deleteByBoard(boardId); throw notFound("board"); }
+  // Read the board again: gone → remove its records; moved meanwhile → these records follow it.
+  const current = await settleRecords(this.repos, boardId, board.workspaceId, docs.map((d) => d._id));
+  if (!current) { await this.repos.records.deleteByBoard(boardId); throw notFound("board"); }
+  for (const d of docs) d.workspaceId = current.workspaceId;
   this.searchIndex?.refresh(boardId, docs.map((d) => d._id));
   return docs;
 };

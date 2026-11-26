@@ -122,8 +122,10 @@ function fileRoutes({ services, access, limiter = uploadLimiter() }) {
     allowOnly(req.query, [], "the query");
     const attachment = await files.get(parseId(req.params.attachmentId, "attachmentId"));
     await access.record(req.actor, attachment.recordId, "MEMBER");
-    if ((await services.records.board(attachment.boardId)).source?.readOnly) return sendError(res, 403, "READ_ONLY_BOARD", "This board is synchronized from monday.com and is read-only in JARC.");
-    await files.remove(attachment, req.actor);
+    const board = await services.records.board(attachment.boardId);
+    if (board.source?.readOnly) return sendError(res, 403, "READ_ONLY_BOARD", "This board is synchronized from monday.com and is read-only in JARC.");
+    // The activity entry goes to the board's workspace, not the attachment's copy (which can lag a board move; P4-0).
+    await files.remove({ ...attachment, workspaceId: board.workspaceId }, req.actor);
     send(res, 200, { deleted: true });
   });
   return router;

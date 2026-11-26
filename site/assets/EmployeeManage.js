@@ -47,6 +47,9 @@ class EmployeeManage {
     LAST_EMPLOYEE_ADMIN: "This is the last active employee administrator.",
     LAST_ADMIN: "This is the workspace's last admin membership.",
     LAST_WORKSPACE_ADMIN: "This is the workspace's last admin membership.",
+    LAST_USABLE_WORKSPACE_ADMIN: "This person is the only usable Workspace admin of a workspace. Make someone else an admin of it first.",
+    TARGET_JARC_ADMIN: "This person is a JARC administrator. Their access can't be suspended or revoked here.",
+    REAUTH_REQUIRED: "For security, sign in again to continue this administrator action.",
     INVALID_TRANSITION: "Not possible from the current account state.",
     NOT_REGISTERED: "This person has no JARC account yet.",
     ALREADY_ACTIVE: "The account is already active.",
@@ -318,6 +321,8 @@ class EmployeeManage {
     const base = { status: st, code, reference };
     if (code === "UNAUTHENTICATED" || st === 401) return { ...base, kind: "generic", message: "Your session has ended. Sign in again to continue." };
     if (code === "OFFLINE") return { ...base, kind: "generic", message: "Can't reach the JARC server. Check your connection, then try again." };
+    // P4-0: the administrator sign-in is too old for this write; the app's toast offers "Sign in again" (AppController).
+    if (code === "REAUTH_REQUIRED") return { ...base, kind: "generic", message: EmployeeManage.CODES.REAUTH_REQUIRED };
     if (st === 403) return { ...base, kind: "denied", message: code === "EMPLOYEES_FORBIDDEN" || read ? "You don't have permission to manage JARC access." : (EmployeeManage.CODES[code] || "You don't have permission for this change.") };
     if (st === 413) return { ...base, kind: "generic", message: "The request was too large. Shorten the reason, then try again." };
     if (st === 404) return { ...base, kind: "record", message: read ? "Manage access isn't available for this person: they aren't in this list, or the feature was turned off." : `${code === "WORKSPACE_NOT_FOUND" || code === "NOT_MEMBER" ? EmployeeManage.CODES[code] : "This person or workspace isn't available any more, or Manage access was turned off."} Reloaded.` };
@@ -330,6 +335,7 @@ class EmployeeManage {
         : code === "ALREADY_MEMBER" || /DUPLICATE|EXISTS/.test(code) ? "This person already has a membership in this workspace."
         : code === "NOT_REGISTERED" ? "This person has no JARC account yet: grant access first."
         : code === "ACCOUNT_NOT_ACTIVE" ? "The JARC account isn't active, so its memberships can't be changed now."
+        : code === "LAST_USABLE_WORKSPACE_ADMIN" || code === "TARGET_JARC_ADMIN" ? EmployeeManage.CODES[code]
         : "Changed by someone else.";
       return { ...base, kind: "conflict", message: `${msg} Reloaded: check the current state, then try again.` };
     }

@@ -45,7 +45,8 @@ function loadConfig(env = process.env) {
   }
   const preAuth = nodeEnv !== "production";
   const { authMode, entra } = loadAuthConfig(env, nodeEnv, dataStore);
-  const { accessPolicy, accessPolicyIgnored } = loadAccessPolicy(env);
+  const accessPolicy = loadAccessPolicy(env);
+  const betaOpenEditing = loadBetaOpenEditing(env);
   const accounts = loadAccountConfig(env, nodeEnv, authMode, entra);
   return Object.freeze({
     nodeEnv,
@@ -55,9 +56,8 @@ function loadConfig(env = process.env) {
     mongo,
     authMode,
     entra,
+    // role_based | development_shared (an unknown ACCESS_POLICY stops startup; see loadAccessPolicy).
     accessPolicy,
-    // An ACCESS_POLICY value that wasn't recognised (role_based is used instead); reported at startup.
-    accessPolicyIgnored,
     // Account Management (Phase M4.3, see auth/accounts.js): { mode, superAdmin }.
     accounts,
     maxFileStorageBytes: maxFileStorageMb * 1024 * 1024,
@@ -86,8 +86,8 @@ function loadConfig(env = process.env) {
     slowRequestMs: loadSlowRequestMs(env),
     // MongoDB commands at least this slow are listed on the System Health page (monitoring/monitor.js). Unset: 500.
     slowCommandMs: loadSlowCommandMs(env),
-    // TEMPORARY beta collaboration (see auth/access.js). Only the exact value "true" turns it on.
-    betaOpenEditing: env.JARC_BETA_OPEN_EDITING === "true",
+    // TEMPORARY beta collaboration (see auth/access.js). "true" turns it on; anything but true/false/unset stops startup.
+    betaOpenEditing,
     // GET/PUT /api/v1/state is a transitional development endpoint with no authentication. Never in production.
     enableDevStateApi: preAuth,
     // AUTH_MODE=dev: the resource API attributes every change to the fixed development user (DEVELOPMENT / PRE-AUTH).
@@ -371,7 +371,9 @@ function loadAuthConfig(env, nodeEnv, dataStore) {
 //   development_shared  DEVELOPMENT COLLABORATION: every signed-in employee of the configured Entra tenant can create
 //                       workspaces and manage every workspace and its boards, columns and records. Sign-in, sessions,
 //                       CSRF and tenant checks are unchanged.
-// Only the exact value development_shared turns sharing on; unset, empty or anything else is role_based (fails safe).
+// Unset or empty is role_based. Any other value must be exactly role_based or development_shared: an unknown value
+// (including another case or surrounding spaces) stops startup with a ConfigError, so a typo can never switch shared
+// access on or off silently.
 const ACCESS_POLICIES = ["role_based", "development_shared"];
 
 // Attachment storage (Phase M4.1).
@@ -509,7 +511,7 @@ function loadMondayConfig(env) {
 // verified claims AND the JARC.Admin app role, and claim the role explicitly (POST /api/v1/accounts/bootstrap).
 function loadAccountConfig(env, nodeEnv, authMode, entra) {
   const mode = env.ACCOUNT_MANAGEMENT ? env.ACCOUNT_MANAGEMENT : "off";
-  if (!["off", "staged", "enforced"].includes(mode)) throw new ConfigError("ACCOUNT_MANAGEMENT must be off, staged or enforced.");
+  if (!["off", "staged", "enforced"].includes(mode)) throw new ConfigError("ACCOUNT_MANAGEMENT must be off, staged or enforced (exactly, lower case), or unset for off.");
   if (mode === "enforced" && nodeEnv === "production") throw new ConfigError("ACCOUNT_MANAGEMENT=enforced is not approved for production yet. Use staged (observation mode) or leave it unset.");
   if (mode !== "off" && authMode !== "entra") throw new ConfigError(`ACCOUNT_MANAGEMENT=${mode} needs AUTH_MODE=entra (accounts are Microsoft Entra identities).`);
   const tenantId = env.JARC_SUPER_ADMIN_TENANT_ID || "", objectId = env.JARC_SUPER_ADMIN_OBJECT_ID || "";
@@ -525,10 +527,22 @@ function loadAccountConfig(env, nodeEnv, authMode, entra) {
   return Object.freeze({ mode, superAdmin });
 }
 
+// Unset or empty: role_based (the documented default). Any other value must be exactly one of ACCESS_POLICIES; anything else
+// (another spelling, case or surrounding spaces) stops startup in every environment, because guessing would silently switch
+// shared access on or off. The message names the variable and the allowed values only, never the value that was set.
 function loadAccessPolicy(env) {
   const value = env.ACCESS_POLICY;
-  if (value === "development_shared") return { accessPolicy: "development_shared", accessPolicyIgnored: false };
-  return { accessPolicy: "role_based", accessPolicyIgnored: value !== undefined && value !== "" && value !== "role_based" };
+  if (value === undefined || value === "") return "role_based";
+  if (!ACCESS_POLICIES.includes(value)) throw new ConfigError(`ACCESS_POLICY must be ${ACCESS_POLICIES.join(" or ")} (exactly, lower case), or unset for role_based.`);
+  return value;
+}
+
+// TEMPORARY beta collaboration (auth/access.js). Unset, empty or "false": off; "true": on. Anything else stops startup.
+function loadBetaOpenEditing(env) {
+  const value = env.JARC_BETA_OPEN_EDITING;
+  if (value === undefined || value === "" || value === "false") return false;
+  if (value === "true") return true;
+  throw new ConfigError("JARC_BETA_OPEN_EDITING must be true or false (exactly, lower case), or unset for false.");
 }
 
 function assertJarcDatabaseName(name) {

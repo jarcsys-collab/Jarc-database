@@ -19,7 +19,7 @@ const express = require("express");
 const { allowOnly, requireBody } = require("../validation/common");
 const { userToApi } = require("../api/serialize");
 const { InvalidTokenError, AuthUnavailableError } = require("../auth/entra-token");
-const { readCookie, cookieHeader, clearCookie, csrfTokenFor, originAllowed, randomSecret, SESSION_COOKIE, SIGN_IN_COOKIE } = require("../auth/session");
+const { readCookie, cookieHeader, clearCookie, csrfTokenFor, originAllowed, randomSecret, adminFreshUntil, adminReauthMs, SESSION_COOKIE, SIGN_IN_COOKIE } = require("../auth/session");
 const { sendError } = require("../middleware/errors");
 const { accountOf, isActiveSuperAdmin } = require("../auth/accounts");
 
@@ -32,6 +32,9 @@ const permissionsOf = (access, actor, { canClaimSuperAdmin = false } = {}) => ({
     accountManagement: { mode: access.accountMode, enforced: access.enforced, overridden: access.overridden, canManage: isActiveSuperAdmin(actor.account), canClaimSuperAdmin }
   })
 });
+// P4-0 (F2): adminFreshUntil, only for a session carrying the JARC.Admin claim: until when sensitive administrator writes accept
+// it (auth/session.js sensitiveAdminRequest); after that they answer 403 REAUTH_REQUIRED until the person signs in again.
+const freshness = (until) => (until instanceof Date ? { adminFreshUntil: until.toISOString() } : {});
 // Only the configured administrator's own session runs the (few) eligibility queries.
 async function claimable(accounts, actor, session) {
   if (!accounts?.tracking || !accounts.superAdmin || !session || String(session.objectId).toLowerCase() !== accounts.superAdmin.objectId || isActiveSuperAdmin(actor.account)) return false;
@@ -51,7 +54,7 @@ function authConfigRoutes({ mode, entra }) {
 }
 
 // Sign-in: nonce, then ID token → session. Mounted before session authentication (no session exists yet).
-function signInRoutes({ entra, verify, repos, access, accounts = null }) {
+function signInRoutes({ entra, verify, repos, access, accounts = null, logger = console }) {
   const router = express.Router();
   const sessionLifetimeMs = entra.sessionMaxHours * 60 * 60 * 1000;
   const idleMs = entra.sessionIdleMinutes * 60 * 1000;
@@ -93,10 +96,15 @@ function signInRoutes({ entra, verify, repos, access, accounts = null }) {
     const sessionSecret = randomSecret();
     const session = await repos.sessions.create({ sessionSecret, userId: user._id, tenantId: identity.tenantId, objectId: identity.objectId, isSystemAdmin: identity.isSystemAdmin, now, idleMs, maxMs: sessionLifetimeMs });
     await accounts?.onSignIn(user, created, now);
+    // P4-0: when the JARC.Admin role was last seen (or no longer seen) at a sign-in, for the P3 JARC administrator guard. Evidence
+    // only; nothing is granted from it. Never fatal: the session already exists, so a failed write is logged (its class only) and
+    // the sign-in goes on (the P3 guard then relies on the earlier record and live sessions).
+    try { await repos.users.recordAdminRole?.(user, identity.isSystemAdmin === true, now); }
+    catch (error) { logger?.error?.(`[auth] couldn't record the JARC.Admin role seen at sign-in: ${error?.name || "Error"}`); }
     res.append("Set-Cookie", cookieHeader(SESSION_COOKIE, sessionSecret, sessionLifetimeMs / 1000));
     // The same rules the session check applies to every later request (auth/session.js).
     const actor = { userId: user._id, kind: "entra", account, hasAdminAppRole: identity.isSystemAdmin, isSystemAdmin: access.enforced ? isActiveSuperAdmin(account) : identity.isSystemAdmin };
-    res.status(201).set("Cache-Control", "no-store").json({ user: userToApi(user), isSystemAdmin: actor.isSystemAdmin, ...permissionsOf(access, actor, { canClaimSuperAdmin: await claimable(accounts, actor, session) }), csrfToken: csrfTokenFor(sessionSecret), expiresAt: session.expiresAt.toISOString() });
+    res.status(201).set("Cache-Control", "no-store").json({ user: userToApi(user), isSystemAdmin: actor.isSystemAdmin, ...permissionsOf(access, actor, { canClaimSuperAdmin: await claimable(accounts, actor, session) }), csrfToken: csrfTokenFor(sessionSecret), expiresAt: session.expiresAt.toISOString(), ...freshness(adminFreshUntil(session, adminReauthMs(entra))) });
   });
   return router;
 }
@@ -107,7 +115,7 @@ function sessionRoutes({ repos, access, accounts = null }) {
   router.get("/auth/session", async (req, res) => {
     allowOnly(req.query, [], "the query");
     const [user, session] = await Promise.all([repos.users.findById(req.actor.userId), repos.sessions.findBySecret(req.sessionSecret)]);
-    res.set("Cache-Control", "no-store").json({ user: userToApi(user), isSystemAdmin: req.actor.isSystemAdmin, ...permissionsOf(access, req.actor, { canClaimSuperAdmin: await claimable(accounts, req.actor, session) }), csrfToken: csrfTokenFor(req.sessionSecret), expiresAt: session.expiresAt.toISOString(), idleExpiresAt: session.idleExpiresAt.toISOString() });
+    res.set("Cache-Control", "no-store").json({ user: userToApi(user), isSystemAdmin: req.actor.isSystemAdmin, ...permissionsOf(access, req.actor, { canClaimSuperAdmin: await claimable(accounts, req.actor, session) }), csrfToken: csrfTokenFor(req.sessionSecret), expiresAt: session.expiresAt.toISOString(), idleExpiresAt: session.idleExpiresAt.toISOString(), ...freshness(req.adminFreshUntil) });
   });
   router.post("/auth/sign-out", async (req, res) => {
     allowOnly(req.query, [], "the query");

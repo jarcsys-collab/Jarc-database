@@ -101,6 +101,20 @@ class UserRepository {
   // administrators suspending each other at the same moment conflict (one is retried, then refused) instead of both succeeding.
   async touchAccessActor(id, now, { session } = {}) { await this.collection.updateOne({ _id: id }, { $set: { accessActionAt: now } }, { session }); }
 
+  // ---- P4-0 (lockout protection)
+  // Several users by _id inside the caller's transaction (status and account only: what decides a usable workspace admin).
+  findByIdsIn(ids, { session } = {}) { return ids.length ? this.collection.find({ _id: { $in: ids } }, { session, limit: 5000, projection: { _id: 1, status: 1, account: 1 } }).toArray() : Promise.resolve([]); }
+  // The JARC.Admin app role as seen at this sign-in (routes/auth.js, after the sign-in is accepted). Present: adminRoleSeenAt =
+  // now. Absent: adminRoleClearedAt = now, written only for someone recorded with the role (nobody else gets a write). Two
+  // additive timestamps, read by the P3 JARC administrator guard (auth/accounts.js adminRoleHeld); they never grant anything.
+  async recordAdminRole(user, present, now) {
+    if (!user?._id) return;
+    if (present === true) { await this.collection.updateOne({ _id: user._id }, { $set: { adminRoleSeenAt: now } }); return; }
+    if (user.adminRoleSeenAt instanceof Date && !(user.adminRoleClearedAt instanceof Date && user.adminRoleClearedAt >= user.adminRoleSeenAt)) {
+      await this.collection.updateOne({ _id: user._id, adminRoleSeenAt: user.adminRoleSeenAt }, { $set: { adminRoleClearedAt: now } });
+    }
+  }
+
   countIdentity(tenantId, entraObjectId) { return this.collection.countDocuments({ tenantId, entraObjectId }); }
   // Users with this email whose identity is NOT the given one (an ambiguous email → identity mapping).
   async countOthersWithEmail(email, userId) { return (await this.collection.find({ emailNormalized: String(email).toLowerCase() }, { limit: 50 }).toArray()).filter((u) => !u._id.equals(userId)).length; }

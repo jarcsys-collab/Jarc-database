@@ -56,7 +56,8 @@ async function main() {
     else console.log("Development state API disabled (production). Only health endpoints and the frontend are served.");
     if (config.enableDevResourceApi) console.log("Resource API enabled for DEVELOPMENT / PRE-AUTH use: no authentication; every change is attributed to the local development actor.");
     if (auth) console.log(`Microsoft Entra ID sign-in enabled: sessions last up to ${config.entra.sessionMaxHours} h (${config.entra.sessionIdleMinutes} min idle).`);
-    if (config.accessPolicyIgnored) console.warn("ACCESS_POLICY has an unrecognised value; using role_based (workspace memberships and the JARC.Admin role).");
+    // The effective access configuration (names of modes only, nothing secret). An unknown value never gets here: loadConfig refuses it.
+    console.log(`Access configuration: ACCESS_POLICY=${config.accessPolicy}, JARC_BETA_OPEN_EDITING=${config.betaOpenEditing}, ACCOUNT_MANAGEMENT=${config.accounts.mode}.`);
     if (config.betaOpenEditing) console.warn("JARC_BETA_OPEN_EDITING=true: BETA collaboration — every signed-in employee can create, edit and delete content in every workspace. Administration, integrations, membership changes, comment moderation and read-only synced boards stay restricted.");
     if (config.accounts.mode === "staged") console.warn("ACCOUNT_MANAGEMENT=staged (observation mode): accounts are recorded and the Super Admin can review them, but roles are NOT enforced yet (ACCESS_POLICY and JARC_BETA_OPEN_EDITING still decide access). Blocking takes effect.");
     if (config.accounts.mode === "enforced") console.warn(`ACCOUNT_MANAGEMENT=enforced: account roles and workspace memberships decide access.${config.accessPolicy === "development_shared" || config.betaOpenEditing ? " ACCESS_POLICY=development_shared / JARC_BETA_OPEN_EDITING are IGNORED." : ""}`);

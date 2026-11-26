@@ -142,7 +142,9 @@ function createApp({ securityHeadersOptions = {}, employees: employeesOption = n
   if (enableDevResourceApi || auth) {
     if (!dataLayer) throw new Error("createApp needs a data layer for the resource API.");
     if (enableDevResourceApi && !devActor) throw new Error("createApp needs the development actor for the development resource API.");
-    const access = new Access(dataLayer.repos, { policy: accessPolicy, betaOpenEditing, accountMode });
+    const access = new Access(dataLayer.repos, { policy: accessPolicy, betaOpenEditing, accountMode, logger });
+    // P4-0: the usable-workspace-admin rule follows ACCOUNT_MANAGEMENT (blocked / pending / capped admins don't count).
+    dataLayer.services?.members?.configure?.({ accountMode });
     const accountService = accountMode !== "off" ? dataLayer.services.accounts.configure({ mode: accountMode, superAdmin: accounts.superAdmin || null, entra: auth.entra, environment }) : null;
     // monday.com OAuth return and webhooks: no JARC session (each has its own protection).
     if (dataLayer.services?.integration) api.use(integrationPublicRoutes({ integration: dataLayer.services.integration }));
@@ -151,7 +153,7 @@ function createApp({ securityHeadersOptions = {}, employees: employeesOption = n
     const googleDrive = auth ? dataLayer.services?.googleDrive : null;
     const driveAdmin = (identity) => canManageDrive(identity, googleDrive.config, auth.entra.tenantId);
     if (googleDrive) api.use(googleDrivePublicRoutes({ drive: googleDrive, logger, stillAdmin: stillAllowed({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users, accountMode, allow: driveAdmin }) }));
-    if (auth) api.use(signInRoutes({ entra: auth.entra, verify: auth.verify, repos: dataLayer.repos, access, accounts: accountService }));
+    if (auth) api.use(signInRoutes({ entra: auth.entra, verify: auth.verify, repos: dataLayer.repos, access, accounts: accountService, logger }));
     const authenticate = auth ? sessionAuthentication({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users, entra: auth.entra, accountMode }) : devActorMiddleware(devActor, { environment });
     // Each router below is mounted with `identify`, and a request passes through every mount until one answers: the
     // full check runs once per request and later mounts reuse its verified result (req.actor).
@@ -225,7 +227,7 @@ function createApp({ securityHeadersOptions = {}, employees: employeesOption = n
     const jarcAccess = employees && auth ? new JarcAccessIndex({ repos: dataLayer.repos, access, tenantId: auth.entra.tenantId, apiAdminObjectIds: tokenService ? apiTokens.adminObjectIds || [] : null, employeesConfig: employees.config, features: { spreadsheetImports: Boolean(enabled.spreadsheetImports && dataLayer.services?.importJobs), mondayIntegration: Boolean(dataLayer.services?.integration) }, logger }) : null;
     // P3 (Access Administration, JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN=true): account and membership changes for EMPLOYEE_ADMIN_OIDS,
     // through JARC's own users, memberships (MembershipService), sessions, API tokens and accountAudit. Off: its paths answer 404.
-    const accessAdmin = jarcAccess && employees.config.accessAdmin === true && dataLayer.services?.members ? new AccessAdminService({ employees, jarcAccess, repos: dataLayer.repos, connection: dataLayer.connection, members: dataLayer.services.members, access, tenantId: auth.entra.tenantId, logger }) : null;
+    const accessAdmin = jarcAccess && employees.config.accessAdmin === true && dataLayer.services?.members ? new AccessAdminService({ employees, jarcAccess, repos: dataLayer.repos, connection: dataLayer.connection, members: dataLayer.services.members, access, tenantId: auth.entra.tenantId, superAdmin: accounts?.superAdmin || null, logger }) : null;
     if (employees) api.use("/admin/employees", identify, employeeRoutes({ employees, savedFilterRepo: dataLayer.repos.employeeSavedFilters || null, jarcAccess, accessAdmin, logger, ...(employeeWriteLimiter ? { writeLimiter: employeeWriteLimiter } : {}) }));
     // employees.jarcAccess only when true (an admin, with the index wired): viewers and outsiders never see the key.
     // employees.accessAdmin (P3) only for that admin with the switch on.

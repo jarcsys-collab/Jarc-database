@@ -34,6 +34,10 @@ class MembershipRepository {
   }
 
   countActiveAdmins(workspaceId, { session } = {}) { return this.collection.countDocuments({ workspaceId, role: "WORKSPACE_ADMIN", status: "active" }, { session }); }
+  // P4-0 (usable last admin, services/membership-service.js): the active WORKSPACE_ADMIN rows of one workspace (row and user IDs
+  // only), and one person's active WORKSPACE_ADMIN rows across workspaces, both inside the caller's transaction when given.
+  listActiveAdmins(workspaceId, { session } = {}) { return this.collection.find({ workspaceId, role: "WORKSPACE_ADMIN", status: "active" }, { session, limit: 1000, projection: { _id: 1, userId: 1 } }).toArray(); }
+  listActiveAdminRowsForUser(userId, { session } = {}) { return this.collection.find({ userId, role: "WORKSPACE_ADMIN", status: "active" }, { session, limit: 5000, projection: { _id: 1, workspaceId: 1 } }).toArray(); }
 
   async updateRole(id, role, now, { session } = {}) {
     if (!ROLES.includes(role)) throw new TypeError("Unknown membership role.");

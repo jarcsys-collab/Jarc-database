@@ -32,8 +32,10 @@ async function setup({ beta }) {
 const upload = (client, recordId) => fetch(`${client.base}/api/v1/records/${recordId}/attachments?column=docs`, { method: "POST", body: PNG, headers: { Cookie: [...client.cookies].map(([k, v]) => `${k}=${v}`).join("; "), Origin: client.origin, "X-CSRF-Token": client.csrf, "Content-Type": "image/png", "X-File-Name": "photo.png" } });
 
 describe("JARC_BETA_OPEN_EDITING configuration", () => {
-  test("off unless exactly \"true\"; the session tells the browser", () => {
-    for (const value of [undefined, "", "false", "TRUE", "1", "yes", " true"]) assert.equal(loadConfig(value === undefined ? {} : { JARC_BETA_OPEN_EDITING: value }).betaOpenEditing, false, String(value));
+  // P4-0: other values ("TRUE", "1", "yes", " true") used to mean off silently; they now stop startup.
+  test("off when unset, empty or \"false\"; on only for exactly \"true\"; anything else stops startup", () => {
+    for (const value of [undefined, "", "false"]) assert.equal(loadConfig(value === undefined ? {} : { JARC_BETA_OPEN_EDITING: value }).betaOpenEditing, false, String(value));
+    for (const value of ["TRUE", "1", "yes", " true"]) assert.throws(() => loadConfig({ JARC_BETA_OPEN_EDITING: value }), /JARC_BETA_OPEN_EDITING must be true or false/, value);
     assert.equal(loadConfig({ JARC_BETA_OPEN_EDITING: "true" }).betaOpenEditing, true);
   });
 });

@@ -81,7 +81,8 @@ function recordToExternal(doc, board, columns, restricted = null) {
   for (const column of columns) {
     if (restricted?.has(column.key)) { values[column.key] = null; hidden.push(column.key); } else values[column.key] = cellValue(doc, column, board);
   }
-  return { id: hex(doc._id), workspaceId: hex(doc.workspaceId), boardId: hex(doc.boardId), groupId: doc.groupId ?? null, position: doc.position, archived: Boolean(doc.archived), values, ...(hidden.length ? { restricted: hidden } : {}), createdAt: iso(doc.createdAt), updatedAt: iso(doc.updatedAt), version: doc.version };
+  // workspaceId: the board's (the record's stored copy can lag a board move; P4-0).
+  return { id: hex(doc._id), workspaceId: hex(board?.workspaceId ?? doc.workspaceId), boardId: hex(doc.boardId), groupId: doc.groupId ?? null, position: doc.position, archived: Boolean(doc.archived), values, ...(hidden.length ? { restricted: hidden } : {}), createdAt: iso(doc.createdAt), updatedAt: iso(doc.updatedAt), version: doc.version };
 }
 
 // ---- Record pages. Two fixed orders, neither of which changes when other rows are added, edited, moved or removed:
@@ -331,7 +332,8 @@ function externalApiRoutes({ tokens, repos, environment = "development", rate = 
     const id = parseId(req.params.recordId, "recordId");
     archivedOnly(req);
     const record = await repos.records.findById(id);
-    if (!record || (record.archived && !wantsArchived(req)) || !req.apiToken.boardIds.has(hex(record.boardId)) || !req.apiToken.workspaceIds.has(hex(record.workspaceId))) throw missing("record");
+    // Scope comes from the record's BOARD, where it is now (scopedBoard), never from the record's workspace copy (P4-0).
+    if (!record || (record.archived && !wantsArchived(req)) || !req.apiToken.boardIds.has(hex(record.boardId))) throw missing("record");
     const board = await scopedBoard(req, record.boardId).catch((error) => { throw error instanceof ApiError && error.status === 404 ? missing("record") : error; });
     send(res, { record: recordToExternal(record, board, board.columns, await restrictedFor(req, board)) });
   });

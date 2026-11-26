@@ -11,6 +11,7 @@ const { normalizeColumn, normalizeColumns, groupColumnOf, hasValue, optionsPlan,
 const { SYNC_LIMITS, MESSAGES, conversionPlanner, convertCell, describeType } = require("../domain/column-conversion");
 const { ApiError } = require("../middleware/errors");
 const { notFound, conflict, activityEntry } = require("./shared");
+const { alignBoardWorkspace } = require("./board-workspace-sync");
 
 const invalid = (message) => new ApiError(400, "VALIDATION_ERROR", message);
 const MAX_RETIRED_COLUMNS = 1000;
@@ -55,7 +56,7 @@ const settingsSet = (board, next) => (JSON.stringify(next) === JSON.stringify(bo
 const typeLabel = (t, m) => (t === "dropdown" && m ? "dropdown (several values)" : t);
 
 class BoardSchemaService {
-  constructor({ repos, connection, searchIndex = null }) { Object.assign(this, { repos, connection, searchIndex }); }
+  constructor({ repos, connection, searchIndex = null, logger = null }) { Object.assign(this, { repos, connection, searchIndex, logger }); }
 
   // Shared executor. build(board, records) → { boardSet, changes: [{ record, set?, unset? }], affected, summary } (or a
   // promise of it).
@@ -271,10 +272,13 @@ class BoardSchemaService {
     });
   }
 
-  // Moves a board (and its records' workspaceId) to another existing workspace.
+  // Moves a board to another existing workspace (P4-0): the board and its activity entry in ONE small transaction, then the
+  // workspace copies on its records, attachments and comments are aligned in bounded, idempotent batches
+  // (services/board-workspace-sync.js). Access already follows the board from the commit on, so the alignment is
+  // housekeeping: if it fails, the move stands and reconcileWorkspace() (or the next move) finishes it.
   async moveBoard(boardId, raw, actor) {
     const { expectedVersion, workspaceId } = validate.boardMove(raw);
-    return this.connection.withTransaction(async (session) => {
+    const moved = await this.connection.withTransaction(async (session) => {
       const board = await this.repos.boards.findById(boardId, { session });
       if (!board) throw notFound("board");
       if (board.version !== expectedVersion) throw conflict("board", board);
@@ -283,10 +287,18 @@ class BoardSchemaService {
       const now = new Date();
       const position = await this.repos.boards.nextPosition(workspaceId, { session });
       if (!await this.repos.boards.updateVersioned(boardId, expectedVersion, { workspaceId, position, updatedAt: now }, { session })) throw conflict("board", board);
-      const records = await this.repos.records.setWorkspaceForBoard(boardId, workspaceId, { session });
       await this.repos.activities.append(activityEntry({ workspaceId, boardId, actorUserId: actor.userId, actorName: actor.displayName, action: "board.moved", entityType: "board", entityId: boardId, changes: [{ field: "workspaceId", from: board.workspaceId, to: workspaceId }], now }), { session });
-      return { board: { ...board, workspaceId, position, updatedAt: now, version: board.version + 1 }, records };
+      return { board: { ...board, workspaceId, position, updatedAt: now, version: board.version + 1 }, from: board.workspaceId };
     });
+    const sync = await this.reconcileWorkspace(boardId, { from: moved.from });
+    return { board: moved.board, records: sync?.records ?? 0, aligned: Boolean(sync) };
+  }
+
+  // Aligns the workspace copies of one board with the board's current workspace. Idempotent and resumable; never throws
+  // (null when it couldn't finish: the drift left behind is harmless for access, see auth/access.js).
+  async reconcileWorkspace(boardId, { from = null, batch } = {}) {
+    try { return await alignBoardWorkspace(this.repos, boardId, { from, ...(batch ? { batch } : {}) }); }
+    catch (error) { this.logger?.error?.(`[boards] could not align the workspace of board ${boardId}'s records: ${error?.name || "Error"}`); return null; }
   }
 }
 

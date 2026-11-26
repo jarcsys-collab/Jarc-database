@@ -31,9 +31,15 @@ function importRoutes({ services, access }) {
   const jobFor = async (req) => {
     const job = await services.importJobs.find(parseId(req.params.id, "id"));
     if (!job || job.target !== "new-board") throw new ApiError(404, "NOT_FOUND", "This import doesn't exist or has ended.");
-    const { role } = await access.workspace(req.actor, job.workspaceId, "MEMBER");
+    const { role } = await access.workspace(req.actor, await jobWorkspace(job), "MEMBER");
     if (!job.createdBy.equals(req.actor.userId) && !Access.atLeast(role, "WORKSPACE_ADMIN")) throw new ApiError(404, "NOT_FOUND", "This import doesn't exist or has ended.");
     return job;
+  };
+  // Where the job's board is NOW once it exists (it may have been moved to another workspace since; P4-0); before that,
+  // the workspace the job was started in. The job's own workspaceId is only a copy.
+  const jobWorkspace = async (job) => {
+    const board = await access.boardWorkspace(job.boardId ?? job.plannedBoardId ?? null);
+    return board?.workspaceId ?? job.workspaceId;
   };
   router.all(["/boards/:boardId/imports", "/boards/:boardId/imports/*rest"], () => { throw new ApiError(403, "IMPORT_NEW_BOARDS_ONLY", "Files can only be imported into a new board for now, so existing boards can't be affected."); });
   router.get("/workspaces/:workspaceId/imports", async (req, res) => {
@@ -42,8 +48,11 @@ function importRoutes({ services, access }) {
     const view = queryString(req.query.view, "view");
     if (view !== undefined && view !== null && view !== "progress") throw new ApiError(400, "VALIDATION_ERROR", "view must be progress.");
     // The tracker follows a person's own imports, whatever their role.
-    if (view === "progress") { send(res, 200, { items: (await services.importJobs.progressForWorkspace(workspace._id, req.actor.userId)).map(progressToApi) }); return; }
-    send(res, 200, { items: (await services.importJobs.listForWorkspace(workspace._id, Access.atLeast(role, "WORKSPACE_ADMIN") ? {} : { userId: req.actor.userId })).map(jobToApi) });
+    // Only jobs whose board is still in THIS workspace (jobWorkspace, as jobFor decides): a board moved to another workspace
+    // since is no longer listed here (P4-0).
+    const here = async (jobs) => (await Promise.all(jobs.map(async (j) => (String(await jobWorkspace(j)) === String(workspace._id) ? j : null)))).filter(Boolean);
+    if (view === "progress") { send(res, 200, { items: (await here(await services.importJobs.progressForWorkspace(workspace._id, req.actor.userId))).map(progressToApi) }); return; }
+    send(res, 200, { items: (await here(await services.importJobs.listForWorkspace(workspace._id, Access.atLeast(role, "WORKSPACE_ADMIN") ? {} : { userId: req.actor.userId }))).map(jobToApi) });
   });
   router.post("/workspaces/:workspaceId/imports", member, express.raw({ type: () => true, limit: LIMITS.fileBytes, inflate: false }), async (req, res) => {
     const { workspace } = await access.workspace(req.actor, parseId(req.params.workspaceId, "workspaceId"), "MEMBER");
@@ -64,7 +73,7 @@ function importRoutes({ services, access }) {
   router.post("/imports/:id/cancel", async (req, res) => send(res, 200, { import: jobToApi(await services.importJobs.cancel(await jobFor(req))) }));
   router.post("/imports/:id/remove-board", async (req, res) => {
     const job = await jobFor(req);
-    await access.workspace(req.actor, job.workspaceId, "MEMBER");
+    await access.workspace(req.actor, await jobWorkspace(job), "MEMBER");
     const { job: started } = await services.importJobs.cleanUp(job, req.actor);
     send(res, 200, { import: jobToApi(started) });
   });

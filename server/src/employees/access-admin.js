@@ -25,12 +25,25 @@
 // authority for memberships (access.workspace(actor, ws, "WORKSPACE_ADMIN", { membershipOnly: true }); no new policy).
 // Every refused write is recorded as employee.access.rejected with a code and the attempted action, never the request body.
 //
+// P4-0 lockout guards (suspend / revoke of an ACTIVE person, inside the same transaction):
+//   LAST_USABLE_WORKSPACE_ADMIN (409)  the person is a usable WORKSPACE_ADMIN (auth/accounts.js usableWorkspaceAdmin) of a
+//                      workspace where no other usable admin would remain; the error names those workspaces. Every workspace
+//                      where the person is an active admin has its membersVersion touched (as MembershipService does), so a
+//                      concurrent suspend of a co-admin or a concurrent demote conflicts with this change (one is retried, then
+//                      refused). The LAST_WORKSPACE_ADMIN_OF warning stays.
+//   TARGET_JARC_ADMIN (409)  the person is a JARC administrator: an active Super Admin account, the configured JARC_SUPER_ADMIN_*
+//                      identity, or a holder of the JARC.Admin app role (recorded at their last sign-in, users.adminRoleSeenAt, or
+//                      a live session that carries it, from the access index). A JARC.Admin holder (never a Super Admin or the
+//                      configured identity) may still be suspended by an administrator who is a JARC administrator in this very
+//                      request; that administrator's own document is then touched, so two administrators suspending each other
+//                      conflict and the second is refused. The TARGET_JARC_ADMIN warning stays.
+//
 // No raw IDs leave the server: the person is the opaque profile ID, a workspace is workspaceRef (HMAC of its _id with the profile
 // ID key), history cursors are encrypted. Logs carry error classes only.
 const crypto = require("crypto");
 const { ObjectId } = require("mongodb");
 const { ApiError } = require("../middleware/errors");
-const { accountOf, isActiveSuperAdmin, WORKSPACE_CAP, WORKSPACE_RANK } = require("../auth/accounts");
+const { accountOf, isActiveSuperAdmin, usableWorkspaceAdmin, adminRoleHeld, WORKSPACE_CAP, WORKSPACE_RANK } = require("../auth/accounts");
 const { ROLES } = require("../repositories/mongo/membership-repository");
 const { FABRIC_PRODUCT } = require("../repositories/mongo/api-token-repository");
 const { ID_PATTERN } = require("./ids");
@@ -69,9 +82,12 @@ const MESSAGES = Object.freeze({
   LAST_WORKSPACE_ADMIN: "A workspace needs at least one admin. Make someone else an admin of that workspace first.",
   WORKSPACE_ADMIN_REQUIRED: "Only that workspace's admins (or a JARC administrator) can manage its members.",
   WORKSPACE_NOT_FOUND: "That workspace doesn't exist.",
-  ROLE_NOT_ALLOWED: "That role isn't allowed for this person's JARC account."
+  ROLE_NOT_ALLOWED: "That role isn't allowed for this person's JARC account.",
+  LAST_USABLE_WORKSPACE_ADMIN: "This person is the only usable Workspace admin of a workspace. Make someone else an admin of it first.",
+  TARGET_JARC_ADMIN: "This person is a JARC administrator. Their access can't be suspended or revoked here."
 });
-const STATUS = Object.freeze({ INVALID_TRANSITION: 409, CONFLICT: 409, SELF_LOCKOUT: 403, LAST_EMPLOYEE_ADMIN: 409, NOT_REGISTERED: 409, ACCOUNT_NOT_ACTIVE: 409, ALREADY_MEMBER: 409, NOT_MEMBER: 404, LAST_WORKSPACE_ADMIN: 409, WORKSPACE_ADMIN_REQUIRED: 403, WORKSPACE_NOT_FOUND: 404, ROLE_NOT_ALLOWED: 400 });
+const STATUS = Object.freeze({ INVALID_TRANSITION: 409, CONFLICT: 409, SELF_LOCKOUT: 403, LAST_EMPLOYEE_ADMIN: 409, NOT_REGISTERED: 409, ACCOUNT_NOT_ACTIVE: 409, ALREADY_MEMBER: 409, NOT_MEMBER: 404, LAST_WORKSPACE_ADMIN: 409, WORKSPACE_ADMIN_REQUIRED: 403, WORKSPACE_NOT_FOUND: 404, ROLE_NOT_ALLOWED: 400, LAST_USABLE_WORKSPACE_ADMIN: 409, TARGET_JARC_ADMIN: 409 });
+const soleAdminMessage = (names) => `This person is the only usable Workspace admin of: ${names.join(", ")}. Make someone else an admin of ${names.length === 1 ? "that workspace" : "those workspaces"} first.`;
 const p3Error = (code) => new ApiError(STATUS[code], code, MESSAGES[code]);
 const invalid = (message, path) => new ApiError(400, "VALIDATION_ERROR", message, path ? { path } : undefined);
 
@@ -104,8 +120,9 @@ function refOf(value) { if (typeof value !== "string" || !REF_PATTERN.test(value
 class AccessAdminService {
   // employees: createEmployees(...) ({ service, snapshot, config }); jarcAccess: the JarcAccessIndex; repos / connection /
   // services: dataLayer (users, memberships, workspaces, sessions, accountAudit, apiTokens; services.members); access: the app's
-  // Access; tenantId: ENTRA_TENANT_ID.
-  constructor({ employees, jarcAccess, repos, connection, members, access, tenantId, idKey = employees?.snapshot?.idKey, logger = console, now = () => new Date() }) {
+  // Access; tenantId: ENTRA_TENANT_ID; superAdmin (P4-0, optional): the configured JARC_SUPER_ADMIN_* identity { tenantId,
+  // objectId } (config accounts.superAdmin), protected by TARGET_JARC_ADMIN.
+  constructor({ employees, jarcAccess, repos, connection, members, access, tenantId, superAdmin = null, idKey = employees?.snapshot?.idKey, logger = console, now = () => new Date() }) {
     if (!employees?.service || !employees?.snapshot) throw new Error("AccessAdminService needs createEmployees(...).");
     if (!jarcAccess || typeof jarcAccess.invalidate !== "function") throw new Error("AccessAdminService needs the JARC access index.");
     for (const r of ["users", "memberships", "workspaces", "sessions", "accountAudit", "apiTokens"]) if (!repos?.[r]) throw new Error("AccessAdminService needs the JARC repositories.");
@@ -116,6 +133,7 @@ class AccessAdminService {
     if (!Buffer.isBuffer(idKey) || idKey.length < 16) throw new Error("AccessAdminService needs the profile ID key.");
     Object.assign(this, { employees, jarcAccess, repos, connection, members, access, logger, now });
     this.tenantId = lower(tenantId);
+    this.superAdmin = superAdmin && superAdmin.objectId ? Object.freeze({ tenantId: lower(superAdmin.tenantId), objectId: lower(superAdmin.objectId) }) : null;
     Object.defineProperty(this, "keys", { enumerable: false, value: Object.freeze({
       workspace: crypto.createHmac("sha256", idKey).update("jarc-employee-workspace-ref:v1").digest(),
       cursor: crypto.createHmac("sha256", idKey).update("jarc-employee-history-cursor:v1").digest()
@@ -146,14 +164,44 @@ class AccessAdminService {
   }
 
   // ---- Guards (shared by the GET's actions list and the writes).
-  // → null when allowed, else the refusal code. ctx: { state, isSelf, isEmployeeAdmin, othersActive }.
+  // → null when allowed, else the refusal code. ctx: { state, isSelf, isEmployeeAdmin, othersActive, jarcAdmin?, actorIsJarcAdmin?,
+  // soleAdminOf? } (the P4-0 parts apply to an ACTIVE person only: suspending or revoking someone already locked out removes nothing).
   refusal(action, ctx) {
     if (!TRANSITIONS[ctx.state]?.[action]) return "INVALID_TRANSITION";
     if (action === "suspend" || action === "revoke") {
       if (ctx.isSelf) return "SELF_LOCKOUT";
       if (ctx.isEmployeeAdmin && ctx.othersActive < 1) return "LAST_EMPLOYEE_ADMIN";
+      if (ctx.state === "active" && ctx.jarcAdmin && !(ctx.jarcAdmin === "role" && ctx.actorIsJarcAdmin === true)) return "TARGET_JARC_ADMIN";
+      if (ctx.state === "active" && ctx.soleAdminOf?.length) return "LAST_USABLE_WORKSPACE_ADMIN";
     }
     return null;
+  }
+  // P4-0: why this person is a JARC administrator, or null. "super_admin" (an active Super Admin account), "configured" (the
+  // JARC_SUPER_ADMIN_* identity), "role" (the JARC.Admin app role at their last recorded sign-in, or a live session carrying it
+  // per the access index entry). Only stored JARC data and configuration: never the directory snapshot, never a guess.
+  jarcAdminKind(user, oid, entry) {
+    if (user && isActiveSuperAdmin(accountOf(user))) return "super_admin";
+    if (this.superAdmin && this.superAdmin.tenantId === this.tenantId && this.superAdmin.objectId === oid) return "configured";
+    if (adminRoleHeld(user) || entry?.jarcAdmin === "yes") return "role";
+    return null;
+  }
+  // P4-0: the workspaces (IDs) where this person is a usable admin and no other usable admin would remain. Reads in the
+  // transaction when given; touch: also increment each of the person's admin workspaces' membersVersion (writes only).
+  async soleUsableAdminOf(user, session, { touch = false } = {}) {
+    const mode = this.access.accountMode;
+    if (!user || !usableWorkspaceAdmin(user, mode)) return [];
+    const ids = [...new Map((await this.repos.memberships.listActiveAdminRowsForUser(user._id, session ? { session } : {})).map((r) => [hex(r.workspaceId), r.workspaceId])).values()];
+    const sole = [];
+    for (const ws of ids) {
+      if (touch) await this.repos.workspaces.touchMembers(ws, { session });
+      const { usable } = await this.members.countUsableAdmins(ws, { session, exceptUserId: user._id, accountMode: mode });
+      if (usable === 0) sole.push(ws);
+    }
+    return sole;
+  }
+  // The JARC access index entry of this record (live JARC.Admin sessions), or null when the index can't be read.
+  async indexEntry(snap, record) {
+    try { const index = await this.jarcAccess.current(); return { index, entry: this.jarcAccess.entryOf(snap, index, record) }; } catch (error) { if (error?.code !== "EMPLOYEES_UNAVAILABLE") throw error; return { index: null, entry: null }; }
   }
   othersActive(oid, session) { return this.repos.users.countActiveIdentities(this.tenantId, this.adminOids().filter((x) => x !== oid), session ? { session } : {}); }
 
@@ -168,8 +216,7 @@ class AccessAdminService {
     const othersActive = isEmployeeAdmin ? await this.othersActive(oid) : 1;
     const entraEnabled = typeof record.values.accountEnabled === "boolean" ? record.values.accountEnabled : null;
     // Effective roles and live sessions come from the access index (refreshed after every P3 write).
-    let entry = null, index = null;
-    try { index = await this.jarcAccess.current(); entry = this.jarcAccess.entryOf(snap, index, record); } catch (error) { if (error?.code !== "EMPLOYEES_UNAVAILABLE") throw error; }
+    const { entry, index } = await this.indexEntry(snap, record);
     const [workspaces, memberships, mine, jarcActive, fabricActive, liveSessions] = await Promise.all([
       this.workspaces(),
       user ? this.repos.memberships.listForUser(user._id) : [],
@@ -187,7 +234,12 @@ class AccessAdminService {
     const rows = [];
     for (const w of workspaces) {
       const m = memberOf.get(hex(w._id)) || null;
-      const lastAdmin = Boolean(m && m.role === "WORKSPACE_ADMIN" && await this.repos.memberships.countActiveAdmins(w._id) <= 1);
+      // The membership guard's own rule (services/membership-service.js guarded): demoting or removing this row would be refused.
+      let lastAdmin = false;
+      if (m && m.role === "WORKSPACE_ADMIN" && m.status === "active") {
+        const { rows: others, usable: usableOthers } = await this.members.countUsableAdmins(w._id, { exceptMemberId: m._id, accountMode: this.access.accountMode });
+        lastAdmin = others === 0 || (usableOthers === 0 && usableWorkspaceAdmin(user, this.access.accountMode));
+      }
       rows.push({
         workspaceRef: w.ref, name: w.name, archived: w.archived,
         membership: m ? { role: m.role, status: m.status === "active" ? "active" : "invited" } : null,
@@ -198,30 +250,26 @@ class AccessAdminService {
       });
     }
     rows.sort(byName);
-    // Workspaces where this person is the only Workspace admin whose JARC account is active: suspending or revoking them
-    // leaves the workspace with no usable admin (the last-admin guard counts memberships, not account status). A warning only.
-    const soleAdminOf = [];
-    for (const w of workspaces) {
-      const m = memberOf.get(hex(w._id));
-      if (!m || m.role !== "WORKSPACE_ADMIN" || m.status !== "active") continue;
-      const others = (await this.repos.memberships.listByWorkspace(w._id)).filter((x) => x.role === "WORKSPACE_ADMIN" && x.status === "active" && !x.userId.equals(user._id));
-      const activeOthers = others.length ? (await this.repos.users.findByIds(others.map((x) => x.userId))).filter((u) => u.status === "active").length : 0;
-      if (!activeOthers) soleAdminOf.push(w.name);
-    }
+    // Workspaces where this person is the only USABLE Workspace admin (P4-0, the same count the writes use): suspending or
+    // revoking them is refused (LAST_USABLE_WORKSPACE_ADMIN); the warning names them.
+    const names = new Map(workspaces.map((w) => [hex(w._id), w.name]));
+    const soleAdminOf = (await this.soleUsableAdminOf(user, null)).map((id) => names.get(hex(id)) ?? "Untitled workspace");
     soleAdminOf.sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base", numeric: true }));
-    const soleAdminWarning = soleAdminOf.length ? { code: "LAST_WORKSPACE_ADMIN_OF", message: `This person is the only active Workspace admin of: ${soleAdminOf.join(", ")}. Suspending or revoking them leaves ${soleAdminOf.length === 1 ? "that workspace" : "those workspaces"} without a usable admin; make someone else an admin first.`, workspaces: soleAdminOf } : null;
-    const ctx = { state, isSelf, isEmployeeAdmin, othersActive };
+    const soleAdminWarning = soleAdminOf.length ? { code: "LAST_WORKSPACE_ADMIN_OF", message: `This person is the only usable Workspace admin of: ${soleAdminOf.join(", ")}. Suspend and Revoke are refused until someone else is an admin of ${soleAdminOf.length === 1 ? "that workspace" : "those workspaces"}.`, workspaces: soleAdminOf } : null;
+    const jarcAdmin = this.jarcAdminKind(user, oid, entry);
+    const ctx = { state, isSelf, isEmployeeAdmin, othersActive, jarcAdmin, actorIsJarcAdmin: actor.isSystemAdmin === true, soleAdminOf };
     const actions = ACCOUNT_ACTIONS.map((action) => {
       const code = this.refusal(action, ctx);
       const ending = action === "suspend" || action === "revoke";
-      return code ? { action, allowed: false, code, reason: MESSAGES[code] } : { action, allowed: true, ...(ending ? { reasonRequired: true } : {}), ...(action === "revoke" ? { confirm: CONFIRM_REVOKE } : {}), ...(ending && soleAdminWarning ? { warnings: [soleAdminWarning] } : {}) };
+      return code ? { action, allowed: false, code, reason: code === "LAST_USABLE_WORKSPACE_ADMIN" ? soleAdminMessage(soleAdminOf) : MESSAGES[code] } : { action, allowed: true, ...(ending ? { reasonRequired: true } : {}), ...(action === "revoke" ? { confirm: CONFIRM_REVOKE } : {}), ...(ending && soleAdminWarning ? { warnings: [soleAdminWarning] } : {}) };
     });
     const snapshot = this.employees.snapshot.meta();
     const warnings = [];
     if (soleAdminWarning) warnings.push(soleAdminWarning);
-    // JARC administrator: a live JARC.Admin session (the access index), or an active Super Admin account (Account Management).
-    const superAdmin = Boolean(user && user.account && isActiveSuperAdmin(accountOf(user)));
-    if (usable && (entry?.jarcAdmin === "yes" || superAdmin)) warnings.push({ code: "TARGET_JARC_ADMIN", message: "This person is a JARC administrator (a live JARC.Admin sign-in or an active Super Admin account). Suspending or revoking them removes that administrator's access." });
+    // JARC administrator (P4-0, jarcAdminKind): an active Super Admin account, the configured Super Admin identity, or the JARC.Admin
+    // role (last recorded sign-in or a live session). Suspend and Revoke are then refused (TARGET_JARC_ADMIN), except a JARC.Admin
+    // holder by an administrator who is a JARC administrator themselves.
+    if (usable && jarcAdmin) warnings.push({ code: "TARGET_JARC_ADMIN", message: "This person is a JARC administrator (the JARC.Admin role at a sign-in, an active Super Admin account or the configured Super Admin). Suspending or revoking them is refused, so JARC always keeps an administrator." });
     if (record.values.accountType === "Guest") warnings.push({ code: "TARGET_GUEST", message: "This is a guest account from another organisation. Check before granting it JARC access." });
     if (snapshot.stale) warnings.push({ code: "SNAPSHOT_STALE", message: "The directory snapshot is out of date. Actions still work, but check the person's Microsoft account details before changing their access." });
     if (entraEnabled === false && usable) warnings.push({ code: "ENTRA_DISABLED_WITH_ACCESS", message: "This Microsoft account is disabled, but the JARC access is still active: an open JARC session and their API tokens keep working until JARC access is suspended. Nothing is changed automatically." });
@@ -272,9 +320,14 @@ class AccessAdminService {
       if (!Number.isSafeInteger(b.expectedVersion) || b.expectedVersion < 0) throw invalid("expectedVersion must be the version you loaded (a whole number).", "expectedVersion");
       const reason = reasonOf(b.reason, action === "suspend" || action === "revoke");
       if (action === "revoke" ? b.confirm !== CONFIRM_REVOKE : b.confirm !== undefined) throw invalid(action === "revoke" ? `Type ${CONFIRM_REVOKE} to confirm.` : "confirm is only used to revoke.", "confirm");
-      const { record, oid } = await this.target(dsName, id, access);
+      const { snap, record, oid } = await this.target(dsName, id, access);
       const now = this.now();
       const isEmployeeAdmin = this.adminOids().includes(oid);
+      const ending = action === "suspend" || action === "revoke";
+      // Live JARC.Admin sessions (the access index, read before the transaction; a sign-in since then also wrote adminRoleSeenAt,
+      // which the transaction reads) and the workspace names for LAST_USABLE_WORKSPACE_ADMIN.
+      const { entry } = ending ? await this.indexEntry(snap, record) : { entry: null };
+      const names = ending ? new Map((await this.workspaces()).map((w) => [hex(w._id), w.name])) : new Map();
       const done = await this.connection.withTransaction(async (session) => {
         const me = await this.repos.users.findByIdIn(actor.userId, { session });
         if (!me || me.status !== "active") throw employeeError("EMPLOYEES_FORBIDDEN");
@@ -283,11 +336,21 @@ class AccessAdminService {
         const state = stateOf(user);
         const isSelf = Boolean(user && user._id.equals(actor.userId));
         if (state !== b.expectedState || versionOf(user) !== b.expectedVersion) throw p3Error("CONFLICT");
-        const othersActive = isEmployeeAdmin && (action === "suspend" || action === "revoke") ? await this.othersActive(oid, session) : 1;
-        const code = this.refusal(action, { state, isSelf, isEmployeeAdmin, othersActive });
+        const othersActive = isEmployeeAdmin && ending ? await this.othersActive(oid, session) : 1;
+        const jarcAdmin = ending && state === "active" ? this.jarcAdminKind(user, oid, entry) : null;
+        const code = this.refusal(action, { state, isSelf, isEmployeeAdmin, othersActive, jarcAdmin, actorIsJarcAdmin: actor.isSystemAdmin === true });
         if (code) throw p3Error(code);
+        // P4-0: the person's admin workspaces are touched (membersVersion) before the usable-admin count, so this change conflicts
+        // with a concurrent membership change or a concurrent suspend / revoke of a co-admin there.
+        if (ending && state === "active") {
+          const sole = await this.soleUsableAdminOf(user, session, { touch: true });
+          if (sole.length) {
+            const list = sole.map((x) => names.get(hex(x)) ?? "Untitled workspace").sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base", numeric: true }));
+            throw new ApiError(409, "LAST_USABLE_WORKSPACE_ADMIN", soleAdminMessage(list), { workspaces: list });
+          }
+        }
         // Two administrators acting on each other at once conflict on this write (one transaction is retried, then refused).
-        if (isEmployeeAdmin) await this.repos.users.touchAccessActor(actor.userId, now, { session });
+        if (isEmployeeAdmin || jarcAdmin) await this.repos.users.touchAccessActor(actor.userId, now, { session });
         const to = TRANSITIONS[state][action];
         let doc;
         if (!user) {
@@ -417,7 +480,7 @@ class AccessAdminService {
       if (current.role !== role) {
         this.assignable(user, role);
         await this.membershipChange("employee.membership.role_changed", actor, user, record, workspace, [{ field: "workspaceRole", from: current.role, to: role }], async (session) => {
-          try { await this.members.changeRole(workspace._id, current._id, { role }, actor, { session }); } catch (error) {
+          try { await this.members.changeRole(workspace._id, current._id, { role }, actor, { session, accountMode: this.access.accountMode }); } catch (error) {
             if (isLastAdminError(error)) throw p3Error("LAST_WORKSPACE_ADMIN");
             if (error?.status === 404) throw p3Error("NOT_MEMBER");
             throw error;
@@ -441,7 +504,7 @@ class AccessAdminService {
       const current = await this.repos.memberships.findActive(workspace._id, user._id);
       if (!current) throw p3Error("NOT_MEMBER");
       await this.membershipChange("employee.membership.removed", actor, user, record, workspace, [{ field: "workspaceRole", from: current.role, to: null }], async (session) => {
-        try { await this.members.remove(workspace._id, current._id, actor, { session }); } catch (error) {
+        try { await this.members.remove(workspace._id, current._id, actor, { session, accountMode: this.access.accountMode }); } catch (error) {
           if (isLastAdminError(error)) throw p3Error("LAST_WORKSPACE_ADMIN");
           if (error?.status === 404) throw p3Error("NOT_MEMBER");
           throw error;

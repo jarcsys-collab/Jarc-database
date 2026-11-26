@@ -183,6 +183,9 @@ function systemHealthRoutes({ dataLayer, access, environment, version, monitor =
       scope: "admin",
       generatedAt: new Date().toISOString(),
       server: { status: pingMs === null ? "degraded" : "ok", environment, version, uptimeSeconds: Math.round(process.uptime()), node: process.version, memoryMb: { rss: Math.round(memory.rss / 1048576), heapUsed: Math.round(memory.heapUsed / 1048576) }, monitoringSince: snap.since },
+      // The effective access configuration (mode names only). Administrators only: viewerView is an allow-list and leaves it out.
+      // Under ACCOUNT_MANAGEMENT=enforced the policy reads role_based and beta off, because that is what access checks apply.
+      access: { policy: access.policy, betaOpenEditing: Boolean(access.betaOpenEditing), accountMode: access.accountMode || "off", shared: Boolean(access.shared) },
       database: { status: pingMs === null ? "unavailable" : "connected", pingMs, ...snap.database },
       api: snap.api, slowestEndpoints: snap.slowestEndpoints, failingEndpoints: snap.failingEndpoints, endpoints: snap.endpoints.slice(0, 60), trend: snap.trend, recentErrors: snap.recentErrors,
       integrations: {

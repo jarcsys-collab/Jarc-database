@@ -156,6 +156,13 @@ class RecordRepository extends VersionedRepository {
     return modifiedCount;
   }
 
+  // Corrects the copied workspaceId of the given records of one board (services/board-workspace-sync.js). Idempotent.
+  async alignWorkspace(boardId, ids, workspaceId, { session } = {}) {
+    if (!ids.length) return 0;
+    const { modifiedCount } = await this.collection.updateMany({ _id: { $in: ids }, boardId: scopedId(boardId, "boardId"), workspaceId: { $ne: workspaceId } }, { $set: { workspaceId } }, { session });
+    return modifiedCount;
+  }
+
   async deleteByBoard(boardId, { session } = {}) {
     const { deletedCount } = await this.collection.deleteMany({ boardId: scopedId(boardId, "boardId") }, { session });
     return deletedCount;

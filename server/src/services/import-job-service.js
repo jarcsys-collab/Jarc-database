@@ -27,6 +27,7 @@ const { parseSpreadsheet, LIMITS } = require("../domain/spreadsheet");
 const { convertCell, lineLookup, DEFAULT_GROUP, LIMITS: BOARD_LIMITS } = require("../domain/workbook-structure");
 const { readWorkbook, checkWorkbook } = require("./workbook-runner");
 const { activityEntry, appendActivity } = require("./shared");
+const { settleRecords } = require("./board-workspace-sync");
 
 const BATCH_ROWS = 100, BATCH_BYTES = 4 * 1024 * 1024, KEEP_MS = 7 * 24 * 3600 * 1000, PREVIEW_ROWS = 500, MAX_ERRORS = 200;
 // A batch costs about 230 database operations. This pace keeps an import well under the Atlas Flex limit of 500 per second.
@@ -516,6 +517,8 @@ class ImportJobService {
       // Even a failed insert may have written some rows. Queued regardless: an ID that wasn't written simply finds no record.
       try { await this.repos.records.collection.insertMany(docs, { ordered: false }); }
       catch (error) { if (!isOnlyDuplicates(error)) { this.searchIndex?.refresh(board._id, docs.map((d) => d._id)); throw error; } }
+      // A board moved while this batch was written: its rows follow the board (P4-0; access never relies on the copy).
+      await settleRecords(this.repos, board._id, board.workspaceId, [...docs, ...written].map((d) => d._id));
       this.searchIndex?.refresh(board._id, docs.map((d) => d._id));
     }
     return { imported: candidates.length, skippedDuplicates, errors };

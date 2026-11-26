@@ -422,15 +422,29 @@ describe("Existing users and the transition from beta access", () => {
       const e = new SessionClient(app.url, app.entra.appOrigin);
       const signIn = await e.signIn(emp);
       assert.deepEqual([signIn.body.account.status, signIn.body.accountManagement.enforced, signIn.body.betaOpenEditing, signIn.body.accessPolicy], ["pending", false, true, "development_shared"]);
-      ok(await e.request("POST", "/api/v1/workspaces", { name: "Beta still open" }), "pending but not enforced");
+      const first = await e.request("POST", "/api/v1/workspaces", { name: "Beta still open" });
+      ok(first, "pending but not enforced");
       const r = new SessionClient(app.url, app.entra.appOrigin); ok(await r.signIn(root), "root");
       ok(await r.request("POST", "/api/v1/accounts/bootstrap", { confirm: "I AM THE SUPER ADMIN" }), "bootstrap in staged");
       const row = (await r.request("GET", "/api/v1/accounts?status=pending")).body.items.find((a) => a.displayName === "Stage Employee");
       const viewer = await r.request("POST", `/api/v1/accounts/${row.id}/approve`, { role: "VIEWER", expectedVersion: row.version });
       ok(viewer, "approve as viewer");
       // Not enforced: the beta override still lets them edit — exactly what the UI must say.
-      ok(await e.request("POST", "/api/v1/workspaces", { name: "Viewer under beta" }), "staged does not restrict");
+      const second = await e.request("POST", "/api/v1/workspaces", { name: "Viewer under beta" });
+      ok(second, "staged does not restrict");
       assert.equal((await e.request("GET", "/api/v1/auth/session")).body.accountManagement.enforced, false);
+      // P4-0: the employee created both workspaces, so they are each one's only usable Workspace admin: blocking is refused
+      // (409 LAST_USABLE_WORKSPACE_ADMIN naming them) and nothing changes.
+      const refused = await r.request("POST", `/api/v1/accounts/${row.id}/block`, { expectedVersion: viewer.body.account.version, confirm: "BLOCK" });
+      assert.equal(refused.status, 409);
+      assert.equal(refused.body.error.code, "LAST_USABLE_WORKSPACE_ADMIN");
+      assert.match(refused.body.error.message, /Beta still open/);
+      assert.match(refused.body.error.message, /Viewer under beta/);
+      assert.equal((await e.request("GET", "/api/v1/workspaces")).status, 200, "not blocked");
+      assert.equal(await app.db.collection("accountAudit").countDocuments({ action: "account.blocked" }), 0, "rolled back: no audit entry");
+      // With an active co-admin (the Super Admin) in both workspaces, the block goes through.
+      const rootId = (await r.request("GET", "/api/v1/me")).body.user.id;
+      for (const w of [first.body.workspace, second.body.workspace]) ok(await r.request("POST", `/api/v1/workspaces/${w.id}/members`, { userId: rootId, role: "WORKSPACE_ADMIN" }), `co-admin of ${w.name}`);
       // Blocking is the one thing that applies in staged.
       ok(await r.request("POST", `/api/v1/accounts/${row.id}/block`, { expectedVersion: viewer.body.account.version, confirm: "BLOCK" }), "block");
       assert.equal((await e.request("GET", "/api/v1/workspaces")).status, 401);

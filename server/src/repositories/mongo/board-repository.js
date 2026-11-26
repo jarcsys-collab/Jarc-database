@@ -11,6 +11,8 @@ class BoardRepository extends VersionedRepository {
   // Every new board gets its public number here, however it is created (the app, the monday.com integration, an import):
   // allocated before the board is written and outside any transaction, so an aborted creation only leaves a gap.
   async insert(doc, options) { await this.assignPublicIds([doc]); return super.insert(doc, options); }
+  // Only the board's workspace (P4-0): what authorization and the workspace-copy checks need, one _id index read.
+  workspaceOf(boardId, { session } = {}) { return this.collection.findOne({ _id: boardId }, { projection: { _id: 1, workspaceId: 1 }, session }); }
   async insertMany(docs, options) { await this.assignPublicIds(docs); return super.insertMany(docs, options); }
   async assignPublicIds(docs) { for (const doc of docs) if (doc.publicId === undefined) doc.publicId = await allocateBoardPublicId(this.db); }
 

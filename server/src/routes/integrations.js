@@ -6,7 +6,9 @@
 //   POST /integrations/monday/webhook/:token        events from monday.com: unguessable per-connection URL token,
 //                                                   the challenge handshake, then a verified JWT on every event
 // Signed in (after the session check; changes also need CSRF like every API change):
-//   GET  /integrations/monday                       status (no secrets) — any signed-in person
+//   GET  /integrations/monday                       status (no secrets) — any signed-in person; JARC administrators get the
+//                                                   full body, everyone else only the connection state (publicStatus):
+//                                                   never board names or IDs, the account, jobs or errors
 //   JARC administrators only:
 //   POST /integrations/monday/connect               → { authorizeUrl } (the browser then goes to monday.com)
 //   POST /integrations/monday/disconnect | /test
@@ -43,12 +45,32 @@ function integrationPublicRoutes({ integration }) {
   return router;
 }
 
+// What a signed-in person who isn't a JARC administrator may see: whether monday.com is set up, switched on and connected,
+// and whether sync runs. Built from an allow-list so nothing added to the full status later reaches them by accident.
+// The arrays stay (empty) so the page keeps working; importedBoardCount replaces the board list.
+function publicStatus(s) {
+  const sync = s?.sync || {};
+  return {
+    provider: s?.provider, configured: Boolean(s?.configured), enabled: Boolean(s?.enabled), canManage: false,
+    connected: Boolean(s?.connected), state: s?.state,
+    account: null,
+    sync: { enabled: Boolean(sync.enabled), paused: Boolean(sync.paused), lastSyncAt: sync.lastSyncAt || null, lastError: null },
+    importedBoardCount: Array.isArray(s?.importedBoards) ? s.importedBoards.length : 0,
+    importedBoards: [], imports: [], failed: []
+  };
+}
+
 function integrationRoutes({ integration, access }) {
   const router = express.Router();
   const send = (res, body, status = 200) => res.status(status).set("Cache-Control", "no-store").json(body);
   const admin = (req) => access.requireSystemAdmin(req.actor);
   const noQuery = (req) => allowOnly(req.query, [], "the query");
-  router.get("/integrations/monday", async (req, res) => { noQuery(req); send(res, await integration.status(req.actor)); });
+  const isAdmin = (req) => { try { admin(req); return true; } catch (error) { if (error?.status === 403) return false; throw error; } };
+  router.get("/integrations/monday", async (req, res) => {
+    noQuery(req);
+    const status = await integration.status(req.actor);
+    send(res, isAdmin(req) ? status : publicStatus(status));
+  });
   router.post("/integrations/monday/connect", async (req, res) => { admin(req); noQuery(req); send(res, await integration.startConnect(req.actor)); });
   router.post("/integrations/monday/disconnect", async (req, res) => { admin(req); noQuery(req); send(res, await integration.disconnect()); });
   router.post("/integrations/monday/test", async (req, res) => { admin(req); noQuery(req); send(res, await integration.test()); });
@@ -83,4 +105,4 @@ function integrationRoutes({ integration, access }) {
   return router;
 }
 
-module.exports = { integrationRoutes, integrationPublicRoutes, rateLimit };
+module.exports = { integrationRoutes, integrationPublicRoutes, rateLimit, publicStatus };

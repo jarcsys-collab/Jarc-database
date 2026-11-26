@@ -107,12 +107,33 @@ session. Requests that change data (POST/PUT/PATCH/DELETE) need the session's `X
 `Origin` matching `ENTRA_REDIRECT_URI`. Users are created on first sign-in, keyed by tenant + object ID (email is
 display-only); a disabled user gets 403 `ACCOUNT_DISABLED` and their session ends.
 
+The `JARC.Admin` app role is read at sign-in and kept for the session's life. For the sensitive administrator writes
+(Account Management under `/accounts`, the monday.com integration's changes, and Employee Management access and membership
+changes while `ACCOUNT_MANAGEMENT` isn't `enforced`), a session whose administrator sign-in is older than 60 minutes gets
+403 `REAUTH_REQUIRED`: the session stays valid, and signing in again re-reads the role from Microsoft. Reads and ordinary
+requests are never affected. `GET /api/v1/auth/session` reports `adminFreshUntil` for a session carrying the role; the app
+shows "For security, sign in again to continue this administrator action." with a **Sign in again** button. Under the
+same rule, a session carrying the claim is also asked to sign in again for workspace member changes and the legacy state
+import (`POST /api/v1/imports`), even when the person acts through a real Workspace admin membership: a known, accepted side
+effect; sessions without the claim are never affected.
+
+Each sign-in also records whether the `JARC.Admin` role was present (`users.adminRoleSeenAt` / `adminRoleClearedAt`). Employee
+Management treats someone whose last recorded sign-in carried the role as a JARC administrator (Suspend / Revoke are refused
+with 409 `TARGET_JARC_ADMIN` unless the acting administrator is a JARC administrator). The record **never expires**: it is
+cleared only by a later sign-in without the role. This fails safe (it protects, it never grants), but a leaver whose role was
+removed in Microsoft Entra ID and who never signs in again stays protected, so suspending them needs an administrator who
+currently holds the role (a fresh sign-in).
+
 ### Access policy (`ACCESS_POLICY`)
 
 | Value | Who can do what |
 |---|---|
-| `role_based` (default; also when unset, empty or unrecognised) | The workspace roles below and the `JARC.Admin` app role. |
+| `role_based` (default; also when unset or empty) | The workspace roles below and the `JARC.Admin` app role. |
 | `development_shared` | **Development collaboration.** Every signed-in employee of the configured tenant can create workspaces and acts as WORKSPACE_ADMIN in every workspace: see, create, edit and delete boards, columns, groups and records, edit and delete workspaces, move boards. New workspaces are visible to everyone at once (they live in MongoDB). |
+
+Any other `ACCESS_POLICY` value (another spelling, case or surrounding spaces) **stops startup** with a configuration error
+naming the allowed values, so a typo can never switch shared access on or off silently. `JARC_BETA_OPEN_EDITING` is parsed the
+same way: `true` turns it on; unset, empty or `false` leave it off; anything else stops startup.
 
 `development_shared` changes only who may do what after sign-in. Microsoft sign-in, the session cookie, CSRF, the
 tenant/audience/issuer/expiry checks and disabled-account lockout all still apply, and these stay restricted:
@@ -173,7 +194,8 @@ How it works and what it keeps:
 `JARC_SUPER_ADMIN_TENANT_ID` + `JARC_SUPER_ADMIN_OBJECT_ID` (optional `JARC_SUPER_ADMIN_EMAIL`) name the intended first
 Super Admin. Being configured grants nothing: that person signs in with exactly these verified Entra claims **and** the
 `JARC.Admin` app role, then claims the role once with a typed confirmation. Every account change is recorded in
-`accountAudit`. See `monday-migration/m43-account-management.md` for the transition plan.
+`accountAudit`. Blocking an account (or, under `enforced`, giving it a role below Admin) is refused with 409
+`LAST_USABLE_WORKSPACE_ADMIN`, naming the workspaces, when it would leave a workspace without a usable Workspace admin. See `monday-migration/m43-account-management.md` for the transition plan.
 
 Permissions per workspace: **VIEWER** reads; **MEMBER** edits boards, records, columns (add/rename), groups and views;
 **WORKSPACE_ADMIN** also deletes or retypes columns, removes options, archives/deletes/moves boards, edits the

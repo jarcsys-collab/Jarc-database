@@ -2,10 +2,15 @@
 // memberships (checked by the routes). A workspace always keeps at least one active WORKSPACE_ADMIN: demoting or
 // removing an admin runs in a transaction that also increments the workspace's membersVersion, so two admins
 // demoting each other at the same moment conflict (one is retried and then refused) instead of both succeeding.
+// P4-0: "an admin" means a USABLE one (auth/accounts.js usableWorkspaceAdmin: the users document exists and is active, and the
+// account isn't blocked, or, under ACCOUNT_MANAGEMENT=enforced, pending or capped below WORKSPACE_ADMIN). Distinct people are
+// counted (duplicate rows count once; a row whose user is missing counts zero). Employee Management P3 suspend / revoke uses the
+// same count (countUsableAdmins) and touches the same membersVersion, so a status change and a membership change conflict too.
 const { ObjectId } = require("mongodb");
 const { ApiError } = require("../middleware/errors");
 const { requireBody, allowOnly, parseId, text, fail } = require("../validation/common");
 const { ROLES } = require("../repositories/mongo/membership-repository");
+const { ACCOUNT_MODES, usableWorkspaceAdmin } = require("../auth/accounts");
 const { activityEntry, appendActivity } = require("./shared");
 
 const memberNotFound = () => new ApiError(404, "NOT_FOUND", "This member doesn't exist in the workspace.");
@@ -13,7 +18,19 @@ const lastAdmin = () => new ApiError(400, "VALIDATION_ERROR", "A workspace needs
 const role = (value) => { if (!ROLES.includes(value)) fail(`role must be one of: ${ROLES.join(", ")}.`); return value; };
 
 class MembershipService {
-  constructor({ repos, connection, logger }) { Object.assign(this, { repos, connection, logger }); }
+  // accountMode: ACCOUNT_MANAGEMENT, for the usable-admin count. Until configure() is called it is "staged" (a blocked account
+  // never counts; pending and capped accounts count, as they still work unless enforced), the safe reading for off and staged.
+  constructor({ repos, connection, logger }) { Object.assign(this, { repos, connection, logger, accountMode: "staged" }); }
+  configure({ accountMode } = {}) { if (ACCOUNT_MODES.includes(accountMode)) this.accountMode = accountMode; return this; }
+
+  // { rows, usable }: the workspace's active WORKSPACE_ADMIN rows other than exceptMemberId / exceptUserId's, and how many
+  // distinct people behind them can use JARC right now. Read in the caller's transaction (session).
+  async countUsableAdmins(workspaceId, { session, exceptMemberId = null, exceptUserId = null, accountMode = this.accountMode } = {}) {
+    const rows = (await this.repos.memberships.listActiveAdmins(workspaceId, { session })).filter((r) => !(exceptMemberId && r._id.equals(exceptMemberId)) && !(exceptUserId && r.userId.equals(exceptUserId)));
+    const ids = [...new Map(rows.map((r) => [r.userId.toHexString(), r.userId])).values()];
+    const users = await this.repos.users.findByIdsIn(ids, { session });
+    return { rows: rows.length, usable: new Set(users.filter((u) => usableWorkspaceAdmin(u, accountMode)).map((u) => u._id.toHexString())).size };
+  }
 
   async list(workspaceId) {
     const members = await this.repos.memberships.listByWorkspace(workspaceId);
@@ -42,7 +59,7 @@ class MembershipService {
     return { ...member, user };
   }
 
-  async changeRole(workspaceId, memberId, raw, actor, { session: outer } = {}) {
+  async changeRole(workspaceId, memberId, raw, actor, { session: outer, accountMode } = {}) {
     const body = requireBody(raw);
     allowOnly(body, ["role"], "the member update");
     const newRole = role(body.role);
@@ -51,21 +68,25 @@ class MembershipService {
       await this.repos.memberships.updateRole(member._id, newRole, now, { session });
       await this.repos.activities.append(activityEntry({ workspaceId, actorUserId: actor.userId, actorName: actor.displayName, action: "member.role_changed", entityType: "member", entityId: member._id, changes: [{ field: "role", from: member.role, to: newRole }], now }), { session });
       return { ...member, role: newRole, updatedAt: now };
-    }, (current) => current.role === "WORKSPACE_ADMIN" && newRole !== "WORKSPACE_ADMIN", outer);
+    }, (current) => current.role === "WORKSPACE_ADMIN" && newRole !== "WORKSPACE_ADMIN", outer, accountMode);
     return { ...member, user: await this.repos.users.findById(member.userId) };
   }
 
-  async remove(workspaceId, memberId, actor, { session: outer } = {}) {
+  async remove(workspaceId, memberId, actor, { session: outer, accountMode } = {}) {
     return this.guarded(workspaceId, memberId, actor, async (member, session, now) => {
       await this.repos.memberships.remove(member._id, { session });
       await this.repos.activities.append(activityEntry({ workspaceId, actorUserId: actor.userId, actorName: actor.displayName, action: "member.removed", entityType: "member", entityId: member._id, changes: [{ field: "role", from: member.role, to: null }], now }), { session });
       return { removed: true };
-    }, (member) => member.role === "WORKSPACE_ADMIN", outer);
+    }, (member) => member.role === "WORKSPACE_ADMIN", outer, accountMode);
   }
 
   // Runs a membership change in a transaction, refusing it if it would leave the workspace without an admin. outer: a session
   // the caller's transaction already holds (the change then runs in it instead of a transaction of its own).
-  async guarded(workspaceId, memberId, actor, apply, losesAdmin, outer = null) {
+  // Refused (P4-0) when no other active admin row is left (as before), or when this member's person is a usable admin and no other
+  // usable admin would remain. Removing an admin row that is already unusable doesn't make a workspace worse, so it stays allowed
+  // while other rows remain (clean-up of suspended admins).
+  async guarded(workspaceId, memberId, actor, apply, losesAdmin, outer = null, accountMode = this.accountMode) {
+    const mode = ACCOUNT_MODES.includes(accountMode) ? accountMode : this.accountMode;
     const id = memberId instanceof ObjectId ? memberId : parseId(memberId, "memberId");
     const now = new Date();
     const run = outer ? (fn) => fn(outer) : (fn) => this.connection.withTransaction(fn);
@@ -74,7 +95,11 @@ class MembershipService {
       if (!member || !member.workspaceId.equals(workspaceId)) throw memberNotFound();
       // Touch the workspace so concurrent membership changes in this workspace conflict with each other.
       await this.repos.workspaces.touchMembers(workspaceId, { session });
-      if (member.status === "active" && losesAdmin(member) && await this.repos.memberships.countActiveAdmins(workspaceId, { session }) <= 1) throw lastAdmin();
+      if (member.status === "active" && losesAdmin(member)) {
+        const { rows, usable } = await this.countUsableAdmins(workspaceId, { session, exceptMemberId: member._id, accountMode: mode });
+        const [self] = await this.repos.users.findByIdsIn([member.userId], { session });
+        if (rows === 0 || (usable === 0 && usableWorkspaceAdmin(self, mode))) throw lastAdmin();
+      }
       return apply(member, session, now);
     });
     return result;

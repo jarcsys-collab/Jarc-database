@@ -1,6 +1,6 @@
 // ACCESS_POLICY=development_shared: every signed-in employee of the configured tenant works in every workspace.
 // Also checks what does NOT change: sign-in, sessions, CSRF and tenant checks; imports and membership changes; and
-// role_based (the default, also for unset or unknown values). Offline: local test keys, fake MongoDB.
+// role_based (the default for unset or empty; an unknown value stops startup). Offline: local test keys, fake MongoDB.
 const { test, describe, before, after } = require("node:test");
 const assert = require("node:assert/strict");
 const { startEntraApp, SessionClient } = require("./helpers");
@@ -21,14 +21,11 @@ const columns = [
 ];
 
 describe("ACCESS_POLICY configuration", () => {
-  test("unset, empty, role_based or any unknown value → role_based (fails safe); only the exact value shares", () => {
-    for (const value of [undefined, "", "role_based"]) {
-      const config = loadConfig({ ...ENTRA_ENV, ACCESS_POLICY: value });
-      assert.deepEqual([config.accessPolicy, config.accessPolicyIgnored], ["role_based", false], String(value));
-    }
+  // P4-0: an unknown value used to fall back to role_based silently; it now stops startup (tests/p40-access-policy-config.test.js).
+  test("unset, empty or role_based → role_based; only the exact value shares; any unknown value stops startup", () => {
+    for (const value of [undefined, "", "role_based"]) assert.equal(loadConfig({ ...ENTRA_ENV, ACCESS_POLICY: value }).accessPolicy, "role_based", String(value));
     for (const value of ["Development_Shared", "development-shared", "shared", "true", " development_shared"]) {
-      const config = loadConfig({ ...ENTRA_ENV, ACCESS_POLICY: value });
-      assert.deepEqual([config.accessPolicy, config.accessPolicyIgnored], ["role_based", true], value);
+      assert.throws(() => loadConfig({ ...ENTRA_ENV, ACCESS_POLICY: value }), (e) => e.name === "ConfigError" && /ACCESS_POLICY must be role_based or development_shared/.test(e.message), value);
     }
     assert.equal(loadConfig({ ...ENTRA_ENV, ACCESS_POLICY: "development_shared" }).accessPolicy, "development_shared");
   });

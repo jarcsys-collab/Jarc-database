@@ -162,6 +162,8 @@ class SearchService {
       throw error;
     }
     const needle = query.toLowerCase();
+    // The workspace shown is the board's (a record's stored copy can lag a board move; P4-0).
+    const workspaceOf = new Map(searched.map((b) => [b._id.toHexString(), b.workspaceId]));
     const items = docs.slice(0, limit).map((d) => {
       const fields = fieldsOf.get(d.boardId.toHexString()) || [];
       const title = textOf(d.values?.serial) || "Record";
@@ -169,7 +171,7 @@ class SearchService {
       const matched = hit ? textOf(d.values[hit.key]) : "";
       const at = matched.toLowerCase().indexOf(needle), from = Math.max(0, at - 40);
       const snippet = !hit || hit.key === "serial" ? null : `${from > 0 ? "…" : ""}${matched.slice(from, at + needle.length + 60)}${at + needle.length + 60 < matched.length ? "…" : ""}`;
-      return { recordId: d._id.toHexString(), boardId: d.boardId.toHexString(), workspaceId: d.workspaceId.toHexString(), title: title.slice(0, 200), field: hit && hit.key !== "serial" ? { key: hit.key, label: hit.label } : null, snippet };
+      return { recordId: d._id.toHexString(), boardId: d.boardId.toHexString(), workspaceId: (workspaceOf.get(d.boardId.toHexString()) ?? d.workspaceId).toHexString(), title: title.slice(0, 200), field: hit && hit.key !== "serial" ? { key: hit.key, label: hit.label } : null, snippet };
     });
     // Item-name matches first (names starting with the query before the rest); then cell matches.
     const rank = (i) => (i.field ? 2 : i.title.toLowerCase().startsWith(needle) ? 0 : 1);

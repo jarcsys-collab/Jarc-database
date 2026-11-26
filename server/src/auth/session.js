@@ -17,6 +17,13 @@
 //            role or status change applies to the very next request: a blocked account's session ends (403
 //            ACCOUNT_DISABLED); under enforced, a pending account can only read its own session and preferences (403
 //            ACCOUNT_PENDING elsewhere) and SYSTEM_ADMIN means an active Super Admin account, not the JARC.Admin app role.
+//   admin    (P4-0, F2) the JARC.Admin app role is read from the ID token at sign-in and kept on the session (isSystemAdmin)
+//            for the session's life (SESSION_MAX_HOURS, 8 h by default): removing the role in Microsoft Entra ID applies at the
+//            person's next sign-in, while the JARC account status above applies to the next request. For the few SENSITIVE
+//            administrator writes (sensitiveAdminRequest), a session whose admin claim is older than the admin re-auth age
+//            (entra.adminReauthMinutes, default ADMIN_REAUTH_MINUTES) answers 403 REAUTH_REQUIRED: signing in again re-reads the
+//            role from Microsoft. No identity-provider call is made per request; ordinary requests, every read, and sessions
+//            without the claim are never affected, and the session itself stays valid.
 // Nothing here logs the cookie, the CSRF token or any token.
 const crypto = require("crypto");
 const { sendError } = require("../middleware/errors");
@@ -30,6 +37,48 @@ const TOUCH_INTERVAL_MS = 60 * 1000;
 // workspace data. The bootstrap route checks its own strict rules (only the configured administrator).
 const PENDING_ALLOWED = new Set(["GET /auth/session", "POST /auth/sign-out", "GET /me", "GET /me/preferences", "PUT /me/preferences", "POST /accounts/bootstrap"]);
 const blocked = (account) => Boolean(account && !account.legacy && account.status === "blocked");
+
+// P4-0 (F2): administrator writes that need a recent JARC.Admin claim. Matched on the full API path (mount-independent):
+//   /accounts/…                         Account Management changes and the Super Admin bootstrap (they read the claim itself:
+//                                       granting SUPER_ADMIN and the bootstrap need JARC.Admin), in every ACCOUNT_MANAGEMENT mode
+//   /integrations/monday/…              connect, disconnect, test, imports, sync, retries (the public webhook / callback excluded)
+//   /admin/employees/:ds/records/:id/access | memberships[/:ref]   Employee Management P3 writes
+//   /workspaces/:id/members[/:memberId]  workspace member changes (see the note at the pattern)
+//   /imports                            the legacy state / browser-backup import (exactly this path)
+// All but /accounts only while ACCOUNT_MANAGEMENT isn't enforced: enforced, SYSTEM_ADMIN is the Super Admin account, read on every
+// request. Only POST / PUT / PATCH / DELETE.
+const ADMIN_REAUTH_MINUTES = 60;
+const API_PREFIX = String.raw`^(?:/api/v\d+)?`;
+const ACCOUNT_WRITES = new RegExp(`${API_PREFIX}/accounts(?:/|$)`, "i");
+const SENSITIVE_ADMIN_WRITES = Object.freeze([
+  new RegExp(`${API_PREFIX}/integrations/monday/(?!webhook(?:/|$)|callback(?:/|$))`, "i"),
+  new RegExp(`${API_PREFIX}/admin/employees/[^/]+/records/[^/]+/(?:access|memberships(?:/[^/]+)?)/?$`, "i"),
+  // Workspace member changes (routes/members.js): a JARC.Admin claim may manage any workspace's members. Known, accepted side
+  // effect: a session that carries the claim is gated here even when it acts through a real WORKSPACE_ADMIN membership; it signs
+  // in again. Sessions without the claim are never gated.
+  new RegExp(`${API_PREFIX}/workspaces/[^/]+/members(?:/[^/]+)?/?$`, "i"),
+  // The legacy state / browser-backup import (routes/resources.js POST /imports; JARC.Admin only, creates workspaces). Exactly
+  // /imports: the spreadsheet import jobs (/imports/:id/…, /workspaces/:id/imports) aren't administrator writes.
+  new RegExp(`${API_PREFIX}/imports/?$`, "i")
+]);
+function sensitiveAdminRequest(req, accountMode = "off") {
+  if (!UNSAFE_METHODS.has(req.method)) return false;
+  const path = `${req.baseUrl || ""}${req.path || ""}`;
+  if (ACCOUNT_WRITES.test(path)) return true;
+  if (accountMode === "enforced") return false;
+  return SENSITIVE_ADMIN_WRITES.some((re) => re.test(path));
+}
+// The admin re-auth age in milliseconds: entra.adminReauthMinutes when it is a whole number from 5 to 480, else the default.
+function adminReauthMs(entra) {
+  const n = entra?.adminReauthMinutes;
+  return (Number.isInteger(n) && n >= 5 && n <= 480 ? n : ADMIN_REAUTH_MINUTES) * 60 * 1000;
+}
+// When the session's admin claim stops counting for sensitive writes (null: the session carries no claim). The claim was read at
+// the sign-in that created the session (createdAt); a session without a valid createdAt is treated as already stale.
+function adminFreshUntil(session, maxAgeMs) {
+  if (session?.isSystemAdmin !== true) return null;
+  return session.createdAt instanceof Date && !Number.isNaN(session.createdAt.getTime()) ? new Date(session.createdAt.getTime() + maxAgeMs) : new Date(0);
+}
 
 const randomSecret = () => crypto.randomBytes(32).toString("base64url");
 const csrfTokenFor = (sessionSecret) => crypto.createHash("sha256").update(`jarc-csrf:${sessionSecret}`).digest("base64url");
@@ -64,6 +113,7 @@ function originAllowed(req, appOrigin) {
 
 function sessionAuthentication({ sessions, users, entra, accountMode = "off" }) {
   const idleMs = entra.sessionIdleMinutes * 60 * 1000;
+  const reauthMs = adminReauthMs(entra);
   return async (req, res, next) => {
     const secret = readCookie(req, SESSION_COOKIE);
     if (!secret) return sendError(res, 401, "UNAUTHENTICATED", "Sign in to continue.");
@@ -104,6 +154,12 @@ function sessionAuthentication({ sessions, users, entra, accountMode = "off" }) 
       return sendError(res, 403, "ACCOUNT_PENDING", "Your JARC account is waiting for approval by a JARC administrator.");
     }
     const isSystemAdmin = accountMode === "enforced" ? isActiveSuperAdmin(account) : Boolean(session.isSystemAdmin);
+    // P4-0 (F2): a sensitive administrator write on an old admin claim → sign in again (the session stays valid for the rest).
+    const freshUntil = adminFreshUntil(session, reauthMs);
+    if (freshUntil && freshUntil <= now && sensitiveAdminRequest(req, accountMode)) {
+      return sendError(res, 403, "REAUTH_REQUIRED", "For this administrator action, sign in to JARC again. Your administrator sign-in is too old.");
+    }
+    req.adminFreshUntil = freshUntil;
     // account: null while ACCOUNT_MANAGEMENT=off. hasAdminAppRole: the JARC.Admin app role was in the sign-in token.
     // tenantId / entraObjectId: the identity verified at sign-in, checked against the stored user just above.
     req.actor = Object.freeze({ userId: user._id, kind: "entra", isSystemAdmin, hasAdminAppRole: Boolean(session.isSystemAdmin), account, sessionId: session._id, tenantId: session.tenantId, entraObjectId: session.objectId, displayName: user.displayName || user.email || null });
@@ -143,4 +199,4 @@ function stillAllowed({ sessions, users, accountMode = "off", now = () => new Da
   };
 }
 
-module.exports = { stillSystemAdmin, stillAllowed, PENDING_ALLOWED, sessionAuthentication, readCookie, cookieHeader, clearCookie, csrfTokenFor, originAllowed, randomSecret, SESSION_COOKIE, SIGN_IN_COOKIE, UNSAFE_METHODS };
+module.exports = { stillSystemAdmin, stillAllowed, PENDING_ALLOWED, ADMIN_REAUTH_MINUTES, sensitiveAdminRequest, adminReauthMs, adminFreshUntil, sessionAuthentication, readCookie, cookieHeader, clearCookie, csrfTokenFor, originAllowed, randomSecret, SESSION_COOKIE, SIGN_IN_COOKIE, UNSAFE_METHODS };

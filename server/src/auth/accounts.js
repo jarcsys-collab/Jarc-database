@@ -42,6 +42,29 @@ function capWorkspaceRole(account, role) {
   return WORKSPACE_RANK[role] <= WORKSPACE_RANK[cap] ? role : cap;
 }
 
+// P4-0 (lockout protection): whether the person holding an active WORKSPACE_ADMIN membership can actually use it right now, from
+// the stored users document only (never the Entra directory snapshot). Pure.
+//   missing user, or users.status !== "active"      no (every sign-in, request and token refuses them)
+//   staged / enforced: a blocked account               no (its sessions end, auth/session.js)
+//   enforced: a pending account, or a role capped below WORKSPACE_ADMIN (EDITOR / VIEWER)   no
+// Legacy users (no account) keep their membership-based access, so they count. Off: the account is not read at all.
+function usableWorkspaceAdmin(user, accountMode = "staged") {
+  if (!user || user.status !== "active") return false;
+  if (accountMode === "off") return true;
+  const account = accountOf(user);
+  if (account.legacy) return true;
+  if (account.status === "blocked") return false;
+  if (accountMode !== "enforced") return true;
+  return capWorkspaceRole(account, "WORKSPACE_ADMIN") === "WORKSPACE_ADMIN";
+}
+
+// P4-0: the JARC.Admin app role as last seen at a sign-in (users.adminRoleSeenAt / adminRoleClearedAt, routes/auth.js). True when
+// the most recent sign-in that recorded anything carried the role. Evidence only: it never grants anything. It NEVER expires:
+// only a later sign-in without the role clears it. That fails safe (it only protects), but a leaver who lost the role in Entra
+// and never signs in again stays protected (TARGET_JARC_ADMIN), so suspending them needs a JARC administrator with a fresh
+// sign-in (the access-admin exception for an acting JARC administrator).
+const adminRoleHeld = (user) => user?.adminRoleSeenAt instanceof Date && !(user.adminRoleClearedAt instanceof Date && user.adminRoleClearedAt > user.adminRoleSeenAt);
+
 const lower = (v) => (typeof v === "string" ? v.toLowerCase() : null);
 
 // Whether this signed-in person may become the first Super Admin. Pure, so every rule is tested on its own.
@@ -91,4 +114,4 @@ function reconciliationReport(users, memberships) {
 // The confirmation phrase high-impact account changes must carry (typed by the Super Admin in the UI).
 const CONFIRM = Object.freeze({ block: "BLOCK", superAdmin: "GRANT SUPER ADMIN", bootstrap: "I AM THE SUPER ADMIN" });
 
-module.exports = { ACCOUNT_MODES, ACCOUNT_ROLES, ACCOUNT_STATUSES, WORKSPACE_CAP, WORKSPACE_RANK, accountOf, isActiveSuperAdmin, capWorkspaceRole, superAdminEligibility, reconciliationReport, CONFIRM };
+module.exports = { ACCOUNT_MODES, ACCOUNT_ROLES, ACCOUNT_STATUSES, WORKSPACE_CAP, WORKSPACE_RANK, accountOf, isActiveSuperAdmin, capWorkspaceRole, usableWorkspaceAdmin, adminRoleHeld, superAdminEligibility, reconciliationReport, CONFIRM };

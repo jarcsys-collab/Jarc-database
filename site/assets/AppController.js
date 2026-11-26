@@ -57,7 +57,7 @@ class AppController {
     // soon as they leave the field — unless they moved straight into another one (refreshWhenIdle checks again).
     root.addEventListener("focusout",e=>{if(this.pendingRefresh&&e.target.matches?.('input:not([type="checkbox"]),textarea,select'))setTimeout(()=>this.flushRefresh(),0);});
     document.addEventListener("pointerdown",e=>{const overlay=this.root.querySelector('#overlay-root');if(overlay?.querySelector('.popover,.profile-popover')&&!overlay.contains(e.target)&&!e.target.closest('[data-action]'))this.view.closeOverlay();});
-    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("jarc-session-expired",()=>{if(this.entra)this.showEntraGate("expired");});window.addEventListener("jarc-access-denied",()=>{if(this.entra){if(typeof BoardCache==="function")BoardCache.clearAll();this.showEntraGate("denied");}});
+    window.addEventListener("jarc-save",()=>this.saveFeedback());window.addEventListener("jarc-session-expired",()=>{if(this.entra)this.showEntraGate("expired");});window.addEventListener("jarc-access-denied",()=>{if(this.entra){if(typeof BoardCache==="function")BoardCache.clearAll();this.showEntraGate("denied");}});window.addEventListener("jarc-reauth-required",()=>this.offerReauth());
     // A board's saved copy asks to be checked: revalidateBoard. Saves that change shared data are counted by the model
     // (dataSaves) from the start, so a check made before live updates connect is protected too.
     this.model.refreshFailed = new Set(); // boards showing their saved copy whose check failed (server IDs): Retry is offered
@@ -633,6 +633,13 @@ class AppController {
   entraSignIn() {
     this.view.renderEntraGate(this.entraGate || "signed-out", this.model, { busy: true });
     this.entra.signIn().catch(() => this.showEntraGate("error", { message: "Microsoft sign-in couldn't start. Check your connection, then try again." }));
+  }
+  // P4-0: a sensitive administrator write answered 403 REAUTH_REQUIRED (the JARC.Admin sign-in is too old). The session stays
+  // valid, so nothing is closed: one toast at a time offers "Sign in again" (the usual Microsoft sign-in, which comes back to this
+  // page). Never automatic, nothing stored, nothing retried.
+  offerReauth() {
+    if (!this.entra || this.entraGate || this.reauthToast?.isConnected) return;
+    this.reauthToast = this.view.toast(StorageError.describe(StorageError.CODES.REAUTH_REQUIRED).message, { label: "Sign in again", onClick: () => { this.reauthToast = null; this.entraSignIn(); } });
   }
   // Resource mode: re-render after records load or server IDs replace temporary ones, but never under an open
   // dialog (it re-renders when the dialog closes) or while a field is being edited (the next update shows it; old
