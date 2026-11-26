@@ -92,6 +92,12 @@ class BoardSchemaService {
     // A duplicate copies values verbatim, so it must keep the original's type and mode: otherwise it would be a type
     // change that skips the conversion checks (the app's duplicate always keeps them).
     if (copyFrom && (copyFrom.type !== column.type || Boolean(copyFrom.multiple) !== Boolean(column.multiple))) throw invalid("A duplicated column keeps the original column's type. Duplicate it first, then change the copy's type.");
+    // A duplicated Connect column copies the linked record IDs, so it must link to the same board; a duplicated Mirror
+    // column must follow the same Connect column and show the same column (otherwise IDs would point at another board).
+    if (copyFrom && (column.type === "connect" || column.type === "mirror")) {
+      const config = (c) => JSON.stringify(c.type === "connect" ? { boardId: c.link?.boardId ?? null } : { via: c.mirror?.via ?? null, column: c.mirror?.column ?? null, show: c.mirror?.show ?? "list" });
+      if (config(copyFrom) !== config(column)) throw invalid(column.type === "connect" ? "A duplicated Connect column links to the same board as the original." : "A duplicated Mirror column shows the same column through the same Connect column as the original.");
+    }
     return this.change(boardId, expectedVersion, actor, {
       action: "column.added",
       build: (current, records) => {

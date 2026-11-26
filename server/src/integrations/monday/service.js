@@ -16,7 +16,7 @@ const { ApiError } = require("../../middleware/errors");
 const { normalizeColumns, normalizeGroups } = require("../../domain/board-schema");
 const { activityEntry, appendActivity } = require("../../services/shared");
 const { MondayClient, MondayApiError } = require("./client");
-const { mapColumns, mapItem } = require("./mapping");
+const { mapColumns, mapItem, mapItemChecked } = require("./mapping");
 const { randomToken, encrypt, decrypt, verifyJwt, sameText } = require("./secrets");
 
 const PROVIDER = "monday";
@@ -193,12 +193,23 @@ class MondayIntegration {
     const plan = boardMap.plan, columns = boardMap.columns, now = this.now();
     const existing = new Map((await this.repos.integrations.listMappings({ provider: PROVIDER, kind: "item", sourceId: { $in: items.map((i) => String(i.id)) } })).map((m) => [m.sourceId, m]));
     const creates = [], mappings = [], updates = [];
+    // Link / Email / Phone values from monday that fail the S0-A rules are never blanked: an update keeps the stored JARC
+    // value (the key is left out of $set), an insert stores the raw value unchanged (flagged by unsafeValues when read and
+    // never linked). Only the counts are logged, never a value.
+    const refusedCounts = { kept: 0, storedRaw: 0 };
     let position = Date.now();
     for (const item of items) {
-      const values = mapItem(item, plan, columns), groupId = boardMap.groupIds?.[item.group?.id] ?? null;
+      const { values, refused } = mapItemChecked(item, plan, columns), groupId = boardMap.groupIds?.[item.group?.id] ?? null;
       const map = existing.get(String(item.id)), updatedAt = item.updated_at ? new Date(item.updated_at) : null;
-      if (map) { if (!(map.sourceUpdatedAt && updatedAt && updatedAt < map.sourceUpdatedAt)) updates.push({ map, values, groupId, updatedAt, archived: item.state && item.state !== "active" }); continue; }
+      if (map) {
+        if (!(map.sourceUpdatedAt && updatedAt && updatedAt < map.sourceUpdatedAt)) {
+          for (const key of refused.keys()) { delete values[key]; refusedCounts.kept += 1; }
+          updates.push({ map, values, groupId, updatedAt, archived: item.state && item.state !== "active" });
+        }
+        continue;
+      }
       if (item.state && item.state !== "active") continue;
+      for (const [key, raw] of refused) { values[key] = raw; refusedCounts.storedRaw += 1; }
       const _id = new ObjectId();
       creates.push({ _id, workspaceId: board.workspaceId, boardId: board._id, values, groupId, position: (position += 1000), archived: false, pinned: false, createdBy: actorId, updatedBy: actorId, createdAt: now, updatedAt: now, version: 1 });
       mappings.push({ _id: new ObjectId(), provider: PROVIDER, kind: "item", sourceId: String(item.id), targetId: _id, boardId: board._id, sourceBoardId: boardMap.sourceId, sourceUpdatedAt: updatedAt, lastSyncedAt: now });
@@ -214,7 +225,13 @@ class MondayIntegration {
         await this.repos.records.collection.updateOne({ _id: u.map.targetId, boardId: board._id }, { $set: set, $inc: { version: 1 } });
         await this.repos.integrations.updateMapping(u.map._id, { sourceUpdatedAt: u.updatedAt, lastSyncedAt: now });
       }
-    } finally { if (touched.length) this.searchIndex?.refresh(board._id, touched); }
+    } finally {
+      if (touched.length) this.searchIndex?.refresh(board._id, touched);
+      if (refusedCounts.kept || refusedCounts.storedRaw) {
+        const warn = typeof this.logger?.warn === "function" ? this.logger.warn : this.logger?.log;
+        warn?.call(this.logger, `[monday] sync: ${refusedCounts.kept} stored Link/Email/Phone value(s) kept and ${refusedCounts.storedRaw} new one(s) stored unchanged because the monday.com value fails JARC's rules (board ${board._id})`);
+      }
+    }
     return creates.length;
   }
 

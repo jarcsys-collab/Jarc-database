@@ -107,8 +107,9 @@ class RecordRepository extends VersionedRepository {
 
   // One column's stored values for every record of a board, as a cursor (read with next()): projection on that column
   // only, in _id order, so a full-board check never loads whole records. key: an existing, validated column key.
-  columnValues(boardId, key, { session } = {}) {
-    return this.collection.find({ boardId: scopedId(boardId, "boardId") }, { projection: { _id: 1, [`values.${key}`]: 1 }, sort: { _id: 1 }, batchSize: 1000, session });
+  // One column of every record of a board (column type conversion scans). Bounded in time on the server (maxTimeMS).
+  columnValues(boardId, key, { session, maxTimeMS = 20000 } = {}) {
+    return this.collection.find({ boardId: scopedId(boardId, "boardId") }, { projection: { _id: 1, [`values.${key}`]: 1 }, sort: { _id: 1 }, batchSize: 1000, maxTimeMS, session });
   }
 
   findManyInBoard(boardId, ids, { session } = {}) {

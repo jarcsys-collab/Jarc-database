@@ -120,8 +120,13 @@ function conversionPlanner({ board, column, to, toColumn }) {
   const toMulti = to.type === "owner" || (to.type === "dropdown" && to.multiple);
   const lossy = Object.fromEntries(LOSSY.map((k) => [k, 0]));
   const counts = { total: 0, populated: 0, convertible: 0, incompatible: 0 };
+  // Memory stays bounded whatever the board size: at most SYNC_LIMITS.cells rewrites are kept (past that they are only
+  // counted, and the change is refused as BOARD_TOO_LARGE anyway), and at most LIMITS.options + 1 Dropdown options (past
+  // that, each entry not already an option is counted per cell in tooManyOptions, so the count is a lower bound of the
+  // distinct values over the cap when values repeat).
   const examples = [], changes = [];
-  const options = to.type === "dropdown" ? new Set(column.options || []) : null;
+  let rewrites = 0, optionOverflow = 0;
+  const options = to.type === "dropdown" ? new Set((column.options || []).slice(0, LIMITS.options + 1)) : null;
   const hash = crypto.createHash("sha256");
   hash.update(JSON.stringify([String(board._id), board.version, column.key, column.type, Boolean(column.multiple), to.type, Boolean(to.multiple)]));
   return {
@@ -141,21 +146,24 @@ function conversionPlanner({ board, column, to, toColumn }) {
         }
         counts.convertible += 1;
         next = cell.next;
-        if (options) for (const entry of valueList(next === undefined ? value : next)) options.add(entry);
+        if (options) for (const entry of valueList(next === undefined ? value : next)) {
+          if (options.has(entry)) continue;
+          if (options.size <= LIMITS.options) options.add(entry); else optionOverflow += 1;
+        }
       }
-      if (next !== undefined && !sameValue(next, value)) changes.push({ id, next });
+      if (next !== undefined && !sameValue(next, value)) { rewrites += 1; if (changes.length < SYNC_LIMITS.cells) changes.push({ id, next }); }
     },
     finish() {
       const optionList = options ? [...options] : null;
-      if (optionList && optionList.length > LIMITS.options) lossy.tooManyOptions = optionList.length - LIMITS.options;
-      const tooLarge = counts.total > SYNC_LIMITS.records || changes.length > SYNC_LIMITS.cells;
+      if (optionList && optionList.length > LIMITS.options) lossy.tooManyOptions = optionList.length - LIMITS.options + optionOverflow;
+      const tooLarge = counts.total > SYNC_LIMITS.records || rewrites > SYNC_LIMITS.cells;
       const reason = counts.incompatible > 0 ? (lossy.peopleReferences ? "PEOPLE_REFERENCES" : "INCOMPATIBLE_VALUES")
         : lossy.tooManyOptions ? "TOO_MANY_OPTIONS" : tooLarge ? "BOARD_TOO_LARGE" : null;
       return {
         details: {
           from: describeType(column.type, column.multiple), to: describeType(to.type, to.multiple),
           ...counts, lossy, examples, reason,
-          allowed: reason === null, tooLarge, rewrites: changes.length, limits: { ...SYNC_LIMITS, options: LIMITS.options },
+          allowed: reason === null, tooLarge, rewrites, limits: { ...SYNC_LIMITS, options: LIMITS.options },
           previewToken: hash.digest("hex").slice(0, 32)
         },
         changes, options: optionList

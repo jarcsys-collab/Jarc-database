@@ -934,20 +934,30 @@ class AppView {
   attr(value) { return this.escape(value ?? ""); }
   safeHref(value,type="link") {
     const text=String(value??"").trim(); if(!text||text.length>2048)return "";
-    if(type==="email")return /^[^\s@<>"'()]+@[^\s@<>"'()]+\.[^\s@<>"'()]+$/.test(text)?"mailto:"+text:"";
-    if(type==="phone")return /^\+?[0-9 ().-]{3,30}$/.test(text)?"tel:"+text.replace(/[^\d+]/g,""):"";
+    // A stored "mailto:" / "tel:" prefix (kept as stored after a type change) is dropped first: never "mailto:mailto:".
+    if(type==="email"){const address=text.replace(/^mailto:/i,"").trim();return /^[^\s@<>"'()]+@[^\s@<>"'()]+\.[^\s@<>"'()]+$/.test(address)?"mailto:"+address:"";}
+    if(type==="phone"){const number=text.replace(/^tel:/i,"").trim();return /^\+?[0-9 ().-]{3,30}$/.test(number)?"tel:"+number.replace(/[^\d+]/g,""):"";}
     let url; try{url=new URL(text);}catch{return "";}
     return ["http:","https:","mailto:","tel:"].includes(url.protocol)?url.href:"";
   }
   // A stored link value naming a scheme that safeHref refuses (javascript:, data:, vbscript:, file:…), or carrying control
-  // characters. Plain text without a scheme ("www.example.com") is just text, not flagged.
+  // characters. Plain text without a scheme is just text, not flagged: "www.example.com", "Note: see drive", host:port
+  // ("localhost:3000", "intranet:8080/x"), "Ref:123". Same reading as the server (validation/record-values.js): a "token:"
+  // prefix is a scheme when it is a known dangerous scheme, "//" follows it, or the token has "+", "-" or "." and isn't
+  // host:port.
   unsafeLink(value) {
     const text=String(value??"").trim(); if(!text)return false;
     // eslint-disable-next-line no-control-regex
     if(/[\u0000-\u001f\u007f]/.test(text))return true;
-    if(/^[a-z][a-z0-9.-]*:\d+(?:[/?#]|$)/i.test(text))return false; // host:port without a scheme ("intranet:8080/x")
-    const scheme=/^([a-z][a-z0-9+.-]*):/i.exec(text)?.[1]?.toLowerCase();
-    return Boolean(scheme)&&!["http","https","mailto","tel"].includes(scheme);
+    const m=/^([a-z][a-z0-9+.-]*):/i.exec(text); if(!m)return false;
+    const scheme=m[1].toLowerCase();
+    if(["http","https","mailto","tel"].includes(scheme))return false;
+    const dangerous=["javascript","vbscript","livescript","mocha","data","file","blob","about","filesystem","jar","view-source","wyciwyg","res","ms-its","mhtml","intent","chrome","chrome-extension","moz-extension","resource","ms-settings","ms-appinstaller","search-ms","shell","vnd.ms-office"];
+    if(dangerous.includes(scheme)||scheme.includes("script")||scheme.startsWith("ms-"))return true;
+    const rest=text.slice(m[0].length);
+    if(rest.startsWith("//"))return true;
+    if(/^\d{1,5}(?:[/?#]|$)/.test(rest)||/^\s/.test(rest))return false; // host:port, or "Note: see drive"
+    return /[+.-]/.test(scheme);
   }
   safeImage(value) { const text=String(value??""); return /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(text)?text:""; }
   cssColor(value,fallback="#64748b") { const text=String(value??"").trim(); return /^#[0-9a-f]{3,8}$/i.test(text)?text:fallback; }

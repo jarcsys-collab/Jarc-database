@@ -1,9 +1,11 @@
 // Link, Email and Phone cell values (Column System S0-A, D-S0-4). Server-side rules for NEW writes into columns of those
 // types; text and every other column type are never checked here.
 //
-//   link   http:, https:, mailto: or tel: URLs, or text with no scheme at all ("www.example.com", "see the shared drive"),
-//          stored exactly as typed (trimmed). Any other scheme is refused: javascript:, data:, vbscript:, file:, blob:,
-//          about:, and also when hidden by case, leading spaces or control characters, tabs or new lines inside it, HTML
+//   link   http:, https:, mailto: or tel: URLs, or text with no scheme at all ("www.example.com", "see the shared drive",
+//          "Note: see drive", "Ref:123", "localhost:3000"), stored exactly as typed (trimmed). A "token:" prefix is a scheme
+//          when it is a known dangerous scheme, "//" follows it, or the token has "+", "-" or "." and isn't host:port
+//          (unknownSchemeIsText); any scheme other than those four is refused:
+//          javascript:, data:, vbscript:, file:, blob:, about:, and also when hidden by case, leading spaces or control characters, tabs or new lines inside it, HTML
 //          entities (&#106; &colon; &Tab;), percent-encoding (%6A, %3A) or full-width letters. Control and invisible
 //          characters (C0, DEL, C1, zero-width, bidirectional marks) are refused anywhere. At most 2,048 characters, the limit
 //          of the frontend's safeHref (site/assets/AppView.js), which also opens only http, https, mailto and tel.
@@ -26,6 +28,19 @@ const TYPES = new Set(["link", "email", "phone"]);
 const HIDDEN = /[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\ufeff]/;
 const CONTROLS = /[\u0000-\u001f\u007f-\u009f]/g;
 const SCHEME = /^([a-z][a-z0-9+.-]*):/i;
+// Schemes refused even without "//" (they run code, read local files or embed content). Any other unknown "word:" prefix
+// without "//" is text, not a scheme: "Note: see drive", "Ref:123", host:port such as "localhost:3000" or "intranet:8080/x"
+// (the same reading as the browser's unsafeLink, site/assets/AppView.js). An unknown scheme followed by "//" is refused.
+const DANGEROUS_SCHEMES = new Set(["javascript", "vbscript", "livescript", "mocha", "data", "file", "blob", "about", "filesystem", "jar", "view-source", "wyciwyg", "res", "ms-its", "mhtml", "intent", "chrome", "chrome-extension", "moz-extension", "resource", "ms-settings", "ms-appinstaller", "search-ms", "shell", "vnd.ms-office"]);
+const isDangerousScheme = (s) => DANGEROUS_SCHEMES.has(s) || s.includes("script") || s.startsWith("ms-");
+// An unknown "token:" prefix (not dangerous, not http/https/mailto/tel) that is just text: host:port ("localhost:3000",
+// "intranet.local:8080/x"), a space after the colon ("Note: see drive"), or a plain word of letters and digits ("Ref:123",
+// "Todo:call"). "//" after it, or a scheme-like token with "+", "-" or "." ("x-unknown:thing", "web+app:x"), is a scheme.
+function unknownSchemeIsText(token, rest) {
+  if (rest.startsWith("//")) return false;
+  if (/^\d{1,5}(?:[/?#]|$)/.test(rest) || /^\s/.test(rest)) return true;
+  return !/[+.-]/.test(token);
+}
 const NAMED = Object.freeze({ colon: ":", tab: "\t", newline: "\n", amp: "&", sol: "/", period: ".", lpar: "(", rpar: ")", quot: "\"", apos: "'", lt: "<", gt: ">", nbsp: " ", semi: ";", excl: "!", num: "#", percnt: "%", plus: "+", equals: "=", quest: "?", commat: "@", bsol: "\\" });
 
 const fromCode = (n) => (Number.isFinite(n) && n >= 0 && n <= 0x10ffff ? String.fromCodePoint(n) : "");
@@ -67,7 +82,11 @@ function linkScheme(text) {
     const m = SCHEME.exec(reading);
     if (!m) continue;
     const s = m[1].toLowerCase();
-    if (!LINK_SCHEMES.includes(s)) return { problem: "scheme" };
+    if (isDangerousScheme(s)) return { problem: "scheme" };
+    if (!LINK_SCHEMES.includes(s)) {
+      if (unknownSchemeIsText(s, reading.slice(m[0].length))) continue; // "word:" text or host:port, not a scheme
+      return { problem: "scheme" };
+    }
     if (reading === text) scheme = s;
     else if (!scheme) scheme = s; // an allowed scheme only seen once decoded: checked as a URL below
   }
@@ -104,8 +123,10 @@ function checkTyped(type, raw) {
     if (text.length > MAX.email) return problem("too-long", `must be at most ${MAX.email} characters`);
     const at = text.lastIndexOf("@");
     const local = text.slice(0, at), domain = text.slice(at + 1);
-    const LOCAL = /^[\p{L}\p{N}!$&'*+=^_`{|}~-]+(?:\.[\p{L}\p{N}!$&'*+=^_`{|}~-]+)*$/u;
-    const LABEL = /^[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?$/u;
+    // Combining marks (\p{M}: vowel signs, viramas) may follow the first character of each part, as Devanagari, Thai and
+    // Tamil addresses need ("info@उदाहरण.भारत"); a part never starts with one.
+    const LOCAL = /^[\p{L}\p{N}!$&'*+=^_`{|}~-][\p{L}\p{M}\p{N}!$&'*+=^_`{|}~-]*(?:\.[\p{L}\p{N}!$&'*+=^_`{|}~-][\p{L}\p{M}\p{N}!$&'*+=^_`{|}~-]*)*$/u;
+    const LABEL = /^[\p{L}\p{N}](?:[\p{L}\p{M}\p{N}-]{0,61}[\p{L}\p{M}\p{N}])?$/u;
     const labels = domain.split(".");
     if (at < 1 || local.length > 64 || !LOCAL.test(local) || labels.length < 2 || !labels.every((l) => LABEL.test(l)) || /^\d+$/.test(labels.at(-1))) return problem("invalid-email", "must be one email address, such as name@example.com");
     return keep(text);

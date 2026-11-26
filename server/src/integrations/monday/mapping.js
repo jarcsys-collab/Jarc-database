@@ -52,8 +52,9 @@ function mapValue(targetType, cv, column) {
     case "date": { const d = value?.date || text.slice(0, 10); return /^\d{4}-\d{2}-\d{2}$/.test(d || "") ? d : ""; }
     case "checkbox": return value?.checked === true || value?.checked === "true";
     // Link / Email / Phone: the same rules as every other write (validation/record-values.js). A value that fails them is
-    // left empty, never stored and never linked; the migration engine keeps the raw value in the record's migration metadata
-    // with the issue "value-not-convertible" (migration/monday/columns.js). Links from monday stay http(s) only, as before.
+    // mapped to "" here; the migration engine keeps the raw value in the record's migration metadata with the issue
+    // "value-not-convertible" (migration/monday/columns.js), and the live sync never blanks it (mapItemChecked below).
+    // Links from monday stay http(s) only, as before.
     case "email": return typedOrEmpty("email", value?.email || text);
     case "phone": return typedOrEmpty("phone", String(value?.phone || text));
     case "link": { const u = String(value?.url || text || "").trim(); return /^https?:\/\//i.test(u) ? typedOrEmpty("link", u) : ""; }
@@ -64,15 +65,36 @@ function mapValue(targetType, cv, column) {
 }
 
 // A monday item → JARC record values, using the column plan of its board.
-function mapItem(item, plan, columns) {
+function mapItem(item, plan, columns) { return mapItemChecked(item, plan, columns).values; }
+
+// The raw monday value of a Link / Email / Phone cell, as JARC stored it before S0-A (links: http(s) only, as always).
+// "" when there is none. Used only by the live sync to tell "monday has no value" from "the value fails the rules".
+function rawTyped(targetType, cv) {
+  const text = typeof cv?.text === "string" ? cv.text.trim() : "";
+  const value = parse(cv?.value);
+  if (targetType === "email") return String(value?.email || text || "").trim();
+  if (targetType === "phone") return String(value?.phone || text || "").trim();
+  const u = String(value?.url || text || "").trim();
+  return /^https?:\/\//i.test(u) ? u : "";
+}
+const TYPED = new Set(["link", "email", "phone"]);
+
+// Like mapItem, plus the keys of Link / Email / Phone cells whose monday value fails the S0-A rules (mapValue maps them to
+// ""), with that raw value. The live sync never blanks such a cell (integrations/monday/service.js): an update keeps the
+// stored JARC value, an insert stores the raw value unchanged (flagged by unsafeValues when read, never linked).
+function mapItemChecked(item, plan, columns) {
   const byKey = new Map(columns.map((c) => [c.key, c]));
-  const values = { serial: String(item.name || "Untitled").slice(0, 10000) };
+  const values = { serial: String(item.name || "Untitled").slice(0, 10000) }, refused = new Map();
   for (const p of plan) {
     if (!p.targetKey || p.targetKey === "serial") continue;
     const cv = (item.column_values || []).find((v) => v.id === p.sourceId);
     values[p.targetKey] = mapValue(p.targetType, cv, byKey.get(p.targetKey));
+    if (TYPED.has(p.targetType) && values[p.targetKey] === "") {
+      const raw = rawTyped(p.targetType, cv);
+      if (raw) refused.set(p.targetKey, raw.slice(0, 10000));
+    }
   }
-  return values;
+  return { values, refused };
 }
 
-module.exports = { mapColumns, mapItem, mapValue, labelsOf, DIRECT, AS_TEXT, SKIPPED };
+module.exports = { mapColumns, mapItem, mapItemChecked, mapValue, labelsOf, DIRECT, AS_TEXT, SKIPPED };

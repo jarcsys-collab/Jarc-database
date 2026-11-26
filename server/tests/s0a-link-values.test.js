@@ -36,8 +36,10 @@ const BYPASSES = [
   "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==", "DATA:text/html,x", " data:image/svg+xml,<svg onload=alert(1)>",
   "vbscript:msgbox(1)", "VBScript:msgbox(1)", "file:///etc/passwd", "file://server/share", "FILE:c:/x", "blob:https://example.com/0000",
   "about:blank", "ftp://example.com/x", "chrome://settings", "jar:file:x!/", "view-source:https://example.com", "intent://x#Intent;end",
-  "ms-word:ofe|u|https://example.com/x.docx", "localhost:8080", "x-unknown:thing"
+  "ms-word:ofe|u|https://example.com/x.docx", "x-unknown:thing", "web+app:x", "foo://x", "javascript:8080", "javascript: alert(1)"
 ];
+// host:port is text with no scheme (S0-A review fix 5; the browser's unsafeLink reads it the same way): "localhost:8080"
+// moved from BYPASSES to the plain-text list below.
 
 describe("Link rule", () => {
   test("every scheme bypass variant is refused", () => {
@@ -51,7 +53,7 @@ describe("Link rule", () => {
     assert.deepEqual(checkTyped("link", "https://example.com\n"), { value: "https://example.com" }, "a trailing line break from a paste is trimmed");
   });
   test("text without a scheme is allowed, as typed (not clickable until it has https://)", () => {
-    for (const value of ["www.example.com", "example.com/path", "//example.com/x", "Room 4: shared drive", "see the shared folder", "\\\\server\\share"]) assert.deepEqual(checkTyped("link", value), { value }, value);
+    for (const value of ["www.example.com", "example.com/path", "//example.com/x", "Room 4: shared drive", "see the shared folder", "\\\\server\\share", "localhost:8080", "intranet:8080/x", "Note: see drive", "Ref:123"]) assert.deepEqual(checkTyped("link", value), { value }, value);
   });
   test("broken http(s) links, over-long links and non-text are refused", () => {
     assert.equal(refused("link", "https://"), "invalid-url");
