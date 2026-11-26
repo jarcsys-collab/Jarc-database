@@ -760,6 +760,15 @@ html[data-density=compact] .editable-table td { height: 34px; padding-top: 1px; 
 /* Keep focused/scrolled-to cells clear of the pinned Item column (left) and the actions column (right). */
 .table-wrap { scroll-padding-inline: 250px 90px; }
 html[data-sticky-column=off] .table-wrap { scroll-padding-inline-start: 70px; }
+/* Sticky first column, scoped (Column R0, 02a §1). styles.css pins th:nth-child(2) / td:nth-child(2) of EVERY table while the
+   setting is on, so other tables (accounts, system health, Fabric grids, API tables…) had their second column pinned to the
+   left edge. 1) In the board table the pinned column is keyed on the Item column itself (th.is-primary, td[data-column-key=serial]),
+   not on its position; the opaque backgrounds, selection and hover colours are unchanged. 2) Any other table drops the left
+   pin: its second header cell keeps only the vertical sticky header every th has (top: 0), its second body cell stays in
+   place. .fabric-invoices pins its own second column on purpose (fabric-data.css) and keeps it. */
+html[data-sticky-column=on] .editable-table > :is(thead, tbody) > tr > :is(th.is-primary, td[data-column-key="serial"]) { position: sticky; left: 0; }
+html[data-sticky-column=on] table:not(.editable-table, .fabric-invoices) > :is(thead, tbody, tfoot) > tr > th:nth-child(2) { left: auto; }
+html[data-sticky-column=on] table:not(.editable-table, .fabric-invoices) > :is(thead, tbody, tfoot) > tr > td:nth-child(2) { left: auto; z-index: auto; }
 
 /* Read mode: each cell is a full-size button that shows the value. */
 .cell-display { display: flex; align-items: center; width: 100%; min-height: 34px; padding: 4px 8px; gap: 8px; border-radius: var(--radius-sm); text-align: left; color: var(--text); font-size: var(--fs-base); cursor: text; overflow: hidden; }

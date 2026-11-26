@@ -1,5 +1,8 @@
 // Import limits (Stage 5). Generous for real boards, but they keep a single import from filling this browser's storage.
 const IMPORT_LIMITS = Object.freeze({ rows: 5000, fields: 200, cellLength: 10000 });
+// The shared column type registry (site/assets/ColumnTypes.js, Column R0), or null where it isn't loaded (tests that load
+// this file alone): each use below keeps today's identical inline list as the fallback (tests/column-types-registry.test.js).
+const columnRegistry = () => { try { return (typeof ColumnTypes !== "undefined" && ColumnTypes) || (typeof window !== "undefined" && window.ColumnTypes) || null; } catch { return null; } };
 
 class BoardModel {
   static SELECT_ALL_LIMIT = 5000; // the most one select-all takes, which is what one batch request can change together (AppView names it on the checkbox)
@@ -19,8 +22,8 @@ class BoardModel {
       { key: "priority", label: "Priority", type: "priority" },
       { key: "notes", label: "Updates / Notes", type: "text" }
     ];
-    // Supported column types. category/description drive the Add column chooser.
-    this.columnTypes = [
+    // Supported column types. category/description drive the Add column chooser. From the registry when it is loaded.
+    this.columnTypes = columnRegistry()?.chooserEntries() || [
       { type: "text", label: "Text", category: "Basic", description: "Names, notes and short values" },
       { type: "number", label: "Number", category: "Basic", description: "Quantities, amounts and scores" },
       { type: "status", label: "Status", category: "Selection", description: "Track progress with labelled stages" },
@@ -1196,8 +1199,8 @@ class BoardModel {
   replaceBoardAttachments(boardId,items,startedAt){const newer=(rid)=>(this.attachmentStamps.get(String(rid))||0)>=startedAt;this.replaceAttachments(items.filter((a)=>!newer(a.recordId)),(a)=>String(a.boardId)===String(boardId)&&!newer(a.recordId));}
   columnType(type){return this.columnTypes.find((item)=>item.type===type);}
   // Options a brand-new column starts with. Existing columns with no stored options keep their legacy defaults.
-  newColumnOptions(type){return type==="status"?["New","In Progress","Waiting","Completed","Cancelled"]:type==="priority"?["Low","Medium","High","Critical"]:[];}
-  effectiveOptions(column){if(!column)return [];if(column.type==="group")return [...this.board.groups];if(column.options?.length)return [...column.options];return column.type==="status"?["New","In Progress","Waiting","Completed","Cancelled","Review","Defective","Clear"]:column.type==="priority"?["Low","Medium","High","Critical"]:[];}
+  newColumnOptions(type){const r=columnRegistry();if(r)return r.newOptions(type);return type==="status"?["New","In Progress","Waiting","Completed","Cancelled"]:type==="priority"?["Low","Medium","High","Critical"]:[];}
+  effectiveOptions(column){if(!column)return [];if(column.type==="group")return [...this.board.groups];if(column.options?.length)return [...column.options];const r=columnRegistry();if(r)return r.fallbackOptions(column.type);return column.type==="status"?["New","In Progress","Waiting","Completed","Cancelled","Review","Defective","Clear"]:column.type==="priority"?["Low","Medium","High","Critical"]:[];}
   hasValue(value){return Array.isArray(value)?value.length>0:value!==undefined&&value!==null&&value!==false&&String(value).trim()!=="";}
   // Several values in one cell: People always, Dropdown when set to "multiple". Stored as a list of strings.
   isMultiColumn(column){return column?.type==="owner"||column?.type==="connect"||(column?.type==="dropdown"&&column.multiple===true);}
