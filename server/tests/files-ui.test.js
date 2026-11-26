@@ -129,7 +129,8 @@ describe("Files column and column guidance (real app, headless browser)", { skip
     await ana.key("Escape");
     assert.ok(await click(ana, 'th[data-column-key="notes"] .column-menu-button'));
     assert.ok(await ana.waitFor("!!document.querySelector('.column-menu-popover')", 2000));
-    assert.deepEqual(await ana.evaluate("[...document.querySelectorAll('.column-menu-popover .menu-section-label')].map(e => e.textContent)"), ["Column", "View", "Arrange"]);
+    // Column C1: the menu is grouped by who a change affects (the board's own column, then this person's view, then Delete).
+    assert.deepEqual(await ana.evaluate("[...document.querySelectorAll('.column-menu-popover .menu-section-label > span')].map(e => e.textContent)"), ["Everyone on this board", "Only you", "Everyone on this board"]);
     await click(ana, '.column-menu-popover [data-action="rename-column"]');
     assert.ok(await ana.waitFor("!!document.querySelector('form[data-action=rename-column-form] textarea[name=description]')", 2000));
     await ana.evaluate("document.querySelector('textarea[name=description]').value = 'What the technician found on site.'");

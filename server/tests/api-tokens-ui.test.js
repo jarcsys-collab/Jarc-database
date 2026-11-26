@@ -416,13 +416,13 @@ describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false :
     // A token for this board, made BEFORE the column exists.
     const earlier = await b.evaluate(`(async () => { const { csrfToken } = await (await fetch("/api/v1/auth/session")).json(); const ws = (await (await fetch("/api/v1/workspaces")).json()).items.find((w) => w.name === "Synthetic Ops"); const r = await fetch("/api/v1/me/api-tokens", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: JSON.stringify({ name: "Before the column", workspaceId: ws.id, boardIds: [${JSON.stringify(boardId)}], scopes: ["read"], expiresAt: new Date(Date.now() + 7 * 864e5).toISOString() }) }); return (await r.json()).secret; })()`);
     assert.match(earlier, /^jarc_/);
-    // Add the column the way an employee does: Add column → type → name → save.
+    // Add the column the way an employee does (Column C1): + → type (created at once) → type its name in the header → Enter.
     assert.ok(await openBoard(DESKTOP), "the board opens");
     await click('th [data-action="add-column"]');
-    assert.ok(await wait("!!document.querySelector('.chooser-option[data-type=\"text\"]')", 8000), "column chooser open");
-    await click('.chooser-option[data-type="text"]');
-    assert.ok(await wait("!!document.querySelector('[data-action=create-column-form]')", 8000), "name step open");
-    await b.evaluate(`(() => { const f = document.querySelector("[data-action=create-column-form]"); f.elements.label.value = "Approval Note"; f.requestSubmit(); })()`);
+    assert.ok(await wait("!!document.querySelector('.column-picker-option[data-type=\"text\"]')", 8000), "column picker open");
+    await click('.column-picker-option[data-type="text"]');
+    assert.ok(await wait("document.activeElement?.classList.contains('column-rename-input')", 8000), "the new header's name is ready to type");
+    await b.evaluate(`(() => { const i = document.activeElement; i.value = "Approval Note"; i.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
     const serverKey = () => b.evaluate(`fetch("/api/v1/boards/${boardId}").then((r) => r.json()).then((x) => x.board.columns.find((c) => c.label === "Approval Note")?.key || "")`);
     assert.ok(await wait(`fetch("/api/v1/boards/${boardId}").then((r) => r.json()).then((x) => x.board.columns.some((c) => c.label === "Approval Note"))`, 10000), "saved on the server");
     const key = await serverKey();

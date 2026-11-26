@@ -718,7 +718,7 @@ class AppController {
 
   // With no workspaces (a new shared database) the full layout is shown, but most actions need a workspace. These work
   // without one; anything else opens "Create workspace" instead of acting on a workspace that doesn't exist.
-  static READ_ONLY_BLOCKED = new Set(["add-column","add-group-column","add-group-form","cell-open","set-cell-option","inline-add","open-form","new-item","import","choose-import-file","duplicate-record","duplicate-column","delete","archive-item","pin-item","rename-column","edit-column-options","column-editor","edit-description","manage-groups","request-delete-column","request-delete-group","move-record-board","move-column","edit","files-input","request-remove-file","board-title-inline"]);
+  static READ_ONLY_BLOCKED = new Set(["add-column","add-column-right","column-picker-choose","column-settings","edit-column-description","change-column-type","toggle-column-multiple","add-group-column","add-group-form","cell-open","set-cell-option","inline-add","open-form","new-item","import","choose-import-file","duplicate-record","duplicate-column","delete","archive-item","pin-item","rename-column","edit-column-options","column-editor","edit-description","manage-groups","request-delete-column","request-delete-group","move-record-board","move-column","edit","files-input","request-remove-file","board-title-inline"]);
   static NO_WORKSPACE_ACTIONS = new Set(["create-workspace","close-overlay","nav","module-exit","toggle-nav","collapse-nav","toggle-workspace-section","command-palette","run-command","retry-save","dismiss-hint","notifications","notification-filter","mark-notifications","profile-menu","profile-settings","developer","choose-avatar","remove-avatar","settings","settings-section","setting","theme","shortcuts","request-logout","confirm-logout","lock-session"]);
   static NO_WORKSPACE_COMMANDS = new Set(["home","mywork","theme","settings","appearance","notifications","shortcuts"]);
   needsWorkspace(allowed) {
@@ -863,8 +863,15 @@ class AppController {
     if (action === "request-delete-group") { const fallback=this.model.board.groups.find((group)=>group!==target.dataset.group); this.view.showConfirm("Delete group?",`Items in ${target.dataset.group} will move to ${fallback}.`,"confirm-delete-group",target.dataset.group); }
     if (action === "confirm-delete-group") { const name=target.dataset.payload, fallback=this.model.board.groups.find((group)=>group!==name); this.runBusy(target,()=>this.model.deleteGroup(name,fallback),()=>{this.view.closeOverlay();this.update();this.view.toast("Group deleted");}); }
     if (action === "manage-columns") this.togglePanel("columns",()=>this.view.showColumnManager(this.model));
-    if (action === "add-column") this.view.showAddColumn(this.model);
-    if (action === "column-editor") this.togglePanel(`column-${target.dataset.key}`,()=>this.view.showColumnEditor(this.model,target.dataset.key));
+    // Column System C1: the Add Column picker, its "to the right" form, the menu's pages and the settings panel.
+    if (action === "add-column") { this.openColumnPicker(target); return; }
+    if (action === "add-column-right") { const key=target.dataset.key; this.view.closeOverlay(); this.openColumnPicker(this.root.querySelector(`.editable-table thead th[data-column-key="${CSS.escape(key)}"]`),{insertAfter:key}); return; }
+    if (action === "column-picker-choose") { this.createColumnFromPicker(target.dataset.type,target); return; }
+    if (action === "column-menu-page" || action === "change-column-type") { if(this.view.columnMenu&&document.querySelector("#overlay-root .column-menu-popover"))this.view.showColumnMenuPage(this.model,target.dataset.key,action==="change-column-type"?"type":"main"); else this.view.showColumnChooser(this.model,{mode:"change",key:target.dataset.key}); return; }
+    if (action === "column-settings" || action === "column-editor") { this.togglePanel(`column-${target.dataset.key}`,()=>this.view.showColumnSettings(this.model,target.dataset.key)); return; }
+    if (action === "edit-column-description") { this.view.showRenameColumn(this.model,target.dataset.key); requestAnimationFrame(()=>this.root.querySelector('#overlay-root [name="description"]')?.focus()); return; }
+    if (action === "column-group-by") { this.model.groupBy=target.dataset.off?"":target.dataset.key; this.model.selected.clear(); this.view.closeOverlay(); this.update(); this.view.toast(target.dataset.off?"No longer grouped by this column":this.model.activeView?"Grouped in this view · save the view to keep it":"Grouped for you · not saved"); return; }
+    if (action === "toggle-sticky-name") { const on=!this.model.settings.stickyFirstColumn; this.model.updateSetting("stickyFirstColumn",on); this.view.closeOverlay(); this.view.applyDisplay(this.model); this.update(); this.view.toast(on?"Record names stay in view as you scroll (for you, on every board)":"Record names scroll with the table"); return; }
     if (action === "move-column") { const moved=this.model.moveColumn(target.dataset.key,target.dataset.direction); this.view.showColumnEditor(this.model,target.dataset.key); this.markPanel(`column-${target.dataset.key}`); this.view.toast(moved?"Column moved":"The primary record column stays first"); }
     if (action === "preview-file") { const row=this.model.rows.find((r)=>r.id===this.model.idOf(target.dataset.id)), column=this.model.board.columns.find((c)=>c.key===target.dataset.field), file=this.model.attachments.get(target.dataset.file); if(row&&column&&file){this.view.showFilePreview(this.model,row,column,file);this.markPanel(`preview-${file.id}`);this.watchPreview();} return; }
     if (action === "download-file") { this.view.toast(`Downloading ${target.dataset.name||"file"}…`); return; } // the browser takes over (no preventDefault)
@@ -925,10 +932,9 @@ class AppController {
     if (action === "column-menu") this.togglePanel(`column-menu-${target.dataset.key}`,()=>this.view.showColumnMenu(this.model,target.dataset.key));
     if (action === "choose-column-type") { this.view.showColumnNameStep(this.model,target.dataset.type); this.selectOverlayInput('[name="label"]'); }
     if (action === "rename-column") { this.view.showRenameColumn(this.model,target.dataset.key); this.selectOverlayInput('[name="label"]'); }
-    if (action === "change-column-type") this.view.showColumnChooser(this.model,{mode:"change",key:target.dataset.key});
     if (action === "choose-new-type") this.changeColumnType(target.dataset.key,target.dataset.type,false,target);
     if (action === "confirm-change-type") { const [key,type]=target.dataset.payload.split("|"); this.changeColumnType(key,type,true,target); }
-    if (action === "edit-column-options") this.view.showOptionEditor(this.model,target.dataset.key);
+    if (action === "edit-column-options") { if(this.view.columnSettings){this.view.showColumnSettings(this.model,target.dataset.key,{section:"labels"});this.markPanel(`column-${target.dataset.key}`);requestAnimationFrame(()=>this.root.querySelector("#overlay-root .option-editor .option-name")?.focus());} else this.view.showOptionEditor(this.model,target.dataset.key); }
     if (action === "add-option-row") { const list=target.closest("form").querySelector(".option-list"); list.insertAdjacentHTML("beforeend",this.view.optionRow()); list.lastElementChild.querySelector("input").focus(); }
     if (action === "remove-option-row") { const row=target.closest(".option-row"), next=row.nextElementSibling||row.previousElementSibling; row.remove(); (next?.querySelector("input")||this.root.querySelector('[data-action="add-option-row"]'))?.focus(); }
     if (action === "confirm-column-options") this.applyColumnOptions(true,target);
@@ -1004,6 +1010,7 @@ class AppController {
     if (event.target.dataset.action === "column-picker-search") { this.view.showColumnPicker(this.model,event.target.value); return; }
     if (event.target.dataset.action === "command-search") { this.command?.onInput(event.target.value); return; }
     if (event.target.dataset.action === "connect-search") { clearTimeout(this.connectSearchTimer); const text=event.target.value; this.connectSearchTimer=setTimeout(()=>this.searchConnect(text),250); return; }
+    if (event.target.dataset.action === "column-type-search" && event.target.closest(".column-picker")) { this.view.columnPicker?.filter(event.target.value); return; }
     if (event.target.dataset.action === "column-type-search") {
       const term=event.target.value.trim().toLowerCase(), modal=event.target.closest(".column-chooser"), options=[...modal.querySelectorAll(".chooser-option")];
       options.forEach((b)=>{b.hidden=Boolean(term)&&!b.dataset.search.includes(term);});
@@ -1279,7 +1286,20 @@ class AppController {
       else this.model.columnFilter={key,op,value:noValue?"":value};
       this.view.closeOverlay(); this.update(); return;
     }
-    if (action === "create-column-form") { let column; this.runBusy(event.submitter,()=>{const [via,source]=String(data.mirrorPair||"").split("|");column=this.model.addColumn({label:data.label,type:data.type,options:data.options||"",multiple:data.multiple==="on",link:data.linkBoard?{boardId:data.linkBoard}:null,mirror:via&&source?{via,column:source,show:data.mirrorShow||"list"}:null});return column?undefined:false;},()=>{this.view.closeOverlay();this.update();this.root.querySelector(`th[data-column-key="${CSS.escape(column.key)}"]`)?.scrollIntoView({block:"nearest",inline:"nearest"});this.view.toast(`${column.label} column added`,true);}); }
+    if (action === "create-column-form") { let column; this.runBusy(event.submitter,()=>{const [via,source]=String(data.mirrorPair||"").split("|");column=this.model.addColumn({label:data.label,type:data.type,options:data.options||"",multiple:data.multiple==="on",link:data.linkBoard?{boardId:data.linkBoard}:null,mirror:via&&source?{via,column:source,show:data.mirrorShow||"list"}:null});if(column&&data.insertAfter)this.placeNewColumn(column,data.insertAfter);return column?undefined:false;},()=>{this.view.closeOverlay();this.update();this.view.columnPicker?.remember(this.model,data.type);this.root.querySelector(`th[data-column-key="${CSS.escape(column.key)}"]`)?.scrollIntoView({block:"nearest",inline:"nearest"});this.view.toast(`${column.label} column added`,true);}); }
+    // The settings panel's details (ColumnSettings.js): only what changed is sent, in one request, and shown once the server has it.
+    if (action === "column-settings-form") {
+      const column=this.model.board.columns.find((c)=>c.key===data.key); if(!column)return;
+      const label=String(data.label||"").trim(), description=String(data.description||"").trim().slice(0,500); if(!label){this.view.showDialogError("Give the column a name.");return;}
+      const patch={};
+      if("defaultValue" in data&&String(data.defaultValue??"")!==String(column.defaultValue??""))patch.defaultValue=String(data.defaultValue??"");
+      if(column.key!=="serial"&&(data.required==="on")!==Boolean(column.required))patch.required=data.required==="on";
+      if(String(data.connection||"").trim()!==String(column.connection||""))patch.connection=String(data.connection||"").trim();
+      const named=label!==column.label||description!==(column.description||"");
+      if(!named&&!Object.keys(patch).length){this.view.closeOverlay();return;}
+      this.runBusy(event.submitter,()=>{if(named)this.model.editColumn(column.key,{label,description});if(Object.keys(patch).length)this.model.updateColumnConfig({[column.key]:patch});},()=>{this.view.closeOverlay();this.update();this.view.toast(`${label} updated for everyone on this board`,true);});
+      return;
+    }
     if (action === "rename-column-form") { this.runBusy(event.submitter,()=>this.model.editColumn(data.key,{label:data.label,description:data.description})?undefined:false,()=>{this.view.closeOverlay();this.update();this.view.toast("Column updated",true);}); }
     if (action === "column-options-form") { this.pendingOptions={key:data.key,items:[...event.target.querySelectorAll(".option-row")].map((row)=>{const input=row.querySelector(".option-name");return {from:input.dataset.from||null,to:input.value,color:row.querySelector(".option-color")?.value||""};})}; this.applyColumnOptions(false,event.submitter); }
     if (action === "column-width-form") { const width=Number(data.width); if(!Number.isFinite(width))return; this.runBusy(event.submitter,()=>{this.model.resizeColumn(data.key,width);},()=>{this.view.closeOverlay();this.update();this.view.toast(this.model.activeView?"Width changed in this view. Save to this view to keep it.":"Column width saved");}); }
@@ -2261,6 +2281,64 @@ class AppController {
     document.addEventListener("pointermove",move,{passive:false});document.addEventListener("pointerup",up);document.addEventListener("pointercancel",cleanup);document.addEventListener("keydown",onKey,true);
   }
   selectOverlayInput(selector){requestAnimationFrame(()=>{const input=this.root.querySelector(`#overlay-root ${selector}`);input?.focus();input?.select();});}
+  // ---- Column System C1: Add Column picker (ColumnPicker.js). It opens under the header's "+" (from the Column manager,
+  // the empty-board link or Ctrl+Shift+C too), or next to a column for "Add column to the right" (insertAfter).
+  openColumnPicker(trigger,{insertAfter=""}={}){
+    const picker=this.view.columnPicker; if(!this.model.board)return;
+    if(!picker){this.view.showAddColumn(this.model);return;}
+    const plus=this.root.querySelector('.editable-table thead [data-action="add-column"]');
+    const anchor=insertAfter?(trigger||plus):(trigger?.closest?.(".editable-table thead")?trigger:plus)||null;
+    this.lastTrigger=anchor;
+    this.togglePanel(`column-picker-${insertAfter}`,()=>picker.open(this.model,{anchor,insertAfter}));
+  }
+  // One click: today's create call (BoardModel.addColumn → POST /boards/:id/columns, with its index when placed to the
+  // right), shown once the server has it; then the new header's name is ready to type over. Connect and Mirror first ask
+  // for their link (the existing setup step).
+  createColumnFromPicker(id,button){
+    const picker=this.view.columnPicker; if(!picker?.isOpen())return;
+    const insertAfter=picker.state.insertAfter||"", d=window.ColumnTypes?.get?.(id)||{id,label:this.model.columnType(id)?.label||id}, type=picker.typeOf(d);
+    if(!this.model.columnType(type))return;
+    if(picker.needsSetup(d)){picker.close();this.view.showColumnNameStep(this.model,type,{insertAfter});this.selectOverlayInput('[name="label"]');return;}
+    const name=picker.nameFor(this.model,d), payload=d.createPayload?{...d.createPayload(name)}:{label:name,type};
+    let column=null;
+    this.runBusy(button,()=>{column=this.model.addColumn(payload);if(!column)return false;if(insertAfter)this.placeNewColumn(column,insertAfter);},()=>{
+      picker.remember(this.model,id);picker.close();this.view.closeOverlay();this.update();
+      // After any refresh that waited for the picker to close (closeOverlay runs it as a microtask), so it isn't redrawn away.
+      this.view.toast(`${column.label} column added`,true);requestAnimationFrame(()=>this.startInlineRename(column.key));
+    });
+  }
+  // A column just added (at the end) goes right after afterKey: in the board's order (the create request carries that
+  // index), and in the open view's own order when it has one.
+  placeNewColumn(column,afterKey){
+    const cols=this.model.board.columns, from=cols.indexOf(column); if(from<0||!cols.some((c)=>c.key===afterKey))return;
+    cols.splice(from,1); cols.splice(Math.max(1,cols.findIndex((c)=>c.key===afterKey)+1),0,column);
+    if(this.model.activeView&&Array.isArray(this.model.viewOrder)){const order=this.model.viewOrder.filter((k)=>k!==column.key),i=order.indexOf(afterKey);order.splice(i<0?order.length:i+1,0,column.key);this.model.viewOrder=order;}
+  }
+  // The new column's name, edited in its header: Enter or leaving the field saves (renameColumn, with Undo); Escape keeps
+  // the name it was created with (the column already exists).
+  startInlineRename(key){
+    const th=this.root.querySelector(`.editable-table thead th[data-column-key="${CSS.escape(key)}"]`), column=this.model.board?.columns.find((c)=>c.key===key), label=th?.querySelector(".column-label");
+    if(!th||!column||!label)return false;
+    th.scrollIntoView({block:"nearest",inline:"nearest"});
+    const input=document.createElement("input");
+    input.type="text";input.className="column-rename-input";input.value=column.label;input.maxLength=50;input.autocomplete="off";input.spellcheck=false;input.dataset.role="column-inline-rename";
+    input.setAttribute("aria-label",`Name the new ${this.model.columnType(column.type)?.label||""} column. Enter saves; Escape keeps “${column.label}”.`);
+    label.replaceWith(input);th.classList.add("is-renaming");
+    let done=false;
+    const finish=(save)=>{
+      if(done)return;done=true;
+      const value=input.value.trim().slice(0,50), live=this.model.board?.columns.find((c)=>c.key===key), changed=Boolean(save&&value&&live&&value!==live.label);
+      if(changed)this.model.renameColumn(key,value);
+      this.update();
+      this.root.querySelector(`.editable-table thead th[data-column-key="${CSS.escape(key)}"] .column-menu-button`)?.focus({preventScroll:true});
+      if(changed)this.view.toast(`Column renamed to ${value}`,true);
+    };
+    input.addEventListener("keydown",(e)=>{if(e.isComposing)return;if(e.key==="Enter"){e.preventDefault();e.stopPropagation();finish(true);}else if(e.key==="Escape"){e.preventDefault();e.stopPropagation();finish(false);}else e.stopPropagation();});
+    input.addEventListener("blur",()=>finish(true));
+    for(const type of ["pointerdown","click","dblclick"])input.addEventListener(type,(e)=>e.stopPropagation());
+    input.focus({preventScroll:true});input.select();
+    return true;
+  }
   // Change a column's type. With the JARC server, the whole board is checked first (POST …/type?dryRun=true) and ITS
   // counts are used, never a count of the loaded rows. A conversion that would lose or garble values is refused: a
   // dialog gives the counts by reason and masked examples, with no convert button. A lossless one gets a simple confirm

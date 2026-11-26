@@ -1,0 +1,74 @@
+/* Column System C1: Add Column picker, column header menu scope groups, the column settings panel and the inline rename of a
+   new column. Colours come from the theme tokens only (jarc-theme.css), so light, dark and every palette follow. */
+
+/* ---- Add Column picker (ColumnPicker.js) ---- */
+.popover.column-picker { width: 360px; max-width: calc(100vw - 16px); max-height: min(70vh, 560px); padding: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--surface-raised, var(--surface)); }
+.column-picker-head { padding: 10px 10px 8px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.column-picker-title { display: flex; flex-direction: column; gap: 1px; padding: 0 4px 8px; }
+.column-picker-title strong { font-size: 13px; color: var(--text); }
+.column-picker-title small { font-size: 11px; color: var(--muted); }
+.column-picker-search { display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--line-strong, var(--line)); border-radius: 8px; background: var(--surface); }
+.column-picker-search:focus-within { border-color: var(--focus); box-shadow: 0 0 0 3px var(--ring); }
+.column-picker-search .icon { width: 15px; height: 15px; color: var(--faint); flex-shrink: 0; }
+.column-picker-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); padding: 8px 0; font: inherit; font-size: 13px; }
+.column-picker-search input::-webkit-search-cancel-button { display: none; }
+.column-picker-list { overflow: auto; padding: 6px; flex: 1; min-height: 0; overscroll-behavior: contain; }
+.column-picker-section + .column-picker-section { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line-subtle, var(--line)); }
+.column-picker-heading { padding: 4px 8px; font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
+.column-picker-option { width: 100%; display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 7px; text-align: left; color: var(--text); background: transparent; border: 0; cursor: pointer; }
+.column-picker-option.is-active, .column-picker-option:hover { background: var(--hover); }
+.column-picker-option:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.column-picker-option.is-active { box-shadow: inset 2px 0 0 var(--accent); }
+.column-picker-icon { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 7px; background: var(--accent-soft); color: var(--accent-text); flex-shrink: 0; }
+.column-picker-icon svg, .column-picker-option > .column-picker-icon .icon { width: 16px; height: 16px; }
+.column-picker-text { display: flex; flex-direction: column; min-width: 0; }
+.column-picker-text strong { font-size: 12.5px; font-weight: 600; }
+.column-picker-text small { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.column-picker-best { font-style: normal; font-size: 10px; font-weight: 600; color: var(--accent-text); }
+.column-picker-empty { padding: 16px 12px; font-size: 12px; color: var(--muted); margin: 0; }
+.column-picker-hint { margin: 0; padding: 7px 14px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); min-height: 30px; flex-shrink: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.column-picker .sheet-handle { display: none; }
+/* Phones: a bottom sheet, the search pinned at the top, 44 px rows and a 16 px field (no iOS zoom). */
+@media (max-width: 640px) {
+  .popover.column-picker, .popover.column-picker.is-sheet { position: fixed; left: 0 !important; right: 0 !important; top: auto !important; bottom: 0; width: 100%; max-width: none; max-height: 85dvh; border-radius: 16px 16px 0 0; border-bottom: 0; padding-bottom: env(safe-area-inset-bottom, 0); }
+  .column-picker .sheet-handle { display: block; width: 38px; height: 4px; border-radius: 4px; background: var(--line-strong, var(--line)); margin: 0 auto 8px; }
+  .column-picker-search input { font-size: 16px; padding: 10px 0; }
+  .column-picker-option { min-height: 48px; }
+  .column-picker-hint { display: none; }
+}
+
+/* ---- Header menu scope groups (ColumnMenu.js) ---- */
+.column-menu-popover { width: 268px; }
+.column-menu-popover .column-scope { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.column-menu-popover .column-scope > span { font-weight: 600; }
+.column-menu-popover .column-scope > small { font-size: 10px; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--faint); }
+.column-menu-popover .column-scope.is-board > span::before, .column-scope-tag.is-board::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 6px; vertical-align: 1px; }
+.column-menu-popover .column-scope.is-view > span::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--muted); margin-right: 6px; vertical-align: 0; box-sizing: border-box; }
+.column-menu-popover > button .menu-label { flex: 1; min-width: 0; }
+.column-menu-popover > button .menu-reason { margin-left: auto; }
+.column-menu-popover .menu-note { margin: 4px 10px 6px; font-size: 11px; color: var(--muted); }
+.column-menu-page-title { justify-content: flex-start; gap: 6px; }
+.column-menu-page-title strong { flex: 1; }
+.column-menu-page-title .icon-button { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 6px; }
+.column-menu-page-title .icon-button:hover { background: var(--hover); }
+.column-menu-popover .column-type-target .column-picker-icon { width: 22px; height: 22px; border-radius: 5px; }
+.column-menu-popover .column-type-target .column-picker-icon svg { width: 14px; height: 14px; }
+@media (max-width: 640px) { .column-menu-popover > button { min-height: 44px; } }
+
+/* ---- Settings panel (ColumnSettings.js) ---- */
+.column-settings-panel .column-settings-body { overflow: auto; flex: 1; }
+.column-settings-panel .column-settings-section { padding: 18px 24px; border-bottom: 1px solid var(--line); }
+.column-settings-panel .column-settings-section h3 { font-size: 13px; margin: 0 0 12px; color: var(--text); }
+.column-settings-panel .column-settings-section .form-grid { padding: 0; }
+.column-settings-panel .column-settings-section > .field-note { font-size: 11px; color: var(--muted); margin: -4px 0 12px; }
+.column-settings-actions { display: flex; justify-content: flex-end; margin-top: 14px; }
+.column-scope-note { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--muted); }
+.column-scope-tag { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: 10.5px; font-weight: 600; }
+.column-settings-panel .eyebrow .icon { width: 13px; height: 13px; vertical-align: -2px; margin-right: 2px; }
+@media (max-width: 640px) { .column-settings-panel .column-settings-section { padding: 16px; } }
+
+/* ---- Inline rename of a new column (AppController.startInlineRename) ---- */
+.editable-table thead th.is-renaming .column-header { gap: 4px; }
+.column-rename-input { flex: 1; min-width: 60px; font: inherit; font-size: 12px; font-weight: 600; color: var(--text); background: var(--surface); border: 1px solid var(--focus); border-radius: 5px; padding: 3px 6px; outline: 0; box-shadow: 0 0 0 3px var(--ring); }
+.add-column-button:disabled { opacity: .45; cursor: not-allowed; }
+@media (prefers-reduced-motion: reduce) { .column-picker, .column-menu-popover { animation: none !important; } }

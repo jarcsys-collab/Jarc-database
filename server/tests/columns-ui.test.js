@@ -232,10 +232,11 @@ describe("Columns and notifications (real app, headless browser)", { skip: BROWS
     await ana.evaluate(`[...document.querySelectorAll('#sidebar .tree-item')].find(b => b.textContent.includes('Empty')).click()`); await sleep(600);
     assert.ok(await ana.waitFor("!!document.querySelector('.add-column-button')", 8000), "empty board shown");
     await click(ana, ".add-column-button");
-    assert.ok(await ana.waitFor("!!document.querySelector('.chooser-option[data-type=\"status\"]')", 8000), "column chooser open");
-    await click(ana, '.chooser-option[data-type="status"]');
-    assert.ok(await ana.waitFor("!!document.querySelector('[data-action=create-column-form]')", 8000), "column form open"); // under load a fixed pause wasn't always enough
-    await ana.evaluate("document.querySelector('[data-action=create-column-form]').requestSubmit()"); await saved(ana); await sleep(400);
+    // Column C1: the Add column picker creates a simple type in one click, then the new header's name can be typed over.
+    assert.ok(await ana.waitFor("!!document.querySelector('.column-picker-option[data-type=\"status\"]')", 8000), "column picker open");
+    await click(ana, '.column-picker-option[data-type="status"]');
+    assert.ok(await ana.waitFor("!!document.querySelector('.column-rename-input')", 8000), "inline rename of the new column");
+    await ana.key("Enter"); await saved(ana); await sleep(400);
     const status = (await api(ana, "GET", `/boards/${empty.id}`)).body.board.columns.find((c) => c.type === "status");
     assert.ok(status, "the column exists on the server");
     await click(ana, '.quick-add-row [data-action="inline-add"]'); await sleep(200);

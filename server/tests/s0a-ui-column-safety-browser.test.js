@@ -170,7 +170,8 @@ describe("S0-A column safety (real app, headless browser)", { skip: BROWSER ? fa
     await plan({ dry: null, real: null, calls: [] });
     await chooseType("count", "number");
     // A server with the full dry-run contract asks to confirm with its counts; an older one (no loss) converts at once.
-    await b.waitFor("!!document.querySelector('[data-action=\"confirm-change-type\"]') || !document.querySelector('#overlay-root .modal, #overlay-root .chooser-option')", 6000);
+    // (Column C1: the targets are listed inside the header menu, which stays open while the dry run runs.)
+    await b.waitFor("!!document.querySelector('[data-action=\"confirm-change-type\"]') || !document.querySelector('#overlay-root .modal, #overlay-root .chooser-option, #overlay-root .column-menu-popover')", 6000);
     if (await b.evaluate("!!document.querySelector('[data-action=\"confirm-change-type\"]')")) {
       assert.match(await text("#overlay-root .confirm-modal p"), /^Checked all \d+ records? on this board\./);
       await click('[data-action="confirm-change-type"]');
