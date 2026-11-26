@@ -31,19 +31,22 @@
 //                      where the person is an active admin has its membersVersion touched (as MembershipService does), so a
 //                      concurrent suspend of a co-admin or a concurrent demote conflicts with this change (one is retried, then
 //                      refused). The LAST_WORKSPACE_ADMIN_OF warning stays.
-//   TARGET_JARC_ADMIN (409)  the person is a JARC administrator: an active Super Admin account, the configured JARC_SUPER_ADMIN_*
-//                      identity, or a holder of the JARC.Admin app role (recorded at their last sign-in, users.adminRoleSeenAt, or
-//                      a live session that carries it, from the access index). A JARC.Admin holder (never a Super Admin or the
-//                      configured identity) may still be suspended by an administrator who is a JARC administrator in this very
-//                      request; that administrator's own document is then touched, so two administrators suspending each other
-//                      conflict and the second is refused. The TARGET_JARC_ADMIN warning stays.
+//   TARGET_JARC_ADMIN (409)  the person is a RECOGNISED JARC administrator (auth/accounts.js jarcAdminStatus): an active Super
+//                      Admin account, the configured JARC_SUPER_ADMIN_* identity, or the JARC.Admin app role seen at their last
+//                      recorded sign-in (users.adminRoleSeenAt) or carried by a live session (read in the transaction, and the
+//                      access index). No exception (D-H2): not even an acting JARC administrator may suspend or revoke one, so no
+//                      P3 path can remove the last usable JARC administrator.
+//   ADMIN_STATUS_UNKNOWN (409)  fail closed (D-H2): no sign-in since this change recorded the role either way (no adminRoleSeenAt,
+//                      no adminRoleClearedAt) and no live session, so JARC can't tell whether the person is a JARC administrator.
+//                      The person signs in to JARC once (their role is then recorded), or IT disables them in Microsoft Entra ID.
 //
 // No raw IDs leave the server: the person is the opaque profile ID, a workspace is workspaceRef (HMAC of its _id with the profile
 // ID key), history cursors are encrypted. Logs carry error classes only.
 const crypto = require("crypto");
 const { ObjectId } = require("mongodb");
 const { ApiError } = require("../middleware/errors");
-const { accountOf, isActiveSuperAdmin, usableWorkspaceAdmin, adminRoleHeld, WORKSPACE_CAP, WORKSPACE_RANK } = require("../auth/accounts");
+const { accountOf, usableWorkspaceAdmin, jarcAdminStatus, jarcAdminMessage, jarcAdminRefusal, JARC_ADMIN_MESSAGES, WORKSPACE_CAP, WORKSPACE_RANK } = require("../auth/accounts");
+const ADMIN_STATUS_UNKNOWN_MESSAGE = JARC_ADMIN_MESSAGES.unknown;
 const { ROLES } = require("../repositories/mongo/membership-repository");
 const { FABRIC_PRODUCT } = require("../repositories/mongo/api-token-repository");
 const { ID_PATTERN } = require("./ids");
@@ -84,11 +87,21 @@ const MESSAGES = Object.freeze({
   WORKSPACE_NOT_FOUND: "That workspace doesn't exist.",
   ROLE_NOT_ALLOWED: "That role isn't allowed for this person's JARC account.",
   LAST_USABLE_WORKSPACE_ADMIN: "This person is the only usable Workspace admin of a workspace. Make someone else an admin of it first.",
-  TARGET_JARC_ADMIN: "This person is a JARC administrator. Their access can't be suspended or revoked here."
+  TARGET_JARC_ADMIN: "This person is recognised as a JARC administrator, so their access can't be suspended or revoked here.",
+  ADMIN_STATUS_UNKNOWN: ADMIN_STATUS_UNKNOWN_MESSAGE
 });
-const STATUS = Object.freeze({ INVALID_TRANSITION: 409, CONFLICT: 409, SELF_LOCKOUT: 403, LAST_EMPLOYEE_ADMIN: 409, NOT_REGISTERED: 409, ACCOUNT_NOT_ACTIVE: 409, ALREADY_MEMBER: 409, NOT_MEMBER: 404, LAST_WORKSPACE_ADMIN: 409, WORKSPACE_ADMIN_REQUIRED: 403, WORKSPACE_NOT_FOUND: 404, ROLE_NOT_ALLOWED: 400, LAST_USABLE_WORKSPACE_ADMIN: 409, TARGET_JARC_ADMIN: 409 });
+const STATUS = Object.freeze({ INVALID_TRANSITION: 409, CONFLICT: 409, SELF_LOCKOUT: 403, LAST_EMPLOYEE_ADMIN: 409, NOT_REGISTERED: 409, ACCOUNT_NOT_ACTIVE: 409, ALREADY_MEMBER: 409, NOT_MEMBER: 404, LAST_WORKSPACE_ADMIN: 409, WORKSPACE_ADMIN_REQUIRED: 403, WORKSPACE_NOT_FOUND: 404, ROLE_NOT_ALLOWED: 400, LAST_USABLE_WORKSPACE_ADMIN: 409, TARGET_JARC_ADMIN: 409, ADMIN_STATUS_UNKNOWN: 409 });
 const soleAdminMessage = (names) => `This person is the only usable Workspace admin of: ${names.join(", ")}. Make someone else an admin of ${names.length === 1 ? "that workspace" : "those workspaces"} first.`;
-const p3Error = (code) => new ApiError(STATUS[code], code, MESSAGES[code]);
+// TARGET_JARC_ADMIN / ADMIN_STATUS_UNKNOWN with the basis in words (auth/accounts.js jarcAdminMessage); details.basis is the kind.
+// account.jarcAdministratorLabel, per jarcAdminStatus kind: worded as what JARC saw, never as Microsoft Entra ID now.
+const JARC_ADMIN_LABEL = Object.freeze({
+  super_admin: "JARC administrator: active Super Admin account",
+  configured: "JARC administrator: the configured Super Admin",
+  role: "JARC administrator role seen at their last sign-in",
+  not_seen: "JARC administrator role not seen at their last sign-in",
+  unknown: "JARC administrator role unknown: no sign-in recorded since this check was introduced"
+});
+const p3Error = (code, kind) => (kind && (code === "TARGET_JARC_ADMIN" || code === "ADMIN_STATUS_UNKNOWN") ? new ApiError(STATUS[code], code, jarcAdminMessage(kind), { basis: kind }) : new ApiError(STATUS[code], code, MESSAGES[code]));
 const invalid = (message, path) => new ApiError(400, "VALIDATION_ERROR", message, path ? { path } : undefined);
 
 const hex = (id) => (id && typeof id.toHexString === "function" ? id.toHexString() : String(id));
@@ -164,26 +177,28 @@ class AccessAdminService {
   }
 
   // ---- Guards (shared by the GET's actions list and the writes).
-  // → null when allowed, else the refusal code. ctx: { state, isSelf, isEmployeeAdmin, othersActive, jarcAdmin?, actorIsJarcAdmin?,
-  // soleAdminOf? } (the P4-0 parts apply to an ACTIVE person only: suspending or revoking someone already locked out removes nothing).
+  // → null when allowed, else the refusal code. ctx: { state, isSelf, isEmployeeAdmin, othersActive, jarcAdmin?, soleAdminOf? }
+  // (the P4-0 parts apply to an ACTIVE person only: suspending or revoking someone already locked out removes nothing).
+  // jarcAdmin: the jarcAdminStatus kind. A recognised JARC administrator is always refused (no actor exception, D-H2 a); an unknown
+  // status is refused too (fail closed, D-H2 c).
   refusal(action, ctx) {
     if (!TRANSITIONS[ctx.state]?.[action]) return "INVALID_TRANSITION";
     if (action === "suspend" || action === "revoke") {
       if (ctx.isSelf) return "SELF_LOCKOUT";
       if (ctx.isEmployeeAdmin && ctx.othersActive < 1) return "LAST_EMPLOYEE_ADMIN";
-      if (ctx.state === "active" && ctx.jarcAdmin && !(ctx.jarcAdmin === "role" && ctx.actorIsJarcAdmin === true)) return "TARGET_JARC_ADMIN";
+      const admin = ctx.state === "active" ? jarcAdminRefusal(ctx.jarcAdmin) : null;
+      if (admin) return admin;
       if (ctx.state === "active" && ctx.soleAdminOf?.length) return "LAST_USABLE_WORKSPACE_ADMIN";
     }
     return null;
   }
-  // P4-0: why this person is a JARC administrator, or null. "super_admin" (an active Super Admin account), "configured" (the
-  // JARC_SUPER_ADMIN_* identity), "role" (the JARC.Admin app role at their last recorded sign-in, or a live session carrying it
-  // per the access index entry). Only stored JARC data and configuration: never the directory snapshot, never a guess.
-  jarcAdminKind(user, oid, entry) {
-    if (user && isActiveSuperAdmin(accountOf(user))) return "super_admin";
-    if (this.superAdmin && this.superAdmin.tenantId === this.tenantId && this.superAdmin.objectId === oid) return "configured";
-    if (adminRoleHeld(user) || entry?.jarcAdmin === "yes") return "role";
-    return null;
+  // P4-0: auth/accounts.js jarcAdminStatus for this person: "super_admin" | "configured" | "role" | "not_seen" | "unknown". Live
+  // sessions: read directly (in the transaction when given), plus the access index entry's live JARC.Admin flag. Only stored JARC
+  // data and configuration: never the directory snapshot, never a guess.
+  async jarcAdminKind(user, entry, session) {
+    if (!user) return "unknown";
+    const live = user.tenantId && user.entraObjectId ? await this.repos.sessions.listLiveForUser(user._id, { tenantId: user.tenantId, objectId: user.entraObjectId }, this.now(), session ? { session } : {}) : [];
+    return jarcAdminStatus({ user, superAdmin: this.superAdmin, liveSessions: entry?.jarcAdmin === "yes" ? [...live, { isSystemAdmin: true }] : live });
   }
   // P4-0: the workspaces (IDs) where this person is a usable admin and no other usable admin would remain. Reads in the
   // transaction when given; touch: also increment each of the person's admin workspaces' membersVersion (writes only).
@@ -238,7 +253,7 @@ class AccessAdminService {
       let lastAdmin = false;
       if (m && m.role === "WORKSPACE_ADMIN" && m.status === "active") {
         const { rows: others, usable: usableOthers } = await this.members.countUsableAdmins(w._id, { exceptMemberId: m._id, accountMode: this.access.accountMode });
-        lastAdmin = others === 0 || (usableOthers === 0 && usableWorkspaceAdmin(user, this.access.accountMode));
+        lastAdmin = others === 0 || usableOthers === 0;
       }
       rows.push({
         workspaceRef: w.ref, name: w.name, archived: w.archived,
@@ -256,20 +271,21 @@ class AccessAdminService {
     const soleAdminOf = (await this.soleUsableAdminOf(user, null)).map((id) => names.get(hex(id)) ?? "Untitled workspace");
     soleAdminOf.sort((a, b) => a.localeCompare(b, "en", { sensitivity: "base", numeric: true }));
     const soleAdminWarning = soleAdminOf.length ? { code: "LAST_WORKSPACE_ADMIN_OF", message: `This person is the only usable Workspace admin of: ${soleAdminOf.join(", ")}. Suspend and Revoke are refused until someone else is an admin of ${soleAdminOf.length === 1 ? "that workspace" : "those workspaces"}.`, workspaces: soleAdminOf } : null;
-    const jarcAdmin = this.jarcAdminKind(user, oid, entry);
-    const ctx = { state, isSelf, isEmployeeAdmin, othersActive, jarcAdmin, actorIsJarcAdmin: actor.isSystemAdmin === true, soleAdminOf };
+    const jarcAdmin = user ? await this.jarcAdminKind(user, entry, null) : null;
+    const ctx = { state, isSelf, isEmployeeAdmin, othersActive, jarcAdmin, soleAdminOf };
     const actions = ACCOUNT_ACTIONS.map((action) => {
       const code = this.refusal(action, ctx);
       const ending = action === "suspend" || action === "revoke";
-      return code ? { action, allowed: false, code, reason: code === "LAST_USABLE_WORKSPACE_ADMIN" ? soleAdminMessage(soleAdminOf) : MESSAGES[code] } : { action, allowed: true, ...(ending ? { reasonRequired: true } : {}), ...(action === "revoke" ? { confirm: CONFIRM_REVOKE } : {}), ...(ending && soleAdminWarning ? { warnings: [soleAdminWarning] } : {}) };
+      return code ? { action, allowed: false, code, reason: code === "LAST_USABLE_WORKSPACE_ADMIN" ? soleAdminMessage(soleAdminOf) : code === "TARGET_JARC_ADMIN" || code === "ADMIN_STATUS_UNKNOWN" ? jarcAdminMessage(jarcAdmin) : MESSAGES[code] } : { action, allowed: true, ...(ending ? { reasonRequired: true } : {}), ...(action === "revoke" ? { confirm: CONFIRM_REVOKE } : {}), ...(ending && soleAdminWarning ? { warnings: [soleAdminWarning] } : {}) };
     });
     const snapshot = this.employees.snapshot.meta();
     const warnings = [];
     if (soleAdminWarning) warnings.push(soleAdminWarning);
     // JARC administrator (P4-0, jarcAdminKind): an active Super Admin account, the configured Super Admin identity, or the JARC.Admin
-    // role (last recorded sign-in or a live session). Suspend and Revoke are then refused (TARGET_JARC_ADMIN), except a JARC.Admin
-    // holder by an administrator who is a JARC administrator themselves.
-    if (usable && jarcAdmin) warnings.push({ code: "TARGET_JARC_ADMIN", message: "This person is a JARC administrator (the JARC.Admin role at a sign-in, an active Super Admin account or the configured Super Admin). Suspending or revoking them is refused, so JARC always keeps an administrator." });
+    // role seen at their last sign-in or in a live session: Suspend and Revoke are refused (TARGET_JARC_ADMIN), for every
+    // administrator. Unknown (nothing recorded since this change, no live session): refused too (ADMIN_STATUS_UNKNOWN).
+    if (usable && jarcAdminRefusal(jarcAdmin) === "TARGET_JARC_ADMIN") warnings.push({ code: "TARGET_JARC_ADMIN", message: `${JARC_ADMIN_LABEL[jarcAdmin]}. Suspend and Revoke are refused, so JARC always keeps its administrators.` });
+    if (usable && jarcAdmin === "unknown") warnings.push({ code: "ADMIN_STATUS_UNKNOWN", message: jarcAdminMessage("unknown") });
     if (record.values.accountType === "Guest") warnings.push({ code: "TARGET_GUEST", message: "This is a guest account from another organisation. Check before granting it JARC access." });
     if (snapshot.stale) warnings.push({ code: "SNAPSHOT_STALE", message: "The directory snapshot is out of date. Actions still work, but check the person's Microsoft account details before changing their access." });
     if (entraEnabled === false && usable) warnings.push({ code: "ENTRA_DISABLED_WITH_ACCESS", message: "This Microsoft account is disabled, but the JARC access is still active: an open JARC session and their API tokens keep working until JARC access is suspended. Nothing is changed automatically." });
@@ -283,7 +299,10 @@ class AccessAdminService {
       id: record.id, version: versionOf(user),
       account: {
         state, provisioned: Boolean(user && user.provisionedAt instanceof Date && !(user.lastLoginAt instanceof Date)), signedInNow: liveSessions > 0,
-        isSelf, isEmployeeAdmin, entraEnabled, statusChangedAt: user ? iso(user.statusChangedAt) : null, statusReason: user && typeof user.statusReason === "string" ? user.statusReason : null,
+        isSelf, isEmployeeAdmin, entraEnabled,
+        // P4-0: what JARC's records say about the JARC administrator role (a past observation, never a live Entra check).
+        ...(user ? { jarcAdministrator: jarcAdmin, jarcAdministratorLabel: JARC_ADMIN_LABEL[jarcAdmin] } : {}),
+        statusChangedAt: user ? iso(user.statusChangedAt) : null, statusReason: user && typeof user.statusReason === "string" ? user.statusReason : null,
         ...(entraEnabled === false ? { suggestedSuspendReason: ENTRA_DISABLED_REASON } : {})
       },
       actions,
@@ -337,9 +356,11 @@ class AccessAdminService {
         const isSelf = Boolean(user && user._id.equals(actor.userId));
         if (state !== b.expectedState || versionOf(user) !== b.expectedVersion) throw p3Error("CONFLICT");
         const othersActive = isEmployeeAdmin && ending ? await this.othersActive(oid, session) : 1;
-        const jarcAdmin = ending && state === "active" ? this.jarcAdminKind(user, oid, entry) : null;
-        const code = this.refusal(action, { state, isSelf, isEmployeeAdmin, othersActive, jarcAdmin, actorIsJarcAdmin: actor.isSystemAdmin === true });
-        if (code) throw p3Error(code);
+        // The JARC administrator status, read in the transaction (the target's users document and live sessions), so a sign-in
+        // with JARC.Admin that commits meanwhile (it writes adminRoleSeenAt on this same document) conflicts with this change.
+        const jarcAdmin = ending && state === "active" ? await this.jarcAdminKind(user, entry, session) : null;
+        const code = this.refusal(action, { state, isSelf, isEmployeeAdmin, othersActive, jarcAdmin });
+        if (code) throw p3Error(code, jarcAdmin);
         // P4-0: the person's admin workspaces are touched (membersVersion) before the usable-admin count, so this change conflicts
         // with a concurrent membership change or a concurrent suspend / revoke of a co-admin there.
         if (ending && state === "active") {
@@ -349,8 +370,9 @@ class AccessAdminService {
             throw new ApiError(409, "LAST_USABLE_WORKSPACE_ADMIN", soleAdminMessage(list), { workspaces: list });
           }
         }
-        // Two administrators acting on each other at once conflict on this write (one transaction is retried, then refused).
-        if (isEmployeeAdmin || jarcAdmin) await this.repos.users.touchAccessActor(actor.userId, now, { session });
+        // Two Employee Management administrators acting on each other at once conflict on this write (one transaction is retried,
+        // then refused). (A recognised JARC administrator never gets this far: TARGET_JARC_ADMIN above.)
+        if (isEmployeeAdmin) await this.repos.users.touchAccessActor(actor.userId, now, { session });
         const to = TRANSITIONS[state][action];
         let doc;
         if (!user) {

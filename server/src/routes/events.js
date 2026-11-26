@@ -7,6 +7,10 @@
 //              that ends someone's access is still announced to them (IDs only), so their screen can drop it.
 //   session    re-checked every 30 s: an expired or signed-out session, or a disabled account, ends the stream with a
 //              "session-ended" event. The stream itself never extends the session's idle time.
+//   fail-closed (P4-0, D-H6) when the access re-read or the session check throws, the stream ends (no "session-ended": the
+//              browser reconnects and is authorized again from scratch) instead of keeping the old scope; only the error class
+//              is logged. A change of the session's JARC.Admin claim, the users.status or the account (status, role,
+//              version) since the stream opened also ends it the same way ("refresh").
 //   resume     ?lastEventId=<activity ID> (or the Last-Event-ID header) replays what was missed; when that isn't
 //              possible (too old, too many) a "resync" event tells the browser to reload its data. A first connection
 //              may send ?since=<ISO time its data load began> (at most 10 minutes ago) to get changes saved meanwhile.
@@ -30,7 +34,7 @@ const ACCESS_ACTIONS = /^(member\.|workspace\.(created|deleted)|board\.moved)/;
 const ENDING_ACTIONS = /^(member\.removed|member\.role_changed|workspace\.deleted|board\.moved)$/;
 const LOST_ACCESS_GRACE_MS = 60000;
 
-function eventRoutes({ stream, access, repos, sessionCheck = null, timings = {} }) {
+function eventRoutes({ stream, access, repos, sessionCheck = null, timings = {}, logger = console }) {
   const router = express.Router();
   const t = { heartbeat: HEARTBEAT_MS, access: ACCESS_REFRESH_MS, session: SESSION_CHECK_MS, ...timings };
   const openByUser = new Map();
@@ -74,7 +78,11 @@ function eventRoutes({ stream, access, repos, sessionCheck = null, timings = {} 
         if (roles && next) for (const id of roles.keys()) if (!next.has(id)) lost.set(id, Date.now());
         for (const [id, at] of lost) if (Date.now() - at > LOST_ACCESS_GRACE_MS) lost.delete(id);
         roles = next;
-      } catch { /* keep the last known access */ }
+      } catch (error) {
+        // P4-0 (D-H6): never keep the old scope on a failed re-read: end the stream; the browser reconnects and is re-authorized.
+        logger?.error?.(`[events] access re-read failed; live stream closed: ${error?.name || "Error"}`);
+        close("refresh");
+      }
     };
 
     // Deliver: filter with the access known when the change happened, then re-read access if it may have changed.
@@ -112,14 +120,20 @@ function eventRoutes({ stream, access, repos, sessionCheck = null, timings = {} 
     timers.push(setInterval(refreshAccess, t.access));
     // "refresh": the person's account role or status changed — the stream ends without "session-ended" and the browser
     // reconnects, with the new permissions.
-    if (sessionCheck) timers.push(setInterval(async () => { const ok = await sessionCheck(req).catch(() => true); if (!ok) close("session"); else if (ok === "refresh") close("refresh"); }, t.session));
+    // P4-0 (D-H6): a check that throws ends the stream too (fail closed), logging the error class only.
+    if (sessionCheck) timers.push(setInterval(async () => {
+      let ok;
+      try { ok = await sessionCheck(req); } catch (error) { logger?.error?.(`[events] session check failed; live stream closed: ${error?.name || "Error"}`); close("refresh"); return; }
+      if (!ok) close("session"); else if (ok === "refresh") close("refresh");
+    }, t.session));
     timers.forEach((timer) => timer.unref?.());
   });
   return router;
 }
 
 // The stored session behind this request is still valid (not expired, idle or signed out; the user is active; the
-// account isn't blocked). "refresh" when the account changed since the stream opened (Account Management).
+// account isn't blocked). "refresh" when the session's JARC.Admin claim differs from the one the stream opened with (P4-0, F2/F9)
+// or the account changed since the stream opened (Account Management: version, status, role or legacy).
 function entraSessionCheck({ sessions, users }) {
   return async (req) => {
     const session = await sessions.findBySecret(req.sessionSecret);
@@ -127,10 +141,12 @@ function entraSessionCheck({ sessions, users }) {
     if (!session || session.expiresAt <= now || session.idleExpiresAt <= now) return false;
     const user = await users.findById(session.userId);
     if (!user || user.status !== "active") return false;
+    if (req.actor && typeof req.actor.hasAdminAppRole === "boolean" && Boolean(session.isSystemAdmin) !== req.actor.hasAdminAppRole) return "refresh";
     if (!req.actor?.account) return true;
     const account = accountOf(user);
     if (!account.legacy && account.status === "blocked") return false;
-    return account.version !== req.actor.account.version || account.legacy !== req.actor.account.legacy ? "refresh" : true;
+    const was = req.actor.account;
+    return account.version !== was.version || account.legacy !== was.legacy || account.status !== was.status || account.role !== was.role ? "refresh" : true;
   };
 }
 

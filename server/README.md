@@ -117,12 +117,20 @@ same rule, a session carrying the claim is also asked to sign in again for works
 import (`POST /api/v1/imports`), even when the person acts through a real Workspace admin membership: a known, accepted side
 effect; sessions without the claim are never affected.
 
-Each sign-in also records whether the `JARC.Admin` role was present (`users.adminRoleSeenAt` / `adminRoleClearedAt`). Employee
-Management treats someone whose last recorded sign-in carried the role as a JARC administrator (Suspend / Revoke are refused
-with 409 `TARGET_JARC_ADMIN` unless the acting administrator is a JARC administrator). The record **never expires**: it is
-cleared only by a later sign-in without the role. This fails safe (it protects, it never grants), but a leaver whose role was
-removed in Microsoft Entra ID and who never signs in again stays protected, so suspending them needs an administrator who
-currently holds the role (a fresh sign-in).
+Each sign-in also records whether the `JARC.Admin` role was present (`users.adminRoleSeenAt` / `adminRoleClearedAt`; the first
+sign-in records it either way). This is what JARC saw at the person's **last sign-in**, never a live Microsoft Entra check.
+Employee Management Suspend / Revoke and Account Management Block of someone whose JARC access is active are refused, for every
+administrator, when the person is a **recognised JARC administrator** (409 `TARGET_JARC_ADMIN`: an active Super Admin, the
+configured `JARC_SUPER_ADMIN_*` identity, or the role seen at their last sign-in or in a live session) or when that status is
+**unknown** (409 `ADMIN_STATUS_UNKNOWN`: no sign-in recorded since this check was introduced and no live session; the person
+signs in to JARC once, or IT disables them in Microsoft Entra ID). `error.details.basis` names the reason. The record **never
+expires**: it is cleared only by a later sign-in without the role, so a leaver whose role was removed in Entra and who never
+signs in again stays protected. A Super Admin can only be demoted while another usable Super Admin (account active and JARC
+access active) remains. No operation (membership removal or demotion, Suspend, Revoke, Block) may leave a workspace without a
+usable Workspace admin.
+
+The live-update stream (`GET /api/v1/events`) fails closed: if its periodic access re-read or session check fails, or the
+session's `JARC.Admin` claim, the JARC access status or the account changed, the stream ends and the browser reconnects.
 
 ### Access policy (`ACCESS_POLICY`)
 

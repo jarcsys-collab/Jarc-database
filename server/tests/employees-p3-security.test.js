@@ -33,7 +33,7 @@ async function world({ policy = "development_shared", admins = [0] } = {}) {
   const index = new JarcAccessIndex({ repos: dataLayer.repos, access, tenantId: TENANT, employeesConfig: config, logger: silent });
   const service = new AccessAdminService({ employees, jarcAccess: index, repos: dataLayer.repos, connection: dataLayer.connection, members: dataLayer.services.members, access, tenantId: TENANT, logger: silent });
   const users = connection.db.collection("users");
-  const register = async (i, extra = {}) => { const doc = { _id: new ObjectId(), tenantId: TENANT, entraObjectId: people[i].user_id, source: "entra", status: "active", displayName: `Synthetic Person ${i + 1}`, createdAt: new Date(), lastLoginAt: new Date(), ...extra }; await users.insertOne(doc); return doc; };
+  const register = async (i, extra = {}) => { const doc = { _id: new ObjectId(), tenantId: TENANT, entraObjectId: people[i].user_id, source: "entra", status: "active", displayName: `Synthetic Person ${i + 1}`, createdAt: new Date(), lastLoginAt: new Date(), adminRoleClearedAt: new Date(1), ...extra }; await users.insertOne(doc); return doc; };
   const actorOf = (doc) => ({ userId: doc._id, kind: "entra", isSystemAdmin: false, tenantId: TENANT, entraObjectId: doc.entraObjectId, displayName: doc.displayName });
   return { fake, db: connection.db, repos: dataLayer.repos, people, service, index, employees, register, actorOf, idOf: (i) => profileId(TEST_ID_KEY, people[i].user_id) };
 }
@@ -126,12 +126,11 @@ describe("design warnings (not refusals)", () => {
     w.index.invalidate();
     const v = await w.service.manageAccess("all", w.idOf(3), ADMIN, w.actorOf(actorDoc));
     assert.ok(v.warnings.some((x) => x.code === "TARGET_JARC_ADMIN"));
-    // P4-0: TARGET_JARC_ADMIN is now also a refusal (409), unless the acting administrator is a JARC administrator themselves
-    // (a JARC.Admin role holder only).
+    // P4-0: TARGET_JARC_ADMIN is also a refusal (409), for every acting administrator (D-H2 a: no exception for a JARC administrator).
     const suspend = v.actions.find((a) => a.action === "suspend");
     assert.equal(suspend.allowed, false, "P4-0: a warning and a refusal");
     assert.equal(suspend.code, "TARGET_JARC_ADMIN");
-    assert.equal((await w.service.manageAccess("all", w.idOf(3), ADMIN, { ...w.actorOf(actorDoc), isSystemAdmin: true })).actions.find((a) => a.action === "suspend").allowed, true, "a JARC administrator may still suspend a JARC.Admin holder");
+    assert.equal((await w.service.manageAccess("all", w.idOf(3), ADMIN, { ...w.actorOf(actorDoc), isSystemAdmin: true })).actions.find((a) => a.action === "suspend").code, "TARGET_JARC_ADMIN", "a JARC administrator can't suspend a JARC.Admin holder either");
     const superAdmin = await w.register(5, { account: { status: "active", role: "SUPER_ADMIN", version: 1 } });
     assert.ok(superAdmin);
     assert.ok((await w.service.manageAccess("all", w.idOf(5), ADMIN, w.actorOf(actorDoc))).warnings.some((x) => x.code === "TARGET_JARC_ADMIN"));

@@ -85,7 +85,7 @@ const STUB = `(() => {
 })();`;
 
 describe("People directory P3 Manage access in the real app (headless browser)", { skip: BROWSER ? false : "no Chrome or Edge installed" }, () => {
-  let issuer, persons, server, base, b, app, employees, signedInAs = null;
+  let issuer, persons, server, base, b, app, employees, realDb, signedInAs = null;
   before(async () => {
     issuer = await createTokenIssuer();
     persons = { viewer: issuer.person("Synthetic Viewer"), admin: issuer.person("Synthetic Owner") };
@@ -95,6 +95,7 @@ describe("People directory P3 Manage access in the real app (headless browser)",
     const connection = new MongoConnection({ uri: "mongodb://fake.invalid", dbName: "jarc_database", createClient: () => new FakeMongoClient() });
     await connection.connect();
     await ensureDatabase(connection.db);
+    realDb = connection.db;
     const dataLayer = createDataLayer({ connection, logger: { error() {} }, fileStore: new MemoryFileStore(), environment: "test" });
     const config = Object.defineProperty({ enabled: true, accessAdmin: true, collection: COLLECTION, dbName: DB_NAME, tenantId: issuer.config.tenantId, viewerObjectIds: [persons.viewer.oid], adminObjectIds: [persons.admin.oid] }, "uri", { value: "mongodb://directory.invalid", enumerable: false });
     employees = createEmployees({ config, createClient: () => new EmployeeFakeClient({ docs: DOCS }), idKey: TEST_ID_KEY, logger: { info() {}, warn() {}, error() {} } });
@@ -290,6 +291,14 @@ describe("People directory P3 Manage access in the real app (headless browser)",
     await submitDialog();
     assert.ok(await until(async () => !(await dialogText()) && /JARC account\s+Active/.test(await tab())), `granted: ${await tab()} ${await dialogText()}`);
     assert.match(await visibleText(), /Provisioned \(not signed in yet\)/);
+    // P4-0 (D-H2, fail closed): nobody has seen this person sign in, so whether they are a JARC administrator is unknown and Suspend
+    // is refused with the reason; the row says "unknown".
+    assert.match(await visibleText(), /JARC administrator\s+JARC administrator role unknown/, await visibleText());
+    assert.match(await visibleText(), /sign in to JARC once/);
+    // Their first sign-in (without the JARC.Admin role) records the observation (routes/auth.js recordAdminRole); simulated here.
+    await realDb.collection("users").updateOne({ provisionedAt: { $exists: true }, adminRoleClearedAt: { $exists: false } }, { $set: { adminRoleClearedAt: new Date() } });
+    await openManage(2);
+    assert.ok(await until(async () => /JARC administrator role not seen at their last sign-in/.test(await tab())), `observed: ${await tab()}`);
     await click('[data-action="emp-m-open"][data-act="suspend"]');
     assert.ok(await wait(`!!document.querySelector("#emp-m-d-reason")`));
     await type("#emp-m-d-reason", "Synthetic leave of absence");

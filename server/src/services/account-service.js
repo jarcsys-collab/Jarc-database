@@ -3,8 +3,15 @@
 //
 //   who        only an active Super Admin account, re-checked inside each change's transaction
 //   self       nobody changes their own role or status (no self-demotion, no self-block)
-//   last       the last active Super Admin can't be demoted or blocked; the last usable Workspace admin of a workspace can't be
-//              blocked (or, enforced, given a role capped below WORKSPACE_ADMIN): 409 LAST_USABLE_WORKSPACE_ADMIN (P4-0)
+//   last       the last USABLE Super Admin (account active and users.status active, P4-0 D-H1) can't be demoted or blocked; the
+//              last usable Workspace admin of a workspace can't be blocked (or, enforced, given a role capped below
+//              WORKSPACE_ADMIN): 409 LAST_USABLE_WORKSPACE_ADMIN (P4-0)
+//   JARC admin (P4-0, D-H2 d) blocking a person whose JARC access is active is refused when they are a RECOGNISED JARC
+//              administrator (409 TARGET_JARC_ADMIN: an active Super Admin, the configured JARC_SUPER_ADMIN_* identity, or the
+//              JARC.Admin role seen at their last sign-in or in a live session), and when that status is unknown (409
+//              ADMIN_STATUS_UNKNOWN: nothing recorded since this change and no live session). Same rule as Employee Management P3
+//              (auth/accounts.js jarcAdminStatus). A role change never blocks anyone; a Super Admin's demotion (under enforced,
+//              the loss of JARC administrator authority) is covered by the last usable Super Admin rule above.
 //   escalation granting SUPER_ADMIN needs the JARC.Admin app role on the granting administrator's sign-in and the
 //              typed confirmation "GRANT SUPER ADMIN"; nobody else can grant anything (Admins can't reach these routes)
 //   versions   every change names the account version it was based on (expectedVersion); a stale one is refused (409)
@@ -17,7 +24,7 @@ const { ObjectId } = require("mongodb");
 const { ApiError } = require("../middleware/errors");
 const { requireBody, allowOnly, parseId, fail } = require("../validation/common");
 const { ROLES: WORKSPACE_ROLES } = require("../repositories/mongo/membership-repository");
-const { ACCOUNT_ROLES, WORKSPACE_CAP, WORKSPACE_RANK, accountOf, isActiveSuperAdmin, capWorkspaceRole, superAdminEligibility, usableWorkspaceAdmin, CONFIRM } = require("../auth/accounts");
+const { ACCOUNT_ROLES, WORKSPACE_CAP, WORKSPACE_RANK, accountOf, isActiveSuperAdmin, capWorkspaceRole, superAdminEligibility, usableWorkspaceAdmin, jarcAdminStatus, jarcAdminRefusal, jarcAdminMessage, CONFIRM } = require("../auth/accounts");
 
 const forbidden = (message) => new ApiError(403, "FORBIDDEN", message);
 const notFound = () => new ApiError(404, "NOT_FOUND", "This account doesn't exist.");
@@ -166,7 +173,14 @@ class AccountService {
       const target = { ...doc, account: { ...account, status: account.legacy ? "pending" : account.status } };
       const fields = plan(target);
       const losesSuperAdmin = before.status === "active" && before.role === "SUPER_ADMIN" && (fields.status && fields.status !== "active" || fields.role && fields.role !== "SUPER_ADMIN");
-      if (losesSuperAdmin && await this.repos.users.countSuperAdmins({ session }) <= 1) throw new ApiError(400, "VALIDATION_ERROR", "JARC needs at least one Super Admin. Make someone else Super Admin first.");
+      if (losesSuperAdmin && await this.repos.users.countUsableSuperAdmins({ exceptId: id, session }) < 1) throw new ApiError(400, "VALIDATION_ERROR", "JARC needs at least one Super Admin. Make someone else Super Admin first.");
+      // P4-0 (D-H2 d): blocking someone whose JARC access works today: never a recognised JARC administrator, never an unknown status.
+      if (fields.status === "blocked" && before.status !== "blocked" && doc.status === "active") {
+        const live = doc.tenantId && doc.entraObjectId ? await this.repos.sessions.listLiveForUser(doc._id, { tenantId: doc.tenantId, objectId: doc.entraObjectId }, now, { session }) : [];
+        const kind = jarcAdminStatus({ user: doc, superAdmin: this.superAdmin, liveSessions: live });
+        const code = jarcAdminRefusal(kind);
+        if (code) throw new ApiError(409, code, jarcAdminMessage(kind), { basis: kind });
+      }
       if (approval || (fields.status === "active" && before.status !== "active")) Object.assign(fields, { approvedBy: actor.userId, approvedByName: actor.displayName ?? null, approvedAt: now });
       const next = await this.repos.users.updateAccount(id, expectedVersion, fields, now, { session });
       if (!next) throw conflict();

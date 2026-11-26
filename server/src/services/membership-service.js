@@ -82,9 +82,10 @@ class MembershipService {
 
   // Runs a membership change in a transaction, refusing it if it would leave the workspace without an admin. outer: a session
   // the caller's transaction already holds (the change then runs in it instead of a transaction of its own).
-  // Refused (P4-0) when no other active admin row is left (as before), or when this member's person is a usable admin and no other
-  // usable admin would remain. Removing an admin row that is already unusable doesn't make a workspace worse, so it stays allowed
-  // while other rows remain (clean-up of suspended admins).
+  // Refused (P4-0, D-H1) whenever no other USABLE admin would remain, whatever this member's own state: no operation may leave a
+  // workspace without a usable owner. That includes removing or demoting an already-unusable (suspended, revoked, blocked or
+  // missing) admin's row while no usable admin remains: that row is the workspace's way back (restoring the person), so someone
+  // usable is made an admin first.
   async guarded(workspaceId, memberId, actor, apply, losesAdmin, outer = null, accountMode = this.accountMode) {
     const mode = ACCOUNT_MODES.includes(accountMode) ? accountMode : this.accountMode;
     const id = memberId instanceof ObjectId ? memberId : parseId(memberId, "memberId");
@@ -97,8 +98,7 @@ class MembershipService {
       await this.repos.workspaces.touchMembers(workspaceId, { session });
       if (member.status === "active" && losesAdmin(member)) {
         const { rows, usable } = await this.countUsableAdmins(workspaceId, { session, exceptMemberId: member._id, accountMode: mode });
-        const [self] = await this.repos.users.findByIdsIn([member.userId], { session });
-        if (rows === 0 || (usable === 0 && usableWorkspaceAdmin(self, mode))) throw lastAdmin();
+        if (rows === 0 || usable === 0) throw lastAdmin();
       }
       return apply(member, session, now);
     });

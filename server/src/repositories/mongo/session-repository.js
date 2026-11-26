@@ -47,6 +47,12 @@ class SessionRepository {
     return this.sessions.countDocuments({ userId, tenantId, objectId, expiresAt: { $gt: now }, idleExpiresAt: { $gt: now } });
   }
 
+  // P4-0 (D-H2): one person's live sessions (bound to their identity, as auth/session.js checks), only the JARC.Admin flag of each
+  // sign-in, inside the caller's transaction when given. At most 200 (a person never has that many).
+  listLiveForUser(userId, { tenantId, objectId }, now, { session } = {}) {
+    return this.sessions.find({ userId, tenantId, objectId, expiresAt: { $gt: now }, idleExpiresAt: { $gt: now } }, { session, limit: 200, projection: { _id: 0, isSystemAdmin: 1 } }).toArray();
+  }
+
   async touch(id, now, idleMs) { await this.sessions.updateOne({ _id: id }, { $set: { lastSeenAt: now, idleExpiresAt: new Date(now.getTime() + idleMs) } }); }
 
   async remove(id) { await this.sessions.deleteOne({ _id: id }); }

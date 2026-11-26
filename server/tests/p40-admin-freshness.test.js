@@ -201,13 +201,18 @@ describe("the sign-in records the JARC.Admin role (users.adminRoleSeenAt / admin
     } finally { users.recordAdminRole = original; }
   });
 
-  test("someone never seen with the role gets no admin fields (no write for ordinary sign-ins)", async () => {
+  test("an ordinary sign-in records the role as not seen once (D-H2: the status is no longer unknown); later ones don't rewrite it", async () => {
     const p = issuer.person("Synthetic Plain Person");
     await new SessionClient(app.url, app.entra.appOrigin).signIn(p);
+    const first = await userOf(p);
+    assert.equal(first.adminRoleSeenAt, undefined);
+    assert.ok(first.adminRoleClearedAt instanceof Date, "observed without the role");
+    await new Promise((r) => setTimeout(r, 5));
     await new SessionClient(app.url, app.entra.appOrigin).signIn(p);
     const u = await userOf(p);
     assert.equal(u.adminRoleSeenAt, undefined);
-    assert.equal(u.adminRoleClearedAt, undefined);
+    assert.equal(u.adminRoleClearedAt.getTime(), first.adminRoleClearedAt.getTime(), "no further write");
+    assert.equal(adminRoleHeld(u), false);
   });
 
   test("a refused sign-in (disabled user) records nothing", async () => {

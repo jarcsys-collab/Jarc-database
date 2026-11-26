@@ -266,15 +266,16 @@ describe("Account Management (ACCOUNT_MANAGEMENT=enforced, with ACCESS_POLICY=de
     const svc = app.dataLayer.services.accounts, users = app.dataLayer.repos.users;
     const target = await users.collection.findOne({ emailNormalized: P.admin.email });
     await users.collection.updateOne({ _id: target._id }, { $set: { "account.role": "SUPER_ADMIN" } });
-    const original = users.countSuperAdmins.bind(users);
-    users.countSuperAdmins = async () => 1;
+    // P4-0 (D-H1): the rule counts the OTHER usable Super Admins (account active and users.status active); none here.
+    const original = users.countUsableSuperAdmins.bind(users);
+    users.countUsableSuperAdmins = async () => 0;
     try {
       const actor = { kind: "entra", userId: (await users.collection.findOne({ emailNormalized: P.root.email }))._id, account: { legacy: false, status: "active", role: "SUPER_ADMIN", version: 2 }, hasAdminAppRole: true, displayName: "Root Admin" };
       const fresh = accountOf(await users.collection.findOne({ _id: target._id }));
       await assert.rejects(svc.changeRole(actor, target._id, { role: "EDITOR", expectedVersion: fresh.version }), /at least one Super Admin/);
       await assert.rejects(svc.block(actor, target._id, { expectedVersion: fresh.version, confirm: "BLOCK" }), /at least one Super Admin/);
     } finally {
-      users.countSuperAdmins = original;
+      users.countUsableSuperAdmins = original;
       await users.collection.updateOne({ _id: target._id }, { $set: { "account.role": "ADMIN" } });
     }
   });

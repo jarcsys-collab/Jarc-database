@@ -45,7 +45,7 @@ async function world({ accountMode = "off", admins = [0], superAdminIndex = null
   const superAdmin = superAdminIndex === null ? null : { tenantId: TENANT, objectId: people[superAdminIndex].user_id };
   const service = new AccessAdminService({ employees, jarcAccess: index, repos: dataLayer.repos, connection: dataLayer.connection, members, access, tenantId: TENANT, superAdmin, logger: silent });
   const users = connection.db.collection("users");
-  const register = async (i, extra = {}) => { const doc = { _id: new ObjectId(), tenantId: TENANT, entraObjectId: people[i].user_id, source: "entra", status: "active", displayName: `Synthetic Person ${i + 1}`, createdAt: new Date(), lastLoginAt: new Date(), ...extra }; await users.insertOne(doc); return doc; };
+  const register = async (i, extra = {}) => { const doc = { _id: new ObjectId(), tenantId: TENANT, entraObjectId: people[i].user_id, source: "entra", status: "active", displayName: `Synthetic Person ${i + 1}`, createdAt: new Date(), lastLoginAt: new Date(), adminRoleClearedAt: new Date(1), ...extra }; await users.insertOne(doc); return doc; };
   const actorOf = (doc, extra = {}) => ({ userId: doc._id, kind: "entra", isSystemAdmin: false, tenantId: TENANT, entraObjectId: doc.entraObjectId, displayName: doc.displayName, ...extra });
   const workspace = async (name) => { const _id = new ObjectId(), now = new Date(); await connection.db.collection("workspaces").insertOne({ _id, name, archived: false, position: 1, createdAt: now, updatedAt: now, version: 1 }); return _id; };
   const admin = (ws, user, role = "WORKSPACE_ADMIN") => dataLayer.repos.memberships.add({ workspaceId: ws, userId: user._id, role, now: new Date() });
@@ -137,13 +137,18 @@ describe("MembershipService: the last USABLE admin", () => {
     }
   });
 
-  test("cleaning up an already-unusable admin row stays allowed while other rows remain; the very last row never goes", async () => {
+  test("D-H1 strict: an already-unusable admin row can't be removed or demoted while no usable admin remains; with one, it can", async () => {
     const w = await world();
-    const a = await w.register(1, { status: "suspended" }), b = await w.register(2, { status: "suspended" });
+    const a = await w.register(1, { status: "suspended" }), b = await w.register(2, { status: "revoked" });
     const ws = await w.workspace("Synthetic WS");
     const ma = await w.admin(ws, a); const mb = await w.admin(ws, b);
-    await w.members.remove(ws, ma._id, w.actorOf(b));
-    await assert.rejects(w.members.remove(ws, mb._id, w.actorOf(b)), LAST_ADMIN, "the last row, as before");
+    await assert.rejects(w.members.remove(ws, ma._id, w.actorOf(b)), LAST_ADMIN, "no usable admin would remain (and none does now)");
+    await assert.rejects(w.members.changeRole(ws, mb._id, { role: "VIEWER" }, w.actorOf(b)), LAST_ADMIN);
+    const c = await w.register(3);
+    await w.admin(ws, c);
+    await w.members.remove(ws, ma._id, w.actorOf(c));
+    await w.members.changeRole(ws, mb._id, { role: "VIEWER" }, w.actorOf(c));
+    assert.deepEqual(await w.members.countUsableAdmins(ws), { rows: 1, usable: 1 });
   });
 
   test("unchanged: demote with another usable admin works; non-admin changes are never counted", async () => {
@@ -283,16 +288,19 @@ describe("P3 suspend / revoke: TARGET_JARC_ADMIN", () => {
     assert.equal((await w.suspend(5, w.actorOf(me))).result.to, "suspended");
   });
 
-  test("the JARC.Admin role recorded at the last sign-in: refused for an ordinary administrator; allowed for a JARC administrator", async () => {
+  test("the JARC.Admin role seen at the last sign-in: refused for every administrator, a fresh JARC administrator included (D-H2 a)", async () => {
     const w = await world();
     const me = await w.register(0);
     await w.register(3, { adminRoleSeenAt: new Date() });
-    await assert.rejects(w.suspend(3, w.actorOf(me)), (e) => e.code === "TARGET_JARC_ADMIN");
-    assert.equal((await w.manage(3, w.actorOf(me))).actions.find((a) => a.action === "revoke").code, "TARGET_JARC_ADMIN");
-    assert.equal((await w.manage(3, w.actorOf(me, { isSystemAdmin: true }))).actions.find((a) => a.action === "suspend").allowed, true);
-    const res = await w.suspend(3, w.actorOf(me, { isSystemAdmin: true }));
-    assert.equal(res.result.to, "suspended");
-    assert.ok((await w.db.collection("users").findOne({ _id: me._id })).accessActionAt instanceof Date, "the acting administrator was touched (conflict point)");
+    for (const actor of [w.actorOf(me), w.actorOf(me, { isSystemAdmin: true })]) {
+      await assert.rejects(w.suspend(3, actor), (e) => e.status === 409 && e.code === "TARGET_JARC_ADMIN" && e.details.basis === "role" && /last sign-in/.test(e.message) && /not a live check/.test(e.message));
+      await assert.rejects(w.revoke(3, actor), (e) => e.code === "TARGET_JARC_ADMIN");
+      const view = await w.manage(3, actor);
+      for (const a of ["suspend", "revoke"]) assert.equal(view.actions.find((x) => x.action === a).code, "TARGET_JARC_ADMIN", a);
+      assert.equal(view.account.jarcAdministrator, "role");
+      assert.equal(view.account.jarcAdministratorLabel, "JARC administrator role seen at their last sign-in");
+    }
+    assert.equal(await w.statusOf(3), "active");
   });
 
   test("the role no longer seen at a later sign-in: not protected", async () => {
@@ -320,13 +328,22 @@ describe("P3 suspend / revoke: TARGET_JARC_ADMIN", () => {
     assert.equal(res.result.to, "revoked");
   });
 
-  test("concurrent: two JARC administrators suspending each other: the second is refused (its administrator is suspended)", async () => {
+  test("concurrent: two JARC administrators suspending / revoking each other: both refused, both stay active", async () => {
     const w = await world({ serial: true, admins: [3, 4] });
     const a = await w.register(3, { adminRoleSeenAt: new Date() }), b = await w.register(4, { adminRoleSeenAt: new Date() });
-    const results = await Promise.allSettled([w.suspend(4, w.actorOf(a, { isSystemAdmin: true })), w.suspend(3, w.actorOf(b, { isSystemAdmin: true }))]);
+    const results = await Promise.allSettled([w.suspend(4, w.actorOf(a, { isSystemAdmin: true })), w.revoke(3, w.actorOf(b, { isSystemAdmin: true }))]);
+    assert.deepEqual(results.map((r) => r.status), ["rejected", "rejected"]);
+    assert.deepEqual(results.map((r) => r.reason.code), ["TARGET_JARC_ADMIN", "TARGET_JARC_ADMIN"]);
+    assert.deepEqual([await w.statusOf(3), await w.statusOf(4)], ["active", "active"]);
+  });
+
+  test("concurrent: two Employee Management administrators (known non-JARC administrators) suspending each other: the second is refused", async () => {
+    const w = await world({ serial: true, admins: [3, 4] });
+    const a = await w.register(3), b = await w.register(4);
+    const results = await Promise.allSettled([w.suspend(4, w.actorOf(a)), w.suspend(3, w.actorOf(b))]);
     assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
     assert.equal(results.find((r) => r.status === "rejected").reason.code, "EMPLOYEES_FORBIDDEN");
-    assert.deepEqual([await w.statusOf(3), await w.statusOf(4)].sort(), ["active", "suspended"], "one JARC administrator always remains");
+    assert.deepEqual([await w.statusOf(3), await w.statusOf(4)].sort(), ["active", "suspended"]);
   });
 
   test("ordinary targets are unaffected; grant / restore never consult the guards", async () => {

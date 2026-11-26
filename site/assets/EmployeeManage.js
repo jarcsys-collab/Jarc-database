@@ -33,7 +33,7 @@ class EmployeeManage {
   static SHARED_NOTE = "Shared access still gives Workspace admin in every workspace; removing this membership only removes member management and comment moderation.";
   static CONFIRM_WORD = "REVOKE";
   static HISTORY_LIMIT = 20;
-  static DIALOG_WARNINGS = ["LAST_WORKSPACE_ADMIN_OF", "TARGET_JARC_ADMIN", "TARGET_GUEST", "EMPLOYEE_ADMIN", "ENTRA_DISABLED_WITH_ACCESS"];
+  static DIALOG_WARNINGS = ["LAST_WORKSPACE_ADMIN_OF", "TARGET_JARC_ADMIN", "ADMIN_STATUS_UNKNOWN", "TARGET_GUEST", "EMPLOYEE_ADMIN", "ENTRA_DISABLED_WITH_ACCESS"];
   static MAX_ITEMS = 500;
   // Server reason / rejection codes → words. Any other code is turned into words from its own letters (it is a code, never a value).
   static CODES = {
@@ -48,7 +48,10 @@ class EmployeeManage {
     LAST_ADMIN: "This is the workspace's last admin membership.",
     LAST_WORKSPACE_ADMIN: "This is the workspace's last admin membership.",
     LAST_USABLE_WORKSPACE_ADMIN: "This person is the only usable Workspace admin of a workspace. Make someone else an admin of it first.",
-    TARGET_JARC_ADMIN: "This person is a JARC administrator. Their access can't be suspended or revoked here.",
+    // P4-0: what JARC saw (an active Super Admin, the configured Super Admin, or the role at the person's last sign-in), never a live
+    // Microsoft Entra check. The server's own sentence (with the basis) is shown when it sends one.
+    TARGET_JARC_ADMIN: "JARC recognises this person as a JARC administrator (a Super Admin, or the JARC administrator role seen at their last sign-in), so their access can't be suspended or revoked here.",
+    ADMIN_STATUS_UNKNOWN: "JARC doesn't know whether this person is a JARC administrator: it hasn't recorded a sign-in from them since this check was introduced. They need to sign in to JARC once, or IT can disable them in Microsoft Entra ID (which blocks new sign-ins).",
     REAUTH_REQUIRED: "For security, sign in again to continue this administrator action.",
     INVALID_TRANSITION: "Not possible from the current account state.",
     NOT_REGISTERED: "This person has no JARC account yet.",
@@ -196,6 +199,8 @@ class EmployeeManage {
       row("Signed in to JARC now", m.state === "not_registered" ? `<span class="emp-p__text">No</span>` : yn(acc.signedInNow), "now"),
       row("Microsoft Entra sign-in", entra, "entra"),
       row("Employee administrator", yn(acc.isEmployeeAdmin), "admin"),
+      // P4-0: the JARC administrator role as JARC last saw it (the server's wording: "seen at their last sign-in" or "unknown").
+      EmployeeManage.str(acc.jarcAdministratorLabel) ? row("JARC administrator", `<span class="emp-p__text">${e(EmployeeManage.str(acc.jarcAdministratorLabel))}</span>`, "jarc-admin") : "",
       acc.isSelf === true ? row("Your account", `<span class="emp-p__text">Yes, this is you</span>`, "self") : "",
       m.state === "not_registered" ? "" : row("API tokens", `<span class="emp-p__text">JARC API: ${e(tok(m.tokens.jarc))} · Fabric API: ${e(tok(m.tokens.fabric))}</span>`, "tokens")
     ].join("");
@@ -335,7 +340,7 @@ class EmployeeManage {
         : code === "ALREADY_MEMBER" || /DUPLICATE|EXISTS/.test(code) ? "This person already has a membership in this workspace."
         : code === "NOT_REGISTERED" ? "This person has no JARC account yet: grant access first."
         : code === "ACCOUNT_NOT_ACTIVE" ? "The JARC account isn't active, so its memberships can't be changed now."
-        : code === "LAST_USABLE_WORKSPACE_ADMIN" || code === "TARGET_JARC_ADMIN" ? EmployeeManage.CODES[code]
+        : code === "LAST_USABLE_WORKSPACE_ADMIN" || code === "TARGET_JARC_ADMIN" || code === "ADMIN_STATUS_UNKNOWN" ? EmployeeManage.CODES[code]
         : "Changed by someone else.";
       return { ...base, kind: "conflict", message: `${msg} Reloaded: check the current state, then try again.` };
     }

@@ -37,7 +37,7 @@ async function world({ policy = "development_shared", admins = [0], accountMode 
   const index = new JarcAccessIndex({ repos: dataLayer.repos, access, tenantId: TENANT, employeesConfig: config, logger: silent });
   const service = new AccessAdminService({ employees, jarcAccess: index, repos: dataLayer.repos, connection: dataLayer.connection, members: dataLayer.services.members, access, tenantId: TENANT, logger: silent });
   const users = connection.db.collection("users");
-  const register = async (i, extra = {}) => { const doc = { _id: new ObjectId(), tenantId: TENANT, entraObjectId: people[i].user_id, source: "entra", status: "active", displayName: `Synthetic Person ${i + 1}`, createdAt: new Date(), lastLoginAt: new Date(), ...extra }; await users.insertOne(doc); return doc; };
+  const register = async (i, extra = {}) => { const doc = { _id: new ObjectId(), tenantId: TENANT, entraObjectId: people[i].user_id, source: "entra", status: "active", displayName: `Synthetic Person ${i + 1}`, createdAt: new Date(), lastLoginAt: new Date(), adminRoleClearedAt: new Date(1), ...extra }; await users.insertOne(doc); return doc; };
   const actorOf = (doc) => ({ userId: doc._id, kind: "entra", isSystemAdmin: false, tenantId: TENANT, entraObjectId: doc.entraObjectId, displayName: doc.displayName });
   return { db: connection.db, repos: dataLayer.repos, people, service, register, actorOf, idOf: (i) => profileId(TEST_ID_KEY, people[i].user_id) };
 }

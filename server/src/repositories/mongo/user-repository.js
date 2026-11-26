@@ -105,15 +105,24 @@ class UserRepository {
   // Several users by _id inside the caller's transaction (status and account only: what decides a usable workspace admin).
   findByIdsIn(ids, { session } = {}) { return ids.length ? this.collection.find({ _id: { $in: ids } }, { session, limit: 5000, projection: { _id: 1, status: 1, account: 1 } }).toArray() : Promise.resolve([]); }
   // The JARC.Admin app role as seen at this sign-in (routes/auth.js, after the sign-in is accepted). Present: adminRoleSeenAt =
-  // now. Absent: adminRoleClearedAt = now, written only for someone recorded with the role (nobody else gets a write). Two
-  // additive timestamps, read by the P3 JARC administrator guard (auth/accounts.js adminRoleHeld); they never grant anything.
+  // now. Absent: adminRoleClearedAt = now, written when the last record said "seen" or when nothing was recorded yet (D-H2: the
+  // first sign-in after this change records the observation either way, so the person's status stops being "unknown"); a person
+  // already recorded without the role gets no further write. Two additive timestamps, read by the P3 / Account Management JARC
+  // administrator guards (auth/accounts.js jarcAdminStatus); they never grant anything. Each write is conditional on what was read,
+  // so a concurrent sign-in with the other answer isn't overwritten by a stale one.
   async recordAdminRole(user, present, now) {
     if (!user?._id) return;
     if (present === true) { await this.collection.updateOne({ _id: user._id }, { $set: { adminRoleSeenAt: now } }); return; }
-    if (user.adminRoleSeenAt instanceof Date && !(user.adminRoleClearedAt instanceof Date && user.adminRoleClearedAt >= user.adminRoleSeenAt)) {
+    const seen = user.adminRoleSeenAt instanceof Date, cleared = user.adminRoleClearedAt instanceof Date;
+    if (seen && !(cleared && user.adminRoleClearedAt >= user.adminRoleSeenAt)) {
       await this.collection.updateOne({ _id: user._id, adminRoleSeenAt: user.adminRoleSeenAt }, { $set: { adminRoleClearedAt: now } });
+    } else if (!seen && !cleared) {
+      await this.collection.updateOne({ _id: user._id, adminRoleSeenAt: { $exists: false }, adminRoleClearedAt: { $exists: false } }, { $set: { adminRoleClearedAt: now } });
     }
   }
+  // Active Super Admin accounts whose users.status is also active (a P3-suspended or revoked Super Admin can't sign in, so it
+  // doesn't count, D-H1), other than one user, inside the caller's transaction.
+  countUsableSuperAdmins({ exceptId = null, session } = {}) { return this.collection.countDocuments({ "account.status": "active", "account.role": "SUPER_ADMIN", status: "active", ...(exceptId ? { _id: { $ne: exceptId } } : {}) }, { session }); }
 
   countIdentity(tenantId, entraObjectId) { return this.collection.countDocuments({ tenantId, entraObjectId }); }
   // Users with this email whose identity is NOT the given one (an ambiguous email → identity mapping).
