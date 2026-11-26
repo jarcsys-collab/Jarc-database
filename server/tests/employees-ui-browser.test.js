@@ -113,12 +113,22 @@ describe("People directory in the real app (headless browser)", { skip: BROWSER 
       assert.ok(s.snap && !s.meta().stale, "directory restored");
     }
   };
-  // Opens JARC at / and goes to the People directory with its nav item.
+  // Developer → Administration → People directory is offered (profile menu); leaves the menu or window closed.
+  const developerOffers = async () => {
+    await click('.topbar [data-action="profile-menu"]');
+    if (!(await wait(`!!document.querySelector("#overlay-root .profile-popover")`, 5000))) return false;
+    if (!(await has('#overlay-root [data-action="developer"]'))) { await click('.topbar [data-action="profile-menu"]'); return false; }
+    await click('#overlay-root [data-action="developer"]');
+    await wait(`!!document.querySelector(".developer-window")`, 5000);
+    return Boolean(await has('.developer-window [data-action="apitok-admin"][data-target="employees"]'));
+  };
+  // Opens JARC at / and goes to the People directory from Developer → Administration (it isn't in the main sidebar).
   const openDirectory = async (size = DESKTOP) => {
     await b.open(`${base}/`, size);
     assert.ok(await wait("!!document.querySelector('.app-shell')", 20000), "app loaded");
-    assert.ok(await wait(`!!document.querySelector('[data-action="nav"][data-screen="employees"]')`, 10000), "People directory in the navigation");
-    await click('[data-action="nav"][data-screen="employees"]');
+    assert.equal(await has('#sidebar [data-screen="employees"]'), false, "not in the main sidebar");
+    assert.ok(await developerOffers(), "People directory in Developer → Administration");
+    await click('.developer-window [data-action="apitok-admin"][data-target="employees"]');
     assert.ok(await wait(`location.pathname === "/admin/employees/active" && document.querySelectorAll(${JSON.stringify(ROWS)}).length > 0`, 15000), "the Active accounts list");
   };
   const go = async (path) => { await b.evaluate(`history.pushState({ jarcScreen: "home" }, "", ${JSON.stringify(path)}); dispatchEvent(new PopStateEvent("popstate", { state: { jarcScreen: "home" } }))`); };
@@ -126,8 +136,7 @@ describe("People directory in the real app (headless browser)", { skip: BROWSER 
   test("1. viewer: nav item, heading, list, grouping, filtered list, profile and back; no Fabric wording; nothing stored", async () => {
     await setRole("viewer");
     await openDirectory();
-    const nav = await json(`[...document.querySelectorAll("#sidebar .nav-item")].map((n) => n.dataset.screen || n.dataset.action)`);
-    assert.ok(nav.includes("employees"));
+    assert.equal(await b.evaluate(`document.querySelector(".app-shell")?.getAttribute("data-module")`), "employees", "opened in its module layout");
     assert.match(await b.evaluate(`document.querySelector("#employees-title").textContent`), /^People directory$/);
     assert.match(await b.evaluate(`document.querySelector("#employees-subtitle").textContent`), /^JARC administration · Source: Microsoft Entra ID snapshot · updated .*2026/);
     const text = await visibleText();
@@ -211,7 +220,8 @@ describe("People directory in the real app (headless browser)", { skip: BROWSER 
     await setRole("none");
     await b.open(`${base}/`, DESKTOP);
     assert.ok(await wait("!!document.querySelector('.app-shell')", 20000));
-    assert.equal(await has('[data-action="nav"][data-screen="employees"]'), false);
+    assert.equal(await developerOffers(), false, "no People directory entry");
+    await b.open(`${base}/`, DESKTOP); assert.ok(await wait("!!document.querySelector('.app-shell')", 20000));
     await go("/admin/employees/active");
     assert.ok(await wait(`!!document.querySelector("#employees-root .emp-denied")`), "no-access state");
     assert.match(await visibleText(), /No access\nYou don't have access to the people directory\./, "title and text apart");
@@ -222,7 +232,7 @@ describe("People directory in the real app (headless browser)", { skip: BROWSER 
       await b.open(`${base}${path}`, DESKTOP);
       assert.ok(await wait("!!document.querySelector('.app-shell')", 20000), `${path}: app loaded`);
       assert.ok(await wait(`!!document.querySelector("#employees-root .emp-denied")`, 15000), `${path}: no-access state`);
-      assert.equal(await has('[data-action="nav"][data-screen="employees"]'), false, `${path}: no nav item`);
+      assert.equal(await has('[data-screen="employees"], [data-action="apitok-admin"][data-target="employees"]'), false, `${path}: no entry`);
       assert.doesNotMatch(await visibleText(), /Synthetic Person|Dept A/, `${path}: no data`);
       const calls = await json("window.__emp");
       assert.equal(calls.length, 0, `${path}: no directory request (${calls.join(", ")})`);
@@ -265,9 +275,7 @@ describe("People directory in the real app (headless browser)", { skip: BROWSER 
       await openDirectory();
       assert.ok(await wait(`!!document.querySelector("#employees-status .emp-stale")`), "stale banner");
       await setMode("unavailable");
-      await b.open(`${base}/`, DESKTOP);
-      assert.ok(await wait(`!!document.querySelector('[data-action="nav"][data-screen="employees"]')`, 20000));
-      await click('[data-action="nav"][data-screen="employees"]');
+      await b.open(`${base}/admin/employees/active`, DESKTOP);
       assert.ok(await wait(`/The directory is temporarily unavailable\\./.test(document.querySelector("#employees-root")?.innerText || "")`), "unavailable state");
       assert.doesNotMatch(await visibleText(), /Synthetic Person/);
     } finally { await setMode(""); }

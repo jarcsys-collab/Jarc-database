@@ -222,6 +222,7 @@ class AppController {
   }
   shellAction(action, target) {
     if (action.startsWith("fabric-") || AppController.SHELL_ACTIONS.has(action)) return true;
+    if (this.employees && this.peopleAction(action, target)) return true; // the People directory needs no JARC data either
     return action === "nav" && Boolean(AppModules.forScreen(target.dataset.screen));
   }
 
@@ -542,12 +543,13 @@ class AppController {
     if (!this.boardLinksEnabled) return false;
     const id = AppController.boardIdInPath(window.location.pathname), model = this.model;
     if (id === undefined) {
-      // People directory (/admin/employees/…): a screen of the shell, not a module. For someone who may not open it (or a list
-      // they may not open) the screen shows its no-access state; nothing is requested and no data is drawn.
+      // People directory (/admin/employees/…): an app module (AppModules "employees") for the people who may open it; arriving
+      // from a JARC screen (Back/Forward) remembers the way back, as for Fabric. For someone who may not open it (or a list they
+      // may not open) the screen shows its no-access state in the normal layout; nothing is requested and no data is drawn.
       const people = this.employees && typeof EmployeesPanel === "function" ? EmployeesPanel.parsePath(window.location.pathname, window.location.search) : undefined;
       if (people !== undefined) {
-        const changed = this.employees.visible ? Boolean(this.employees.applyRoute(people)) : false;
-        if (model.screen !== "employees" || model.boardLinkProblem) { model.openScreen("employees"); return true; }
+        const visible = Boolean(this.employees.visible), changed = visible ? Boolean(this.employees.applyRoute(people)) : false;
+        if (model.screen !== "employees" || model.boardLinkProblem) { if (visible && this.ready && !this.shellOnly && typeof AppModules === "function" && !AppModules.forScreen(model.screen)) this.rememberReturn?.(); model.openScreen("employees"); return true; }
         return changed;
       }
       // App module paths (/fabric/… for Fabric Data): only for the people who may open the module; anyone else gets the usual
@@ -692,11 +694,13 @@ class AppController {
     if (toggle) { toggle.setAttribute("aria-expanded", String(open)); toggle.setAttribute("aria-label", open ? "Close navigation" : "Open navigation"); }
   }
   // Scroll positions (page and the records table) survive a re-render.
-  // App modules scroll inside their own regions ([data-module-scroll], by its data-focus-key or position), never the page.
-  scrollState() { const wrap = this.root.querySelector(".table-wrap"), inner = [...(this.root.querySelectorAll?.("[data-module-scroll]") || [])].map((el, i) => [el.dataset.focusKey || el.id || String(i), el.scrollLeft, el.scrollTop]); return { x: window.scrollX, y: window.scrollY, left: wrap?.scrollLeft || 0, top: wrap?.scrollTop || 0, inner }; }
+  // App modules scroll inside their own regions ([data-module-scroll], or a module app's body: the People directory's
+  // #employees-body), by its data-focus-key or position, never the page.
+  static MODULE_SCROLL = "[data-module-scroll], [data-module-body] > .fx-app .fx-app__body";
+  scrollState() { const wrap = this.root.querySelector(".table-wrap"), inner = [...(this.root.querySelectorAll?.(AppController.MODULE_SCROLL) || [])].map((el, i) => [el.dataset.focusKey || el.id || String(i), el.scrollLeft, el.scrollTop]); return { x: window.scrollX, y: window.scrollY, left: wrap?.scrollLeft || 0, top: wrap?.scrollTop || 0, inner }; }
   restoreScroll(s) {
     if (!s) return; const wrap = this.root.querySelector(".table-wrap"); if (wrap) { wrap.scrollLeft = s.left; wrap.scrollTop = s.top; }
-    if (s.inner?.length) { const els = [...this.root.querySelectorAll("[data-module-scroll]")]; for (const [key, left, top] of s.inner) { const el = els.find((e, i) => (e.dataset.focusKey || e.id || String(i)) === key); if (el) { el.scrollLeft = left; el.scrollTop = top; } } }
+    if (s.inner?.length) { const els = [...this.root.querySelectorAll(AppController.MODULE_SCROLL)]; for (const [key, left, top] of s.inner) { const el = els.find((e, i) => (e.dataset.focusKey || e.id || String(i)) === key); if (el) { el.scrollLeft = left; el.scrollTop = top; } } }
     if (window.scrollX !== s.x || window.scrollY !== s.y) window.scrollTo(s.x, s.y);
   }
   // The focused button, described so the same control can be focused again after a re-render.
@@ -941,7 +945,7 @@ class AppController {
     if (action === "bulk-priority") this.view.showQuickChoice("Set selected priority",["Low","Medium","High","Critical"],"apply-bulk-priority","");
     if (action === "apply-bulk-priority") { this.model.bulkUpdate([...this.model.selected],this.model.priorityColumn.key,target.dataset.value); this.model.selected.clear(); this.view.closeOverlay(); this.update(); this.view.toast("Priorities updated"); }
     if (action === "settings") this.togglePanel("settings",()=>this.view.showSettings(this.model));
-    if (action === "developer" || (action === "settings-section" && target.dataset.section === "api-tokens")) { if (this.apiTokens?.visible()) this.apiTokens.open(target.dataset.section === "api-tokens" ? "tokens" : target.dataset.section || "overview"); return; }
+    if (action === "developer" || (action === "settings-section" && target.dataset.section === "api-tokens")) { if (this.apiTokens?.developerVisible()) this.apiTokens.open(target.dataset.section === "api-tokens" ? "tokens" : target.dataset.section || this.apiTokens.homeTab()); return; }
     if (action === "settings-section") { this.model.updateSetting("settingsSection",target.dataset.section); this.view.showSettings(this.model,target.dataset.section); this.markPanel("settings"); }
     if (action === "workspace-manage") this.view.showSettings(this.model,"workspace");
     if (action === "request-delete-workspace") { const workspace=this.model.workspaces.find((w)=>String(w.id)===String(target.dataset.id)), files=workspace?.boards?.some((x)=>x.columns?.some((c)=>c.type==="files")); this.view.showConfirm("Delete workspace?",`All boards and records in this workspace will be deleted${this.model.filesAvailable()?"":" from this browser"}.${files?" Files in Files columns are deleted permanently.":""}`,"confirm-delete-workspace",target.dataset.id); }
@@ -979,7 +983,8 @@ class AppController {
     if (action === "choose-import-file") document.querySelector("#import-file").click();
     if (action === "export") { if(this.model.serverView&&!this.model.serverViewComplete)this.exportWholeView(); else if(!this.model.serverView&&this.model.boardLoadState().state!=="full")this.view.toast("This board is still loading, so nothing was exported. Try again in a moment."); else this.exportCsv(); }
     if (action === "export-backup") this.exportBackup();
-    if (action === "close-overlay" && (event.target === target || target.closest("button"))) this.view.closeOverlay();
+    // An outside click doesn't close a dialog that asks to stay open (data-keep-open: e.g. a Manage access change in flight), as Escape doesn't.
+    if (action === "close-overlay" && (event.target === target || target.closest("button")) && !(event.target === target && target.querySelector?.("[data-keep-open]"))) this.view.closeOverlay();
   }
 
   onInput(event) {

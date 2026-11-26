@@ -70,8 +70,36 @@ class UserRepository {
   // Employee Management P2 (employees/jarc-access.js, read-only): the same people, only the fields the access index uses
   // (identity, status, account, sign-in times; never the name, email or preferences), at most 5000.
   listEntraForAccessIndex() {
-    return this.collection.find({ source: "entra" }, { sort: { _id: 1 }, limit: 5000, projection: { _id: 1, source: 1, tenantId: 1, entraObjectId: 1, status: 1, account: 1, createdAt: 1, lastLoginAt: 1 } }).toArray();
+    return this.collection.find({ source: "entra" }, { sort: { _id: 1 }, limit: 5000, projection: { _id: 1, source: 1, tenantId: 1, entraObjectId: 1, status: 1, account: 1, createdAt: 1, lastLoginAt: 1, provisionedAt: 1 } }).toArray();
   }
+
+  // ---- Employee Management P3 (Access Administration, employees/access-admin.js)
+  // The Entra user with exactly this identity (both lower case, as the sign-in verifier stores them; the lookup sign-in uses).
+  findEntraIdentity(tenantId, entraObjectId, { session } = {}) { return this.collection.findOne({ tenantId, entraObjectId }, { session }); }
+  // A users document created by an administrator for someone who hasn't signed in yet: status "active" (Grant) or "revoked"
+  // (blocked before the first sign-in). The first sign-in finds it by identity and reuses it (signInFromEntra); it never changes
+  // its status. A duplicate identity is the unique index's E11000 (the caller answers 409).
+  // trackAccounts (ACCOUNT_MANAGEMENT staged/enforced): the same pending account with no role a first sign-in would create.
+  async provisionEntra({ tenantId, entraObjectId, displayName, email, status, reason = null, by, now, trackAccounts = false }, { session } = {}) {
+    const doc = { tenantId, entraObjectId, source: "entra", displayName, email, emailNormalized: email ? email.toLowerCase() : null, status, createdAt: now, updatedAt: now, provisionedAt: now, provisionedBy: by, statusChangedAt: now, statusReason: reason, accessVersion: 1,
+      ...(trackAccounts ? { account: { status: "pending", role: null, version: 1, createdAt: now, updatedAt: now } } : {}) };
+    await this.collection.insertOne(doc, { session });
+    return doc;
+  }
+  // Changes users.status only if it is still `fromStatus` at `expectedVersion` (users.accessVersion; missing = 0), and bumps the
+  // version. Null when someone else changed it first (the caller answers 409).
+  setAccessStatus(id, { fromStatus, expectedVersion, status, reason = null, now }, { session } = {}) {
+    const filter = { _id: id, source: "entra", status: fromStatus, accessVersion: expectedVersion === 0 ? { $in: [null, 0] } : expectedVersion };
+    return this.collection.findOneAndUpdate(filter, { $set: { status, statusChangedAt: now, statusReason: reason, updatedAt: now }, $inc: { accessVersion: 1 } }, { session, returnDocument: "after" });
+  }
+  // The listed Employee Management administrators (lower-case object IDs) whose JARC account is active, other than one user.
+  countActiveIdentities(tenantId, entraObjectIds, { exceptId = null, session } = {}) {
+    if (!entraObjectIds.length) return Promise.resolve(0);
+    return this.collection.countDocuments({ tenantId, entraObjectId: { $in: entraObjectIds }, status: "active", ...(exceptId ? { _id: { $ne: exceptId } } : {}) }, { session });
+  }
+  // Marks the acting administrator's document inside a P3 transaction that touches another listed administrator, so two
+  // administrators suspending each other at the same moment conflict (one is retried, then refused) instead of both succeeding.
+  async touchAccessActor(id, now, { session } = {}) { await this.collection.updateOne({ _id: id }, { $set: { accessActionAt: now } }, { session }); }
 
   countIdentity(tenantId, entraObjectId) { return this.collection.countDocuments({ tenantId, entraObjectId }); }
   // Users with this email whose identity is NOT the given one (an ambiguous email → identity mapping).

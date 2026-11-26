@@ -5,7 +5,7 @@
 //   - "Back to …" (data-action="module-exit") restores the screen, workspace, board and view open before (AppController.exitModule).
 // No iframe and no new window: a module is a screen of this page with its own route parser and renderer.
 //
-// A module entry: { id, screen, label, icon, visible(c), isPath(pathname), parsePath(pathname, search), applyRoute(c, route),
+// A module entry: { id, screen, label, icon, nav (false: no button above Settings), visible(c), isPath(pathname), parsePath(pathname, search), applyRoute(c, route),
 // urlFor(c) → { path, search }, render(view, model) → HTML }. c is the AppController. Adding a module never needs shell code:
 // register it here (or from its own file, after this one) and give it a nav button through AppView.moduleNav.
 class AppModules {
@@ -13,7 +13,7 @@ class AppModules {
   static register(entry) {
     if (!entry || typeof entry.id !== "string" || typeof entry.screen !== "string") throw new Error("An app module needs an id and a screen");
     if (AppModules.#list.some((m) => m.id === entry.id || m.screen === entry.screen)) throw new Error(`App module "${entry.id}" is already registered`);
-    AppModules.#list.push(Object.freeze({ icon: "layout", exitLabel: null, ...entry }));
+    AppModules.#list.push(Object.freeze({ icon: "layout", exitLabel: null, nav: true, ...entry }));
     return entry;
   }
   static all() { return [...AppModules.#list]; }
@@ -38,5 +38,18 @@ AppModules.register({
   applyRoute: (c, route) => Boolean(c.fabric?.applyRoute(route)),
   urlFor: (c) => c.fabric.urlFor(),
   render: (view) => view.fabricPanel.html()
+});
+// People directory (EmployeesPanel.js, /admin/employees/…): the same module layout as Fabric Data, for the people /features
+// names (employees.view). Its button stays in the primary navigation (AppView.sidebar, under Search), so it gets no second one
+// above Settings (nav: false). Anyone else who opens its address keeps the existing no-access state in the normal JARC layout
+// (AppView.content, AppController.applyBoardUrl): nothing is requested and no module layout is drawn.
+AppModules.register({
+  id: "employees", screen: "employees", label: "People directory", icon: "people", nav: false,
+  visible: (c) => Boolean(c.employees?.visible),
+  isPath: (pathname) => typeof EmployeesPanel === "function" && EmployeesPanel.parsePath(pathname || "") !== undefined,
+  parsePath: (pathname, search) => (typeof EmployeesPanel === "function" ? EmployeesPanel.parsePath(pathname, search) : undefined),
+  applyRoute: (c, route) => Boolean(c.employees?.applyRoute(route)),
+  urlFor: (c) => c.employees.urlFor(),
+  render: (view) => view.employeesPanel.html()
 });
 if (typeof window !== "undefined") window.AppModules = AppModules;

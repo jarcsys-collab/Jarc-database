@@ -41,6 +41,11 @@ class SessionRepository {
   listLiveForAccessIndex(now) {
     return this.sessions.find({ expiresAt: { $gt: now } }, { sort: { isSystemAdmin: -1, lastSeenAt: -1 }, limit: 5000, projection: { _id: 0, userId: 1, tenantId: 1, objectId: 1, isSystemAdmin: 1, expiresAt: 1, idleExpiresAt: 1, lastSeenAt: 1 } }).toArray();
   }
+  // Employee Management P3 (read-only): how many live sessions one person has, bound to their identity as auth/session.js checks
+  // (indexed on userId; _id is never read).
+  countLiveForUser(userId, { tenantId, objectId }, now) {
+    return this.sessions.countDocuments({ userId, tenantId, objectId, expiresAt: { $gt: now }, idleExpiresAt: { $gt: now } });
+  }
 
   async touch(id, now, idleMs) { await this.sessions.updateOne({ _id: id }, { $set: { lastSeenAt: now, idleExpiresAt: new Date(now.getTime() + idleMs) } }); }
 

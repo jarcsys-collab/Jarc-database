@@ -1,6 +1,6 @@
 /* People directory (EmployeesPanel.js, EmployeesObjects.js): a screen of the normal JARC shell that reuses the Fabric Data
    look (fabric-ui.css tokens, fabric-objects.css, fabric-explorer.css, all scoped under .fx-app). Only what differs lives here:
-   the screen is a bounded box inside the shell's content area (not a full-viewport module), the heading has a subtitle, and the
+   the screen is a bounded box when shown in the JARC layout; in the module layout fabric-ui.css makes it fill the module body; the heading has a subtitle, and the
    grouping views. Light and dark come from the --fx- tokens (fabric-ui.css: :root[data-theme="dark"] .fx-app). */
 
 .fx-app.emp-app { flex: none; height: calc(100vh - 132px); height: calc(100dvh - 132px); min-height: 480px; border: 1px solid var(--fx-border-strong); border-radius: 8px; overflow: hidden; }

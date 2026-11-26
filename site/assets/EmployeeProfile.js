@@ -12,6 +12,8 @@
 //
 // P2: for people with access.jarcAccess (explorer.p.jarcAccess) the page has two tabs, Profile (the page above, unchanged) and
 // JARC access (EmployeeAccess.js, loaded by the panel; address …/records/{id}/access). Everyone else gets no tab bar at all.
+// P3: with explorer.p.accessAdmin a third tab, Manage access (EmployeeManage.js; …/records/{id}/manage). Tabs are listed per
+// person: Profile always, JARC access with jarcAccess, Manage access with accessAdmin.
 class EmployeeProfile {
   static ID = /^[A-Za-z0-9_-]{22}$/;
   // The allow-list: API field name → default label (the schema's label wins when present).
@@ -125,26 +127,36 @@ class EmployeeProfile {
     const tabs = EmployeeProfile.tabs(explorer);
     if (!tabs) return shell(e(name), `${disabled}${stale}${head}${sections}`);
     // Employee administrators (access.jarcAccess): two tabs, Profile (the page above, unchanged) and JARC access.
-    const inner = tabs.tab === "access" ? EmployeeProfile.accessHtml(explorer, tabs.state) : sections;
-    return shell(e(name), `${disabled}${stale}${head}${EmployeeProfile.tabBarHtml(explorer, tabs.tab)}<div class="emp-p__panel" role="tabpanel" id="emp-p-panel-${ds}" aria-labelledby="emp-p-tab-${tabs.tab}-${ds}" tabindex="-1" data-tab="${tabs.tab}">${inner}</div>`);
+    const inner = tabs.tab === "access" ? EmployeeProfile.accessHtml(explorer, tabs.state) : tabs.tab === "manage" ? EmployeeProfile.manageHtml(explorer, tabs.state) : sections;
+    return shell(e(name), `${disabled}${stale}${head}${EmployeeProfile.tabBarHtml(explorer, tabs.tab, tabs.list)}<div class="emp-p__panel" role="tabpanel" id="emp-p-panel-${ds}" aria-labelledby="emp-p-tab-${tabs.tab}-${ds}" tabindex="-1" data-tab="${tabs.tab}">${inner}</div>`);
   }
 
   // ---- Tabs (only for people with access.jarcAccess; the panel says so through explorer.p). Anyone else gets no tab bar.
-  static TABS = [["profile", "Profile"], ["access", "JARC access"]];
+  static TABS = [["profile", "Profile"], ["access", "JARC access"], ["manage", "Manage access"]];
   static access() { try { return typeof EmployeeAccess === "function" && typeof EmployeeAccess.html === "function" ? EmployeeAccess : null; } catch { return null; } }
-  // { tab: "profile" | "access", state } when the tabs are drawn, else null.
-  static tabs(explorer) {
+  static manage() { try { return typeof EmployeeManage === "function" && typeof EmployeeManage.html === "function" ? EmployeeManage : null; } catch { return null; } }
+  // The tabs this person gets: Profile, JARC access (jarcAccess), Manage access (accessAdmin). Only Profile → no tab bar.
+  static tabList(explorer) {
     const p = explorer?.p;
-    if (!p || p.jarcAccess !== true || !EmployeeProfile.access()) return null;
+    if (!p) return [];
+    const list = EmployeeProfile.TABS.filter(([id]) => id === "profile" || (id === "access" && p.jarcAccess === true && EmployeeProfile.access()) || (id === "manage" && p.accessAdmin === true && EmployeeProfile.manage()));
+    return list.length > 1 ? list : [];
+  }
+  // { tab: "profile" | "access" | "manage", state, list } when the tabs are drawn, else null.
+  static tabs(explorer) {
+    const p = explorer?.p, list = EmployeeProfile.tabList(explorer);
+    if (!list.length) return null;
     let tab = "profile", state = null;
-    try { tab = typeof p.profileTabFor === "function" && p.profileTabFor(explorer) === "access" ? "access" : "profile"; } catch { tab = "profile"; }
+    try { const t = typeof p.profileTabFor === "function" ? p.profileTabFor(explorer) : "profile"; tab = list.some(([id]) => id === t) ? t : "profile"; } catch { tab = "profile"; }
     if (tab === "access") { try { state = typeof p.accessState === "function" ? p.accessState(explorer) : null; } catch { state = null; } }
-    return { tab, state };
+    if (tab === "manage") { try { state = typeof p.manageState === "function" ? p.manageState(explorer) : null; } catch { state = null; } }
+    return { tab, state, list };
   }
   static accessHtml(explorer, state) { try { const h = EmployeeProfile.access().html(explorer, state); return typeof h === "string" ? h : ""; } catch { return ""; } }
-  static tabBarHtml(explorer, current) {
+  static manageHtml(explorer, state) { try { const h = EmployeeProfile.manage().html(explorer, state); return typeof h === "string" ? h : ""; } catch { return ""; } }
+  static tabBarHtml(explorer, current, list = EmployeeProfile.tabList(explorer)) {
     const ds = EmployeeProfile.safeDs(explorer), a = (v) => EmployeeProfile.attr(explorer, v);
-    const buttons = EmployeeProfile.TABS.map(([id, label]) => {
+    const buttons = list.map(([id, label]) => {
       const on = id === current;
       return `<button type="button" role="tab" class="emp-p__tab${on ? " is-active" : ""}" id="emp-p-tab-${id}-${ds}" data-action="emp-p-tab" data-tab="${id}" data-ds="${a(ds)}" data-focus-key="emp-p-tab-${id}" aria-selected="${on}"${on ? ` aria-controls="emp-p-panel-${ds}"` : ""} tabindex="${on ? 0 : -1}">${label}</button>`;
     }).join("");
@@ -152,7 +164,7 @@ class EmployeeProfile {
   }
   static selectTab(explorer, tab, { focus = true } = {}) {
     const p = explorer?.p;
-    if (!EmployeeProfile.TABS.some(([id]) => id === tab) || typeof p?.setProfileTab !== "function") return false;
+    if (!EmployeeProfile.tabList(explorer).some(([id]) => id === tab) || typeof p?.setProfileTab !== "function") return false;
     p.setProfileTab(explorer, tab);
     if (focus) EmployeeProfile.doc()?.querySelector?.(`#emp-p-tab-${tab}-${EmployeeProfile.safeDs(explorer)}`)?.focus?.();
     return true;
@@ -216,13 +228,14 @@ class EmployeeProfile {
     if (action === "emp-p-retry") { if (typeof explorer?.retry === "function") explorer.retry(); else explorer?.refresh?.(); return true; }
     if (action === "emp-p-tab") { EmployeeProfile.selectTab(explorer, String(target?.dataset?.tab ?? "")); return true; }
     if (action === "emp-p-access-retry") { explorer?.p?.retryAccess?.(explorer); return true; }
+    if (action === "emp-p-manage") { EmployeeProfile.selectTab(explorer, "manage"); return true; }
     return false;
   }
   // The tab bar (APG tabs, automatic activation): ← / → move to the other tab and open it; Home / End the first / last.
   static onTabKey(explorer, event) {
     const t = event?.target;
     if (t?.getAttribute?.("role") !== "tab" || !t.closest?.(".emp-p__tabs") || event.altKey || event.ctrlKey || event.metaKey) return false;
-    const ids = EmployeeProfile.TABS.map(([id]) => id), i = ids.indexOf(String(t.dataset?.tab ?? ""));
+    const ids = EmployeeProfile.tabList(explorer).map(([id]) => id), i = ids.indexOf(String(t.dataset?.tab ?? ""));
     if (i < 0) return false;
     const next = { ArrowRight: (i + 1) % ids.length, ArrowLeft: (i - 1 + ids.length) % ids.length, Home: 0, End: ids.length - 1 }[event.key];
     if (next === undefined) return false;

@@ -1701,6 +1701,17 @@ tr:hover .comment-indicator, .comment-indicator:focus-visible, .comment-indicato
 .developer-window .settings-nav [data-action=apitok-tab]:hover{background:var(--hover)}
 .developer-window .settings-nav [data-action=apitok-tab].active,.developer-window .settings-nav [data-action=apitok-tab][aria-current]{background:var(--surface);color:var(--accent-text);font-weight:var(--weight-semibold,600);box-shadow:var(--shadow-row)}
 .developer-window .settings-body{min-width:0}
+/* Developer → Administration (ApiTokensPanel.ADMIN_LINKS): a divider and a caption after the API sections, then launchers for
+   System Health and the People directory with the sections' own look (hover; the page open now is marked). Icons only, without
+   the caption, where the window's navigation is a rail (≤620 px, styles.css); the navigation scrolls if it runs out of room. */
+.developer-window .settings-nav .apitok-nav-sep{height:1px;margin:10px 6px;background:var(--line)}
+.developer-window .settings-nav .apitok-nav-caption{margin:2px 11px 6px;font-size:11px;font-weight:var(--weight-semibold,600);letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+.developer-window .settings-nav [data-action=apitok-admin]{border-radius:var(--radius-pill);color:var(--text)}
+.developer-window .settings-nav [data-action=apitok-admin]:hover{background:var(--hover)}
+.developer-window .settings-nav [data-action=apitok-admin].is-current{color:var(--accent-text);font-weight:var(--weight-semibold,600)}
+.apitok-admin-list{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.apitok-admin-icon{flex:none;width:28px;height:28px;border-radius:8px;display:grid;place-items:center;background:var(--accent-fill,var(--accent));color:var(--on-accent,#fff)}.apitok-admin-icon .icon{width:16px;height:16px}
+@media(max-width:620px){.developer-window .settings-nav .apitok-nav-caption{display:none}.developer-window .settings-nav .apitok-nav-sep{margin:8px 4px}.apitok-admin-list{grid-template-columns:1fr}}
 .apitok-lead{font-size:14px!important;margin:0 0 14px}
 .apitok-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:0 0 14px}.apitok-stats>div{border:1px solid var(--line);border-radius:12px;padding:10px 14px;display:grid;gap:2px;background:var(--surface)}.apitok-stats span{color:var(--muted);font-size:12px}.apitok-stats strong{font-size:22px;line-height:1.2}
 .apitok-steps{list-style:none;padding:0;margin:16px 0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}

@@ -11,7 +11,7 @@ const { healthRoutes } = require("./routes/health");
 const { slowRequestLog } = require("./middleware/slow-requests");
 const { requestContext } = require("./monitoring/request-context");
 const { monitor: defaultMonitor } = require("./monitoring/monitor");
-const { systemHealthRoutes } = require("./routes/system-health");
+const { systemHealthRoutes, isSystemHealthViewer } = require("./routes/system-health");
 const { stateRoutes } = require("./routes/state");
 const { resourceRoutes } = require("./routes/resources");
 const { memberRoutes } = require("./routes/members");
@@ -22,7 +22,7 @@ const { canManageDrive, actorCanManageDrive } = require("./integrations/google-d
 const { Access } = require("./auth/access");
 const { apiNotFound, errorHandler, sendError } = require("./middleware/errors");
 const { securityHeaders, cspReportHandler } = require("./middleware/security-headers");
-const { employeeRoutes, JarcAccessIndex } = require("./employees");
+const { employeeRoutes, JarcAccessIndex, AccessAdminService } = require("./employees");
 const { ActivityStream } = require("./realtime/activity-stream");
 const { eventRoutes, entraSessionCheck } = require("./routes/events");
 const { fileRoutes } = require("./routes/files");
@@ -70,7 +70,9 @@ const FABRIC_LINK_PATH = /^\/fabric\/((inventory|sales)(\/records\/[^/]{1,64})?|
 const FABRIC_INVOICE_LINK_PATH = /^\/fabric\/invoices(\/[^/]{1,400}\/[^/]{1,400})?\/?$/;
 // People directory (Employee Management) links: the screen itself asks the server what this person may see. …/records/{id}/access
 // is the profile's JARC access tab (P2; the page shows it only to Employee Management admins).
-const EMPLOYEES_LINK_PATH = /^\/admin\/employees(?:\/(?:active|all|disabled|guests)(?:\/records\/[A-Za-z0-9_-]{22}(?:\/access)?)?|\/groups\/(?:department|jobTitle|officeLocation|emailDomain))?\/?$/;
+const EMPLOYEES_LINK_PATH = /^\/admin\/employees(?:\/(?:active|all|disabled|guests)(?:\/records\/[A-Za-z0-9_-]{22}(?:\/access|\/manage)?)?|\/groups\/(?:department|jobTitle|officeLocation|emailDomain))?\/?$/;
+// Case-insensitive like Express routing, so /RECORDS/…/ACCESS can't reach the P3 handlers past this parser.
+const EMPLOYEE_P3_WRITE_PATH = /^\/[^/]+\/records\/[^/]+\/(?:access|memberships(?:\/[^/]+)?)\/?$/i;
 const rootRelative = (html) => html.replace(/(\s(?:href|src))="assets\//g, '$1="/assets/');
 
 // An optional feature not stated is off in production and on elsewhere.
@@ -87,7 +89,7 @@ const resolveFeatures = (features = {}, environment = "development") => { const 
 // apiTokens: { key, perMinute? } turns on API tokens for other systems (config/index.js); Entra sign-in only. Without it their paths don't exist.
 // fabricData: { config, service, limiter? } (config.fabricData with the switch on, and a FabricService from src/fabric) turns on Fabric Data;
 // Entra sign-in only. Without it (or with the switch off) its paths don't exist and /features doesn't mention it.
-function createApp({ securityHeadersOptions = {}, employees: employeesOption = null, fabricData = null, apiTokens = null, features = {}, repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, siteDir = DEFAULT_SITE_DIR, logger = console, slowRequestMs = 0, monitor = defaultMonitor } = {}) {
+function createApp({ securityHeadersOptions = {}, employees: employeesOption = null, fabricData = null, apiTokens = null, features = {}, repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, employeeWriteLimiter = null, systemHealth = null, siteDir = DEFAULT_SITE_DIR, logger = console, slowRequestMs = 0, monitor = defaultMonitor } = {}) {
   if (environment === "production" && (enableDevStateApi || enableDevResourceApi)) {
     throw new Error("Development (pre-auth) APIs can't be enabled in production.");
   }
@@ -125,6 +127,9 @@ function createApp({ securityHeadersOptions = {}, employees: employeesOption = n
   // app-wide 10 MB parser below sees the body as already read and skips it (L3, Fabric phase 7 security review).
   if (fabric) api.use("/fabric/saved-filters", express.json({ limit: "32kb", strict: true, inflate: false }));
   if (employees) api.use("/admin/employees/saved-filters", express.json({ limit: "32kb", strict: true, inflate: false }));
+  // P3 Access Administration writes: their own 8 KB parser (an action body is a few hundred bytes).
+  const employeeWriteParser = express.json({ limit: "8kb", strict: true, inflate: false });
+  if (employees) api.use("/admin/employees", (req, res, next) => (EMPLOYEE_P3_WRITE_PATH.test(req.path) ? employeeWriteParser(req, res, next) : next()));
   // CSP violation reports (report-only policy): own 8 KB parser, logs directive + blocked origin only, rate-limited.
   api.use("/csp-report", cspReportHandler({ logger }));
   api.use(express.json({ limit: JSON_BODY_LIMIT, strict: true, inflate: false }));
@@ -218,11 +223,19 @@ function createApp({ securityHeadersOptions = {}, employees: employeesOption = n
     // features: which of the actions it describes exist on this server at all (spreadsheet imports and the monday.com integration
     // are mounted only when on, lines below).
     const jarcAccess = employees && auth ? new JarcAccessIndex({ repos: dataLayer.repos, access, tenantId: auth.entra.tenantId, apiAdminObjectIds: tokenService ? apiTokens.adminObjectIds || [] : null, employeesConfig: employees.config, features: { spreadsheetImports: Boolean(enabled.spreadsheetImports && dataLayer.services?.importJobs), mondayIntegration: Boolean(dataLayer.services?.integration) }, logger }) : null;
-    if (employees) api.use("/admin/employees", identify, employeeRoutes({ employees, savedFilterRepo: dataLayer.repos.employeeSavedFilters || null, jarcAccess, logger }));
+    // P3 (Access Administration, JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN=true): account and membership changes for EMPLOYEE_ADMIN_OIDS,
+    // through JARC's own users, memberships (MembershipService), sessions, API tokens and accountAudit. Off: its paths answer 404.
+    const accessAdmin = jarcAccess && employees.config.accessAdmin === true && dataLayer.services?.members ? new AccessAdminService({ employees, jarcAccess, repos: dataLayer.repos, connection: dataLayer.connection, members: dataLayer.services.members, access, tenantId: auth.entra.tenantId, logger }) : null;
+    if (employees) api.use("/admin/employees", identify, employeeRoutes({ employees, savedFilterRepo: dataLayer.repos.employeeSavedFilters || null, jarcAccess, accessAdmin, logger, ...(employeeWriteLimiter ? { writeLimiter: employeeWriteLimiter } : {}) }));
     // employees.jarcAccess only when true (an admin, with the index wired): viewers and outsiders never see the key.
-    const employeeFlags = (actor) => { const { jarcAccess: jarc, ...flags } = employees.accessFor(actor); return { ...flags, ...(jarc === true && jarcAccess ? { jarcAccess: true } : {}) }; };
+    // employees.accessAdmin (P3) only for that admin with the switch on.
+    const employeeFlags = (actor) => { const { jarcAccess: jarc, ...flags } = employees.accessFor(actor); const admin = jarc === true && jarcAccess; return { ...flags, ...(admin ? { jarcAccess: true } : {}), ...(admin && accessAdmin ? { accessAdmin: true } : {}) }; };
+    // systemHealth (only for someone who may open it): view, admin (the full view), activity (Activity History).
+    const healthViewers = auth ? systemHealth?.viewerObjectIds || [] : [];
+    const healthFlags = (actor) => (actor?.isSystemAdmin ? { view: true, admin: true, activity: true } : isSystemHealthViewer(actor, healthViewers, auth?.entra?.tenantId) ? { view: true, admin: false, activity: false } : null);
     api.get("/features", identify, (req, res) => {
-      const fabricFlags = { ...(fabricAccessFor ? { fabricData: { ...fabricAccessFor(req.actor), apiTokens: Boolean(tokenService) } } : {}), ...(employees ? { employees: employeeFlags(req.actor) } : {}) };
+      const health = healthFlags(req.actor);
+      const fabricFlags = { ...(fabricAccessFor ? { fabricData: { ...fabricAccessFor(req.actor), apiTokens: Boolean(tokenService) } } : {}), ...(employees ? { employees: employeeFlags(req.actor) } : {}), ...(health ? { systemHealth: health } : {}) };
       res.status(200).set("Cache-Control", "no-store").json({ features: tokenService ? { ...enabled, apiTokens: true, apiTokenAdmin: tokenService.isAdmin(req.actor), ...fabricFlags } : { ...enabled, ...fabricFlags } });
     });
     api.use(identify, preferenceRoutes({ repos: dataLayer.repos }));
@@ -232,7 +245,8 @@ function createApp({ securityHeadersOptions = {}, employees: employeesOption = n
     if (googleDrive && dataLayer.services?.midAttachments) api.use(identify, midAttachmentRoutes({ migration: dataLayer.services.midAttachments, canManage: (actor) => actorCanManageDrive(actor, googleDrive.config, auth.entra.tenantId) }));
     // Live updates (Server-Sent Events) from the activity log; live: { pollMs, overlapMs, timings } for tests.
     // System Health, Integration Reliability and Activity History: JARC administrators only (checked in each route).
-    api.use(identify, systemHealthRoutes({ dataLayer, access, environment, version, monitor, enabled, canManageDrive: googleDrive ? (actor) => actorCanManageDrive(actor, googleDrive.config, auth.entra.tenantId) : () => false }));
+    // SYSTEM_HEALTH_VIEWER_OIDS (Entra sign-in only): a redacted System Health view, never Activity History.
+    api.use(identify, systemHealthRoutes({ dataLayer, access, environment, version, monitor, enabled, canManageDrive: googleDrive ? (actor) => actorCanManageDrive(actor, googleDrive.config, auth.entra.tenantId) : () => false, viewerObjectIds: healthViewers, tenantId: auth?.entra?.tenantId || null }));
     const stream = new ActivityStream({ activities: dataLayer.repos.activities, logger, ...(live.pollMs ? { pollMs: live.pollMs } : {}), ...(live.overlapMs ? { overlapMs: live.overlapMs } : {}) });
     app.locals.realtime = stream;
     api.use(identify, eventRoutes({ stream, access, repos: dataLayer.repos, sessionCheck: auth ? entraSessionCheck({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users }) : null, timings: live.timings }));

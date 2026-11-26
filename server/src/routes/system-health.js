@@ -1,6 +1,7 @@
-// System Health, Integration Reliability and Activity History (Q1.1, Q1.4, Q1.5). JARC administrators only (the JARC.Admin
-// app role, checked on the server for every request; a signed-in employee without it gets 403, a caller without a session
-// never reaches these routes).
+// System Health, Integration Reliability and Activity History (Q1.1, Q1.4, Q1.5). JARC administrators (the JARC.Admin app
+// role, checked on the server for every request) see everything. The people in SYSTEM_HEALTH_VIEWER_OIDS (this tenant, a JARC
+// session) may also read GET /admin/system-health, as a redacted view (viewerView, scope "viewer"); never Activity History.
+// Anyone else signed in gets 403; a caller without a session never reaches these routes. GET only.
 //
 //   GET /admin/system-health   process, database, API timings, slow endpoints, recent errors, slow MongoDB commands,
 //                              integration health (monday.com, Google Drive), background jobs
@@ -85,28 +86,92 @@ async function part(fn) {
   catch (error) { return { unavailable: true, error: error?.code && /^[A-Z0-9_]{2,64}$/.test(error.code) ? error.code : "UNAVAILABLE" }; }
 }
 
-function systemHealthRoutes({ dataLayer, access, environment, version, monitor = defaultMonitor, canManageDrive = () => false, enabled = {} }) {
+// ---- System Health viewers (SYSTEM_HEALTH_VIEWER_OIDS): a session actor of kind "entra" in this tenant whose object ID is listed.
+const lower = (v) => (typeof v === "string" ? v.toLowerCase() : null);
+function isSystemHealthViewer(actor, viewerObjectIds, tenantId) {
+  if (actor?.kind !== "entra" || !tenantId || !Array.isArray(viewerObjectIds) || !viewerObjectIds.length) return false;
+  const tid = lower(actor.tenantId), oid = lower(actor.entraObjectId);
+  return Boolean(tid && oid && tid === lower(tenantId) && viewerObjectIds.includes(oid));
+}
+
+// The viewer's REDACTED view, built field by field from the administrator's (an allow-list: nothing is copied by spreading).
+// Kept: overall health, server version and uptime, memory, database availability, latency and command counts, API request
+// counts, error rates and timings (overall, per route pattern and per minute), errors as counts by status and code, integration
+// and job state with counts and times. Left out: the environment name, the Node.js version, request IDs, the database's slow
+// command list (collection names), the monday.com account name, failed job details and error text, the Google Drive error
+// text and management flag, the Machine Installation Database runs, import job IDs, and anything else not named here.
+// Text fields come from fixed vocabularies (anything else is "unknown"); the version must look like semver; an endpoint whose
+// route isn't a plain route pattern is dropped. So no free text reaches a viewer even if a source changes later.
+const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const oneOf = (v, allowed) => (typeof v === "string" && allowed.includes(v) ? v : "unknown");
+const SERVER_STATES = ["ok", "degraded"], DATABASE_STATES = ["connected", "unavailable"], SEARCH_MODES = ["off", "shadow", "on"];
+const MONDAY_STATES = ["setup_required", "disabled", "needs_reconnect", "connected", "not_connected"];
+const DRIVE_STATES = ["disabled", "not_connected", "needs_reconnect", "unavailable", "connected"], DRIVE_ERROR_STATES = ["needs_reconnect", "unavailable"];
+const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,6}(?:-[0-9A-Za-z.-]{1,40})?$/;
+const ROUTE = /^[A-Z]+ [/:A-Za-z0-9_.()*-]+$/;
+const routeOk = (e) => typeof e?.route === "string" && e.route.length <= 160 && ROUTE.test(e.route);
+const endpoints = (list) => (list || []).filter(routeOk).map(endpointView);
+const stateOf = (p, allowed) => (p.unavailable || p.state === undefined ? null : oneOf(p.state, allowed));
+const isoText = (v) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(v) ? v : null);
+const bool = (v) => (typeof v === "boolean" ? v : null);
+const CODE = /^[A-Z0-9_]{2,64}$/;
+const timing = (s) => ({ samples: num(s?.samples), avgMs: num(s?.avgMs), p50Ms: num(s?.p50Ms), p95Ms: num(s?.p95Ms), p99Ms: num(s?.p99Ms), maxMs: num(s?.maxMs) });
+const endpointView = (e) => ({ route: e.route, count: num(e?.count), serverErrors: num(e?.serverErrors), clientErrors: num(e?.clientErrors), errorRate: num(e?.errorRate), ...timing(e), lastAt: isoText(e?.lastAt) });
+const countBy = (items, key) => { const out = {}; for (const i of items || []) { const k = key(i); if (k !== null) out[k] = (out[k] || 0) + 1; } return out; };
+const partView = (p, fn) => (p === null || p === undefined ? null : p.unavailable ? { unavailable: true } : fn(p));
+const activityView = (a) => (a ? { ok: num(a.ok), failed: num(a.failed), retries: num(a.retries), timeouts: num(a.timeouts), rateLimited: num(a.rateLimited), lastSuccessAt: isoText(a.lastSuccessAt), lastFailureAt: isoText(a.lastFailureAt), lastErrorCode: a.lastError && CODE.test(a.lastError.code || "") ? a.lastError.code : null, lastErrorStatus: num(a.lastError?.status) } : null);
+function viewerView(full) {
+  const { server: s, database: d, api: a } = full;
+  const monday = full.integrations.monday, drive = full.integrations.googleDrive;
+  return {
+    scope: "viewer", generatedAt: isoText(full.generatedAt),
+    server: { status: oneOf(s.status, SERVER_STATES), version: typeof s.version === "string" && VERSION.test(s.version) ? s.version : "unknown", uptimeSeconds: num(s.uptimeSeconds), memoryMb: { rss: num(s.memoryMb?.rss), heapUsed: num(s.memoryMb?.heapUsed) }, monitoringSince: isoText(s.monitoringSince) },
+    database: { status: oneOf(d.status, DATABASE_STATES), pingMs: num(d.pingMs), commands: num(d.commands), failed: num(d.failed), slow: num(d.slow), slowThresholdMs: num(d.slowThresholdMs) },
+    api: { requests: num(a.requests), serverErrors: num(a.serverErrors), clientErrors: num(a.clientErrors), errorRate: num(a.errorRate), statuses: Object.fromEntries(Object.entries(a.statuses || {}).filter(([k, v]) => /^\d{3}$/.test(k) && num(v) !== null)), ...timing(a) },
+    slowestEndpoints: endpoints(full.slowestEndpoints),
+    failingEndpoints: endpoints(full.failingEndpoints),
+    endpoints: endpoints(full.endpoints),
+    trend: (full.trend || []).map((t) => ({ at: isoText(t.at), requests: num(t.requests), errors: num(t.errors), avgMs: num(t.avgMs) })),
+    errors: { recent: (full.recentErrors || []).length, byStatus: countBy(full.recentErrors, (e) => (Number.isInteger(e.status) ? String(e.status) : null)), byCode: countBy(full.recentErrors, (e) => (CODE.test(e.code || "") ? e.code : null)) },
+    integrations: {
+      monday: { enabled: bool(monday.enabled) ?? false, ...(monday.unavailable ? { unavailable: true } : {}), configured: bool(monday.configured), connected: bool(monday.connected), state: stateOf(monday, MONDAY_STATES), syncEnabled: bool(monday.sync?.enabled), syncPaused: bool(monday.sync?.paused), lastSyncAt: isoText(monday.sync?.lastSyncAt), importedBoards: num(monday.importedBoards), failedJobs: Array.isArray(monday.failedJobs) ? monday.failedJobs.length : null, activity: activityView(monday.activity) },
+      googleDrive: { enabled: bool(drive.enabled) ?? false, ...(drive.unavailable ? { unavailable: true } : {}), connected: bool(drive.connected), state: stateOf(drive, DRIVE_STATES), activeForNewUploads: bool(drive.activeForNewUploads), hasError: Boolean(drive.unavailable) || DRIVE_ERROR_STATES.includes(drive.state), lastErrorAt: isoText(drive.lastErrorAt), activity: activityView(drive.activity) }
+    },
+    jobs: {
+      integration: partView(full.jobs.integration, (j) => ({ monday: { queued: num(j.monday?.queued), running: num(j.monday?.running), retry: num(j.monday?.retry), failed: num(j.monday?.failed) } })),
+      imports: partView(full.jobs.imports, (j) => ({ active: num(j.active), failed: num(j.failed) })),
+      searchIndex: full.jobs.searchIndex ? { mode: oneOf(full.jobs.searchIndex.mode, SEARCH_MODES), ready: Boolean(full.jobs.searchIndex.ready) } : null,
+      recentFailures: { count: (full.jobs.recentFailures || []).length, byKind: countBy(full.jobs.recentFailures, (f) => (/^[a-z0-9._-]{1,60}$/i.test(f.kind || "") ? f.kind : null)) }
+    }
+  };
+}
+
+// viewerObjectIds: SYSTEM_HEALTH_VIEWER_OIDS; tenantId: ENTRA_TENANT_ID. A JARC administrator gets the full view (unchanged,
+// plus scope: "admin"); a listed viewer gets viewerView (scope: "viewer"); Activity History stays JARC administrators only.
+function systemHealthRoutes({ dataLayer, access, environment, version, monitor = defaultMonitor, canManageDrive = () => false, enabled = {}, viewerObjectIds = [], tenantId = null }) {
   const router = express.Router();
   const send = (res, body) => res.status(200).set("Cache-Control", "no-store").json(body);
   const admin = (req) => access.requireSystemAdmin(req.actor);
   const { repos, services, connection } = dataLayer;
 
   router.get("/admin/system-health", async (req, res) => {
-    admin(req);
+    const viewer = !req.actor?.isSystemAdmin && isSystemHealthViewer(req.actor, viewerObjectIds, tenantId);
+    if (!viewer) admin(req);
     allowOnly(req.query, [], "the query");
     const db = connection.db;
     const memory = process.memoryUsage();
     const [pingMs, monday, drive, mid, imports, integrationJobs] = await Promise.all([
       connection.pingMs(),
       part(async () => (services.integration ? summariseMonday(await services.integration.status(req.actor)) : null)),
-      part(async () => (services.googleDrive ? summariseDrive(await services.googleDrive.status({ canManage: canManageDrive(req.actor) })) : null)),
-      part(async () => (services.midAttachments && canManageDrive(req.actor) ? midRuns(db) : null)),
+      part(async () => (services.googleDrive ? summariseDrive(await services.googleDrive.status({ canManage: viewer ? false : canManageDrive(req.actor) })) : null)),
+      part(async () => (!viewer && services.midAttachments && canManageDrive(req.actor) ? midRuns(db) : null)),
       part(async () => (enabled.spreadsheetImports ? importSummary(db) : null)),
       part(async () => jobSummary(repos.integrations))
     ]);
     const snap = monitor.snapshot();
     const search = dataLayer.searchIndex;
-    send(res, {
+    const full = {
+      scope: "admin",
       generatedAt: new Date().toISOString(),
       server: { status: pingMs === null ? "degraded" : "ok", environment, version, uptimeSeconds: Math.round(process.uptime()), node: process.version, memoryMb: { rss: Math.round(memory.rss / 1048576), heapUsed: Math.round(memory.heapUsed / 1048576) }, monitoringSince: snap.since },
       database: { status: pingMs === null ? "unavailable" : "connected", pingMs, ...snap.database },
@@ -116,7 +181,8 @@ function systemHealthRoutes({ dataLayer, access, environment, version, monitor =
         googleDrive: { ...(drive || { enabled: false }), activity: snap.integrations["google-drive"] || null }
       },
       jobs: { integration: integrationJobs, imports, midAttachments: mid, searchIndex: search ? { mode: search.mode, ready: Boolean(search.ready) } : null, recentFailures: snap.jobFailures }
-    });
+    };
+    send(res, viewer ? viewerView(full) : full);
   });
 
   router.get("/admin/activity", async (req, res) => {
@@ -167,4 +233,4 @@ async function importSummary(db) {
   return { active, failed, recent: recent.map((j) => ({ id: String(j._id), status: j.status, createdAt: iso(j.createdAt), finishedAt: iso(j.finishedAt) })) };
 }
 
-module.exports = { systemHealthRoutes, activityQuery, safeValue, activityToAdmin, summariseDrive };
+module.exports = { systemHealthRoutes, activityQuery, safeValue, activityToAdmin, summariseDrive, isSystemHealthViewer, viewerView };

@@ -606,7 +606,15 @@ describe("API Tokens and the profile menu (real app)", { skip: BROWSER ? false :
       let menu = false;
       for (let i = 0; i < 4 && !menu; i++) { await click('[data-action="profile-menu"]'); menu = await wait("!!document.querySelector('.profile-popover')", 2000); }
       assert.ok(menu);
-      assert.equal(await has('.profile-popover [data-action="developer"]'), false, "no Developer item");
+      // A JARC administrator still gets Developer for its Administration section (System Health), but no API section.
+      assert.equal(await has('.profile-popover [data-action="developer"]'), true, "Developer item (Administration)");
+      {
+        await click('.profile-popover [data-action="developer"]');
+        assert.ok(await wait("!!document.querySelector('.developer-window')", 5000), "Developer (Administration only)");
+        assert.deepEqual(JSON.parse(await b.evaluate(`JSON.stringify([...document.querySelectorAll('.developer-window [data-action="apitok-tab"]')].map((x) => x.dataset.tab))`)), ["admin"], "no API section");
+        assert.equal(await has('.developer-window [data-action="apitok-admin"][data-target="system-health"]'), true);
+        await click('.developer-window [data-action="close-overlay"]');
+      }
       assert.equal(await b.evaluate(`fetch("/api/v1/me/api-tokens").then((r) => r.status)`), 404);
     } finally { off.proc.kill(); }
   });

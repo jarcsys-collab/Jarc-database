@@ -5,6 +5,13 @@
 //   GET /:ds/schema | /:ds/records | /:ds/records/:id | /:ds/values         ds ∈ active | all | disabled | guests
 //   GET /:ds/records/:id/jarc-access                                        P2: EMPLOYEE_ADMIN_OIDS only (jarcAccess)
 //   GET|POST /saved-filters/:ds, PUT|DELETE /saved-filters/:ds/:id          (routes/employee-saved-filters.js)
+//   P3 (Access Administration, access-admin.js; JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN=true and EMPLOYEE_ADMIN_OIDS only):
+//   GET /:ds/records/:id/manage-access | /:ds/records/:id/access-history
+//   POST /:ds/records/:id/access | /:ds/records/:id/memberships
+//   PATCH|DELETE /:ds/records/:id/memberships/:workspaceRef
+//   Switched off: 404 for every method for a listed viewer or administrator; everyone else gets the router's usual answer first
+//   (signed out or a bearer token 401, not listed 403). On: anyone but an administrator 403 EMPLOYEES_FORBIDDEN. Writes: CSRF (the
+//   session middleware), their own 8 KB JSON parser (app.js), WRITES_PER_MINUTE per administrator and WRITES_IN_FLIGHT at once.
 // Who: EMPLOYEE_VIEWER_OIDS / EMPLOYEE_ADMIN_OIDS within the tenant only (access.js). A bearer token is refused (401), no
 // session → 401, anyone else → 403 EMPLOYEES_FORBIDDEN on every path (records, IDs and saved filters included). An admin
 // dataset for a viewer → 403; an unknown dataset → 404 (never echoed). Data routes are GET/HEAD only, never cached
@@ -13,16 +20,24 @@ const express = require("express");
 const { sendError, apiNotFound } = require("../middleware/errors");
 const { searchLimiter } = require("../routes/search");
 const { employeeSavedFilterRoutes } = require("../routes/employee-saved-filters");
-const { employeeError, describe, MESSAGES } = require("./errors");
+const { employeeError, invalid, describe, MESSAGES } = require("./errors");
+
+const invalidQuery = () => invalid("Unknown parameter.", "query", "unknownParameter");
 
 const READS_PER_WINDOW = 60, WINDOW_MS = 10 * 1000, PER_CALLER_IN_FLIGHT = 4;
+const WRITES_PER_MINUTE = 20, WRITES_IN_FLIGHT = 2;
+// The P3 paths (any method): answered here, never by the GET-only data routes below.
+// Case-insensitive, as Express routes are (app.js's 8 KB parser path matches the same way).
+const P3_PATH = /^\/[^/]+\/records\/[^/]+\/(?:manage-access|access|access-history|memberships(?:\/[^/]+)?)\/?$/i;
 
 // employees: createEmployees(...) result ({ service, accessFor }). savedFilterRepo: dataLayer.repos.employeeSavedFilters (or
 // null: no saved filter paths). limiter: (userKey) → boolean for the data routes. savedFilters: { readLimiter, writeLimiter,
 // maxPerDataset } passed to the saved filter routes (tests).
 // jarcAccess (P2): the JARC access index (jarc-access.js JarcAccessIndex), or null. Without it (P1 mounts, tests) nobody gets
 // jarcAccess: the JARC fields and GET /:ds/records/:id/jarc-access don't exist for anyone (403 EMPLOYEES_FORBIDDEN on that path).
-function employeeRoutes({ employees, savedFilterRepo = null, jarcAccess = null, limiter = searchLimiter({ perWindow: READS_PER_WINDOW, windowMs: WINDOW_MS }), savedFilters = {}, logger = console, perCallerInFlight = PER_CALLER_IN_FLIGHT }) {
+// accessAdmin (P3): an AccessAdminService (access-admin.js), or null while JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN is off. writeLimiter:
+// (adminKey) → boolean for the P3 writes (tests).
+function employeeRoutes({ employees, savedFilterRepo = null, jarcAccess = null, accessAdmin = null, limiter = searchLimiter({ perWindow: READS_PER_WINDOW, windowMs: WINDOW_MS }), writeLimiter = searchLimiter({ perWindow: WRITES_PER_MINUTE, windowMs: 60 * 1000 }), savedFilters = {}, logger = console, perCallerInFlight = PER_CALLER_IN_FLIGHT, writesInFlight = WRITES_IN_FLIGHT }) {
   if (!employees?.service || typeof employees.accessFor !== "function") throw new Error("employeeRoutes needs createEmployees(...).");
   if (jarcAccess && typeof jarcAccess.current !== "function") throw new Error("employeeRoutes jarcAccess must be a JarcAccessIndex.");
   const { service } = employees;
@@ -46,16 +61,47 @@ function employeeRoutes({ employees, savedFilterRepo = null, jarcAccess = null, 
   if (savedFilterRepo) router.use("/saved-filters", employeeSavedFilterRoutes({ repo: savedFilterRepo, datasetOf, ...savedFilters }));
   else router.use("/saved-filters", apiNotFound);
 
-  router.use((req, res, next) => {
-    if (req.method !== "GET" && req.method !== "HEAD") { res.set("Allow", "GET, HEAD"); return sendError(res, 405, "METHOD_NOT_ALLOWED", "The people directory is read-only."); }
+  // At most `max` requests of this caller at once in `map` (released when the response closes).
+  const admit = (map, key, max, res) => {
+    const count = map.get(key) || 0;
+    if (count >= max) return false;
+    map.set(key, count + 1);
+    let done = false;
+    res.on("close", () => { if (done) return; done = true; const left = (map.get(key) || 1) - 1; if (left > 0) map.set(key, left); else map.delete(key); });
+    return true;
+  };
+  const readGate = (req, res, next) => {
     const key = req.employeeAccess.who;
     if (limiter && !limiter(key)) { res.set("Retry-After", String(Math.ceil(WINDOW_MS / 1000))); return sendError(res, 429, "RATE_LIMITED", MESSAGES.RATE_LIMITED); }
-    const count = running.get(key) || 0;
-    if (count >= perCallerInFlight) { res.set("Retry-After", "2"); return sendError(res, 429, "RATE_LIMITED", MESSAGES.RATE_LIMITED); }
-    running.set(key, count + 1);
-    let done = false;
-    res.on("close", () => { if (done) return; done = true; const left = (running.get(key) || 1) - 1; if (left > 0) running.set(key, left); else running.delete(key); });
+    if (!admit(running, key, perCallerInFlight, res)) { res.set("Retry-After", "2"); return sendError(res, 429, "RATE_LIMITED", MESSAGES.RATE_LIMITED); }
     return next();
+  };
+
+  // ---- P3 (Access Administration), before the GET-only guard.
+  if (!accessAdmin) router.all(P3_PATH, (req, res) => { const e = employeeError("NOT_FOUND"); sendError(res, e.status, e.code, e.message); });
+  else {
+    const writing = new Map();
+    const adminOnly = (req, res, next) => (req.employeeAccess.admin === true && req.employeeAccess.jarcAccess === true ? next() : sendError(res, 403, "EMPLOYEES_FORBIDDEN", MESSAGES.EMPLOYEES_FORBIDDEN));
+    const writeGate = (req, res, next) => {
+      const key = req.employeeAccess.who;
+      if (writeLimiter && !writeLimiter(key)) { res.set("Retry-After", "60"); return sendError(res, 429, "RATE_LIMITED", MESSAGES.RATE_LIMITED); }
+      if (!admit(writing, key, writesInFlight, res)) { res.set("Retry-After", "2"); return sendError(res, 429, "RATE_LIMITED", MESSAGES.RATE_LIMITED); }
+      return next();
+    };
+    const noQuery = (req) => { if (Object.keys(req.query || {}).length) throw invalidQuery(); };
+    const p = "/:ds/records/:id";
+    router.get(`${p}/manage-access`, adminOnly, readGate, async (req, res) => { noQuery(req); send(res, await accessAdmin.manageAccess(req.params.ds, req.params.id, req.employeeAccess, req.actor)); });
+    router.get(`${p}/access-history`, adminOnly, readGate, async (req, res) => send(res, await accessAdmin.history(req.params.ds, req.params.id, req.query, req.employeeAccess)));
+    router.post(`${p}/access`, adminOnly, writeGate, async (req, res) => { noQuery(req); send(res, await accessAdmin.changeAccess(req.params.ds, req.params.id, req.body, req.employeeAccess, req.actor)); });
+    router.post(`${p}/memberships`, adminOnly, writeGate, async (req, res) => { noQuery(req); res.status(201).set("Cache-Control", "no-store").json(await accessAdmin.addMembership(req.params.ds, req.params.id, req.body, req.employeeAccess, req.actor)); });
+    router.patch(`${p}/memberships/:workspaceRef`, adminOnly, writeGate, async (req, res) => { noQuery(req); send(res, await accessAdmin.changeMembership(req.params.ds, req.params.id, req.params.workspaceRef, req.body, req.employeeAccess, req.actor)); });
+    router.delete(`${p}/memberships/:workspaceRef`, adminOnly, writeGate, async (req, res) => { noQuery(req); send(res, await accessAdmin.removeMembership(req.params.ds, req.params.id, req.params.workspaceRef, req.body, req.employeeAccess, req.actor)); });
+    router.all(P3_PATH, (req, res) => sendError(res, 405, "METHOD_NOT_ALLOWED", "This method isn't supported here."));
+  }
+
+  router.use((req, res, next) => {
+    if (req.method !== "GET" && req.method !== "HEAD") { res.set("Allow", "GET, HEAD"); return sendError(res, 405, "METHOD_NOT_ALLOWED", "The people directory is read-only."); }
+    return readGate(req, res, next);
   });
 
   // The index only for jarcAccess callers; everyone else's requests never touch it.

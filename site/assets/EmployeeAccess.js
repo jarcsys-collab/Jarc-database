@@ -8,7 +8,9 @@
 // workspaces (membership, shared access and JARC administrator badges, effective role, permissions, board count), the
 // accessible boards (linked by their public board number, /boards/{publicId}) and the policy notes in plain language.
 //
-// Read-only: no grant, revoke or edit controls. Every value is escaped; only known enum values are turned into words, and
+// Read-only: no grant, revoke or edit controls (P3 puts those on the Manage access tab, EmployeeManage.js; with
+// explorer.p.accessAdmin this tab only links there). P3 display: status Suspended / Revoked, and "Provisioned (not signed in yet)".
+// Every value is escaped; only known enum values are turned into words, and
 // nothing that looks like an internal ID is drawn (the response carries none: board numbers are the only identifiers, and
 // only all-digit ones become links). Nothing is written to localStorage, sessionStorage or IndexedDB; no request is made here.
 class EmployeeAccess {
@@ -95,7 +97,8 @@ class EmployeeAccess {
     const workspaces = EmployeeAccess.list(d.workspaces).map(EmployeeAccess.obj).filter(Boolean);
     const reach = workspaces.filter((w) => typeof w.effectiveRole === "string" && Object.hasOwn(EmployeeAccess.ROLES, w.effectiveRole)).length;
     if (acc.entraDisabledWithAccess === true) {
-      parts.push(`<div class="fx-status fx-status--error fx-status--block emp-a__alert" role="alert"><span class="fx-status__icon" aria-hidden="true">!</span><span class="fx-status__text"><strong class="emp-state__title">Disabled in Microsoft Entra ID, still has JARC access</strong> <span class="emp-state__msg">Sign-in is disabled in Microsoft Entra ID, but this person's JARC account is active${reach ? ` with access to ${e(EmployeeAccess.plural(reach, "workspace", "workspaces"))}` : acc.jarcAdmin === "yes" ? " as a JARC administrator" : ""}. JARC access isn't changed here: review it with a JARC administrator.</span></span></div>`);
+      const manage = EmployeeAccess.canManage(explorer);
+      parts.push(`<div class="fx-status fx-status--error fx-status--block emp-a__alert" role="alert"><span class="fx-status__icon" aria-hidden="true">!</span><span class="fx-status__text"><strong class="emp-state__title">Disabled in Microsoft Entra ID, still has JARC access</strong> <span class="emp-state__msg">Sign-in is disabled in Microsoft Entra ID, but this person's JARC account is active${reach ? ` with access to ${e(EmployeeAccess.plural(reach, "workspace", "workspaces"))}` : acc.jarcAdmin === "yes" ? " as a JARC administrator" : ""}. ${manage ? "Suspend the account on the Manage access tab." : "JARC access isn't changed here: review it with a JARC administrator."}</span></span>${manage ? `<span class="fx-status__actions"><button type="button" class="fx-btn" data-action="emp-p-manage" data-ds="${EmployeeAccess.attr(explorer, ds)}" data-focus-key="emp-a-manage">Open Manage access</button></span>` : ""}</div>`);
     }
     const sections = [
       EmployeeAccess.section(ds, "account", "JARC account", EmployeeAccess.accountHtml(explorer, acc)),
@@ -110,7 +113,8 @@ class EmployeeAccess {
 
   static accountHtml(explorer, acc) {
     const e = (v) => EmployeeAccess.esc(explorer, v), t = (v) => EmployeeAccess.timeHtml(explorer, v), row = (l, i, k) => EmployeeAccess.row(explorer, l, i, k);
-    const status = acc.status === "active" ? EmployeeAccess.badge("Active", "on") : acc.status === "disabled" ? EmployeeAccess.badge("Disabled in JARC", "off") : EmployeeAccess.none("Unknown");
+    const status = EmployeeAccess.statusBadge(acc.status);
+    const provisioned = EmployeeAccess.provisioned(acc);
     const admin = { yes: "Yes", no: "No", unknown: "Unknown (not signed in)" }[acc.jarcAdmin] || "Unknown";
     const precision = EmployeeAccess.int(acc.lastSignInPrecisionMinutes) || 15;
     const seen = t(acc.lastSeenAt);
@@ -118,18 +122,30 @@ class EmployeeAccess {
     const role = EmployeeAccess.obj(acc.accountRole);
     const entra = acc.entraEnabled === true ? `<span class="emp-p__text">Enabled</span>` : acc.entraEnabled === false ? EmployeeAccess.badge("Disabled", "off") : EmployeeAccess.none("Unknown");
     const rows = [
-      row("JARC account", `<span class="emp-p__text">Registered</span>`, "registered"),
+      row("JARC account", provisioned ? EmployeeAccess.badge("Provisioned (not signed in yet)", "member") : `<span class="emp-p__text">Registered</span>`, "registered"),
       row("JARC account status", status, "status"),
       row("JARC administrator", `<span class="emp-p__text">${admin}</span>`, "admin"),
       role ? row("JARC account role", `<span class="emp-p__text">${e(EmployeeAccess.str(role.role, 60) ? EmployeeAccess.humanize(role.role) : "Unknown")}${EmployeeAccess.str(role.status, 40) ? ` · ${e(EmployeeAccess.humanize(role.status))}` : ""}</span>`, "role") : "",
-      row("First JARC sign-in", t(acc.registeredAt) || EmployeeAccess.none(), "first"),
+      row("First JARC sign-in", (provisioned ? "" : t(acc.registeredAt)) || EmployeeAccess.none(provisioned ? "Not signed in yet" : "Not recorded"), "first"),
       row("Last JARC sign-in", t(acc.lastSignInAt) || EmployeeAccess.none(), "last"),
       row("Signed in to JARC now", now, "now"),
       row("Microsoft Entra sign-in", entra, "entra")
     ].join("");
-    const disabled = acc.status === "disabled" ? `<p class="emp-p__note">A JARC account that is disabled in JARC gives no access at all.</p>` : "";
-    return `<dl class="emp-p__grid">${rows}</dl>${disabled}<p class="emp-p__note">${EmployeeAccess.ADMIN_CAVEAT}</p><p class="emp-p__note">The last sign-in is recorded at most every ${e(String(precision))} minutes, so it is accurate to about ${e(String(precision))} minutes.</p>`;
+    const disabled = { disabled: "A JARC account that is disabled in JARC gives no access at all.", suspended: "A suspended JARC account gives no access: sign-in and its API tokens are refused until it is restored.", revoked: "A revoked JARC account gives no access. Its memberships are kept but give nothing; its API tokens were revoked." }[acc.status];
+    const provisionedNote = provisioned ? `<p class="emp-p__note">Pre-provisioned by an employee administrator: the account is used at the person's first Microsoft sign-in.</p>` : "";
+    return `<dl class="emp-p__grid">${rows}</dl>${disabled ? `<p class="emp-p__note">${disabled}</p>` : ""}${provisionedNote}<p class="emp-p__note">${EmployeeAccess.ADMIN_CAVEAT}</p><p class="emp-p__note">The last sign-in is recorded at most every ${e(String(precision))} minutes, so it is accurate to about ${e(String(precision))} minutes.</p>`;
   }
+  // P3: the JARC status as a badge (Active / Suspended / Revoked / Disabled in JARC for any other recorded value).
+  static statusBadge(status) {
+    if (status === "active") return EmployeeAccess.badge("Active", "on");
+    if (status === "suspended") return EmployeeAccess.badge("Suspended", "shared");
+    if (status === "revoked") return EmployeeAccess.badge("Revoked", "off");
+    if (typeof status === "string" && status) return EmployeeAccess.badge("Disabled in JARC", "off");
+    return EmployeeAccess.none("Unknown");
+  }
+  // Pre-provisioned on Grant and never signed in: provisioned true (or the account word says so) and no sign-in recorded.
+  static provisioned(acc) { return (acc?.provisioned === true || acc?.jarcAccount === "provisioned") && !acc?.lastSignInAt; }
+  static canManage(explorer) { try { return explorer?.p?.accessAdmin === true; } catch { return false; } }
   static humanize(v) { const s = String(v ?? "").replace(/[_-]+/g, " ").trim().toLowerCase(); return s ? s[0].toUpperCase() + s.slice(1) : ""; }
 
   static appHtml(explorer, list) {
@@ -222,7 +238,8 @@ class EmployeeAccess {
 
   static footerHtml(explorer, d) {
     const t = EmployeeAccess.timeHtml(explorer, d.generatedAt);
-    return `<p class="emp-p__source">Source: JARC${t ? ` · checked ${t}` : ""}. Read-only: JARC access isn't changed here.</p>`;
+    const manage = EmployeeAccess.canManage(explorer);
+    return `<p class="emp-p__source">Source: JARC${t ? ` · checked ${t}` : ""}. Read-only: ${manage ? "changes are made on the Manage access tab" : "JARC access isn't changed here"}.</p>`;
   }
 }
 if (typeof window !== "undefined") window.EmployeeAccess = EmployeeAccess;

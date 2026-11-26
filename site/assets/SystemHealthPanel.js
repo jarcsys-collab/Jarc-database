@@ -1,7 +1,15 @@
 // System Health (JARC administrators): backend and database health, API response times, slow and failing endpoints, recent
 // errors, slow MongoDB commands, integration reliability (monday.com, Google Drive) and background jobs — plus the Activity
 // History audit trail. Shows only what the server reports (GET /api/v1/admin/system-health and /admin/activity); the server
-// checks the JARC.Admin role on every request, so hiding the page from others is convenience, not protection.
+// checks every request, so hiding the page from others is convenience, not protection.
+//
+// Who sees it (/features systemHealth, decided by the server: absent = no access): JARC administrators get { view, admin,
+// activity } all true and the full report (scope "admin"); the System Health viewers (SYSTEM_HEALTH_VIEWER_OIDS) get view only
+// and a redacted report (scope "viewer": some fields are absent, so every section below is drawn only when its data is there).
+// Activity History (the audit trail, /admin/activity) is only for systemHealth.activity: no tab and no request for anyone else.
+// A server that doesn't report systemHealth at all keeps the earlier rule (JARC administrators, auth.isSystemAdmin).
+// The page has no actions that change anything (Refresh, tabs and a link to Integrations only), so viewers and administrators
+// see the same controls.
 class SystemHealthPanel {
   static TABS = [["overview", "Overview", "home"], ["integrations", "Integrations", "link"], ["activity", "Activity History", "refresh"]];
   static ACTIONS = [["", "All actions"], ["record.", "Records (any)"], ["record.created", "Record created"], ["record.updated", "Record updated"], ["record.deleted", "Record deleted"], ["records.", "Records in bulk"], ["attachment.", "Attachments (any)"], ["attachment.added", "Attachment added"], ["attachment.removed", "Attachment removed"], ["board.", "Boards"], ["workspace.", "Workspaces"], ["member.", "Members"], ["comment.", "Comments"], ["integration.", "Integrations"]];
@@ -11,20 +19,28 @@ class SystemHealthPanel {
   }
   get view() { return this.c.view; }
   get adapter() { return this.c.model.storage?.adapter; }
-  // Only signed-in administrators in resource mode; the server enforces it regardless.
-  get visible() { return this.adapter?.mode === "resource" && Boolean(this.c.auth?.isSystemAdmin); }
+  // What /features says for this person (null = not reported).
+  get access() { const f = this.c.model.features?.systemHealth; return f && typeof f === "object" ? f : null; }
+  // A server from before systemHealth was reported in /features (its features answer has no such key).
+  get legacy() { const f = this.c.model.features; return Boolean(f && typeof f === "object" && !("systemHealth" in f)); }
+  // Signed in with Microsoft (resource mode) and allowed by the server; the server enforces it regardless.
+  get visible() { if (this.adapter?.mode !== "resource") return false; const a = this.access; return a ? a.view === true : this.legacy && Boolean(this.c.auth?.isSystemAdmin); }
+  // The audit trail: administrators only (systemHealth.activity).
+  get activityAllowed() { if (!this.visible) return false; const a = this.access; return a ? a.activity === true : Boolean(this.c.auth?.isSystemAdmin); }
+  tabs() { return SystemHealthPanel.TABS.filter(([id]) => id !== "activity" || this.activityAllowed); }
   esc(v) { return this.view.escape(v ?? ""); }
 
   html() {
-    if (!this.visible) return `<section class="page-head"><div><div class="eyebrow">Settings</div><h1>System Health</h1></div></section><div class="integration-card"><p>System Health is available to JARC administrators who are signed in with Microsoft.</p></div>`;
+    if (!this.visible) return `<section class="page-head"><div><div class="eyebrow">Settings</div><h1>System Health</h1></div></section><div class="integration-card"><p>System Health is available to JARC administrators and System Health viewers who are signed in with Microsoft.</p></div>`;
+    if (this.tab === "activity" && !this.activityAllowed) this.tab = "overview";
     if (this.tab !== "activity" && !this.health && !this.loading) setTimeout(() => this.load(), 0);
     if (this.tab === "activity" && !this.activity.loaded && !this.activity.loading) setTimeout(() => this.loadActivity(), 0);
-    const tabs = SystemHealthPanel.TABS.map(([id, label, ic]) => `<button type="button" role="tab" data-action="health-tab" data-tab="${id}" aria-selected="${id === this.tab}" class="${id === this.tab ? "active" : ""}">${icon(ic)} ${label}</button>`).join("");
+    const tabs = this.tabs().map(([id, label, ic]) => `<button type="button" role="tab" data-action="health-tab" data-tab="${id}" aria-selected="${id === this.tab}" class="${id === this.tab ? "active" : ""}">${icon(ic)} ${label}</button>`).join("");
     return `<section class="page-head"><div><div class="eyebrow">Administration</div><h1>System Health</h1><p>How JARC is running right now: response times, errors, integrations and background jobs. Figures cover the time since the server last started.</p></div><div class="page-actions"><button class="button secondary" data-action="health-refresh">${icon("refresh")}<span>Refresh</span></button></div></section><div class="apitok-tabs health-tabs" role="tablist" aria-label="System Health sections">${tabs}</div><div id="health-root" class="health-page" aria-live="polite">${this.body()}</div>`;
   }
   redraw() { const root = document.querySelector("#health-root"); if (root) root.innerHTML = this.body(); }
   body() {
-    if (this.tab === "activity") return this.activityHtml();
+    if (this.tab === "activity") return this.activityAllowed ? this.activityHtml() : "";
     if (this.loading && !this.health) return `<div class="integration-card is-loading" role="status" aria-busy="true"><span class="loading-spinner" aria-hidden="true"></span> Loading System Health…</div>`;
     if (this.error && !this.health) return `<div class="integration-card"><div class="integration-alert" role="alert"><strong>System Health couldn't be loaded.</strong><span>${this.esc(this.error)}</span></div><div class="integration-actions"><button class="button secondary" data-action="health-refresh">${icon("refresh")} Try again</button></div></div>`;
     if (!this.health) return "";
@@ -49,28 +65,45 @@ class SystemHealthPanel {
   tile(label, value, note = "", tone = "") { return `<div class="health-tile ${tone ? `is-${tone}` : ""}"><span class="health-tile-label">${label}</span><strong>${value}</strong>${note ? `<small>${note}</small>` : ""}</div>`; }
   ms(v) { return v === null || v === undefined ? "—" : `${Number(v).toLocaleString(undefined, { maximumFractionDigits: 1 })} ms`; }
   when(iso) { return iso ? this.view.relative(iso) : "—"; }
+  // A number as text, or "—" when the report doesn't include it (the viewer scope leaves some fields out).
+  num(v) { return typeof v === "number" && Number.isFinite(v) ? v.toLocaleString() : "—"; }
+  has(v) { return v !== null && v !== undefined; }
   overviewHtml() {
-    const h = this.health, api = h.api, db = h.database;
+    const h = this.health || {}, api = h.api || null, db = h.database || null, server = h.server || null, list = (v) => (Array.isArray(v) ? v : null);
     const tiles = [
-      this.tile("Backend", h.server.status === "ok" ? "Healthy" : "Degraded", `Up ${this.duration(h.server.uptimeSeconds)} · ${this.esc(h.server.version)}`, h.server.status === "ok" ? "good" : "bad"),
-      this.tile("MongoDB", db.status === "connected" ? "Connected" : "Unavailable", db.pingMs === null ? "No answer to ping" : `Ping ${this.ms(db.pingMs)}`, db.status === "connected" ? "good" : "bad"),
-      this.tile("API requests", api.requests.toLocaleString(), `${api.serverErrors} server error${api.serverErrors === 1 ? "" : "s"} · ${api.errorRate}%`, api.errorRate >= 5 ? "bad" : api.errorRate > 0 ? "warn" : ""),
-      this.tile("Average", this.ms(api.avgMs), `p50 ${this.ms(api.p50Ms)}`),
-      this.tile("p95", this.ms(api.p95Ms), `p99 ${this.ms(api.p99Ms)}`, api.p95Ms >= 2000 ? "warn" : ""),
-      this.tile("Slow database commands", db.slow.toLocaleString(), `≥ ${db.slowThresholdMs} ms · ${db.failed} failed`, db.slow ? "warn" : "")
+      server ? this.tile("Backend", server.status === "ok" ? "Healthy" : "Degraded", [this.has(server.uptimeSeconds) ? `Up ${this.duration(server.uptimeSeconds)}` : "", this.has(server.version) ? this.esc(server.version) : ""].filter(Boolean).join(" · "), server.status === "ok" ? "good" : "bad") : "",
+      db ? this.tile("MongoDB", db.status === "connected" ? "Connected" : "Unavailable", db.pingMs === null ? "No answer to ping" : this.has(db.pingMs) ? `Ping ${this.ms(db.pingMs)}` : "", db.status === "connected" ? "good" : "bad") : "",
+      api ? this.tile("API requests", this.num(api.requests), this.has(api.serverErrors) ? `${api.serverErrors} server error${api.serverErrors === 1 ? "" : "s"}${this.has(api.errorRate) ? ` · ${api.errorRate}%` : ""}` : "", api.errorRate >= 5 ? "bad" : api.errorRate > 0 ? "warn" : "") : "",
+      api && this.has(api.avgMs) ? this.tile("Average", this.ms(api.avgMs), this.has(api.p50Ms) ? `p50 ${this.ms(api.p50Ms)}` : "") : "",
+      api && this.has(api.p95Ms) ? this.tile("p95", this.ms(api.p95Ms), this.has(api.p99Ms) ? `p99 ${this.ms(api.p99Ms)}` : "", api.p95Ms >= 2000 ? "warn" : "") : "",
+      db && this.has(db.slow) ? this.tile("Slow database commands", this.num(db.slow), [this.has(db.slowThresholdMs) ? `≥ ${db.slowThresholdMs} ms` : "", this.has(db.failed) ? `${db.failed} failed` : ""].filter(Boolean).join(" · "), db.slow ? "warn" : "") : ""
     ].join("");
-    const endpoint = (e) => `<tr><td><code>${this.esc(e.route)}</code></td><td data-label="Requests">${e.count.toLocaleString()}</td><td data-label="Average">${this.ms(e.avgMs)}</td><td data-label="p95">${this.ms(e.p95Ms)}</td><td data-label="p99">${this.ms(e.p99Ms)}</td><td data-label="Errors">${e.serverErrors ? `<span class="health-bad">${e.serverErrors} (${e.errorRate}%)</span>` : "0"}</td></tr>`;
-    const table = (list, empty) => list.length ? `<table class="account-table health-table"><thead><tr><th>Endpoint</th><th>Requests</th><th>Average</th><th>p95</th><th>p99</th><th>Server errors</th></tr></thead><tbody>${list.map(endpoint).join("")}</tbody></table>` : `<p class="integration-note">${empty}</p>`;
-    const errors = h.recentErrors.length ? `<table class="account-table health-table"><thead><tr><th>When</th><th>Request</th><th>Status</th><th>Code</th><th>Reference</th></tr></thead><tbody>${h.recentErrors.slice(0, 20).map((e) => `<tr><td>${this.when(e.at)}</td><td data-label="Request"><code>${this.esc(`${e.method} ${e.route}`)}</code></td><td data-label="Status">${e.status}</td><td data-label="Code">${this.esc(e.code || "—")}</td><td data-label="Reference"><code>${this.esc(e.requestId || "—")}</code></td></tr>`).join("")}</tbody></table>` : `<p class="integration-note">No errors since the server started.</p>`;
-    const slow = db.slowCommands.length ? `<table class="account-table health-table"><thead><tr><th>When</th><th>Command</th><th>Collection</th><th>Time</th><th>Result</th></tr></thead><tbody>${db.slowCommands.slice(0, 15).map((c) => `<tr><td>${this.when(c.at)}</td><td data-label="Command">${this.esc(c.command)}</td><td data-label="Collection">${this.esc(c.collection || "—")}</td><td data-label="Time">${this.ms(c.ms)}</td><td data-label="Result">${c.ok ? "OK" : `<span class="health-bad">Failed ${this.esc(c.code || "")}</span>`}</td></tr>`).join("")}</tbody></table>` : `<p class="integration-note">No database command has taken ${db.slowThresholdMs} ms or more.</p>`;
+    const endpoint = (e) => `<tr><td><code>${this.esc(e.route)}</code></td><td data-label="Requests">${this.num(e.count)}</td><td data-label="Average">${this.ms(e.avgMs)}</td><td data-label="p95">${this.ms(e.p95Ms)}</td><td data-label="p99">${this.ms(e.p99Ms)}</td><td data-label="Errors">${e.serverErrors ? `<span class="health-bad">${e.serverErrors} (${e.errorRate}%)</span>` : "0"}</td></tr>`;
+    const table = (rows, empty) => rows.length ? `<table class="account-table health-table"><thead><tr><th>Endpoint</th><th>Requests</th><th>Average</th><th>p95</th><th>p99</th><th>Server errors</th></tr></thead><tbody>${rows.map(endpoint).join("")}</tbody></table>` : `<p class="integration-note">${empty}</p>`;
+    const summary = !Array.isArray(h.recentErrors) && h.errors && typeof h.errors === "object" ? h.errors : null;
+    const recent = list(h.recentErrors), slowCmds = db ? list(db.slowCommands) : null, slowest = list(h.slowestEndpoints), failing = list(h.failingEndpoints), trend = list(h.trend);
+    const errors = recent && (recent.length ? `<table class="account-table health-table"><thead><tr><th>When</th><th>Request</th><th>Status</th><th>Code</th><th>Reference</th></tr></thead><tbody>${recent.slice(0, 20).map((e) => `<tr><td>${this.when(e.at)}</td><td data-label="Request"><code>${this.esc(`${e.method} ${e.route}`)}</code></td><td data-label="Status">${e.status}</td><td data-label="Code">${this.esc(e.code || "—")}</td><td data-label="Reference"><code>${this.esc(e.requestId || "—")}</code></td></tr>`).join("")}</tbody></table>` : `<p class="integration-note">No errors since the server started.</p>`);
+    const slow = slowCmds && (slowCmds.length ? `<table class="account-table health-table"><thead><tr><th>When</th><th>Command</th><th>Collection</th><th>Time</th><th>Result</th></tr></thead><tbody>${slowCmds.slice(0, 15).map((c) => `<tr><td>${this.when(c.at)}</td><td data-label="Command">${this.esc(c.command)}</td><td data-label="Collection">${this.esc(c.collection || "—")}</td><td data-label="Time">${this.ms(c.ms)}</td><td data-label="Result">${c.ok ? "OK" : `<span class="health-bad">Failed ${this.esc(c.code || "")}</span>`}</td></tr>`).join("")}</tbody></table>` : `<p class="integration-note">No database command has taken ${this.esc(db.slowThresholdMs ?? "")} ms or more.</p>`);
+    const foot = [h.generatedAt ? `Generated ${this.view.time(h.generatedAt)}` : "", this.has(server?.memoryMb?.rss) ? `memory ${this.num(server.memoryMb.rss)} MB` : "", server?.node ? `Node.js ${this.esc(server.node)}` : ""].filter(Boolean).join(" · ");
     return `<div class="health-tiles">${tiles}</div>
-      <section class="integration-card health-section"><h2>Requests per minute</h2>${this.trendHtml(h.trend)}</section>
-      <section class="integration-card health-section"><h2>Slowest endpoints <small>by p95</small></h2>${table(h.slowestEndpoints, "No requests have been timed yet.")}</section>
-      ${h.failingEndpoints.length ? `<section class="integration-card health-section"><h2>Failing endpoints</h2>${table(h.failingEndpoints, "")}</section>` : ""}
-      <section class="integration-card health-section"><h2>Recent errors <small>server errors, refusals and rate limits</small></h2>${errors}</section>
-      <section class="integration-card health-section"><h2>Slow database commands</h2>${slow}</section>
-      <section class="integration-card health-section"><h2>Background jobs</h2>${this.jobsHtml()}</section>
-      <p class="integration-note">Generated ${this.view.time(h.generatedAt)} · memory ${h.server.memoryMb.rss} MB · Node.js ${this.esc(h.server.node)}. Use a reference to find the matching line in the server log.</p>`;
+      ${trend ? `<section class="integration-card health-section"><h2>Requests per minute</h2>${this.trendHtml(trend)}</section>` : ""}
+      ${slowest ? `<section class="integration-card health-section"><h2>Slowest endpoints <small>by p95</small></h2>${table(slowest, "No requests have been timed yet.")}</section>` : ""}
+      ${failing?.length ? `<section class="integration-card health-section"><h2>Failing endpoints</h2>${table(failing, "")}</section>` : ""}
+      ${errors ? `<section class="integration-card health-section"><h2>Recent errors <small>server errors, refusals and rate limits</small></h2>${errors}</section>` : ""}
+      ${summary ? `<section class="integration-card health-section"><h2>Errors <small>since the server started</small></h2>${this.errorSummaryHtml(summary)}</section>` : ""}
+      ${slow ? `<section class="integration-card health-section"><h2>Slow database commands</h2>${slow}</section>` : ""}
+      ${h.jobs && typeof h.jobs === "object" ? `<section class="integration-card health-section"><h2>Background jobs</h2>${this.jobsHtml()}</section>` : ""}
+      ${foot ? `<p class="integration-note">${foot}.${recent ? " Use a reference to find the matching line in the server log." : ""}</p>` : ""}`;
+  }
+  // The viewer report's error counts (no request rows or references): { recent, byStatus: { 500: n }, byCode: { CODE: n } }.
+  errorSummaryHtml(e) {
+    const pairs = (o) => (o && typeof o === "object" ? Object.entries(o).filter(([, n]) => typeof n === "number") : []);
+    const rows = [];
+    if (typeof e.recent === "number") rows.push(["Recent errors", this.num(e.recent)]);
+    const st = pairs(e.byStatus), cd = pairs(e.byCode);
+    if (st.length) rows.push(["By status", st.map(([k, n]) => `${this.esc(k)}: ${this.num(n)}`).join(" · ")]);
+    if (cd.length) rows.push(["By code", cd.map(([k, n]) => `${this.esc(k)}: ${this.num(n)}`).join(" · ")]);
+    return rows.length ? `<dl class="integration-facts health-facts">${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>` : `<p class="integration-note">No errors since the server started.</p>`;
   }
   // A small bar chart of the last hour's requests per minute, with errors marked; the numbers are in each bar's label.
   trendHtml(trend) {
@@ -80,39 +113,41 @@ class SystemHealthPanel {
   }
   duration(s) { if (s < 120) return `${s} s`; if (s < 7200) return `${Math.round(s / 60)} min`; if (s < 172800) return `${Math.round(s / 3600)} h`; return `${Math.round(s / 86400)} days`; }
   jobsHtml() {
-    const j = this.health.jobs, rows = [];
+    const j = this.health.jobs || {}, rows = [];
     const m = j.integration?.monday;
-    if (m && !m.unavailable) rows.push(["monday.com jobs", `${m.running} running · ${m.queued} queued · ${m.retry} waiting to retry · ${m.failed} failed`, m.failed ? "bad" : ""]);
-    if (j.imports && !j.imports.unavailable) rows.push(["Excel and CSV imports", `${j.imports.active} in progress · ${j.imports.failed} failed`, j.imports.failed ? "warn" : ""]);
+    if (m && !m.unavailable) rows.push(["monday.com jobs", `${this.num(m.running)} running · ${this.num(m.queued)} queued · ${this.num(m.retry)} waiting to retry · ${this.num(m.failed)} failed`, m.failed ? "bad" : ""]);
+    if (j.imports && !j.imports.unavailable) rows.push(["Excel and CSV imports", `${this.num(j.imports.active)} in progress · ${this.num(j.imports.failed)} failed`, j.imports.failed ? "warn" : ""]);
     if (Array.isArray(j.midAttachments)) for (const r of j.midAttachments) rows.push([`Attachment import ${this.esc(r.runId)}`, `${this.esc(r.status)}${r.mode ? ` (${this.esc(r.mode)})` : ""} · ${r.remaining ?? "?"} of ${r.totalFiles ?? "?"} files left${r.pausedReason ? ` · paused: ${this.esc(r.pausedReason)}` : ""}${r.lastError ? ` · last error: ${this.esc(r.lastError)}` : ""}`, r.status === "failed" ? "bad" : r.status === "paused" ? "warn" : ""]);
     if (j.searchIndex) rows.push(["Search index", `${this.esc(j.searchIndex.mode)}${j.searchIndex.mode !== "off" ? (j.searchIndex.ready ? " · ready" : " · catching up") : ""}`, ""]);
-    for (const f of j.recentFailures || []) rows.push([`Failed: ${this.esc(f.kind)}`, `${this.when(f.at)}${f.code ? ` · ${this.esc(f.code)}` : ""}`, "bad"]);
+    if (j.recentFailures && !Array.isArray(j.recentFailures) && typeof j.recentFailures.count === "number" && j.recentFailures.count > 0) rows.push(["Recent failures", `${j.recentFailures.count}${j.recentFailures.byKind && typeof j.recentFailures.byKind === "object" ? ` · ${Object.entries(j.recentFailures.byKind).map(([k, n]) => `${this.esc(k)} ${this.num(n)}`).join(", ")}` : ""}`, "bad"]);
+    for (const f of Array.isArray(j.recentFailures) ? j.recentFailures : []) rows.push([`Failed: ${this.esc(f.kind)}`, `${this.when(f.at)}${f.code ? ` · ${this.esc(f.code)}` : ""}`, "bad"]);
     return rows.length ? `<dl class="integration-facts health-facts">${rows.map(([k, v, tone]) => `<div class="${tone ? `is-${tone}` : ""}"><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>` : `<p class="integration-note">No background jobs on this server.</p>`;
   }
 
   // ---- Integration Reliability
   integrationsHtml() {
-    const i = this.health.integrations;
+    const i = this.health.integrations || {};
     const card = (name, status, a, details, action) => {
       const state = status.unavailable ? "unknown" : status.enabled === false ? "off" : status.state || (status.connected ? "connected" : "not_connected");
       const label = { connected: "Connected", not_connected: "Not connected", needs_reconnect: "Needs reconnecting", unavailable: "Unavailable", setup_required: "Setup required", disabled: "Switched off", off: "Switched off on this server", unknown: "Status couldn't be read" }[state] || state;
       const tone = state === "connected" ? "good" : ["needs_reconnect", "unavailable", "unknown"].includes(state) ? "bad" : "";
-      const act = a ? `<dl class="integration-facts health-facts"><div><dt>Last success</dt><dd>${this.when(a.lastSuccessAt)}</dd></div><div class="${a.lastFailureAt ? "is-warn" : ""}"><dt>Last failure</dt><dd>${a.lastFailureAt ? `${this.when(a.lastFailureAt)}${a.lastError ? ` · ${this.esc(a.lastError.op || "")} ${a.lastError.status ?? ""} ${this.esc(a.lastError.code || "")}` : ""}` : "None"}</dd></div><div><dt>Requests</dt><dd>${a.ok.toLocaleString()} succeeded · ${a.failed} failed · ${a.retries} retried · ${a.timeouts} timed out</dd></div><div class="${a.rateLimited ? "is-warn" : ""}"><dt>Rate limits</dt><dd>${a.rateLimited ? `${a.rateLimited} · last ${this.when(a.lastRateLimit?.at)}${a.lastRateLimit?.retryAfterMs ? `, asked to wait ${Math.round(a.lastRateLimit.retryAfterMs / 1000)} s` : ""}` : "None"}</dd></div></dl>${a.history.length ? `<details class="health-history"><summary>Recent retries and failures (${a.history.length})</summary><table class="account-table health-table"><thead><tr><th>When</th><th>Operation</th><th>Outcome</th><th>Status</th><th>Code</th></tr></thead><tbody>${a.history.slice(0, 25).map((e) => `<tr><td>${this.when(e.at)}</td><td data-label="Operation">${this.esc(e.op || "—")}</td><td data-label="Outcome">${this.esc(e.outcome)}</td><td data-label="Status">${e.status ?? "—"}</td><td data-label="Code">${this.esc(e.code || "—")}</td></tr>`).join("")}</tbody></table></details>` : ""}` : `<p class="integration-note">No requests to ${name} since the server started.</p>`;
+      const act = a ? `<dl class="integration-facts health-facts"><div><dt>Last success</dt><dd>${this.when(a.lastSuccessAt)}</dd></div><div class="${a.lastFailureAt ? "is-warn" : ""}"><dt>Last failure</dt><dd>${a.lastFailureAt ? `${this.when(a.lastFailureAt)}${a.lastError ? ` · ${this.esc(a.lastError.op || "")} ${a.lastError.status ?? ""} ${this.esc(a.lastError.code || "")}` : ""}` : "None"}</dd></div><div><dt>Requests</dt><dd>${this.num(a.ok)} succeeded · ${this.num(a.failed)} failed · ${this.num(a.retries)} retried · ${this.num(a.timeouts)} timed out</dd></div><div class="${a.rateLimited ? "is-warn" : ""}"><dt>Rate limits</dt><dd>${a.rateLimited ? `${a.rateLimited} · last ${this.when(a.lastRateLimit?.at)}${a.lastRateLimit?.retryAfterMs ? `, asked to wait ${Math.round(a.lastRateLimit.retryAfterMs / 1000)} s` : ""}` : "None"}</dd></div></dl>${Array.isArray(a.history) && a.history.length ? `<details class="health-history"><summary>Recent retries and failures (${a.history.length})</summary><table class="account-table health-table"><thead><tr><th>When</th><th>Operation</th><th>Outcome</th><th>Status</th><th>Code</th></tr></thead><tbody>${a.history.slice(0, 25).map((e) => `<tr><td>${this.when(e.at)}</td><td data-label="Operation">${this.esc(e.op || "—")}</td><td data-label="Outcome">${this.esc(e.outcome)}</td><td data-label="Status">${e.status ?? "—"}</td><td data-label="Code">${this.esc(e.code || "—")}</td></tr>`).join("")}</tbody></table></details>` : ""}` : `<p class="integration-note">No requests to ${name} since the server started.</p>`;
       return `<section class="integration-card health-section"><div class="health-card-head"><h2>${name}</h2><span class="health-pill ${tone ? `is-${tone}` : ""}">${label}</span></div>${details}${act}${action}</section>`;
     };
-    const m = i.monday, d = i.googleDrive;
-    const mondayDetails = m.unavailable || m.enabled === false ? "" : `<p class="integration-note">${m.account ? `Account ${this.esc(m.account)} · ` : ""}${m.importedBoards} imported board${m.importedBoards === 1 ? "" : "s"} · sync ${m.sync?.enabled ? (m.sync.paused ? "paused" : "on") : "off"}${m.sync?.lastSyncAt ? ` · last sync ${this.when(m.sync.lastSyncAt)}` : ""}</p>${m.sync?.lastError ? `<p class="integration-alert" role="alert">Last sync error: ${this.esc(m.sync.lastError)}</p>` : ""}${m.failedJobs?.length ? `<p class="integration-alert" role="alert">${m.failedJobs.length} failed job${m.failedJobs.length === 1 ? "" : "s"}: ${m.failedJobs.slice(0, 3).map((f) => `${this.esc(f.type)} (${f.attempts} attempt${f.attempts === 1 ? "" : "s"}${f.error ? `: ${this.esc(f.error)}` : ""})`).join("; ")}. Retry them on the Integrations page.</p>` : ""}`;
-    const driveDetails = d.unavailable || d.enabled === false ? "" : `<p class="integration-note">${d.activeForNewUploads ? "New uploads are stored in Google Drive." : "New uploads aren't stored in Google Drive."}${d.lastError ? ` Last problem: ${this.esc(d.lastError)}${d.lastErrorAt ? ` (${this.when(d.lastErrorAt)})` : ""}.` : ""}${d.canManage ? "" : " Only the Google Drive administrators set up for JARC can see its account details and manage it."}</p>`;
+    const m = i.monday && typeof i.monday === "object" ? i.monday : null, d = i.googleDrive && typeof i.googleDrive === "object" ? i.googleDrive : null;
+    const mondayDetails = !m || m.unavailable || m.enabled === false ? "" : `<p class="integration-note">${m.account ? `Account ${this.esc(m.account)} · ` : ""}${this.num(m.importedBoards)} imported board${m.importedBoards === 1 ? "" : "s"} · sync ${(m.sync?.enabled ?? m.syncEnabled) ? ((m.sync?.paused ?? m.syncPaused) ? "paused" : "on") : "off"}${(m.sync?.lastSyncAt ?? m.lastSyncAt) ? ` · last sync ${this.when(m.sync?.lastSyncAt ?? m.lastSyncAt)}` : ""}</p>${m.sync?.lastError ? `<p class="integration-alert" role="alert">Last sync error: ${this.esc(m.sync.lastError)}</p>` : ""}${typeof m.failedJobs === "number" && m.failedJobs > 0 ? `<p class="integration-alert" role="alert">${m.failedJobs} failed job${m.failedJobs === 1 ? "" : "s"}. Retry them on the Integrations page.</p>` : ""}${Array.isArray(m.failedJobs) && m.failedJobs.length ? `<p class="integration-alert" role="alert">${m.failedJobs.length} failed job${m.failedJobs.length === 1 ? "" : "s"}: ${m.failedJobs.slice(0, 3).map((f) => `${this.esc(f.type)} (${f.attempts} attempt${f.attempts === 1 ? "" : "s"}${f.error ? `: ${this.esc(f.error)}` : ""})`).join("; ")}. Retry them on the Integrations page.</p>` : ""}`;
+    const driveDetails = !d || d.unavailable || d.enabled === false ? "" : `<p class="integration-note">${d.activeForNewUploads ? "New uploads are stored in Google Drive." : "New uploads aren't stored in Google Drive."}${d.lastError ? ` Last problem: ${this.esc(d.lastError)}${d.lastErrorAt ? ` (${this.when(d.lastErrorAt)})` : ""}.` : d.hasError ? ` A problem was reported${d.lastErrorAt ? ` ${this.when(d.lastErrorAt)}` : ""}.` : ""}${d.canManage ? "" : " Only the Google Drive administrators set up for JARC can see its account details and manage it."}</p>`;
     const next = (state) => state === "needs_reconnect" ? "Reconnect it on the Integrations page." : state === "unavailable" ? "Check the connection on the Integrations page (Test connection)." : "";
     const goto = `<div class="integration-actions"><button class="button secondary" data-action="nav" data-screen="integrations">${icon("link")} Open Integrations</button></div>`;
     const tip = (s) => { const n = next(s.state); return n ? `<p class="integration-alert" role="alert">${n}</p>` : ""; };
-    return card("monday.com", m, m.activity, mondayDetails + tip(m), goto) + card("Google Drive", d, d.activity, driveDetails + tip(d), goto)
+    const cards = (m ? card("monday.com", m, m.activity, mondayDetails + tip(m), goto) : "") + (d ? card("Google Drive", d, d.activity, driveDetails + tip(d), goto) : "");
+    return (cards || `<p class="integration-note">No integrations are reported on this server.</p>`)
       + `<p class="integration-note">Requests are retried automatically with increasing waits only when that is safe (reads, and uploads that can resume); changes are never repeated blindly. Counts cover the time since the server started.</p>`;
   }
 
   // ---- Activity History
   async loadActivity({ more = false } = {}) {
-    if (!this.visible || this.activity.loading) return;
+    if (!this.activityAllowed || this.activity.loading) return;
     const a = this.activity; a.loading = true; a.error = ""; this.redraw();
     // The date boxes hold days; what is sent are the exact start and end of those days (a.query, from onSubmit).
     const params = new URLSearchParams(Object.entries({ ...a.filters, from: a.query?.from || "", to: a.query?.to || "" }).filter(([, v]) => v));
@@ -141,7 +176,7 @@ class SystemHealthPanel {
 
   // ---- Events (routed here by AppController for every "health-…" action)
   onAction(action, target) {
-    if (action === "health-tab") { this.tab = target.dataset.tab; this.c.update(); document.querySelector(`[data-action="health-tab"][data-tab="${CSS.escape(this.tab)}"]`)?.focus(); return; }
+    if (action === "health-tab") { this.tab = this.tabs().some(([id]) => id === target.dataset.tab) ? target.dataset.tab : "overview"; this.c.update(); document.querySelector(`[data-action="health-tab"][data-tab="${CSS.escape(this.tab)}"]`)?.focus(); return; }
     if (action === "health-refresh") { if (this.tab === "activity") this.loadActivity(); else this.load(); return; }
     if (action === "health-activity-more") { this.loadActivity({ more: true }); return; }
     if (action === "health-activity-retry") { this.loadActivity(); return; }

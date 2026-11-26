@@ -23,6 +23,11 @@ class ApiTokenRepository {
   findByPublicId(publicId) { return this.tokens.findOne({ publicId }); }
   findOwned(id, ownerUserId, { product } = {}) { return this.tokens.findOne({ _id: id, ownerUserId, ...ofProduct(product) }); }
   listForOwner(ownerUserId, { limit = 100, product } = {}) { return this.tokens.find({ ownerUserId, ...ofProduct(product) }, { sort: { createdAt: -1, _id: -1 }, limit }).toArray(); }
+  // Read-only, bounded: one owner's ACTIVE tokens of one product (not revoked, not expired), only the fields a revoke needs.
+  // Used by Employee Management P3 when a person's JARC access is revoked (inside its transaction).
+  listActiveForOwner(ownerUserId, now, { limit = 5000, product, session } = {}) {
+    return this.tokens.find({ ownerUserId, revokedAt: null, expiresAt: { $gt: now }, ...ofProduct(product) }, { sort: { _id: 1 }, limit, projection: { _id: 1, ownerUserId: 1, revokedAt: 1, expiresAt: 1, workspaceId: 1, workspaceIds: 1, product: 1 }, session }).toArray();
+  }
   countActive(ownerUserId, now, { product } = {}) { return this.tokens.countDocuments({ ownerUserId, revokedAt: null, expiresAt: { $gt: now }, ...ofProduct(product) }); }
   // Any owner's tokens, newest first (API administrators). The service describes them field by field and never returns the digest.
   findById(id, { product } = {}) { return this.tokens.findOne({ _id: id, ...ofProduct(product) }); }

@@ -80,6 +80,8 @@ function loadConfig(env = process.env) {
     fabricData: loadFabricDataConfig(env, authMode),
     // Employee Management (JARC administration, read-only people directory, src/employees/): off unless JARC_FEATURE_EMPLOYEES=true.
     employees: loadEmployeeConfig(env, authMode),
+    // System Health viewers (routes/system-health.js): a redacted, read-only System Health for the listed people.
+    systemHealth: loadSystemHealthConfig(env, authMode),
     // Requests slower than this are logged by route pattern (middleware/slow-requests.js). 0 turns it off.
     slowRequestMs: loadSlowRequestMs(env),
     // MongoDB commands at least this slow are listed on the System Health page (monitoring/monitor.js). Unset: 500.
@@ -236,12 +238,29 @@ function loadFabricDataConfig(env, authMode) {
 //                                   open access or any other feature's list.
 // Also needs (when on) AUTH_MODE=entra, FABRIC_MONGODB_URI, FABRIC_MONGODB_DB_NAME (same rules as there) and JARC_API_TOKEN_KEY
 // (the key of the opaque profile IDs; no new secret).
+//   JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN  P3 (Access Administration: grant, suspend, restore and revoke JARC access, workspace
+//                                   memberships, history; EMPLOYEE_ADMIN_OIDS only). Only the exact value "true" turns it on;
+//                                   unset, empty or "false" is off; anything else stops startup. Only meaningful while
+//                                   JARC_FEATURE_EMPLOYEES=true (otherwise always off). While off, its paths answer 404 and
+//                                   /features doesn't mention it.
 const EMPLOYEE_COLLECTION = /^[A-Za-z0-9_.-]{1,64}$/;
+
+// System Health viewers (routes/system-health.js). JARC administrators (JARC.Admin) keep the full System Health and Activity
+// History; the people listed here may also VIEW System Health, as a redacted monitoring view (no Activity History).
+//   SYSTEM_HEALTH_VIEWER_OIDS   Microsoft Entra object IDs (GUIDs, comma-separated), at most 20, matched within ENTRA_TENANT_ID
+//                               only. Unset or empty: nobody (fail closed). Its own list: no other feature's list is read into
+//                               it, and it grants nothing else. Ignored (empty) unless AUTH_MODE=entra.
+function loadSystemHealthConfig(env, authMode) {
+  const viewerObjectIds = loadObjectIdList(env, "SYSTEM_HEALTH_VIEWER_OIDS", 20);
+  return Object.freeze({ viewerObjectIds: authMode === "entra" ? viewerObjectIds : Object.freeze([]) });
+}
 function loadEmployeeConfig(env, authMode) {
   const value = env.JARC_FEATURE_EMPLOYEES;
   if (value !== undefined && value !== "" && value !== "true" && value !== "false") throw new ConfigError("JARC_FEATURE_EMPLOYEES must be true or false.");
+  const adminSwitch = env.JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN;
+  if (adminSwitch !== undefined && adminSwitch !== "" && adminSwitch !== "true" && adminSwitch !== "false") throw new ConfigError("JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN must be true or false.");
   const hide = (config, uri, idKey) => Object.freeze(Object.defineProperties(config, { uri: { value: uri, enumerable: false }, idKey: { value: idKey, enumerable: false } }));
-  if (value !== "true") return hide({ enabled: false, collection: null, dbName: null, tenantId: null, viewerObjectIds: Object.freeze([]), adminObjectIds: Object.freeze([]) }, null, null);
+  if (value !== "true") return hide({ enabled: false, collection: null, dbName: null, tenantId: null, viewerObjectIds: Object.freeze([]), adminObjectIds: Object.freeze([]), accessAdmin: false }, null, null);
   if (authMode !== "entra") throw new ConfigError("JARC_FEATURE_EMPLOYEES=true needs AUTH_MODE=entra.");
   const missing = ["EMPLOYEE_DIRECTORY_COLLECTION", "FABRIC_MONGODB_URI", "FABRIC_MONGODB_DB_NAME", "JARC_API_TOKEN_KEY"].filter((name) => !env[name]);
   if (missing.length) throw new ConfigError(`JARC_FEATURE_EMPLOYEES=true needs ${missing.join(", ")}.`);
@@ -267,7 +286,7 @@ function loadEmployeeConfig(env, authMode) {
   const viewerObjectIds = loadObjectIdList(env, "EMPLOYEE_VIEWER_OIDS", 50);
   const adminObjectIds = loadObjectIdList(env, "EMPLOYEE_ADMIN_OIDS", 20);
   const tenantId = String(env.ENTRA_TENANT_ID || "").toLowerCase() || null;
-  return hide({ enabled: true, collection, dbName, tenantId, viewerObjectIds, adminObjectIds, queryTimeMs: 8000 }, uri, idKey);
+  return hide({ enabled: true, collection, dbName, tenantId, viewerObjectIds, adminObjectIds, queryTimeMs: 8000, accessAdmin: adminSwitch === "true" }, uri, idKey);
 }
 
 // The lowercased host names (without ports or credentials) of a MongoDB connection string, or null when it isn't one.

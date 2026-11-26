@@ -9,6 +9,7 @@
 //   to employeeRoutes as jarcAccess. It reads JARC's own database only, lazily (nothing runs until an admin asks).
 const { EmployeeSourceConnection } = require("./connection");
 const { JarcAccessIndex } = require("./jarc-access");
+const { AccessAdminService } = require("./access-admin");
 const { EmployeeSnapshot, directorySource } = require("./snapshot");
 const { EmployeeService } = require("./service");
 const { employeeRoutes } = require("./router");
@@ -31,4 +32,4 @@ function createEmployees({ config, logger = console, createClient, source, idKey
   return { config, connection, snapshot, service, accessFor, access: { accessFor }, close: () => (connection ? connection.close() : Promise.resolve()) };
 }
 
-module.exports = { createEmployees, employeeRoutes, employeeAccessFor, profileId, DATASETS, DATASET_NAMES, JarcAccessIndex };
+module.exports = { createEmployees, employeeRoutes, employeeAccessFor, profileId, DATASETS, DATASET_NAMES, JarcAccessIndex, AccessAdminService };

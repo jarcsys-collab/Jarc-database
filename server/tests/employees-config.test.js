@@ -57,3 +57,12 @@ test("the employee lists are their own: other features' lists are never read int
   assert.deepEqual(c.employees.viewerObjectIds, []);
   assert.deepEqual(c.employees.adminObjectIds, []);
 });
+
+test("P3: JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN is on only for exactly \"true\", only with the directory on; anything else stops startup", () => {
+  assert.equal(loadConfig(on()).employees.accessAdmin, false, "default off");
+  assert.equal(loadConfig(on({ JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN: "" })).employees.accessAdmin, false);
+  assert.equal(loadConfig(on({ JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN: "false" })).employees.accessAdmin, false);
+  assert.equal(loadConfig(on({ JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN: "true" })).employees.accessAdmin, true);
+  assert.equal(loadConfig(entraEnv({ JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN: "true" })).employees.accessAdmin, false, "meaningless while the directory is off");
+  for (const v of ["TRUE", "1", "yes", "true "]) fails(on({ JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN: v }), /JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN must be true or false/);
+});

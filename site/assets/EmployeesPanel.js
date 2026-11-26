@@ -9,6 +9,8 @@
 // all / disabled / guests only with employees.admin; anyone else (and anyone without employees.view) gets the no-access state.
 // P2 (employees.jarcAccess, the employee administrators): a profile's JARC access tab, /admin/employees/{ds}/records/{id}/access,
 // loaded from …/records/{id}/jarc-access (EmployeeAccess.js draws it), and the "Disabled with JARC access" navigation item.
+// P3 (employees.accessAdmin, the employee administrator with the access-administration switch on): a third tab, Manage access,
+// /admin/employees/{ds}/records/{id}/manage (EmployeeManage.js draws it and makes its requests; its state is this.manage).
 //
 // Nothing read here is ever stored in the browser: no localStorage, IndexedDB or BoardCache. The only browser-storage entries are
 // the explorer's column NAMES (FabricExplorer's "jarc.fabric.columns.<user>.<active|all|disabled|guests>") and the Objects panel's expanded node IDs
@@ -23,7 +25,9 @@ class EmployeesPanel {
   static GROUP_LIMIT = 500;
   static ID = /^[A-Za-z0-9_-]{22}$/;
   // A profile's JARC access tab (P2, employee administrators only) is /admin/employees/{ds}/records/{id}/access.
-  static PATH = /^\/admin\/employees(?:\/(active|all|disabled|guests)(?:\/records\/([A-Za-z0-9_-]{22})(\/access)?)?|\/groups\/(department|jobTitle|officeLocation|emailDomain))?\/?$/;
+  // P3: …/records/{id}/manage is the Manage access tab (employees.accessAdmin only).
+  static PATH = /^\/admin\/employees(?:\/(active|all|disabled|guests)(?:\/records\/([A-Za-z0-9_-]{22})(\/access|\/manage)?)?|\/groups\/(department|jobTitle|officeLocation|emailDomain))?\/?$/;
+  static TAB_PATHS = { access: "/access", manage: "/manage" };
   // The administrators' "Disabled with JARC access" list: the Disabled accounts list with this one condition.
   static JARC_DISABLED_FILTER = { v: 1, op: "and", items: [{ field: "jarcDisabledWithAccess", op: "isTrue" }] };
   static ROOT = "#employees-root";
@@ -49,13 +53,13 @@ class EmployeesPanel {
     const query = typeof FabricExplorer === "function" ? FabricExplorer.parseQuery(search) : null;
     if (!m) return { view: "list", ds: "active", recordId: "", query: null, unknown: true };
     if (m[4]) return { view: "group", group: m[4] };
-    return { view: "list", ds: m[1] || "active", recordId: m[2] || "", query, ...(m[2] && m[3] ? { tab: "access" } : {}) };
+    return { view: "list", ds: m[1] || "active", recordId: m[2] || "", query, ...(m[2] && m[3] ? { tab: m[3] === "/manage" ? "manage" : "access" } : {}) };
   }
   static formatPath(route) {
     const r = route || { view: "list", ds: "active" };
     if (r.view === "group" && EmployeesPanel.GROUPS.some(([f]) => f === r.group)) return { path: `${EmployeesPanel.BASE}/groups/${r.group}`, search: "" };
     const ds = EmployeesPanel.DATASET_VIEWS.includes(r.ds) ? r.ds : "active";
-    const rec = r.recordId && EmployeesPanel.ID.test(r.recordId) ? `/records/${encodeURIComponent(r.recordId)}${r.tab === "access" ? "/access" : ""}` : "";
+    const rec = r.recordId && EmployeesPanel.ID.test(r.recordId) ? `/records/${encodeURIComponent(r.recordId)}${Object.hasOwn(EmployeesPanel.TAB_PATHS, r.tab ?? "") ? EmployeesPanel.TAB_PATHS[r.tab] : ""}` : "";
     return { path: `${EmployeesPanel.BASE}/${ds}${rec}`, search: typeof FabricExplorer === "function" && r.query ? FabricExplorer.formatQuery(r.query) : "" };
   }
   static samePath(a, b) {
@@ -113,6 +117,7 @@ class EmployeesPanel {
     this.status = null; this.statusLoading = false; this.statusError = null;
     this.groups = {}; this.denied = false; this.forbiddenView = false; this.announced = "";
     this.access = EmployeesPanel.slot(); this.profileTab = { ds: "", id: "", tab: "" };
+    this.manage = EmployeesPanel.manager() ? EmployeesPanel.manager().slot() : null;
   }
   forget() { this.reset(); }
   static slot() { return { key: null, data: null, loading: false, error: null, seq: 0 }; }
@@ -124,6 +129,10 @@ class EmployeesPanel {
   // P2: JARC access visibility (employee administrators only). /features says so (employees.jarcAccess); a status answer that
   // says otherwise wins. The server refuses the access endpoint and the JARC fields to everyone else either way.
   get jarcAccess() { return Boolean(this.admin && this.features?.jarcAccess === true && this.status?.access?.jarcAccess !== false); }
+  // P3: Manage access (the employee administrator with JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN on). /features says so with
+  // employees.accessAdmin === true (absent = off); a status answer saying accessAdmin false wins. No flag, no tab and no hint.
+  get accessAdmin() { return Boolean(this.admin && this.features?.accessAdmin === true && this.status?.access?.accessAdmin !== false && EmployeesPanel.manager()); }
+  static manager() { try { return typeof EmployeeManage === "function" && typeof EmployeeManage.html === "function" ? EmployeeManage : null; } catch { return null; } }
   datasetAllowed(ds) {
     if (!this.visible || !EmployeesPanel.DATASET_VIEWS.includes(ds)) return false;
     if (ds === "active") return true;
@@ -149,7 +158,7 @@ class EmployeesPanel {
       if (!this.datasetAllowed(ds)) { this.forbiddenView = true; this.route = { view: "list", ds, group: "" }; }
       else {
         const x = this.explorers[ds]; if (r.query) x.applyQuery(r.query); x.openRecord(r.recordId || ""); this.route = { view: "list", ds, group: "" };
-        if (x.recordId) this.profileTab = { ds, id: x.recordId, tab: r.tab === "access" ? "access" : "profile" };
+        if (x.recordId) this.profileTab = { ds, id: x.recordId, tab: r.tab === "access" || r.tab === "manage" ? r.tab : "profile" };
       }
     }
     return before !== this.routeKey();
@@ -161,25 +170,35 @@ class EmployeesPanel {
     const ds = this.route.ds;
     if (!this.datasetAllowed(ds)) return { view: "list", ds };
     const x = this.explorers[ds];
-    return { view: "list", ds, recordId: x.recordId, query: x.query, ...(this.profileTabFor(x) === "access" ? { tab: "access" } : {}) };
+    const tab = this.profileTabFor(x);
+    return { view: "list", ds, recordId: x.recordId, query: x.query, ...(tab !== "profile" ? { tab } : {}) };
   }
 
   // ---- The profile's tabs (P2): "profile" | "access", per open profile. Without jarcAccess it is always "profile" (no tab bar,
   // and an /access address shows the profile; the address bar then drops "/access").
+  // P3 adds "manage" (Manage access) for accessAdmin; without it a /manage address shows the profile (and the address drops it).
+  tabAllowed(tab) { return tab === "profile" || (tab === "access" && this.jarcAccess) || (tab === "manage" && this.accessAdmin); }
   profileTabFor(x) {
-    if (!x?.recordId || !this.jarcAccess) return "profile";
+    if (!x?.recordId) return "profile";
     const t = this.profileTab;
-    return t.ds === x.ds && t.id === x.recordId && t.tab === "access" ? "access" : "profile";
+    return t.ds === x.ds && t.id === x.recordId && (t.tab === "access" || t.tab === "manage") && this.tabAllowed(t.tab) ? t.tab : "profile";
   }
   setProfileTab(x, tab) {
-    if (!x?.recordId || !this.jarcAccess || this.explorer !== x) return;
-    const next = tab === "access" ? "access" : "profile";
+    if (!x?.recordId || this.explorer !== x) return;
+    const next = (tab === "access" || tab === "manage") && this.tabAllowed(tab) ? tab : "profile";
     if (this.profileTabFor(x) === next) return;
     this.profileTab = { ds: x.ds, id: x.recordId, tab: next };
     this.c.update();
     this.ensure();
-    this.announce(next === "access" ? "JARC access" : "Profile");
+    this.announce({ access: "JARC access", manage: "Manage access" }[next] || "Profile");
   }
+  // What the Manage access tab draws (EmployeeManage keeps it in this.manage): the open profile's state, else loading.
+  manageState(x) {
+    const M = EmployeesPanel.manager(), s = this.manage;
+    return M && s && x?.recordId && s.key === M.path(x) ? s : { data: null, loading: true, error: null };
+  }
+  ensureManage({ keep = false } = {}) { const M = EmployeesPanel.manager(); if (M && this.accessAdmin) M.ensure(this, { keep }); }
+  retryManage() { if (this.manage) this.manage.key = null; this.ensureManage(); }
   accessPath(x) { return `${EmployeesPanel.BASE}/${encodeURIComponent(x.ds)}/records/${encodeURIComponent(x.recordId)}/jarc-access`; }
   // What the JARC access tab draws: { data, loading, error } for the open profile, or an empty loading state.
   accessState(x) {
@@ -239,7 +258,7 @@ class EmployeesPanel {
       <div class="fx-appbar__chips"><span class="fx-chip fx-chip--readonly" title="Directory data is changed by IT in Microsoft Entra ID">${icon("lock")}<span>Read-only</span></span>${this.headerRefresh() ? `<button type="button" class="fx-btn fx-btn--icon" data-action="emp-refresh" data-focus-key="emp-refresh" aria-label="Refresh" title="Refresh">${icon("refresh")}</button>` : ""}</div></header>`;
     if (!this.visible || this.denied) return `<div class="fx-app emp-app emp-app--closed" id="employees-root">${head}<div class="fx-app__body" id="employees-body">${this.deniedHtml()}</div></div>`;
     this.scheduleEnsure();
-    return `<div class="fx-app emp-app" id="employees-root" data-emp-view="${this.attr(this.route.view)}">${head}<div id="employees-status" class="fx-app__status">${this.statusHtml()}</div><p id="employees-live" class="sr-only" role="status" aria-live="polite">${this.esc(this.announced)}</p><div class="fx-app__split">${objects ? EmployeesObjects.html(this) : ""}<div id="employees-body" class="fx-app__body fabric-root" role="region" aria-labelledby="employees-title" data-focus-key="employees-body">${this.body()}</div></div></div>`;
+    return `<div class="fx-app emp-app" id="employees-root" data-emp-view="${this.attr(this.route.view)}">${head}<div id="employees-status" class="fx-app__status">${this.statusHtml()}</div><p id="employees-live" class="sr-only" role="status" aria-live="polite">${this.esc(this.announced)}</p><div class="fx-app__split">${objects ? EmployeesObjects.html(this) : ""}<div id="employees-body" class="fx-app__body fabric-root" role="region" data-module-scroll aria-labelledby="employees-title" data-focus-key="employees-body">${this.body()}</div></div></div>`;
   }
   // The navigation toggle (EmployeesObjects) with a list icon, so on phones it doesn't look like the shell's ≡ menu button.
   toggleHtml() { const h = EmployeesObjects.toggleHtml(this); return typeof h === "string" ? h : ""; }
@@ -304,6 +323,7 @@ class EmployeesPanel {
     // A profile closed (Back, another list): its tab choice is dropped, so the next profile opens on Profile.
     if (!this.explorer?.recordId && this.profileTab.id) this.profileTab = { ds: "", id: "", tab: "" };
     this.ensureAccess();
+    this.ensureManage();
   }
   async loadStatus() {
     if (this.statusLoading) return;
@@ -454,12 +474,14 @@ class EmployeesPanel {
     if (this.route.view === "group") { this.ensureGroup(this.route.group, { keep: true }); this.loadStatus(); return; }
     this.explorer?.refresh();
     this.ensureAccess({ keep: true });
+    if (this.explorer && this.profileTabFor(this.explorer) === "manage" && this.manage && !this.manage.busy) this.ensureManage({ keep: true });
     this.loadStatus().then(() => this.ensure());
   }
   retry() {
     if (this.statusError) { this.statusError = null; this.status = null; }
     for (const g of Object.values(this.groups)) if (g.error) g.key = null;
     if (this.access.error) this.access.key = null;
+    if (this.manage?.error) this.manage.key = null;
     this.explorer?.retry();
     this.c.update();
   }
@@ -472,6 +494,7 @@ class EmployeesPanel {
     if (target.tagName === "A" && !plain) return;
     if (target.tagName === "A" && !action.startsWith("emp-p-")) event?.preventDefault?.();
     if (action.startsWith("emp-p-")) { const P = EmployeesPanel.profile(), x = this.explorer; if (P && x && typeof P.onAction === "function") P.onAction(x, action, target, event); return; }
+    if (action.startsWith("emp-m-")) { if (this.accessAdmin && this.explorer?.recordId) EmployeesPanel.manager().onAction(this, action, target, event); return; }
     if (action.startsWith("emp-o-")) { if (typeof EmployeesObjects === "function") EmployeesObjects.onAction(this, action, target, event); return; }
     if (action.startsWith("fabric-s-")) { this.savedFilterAction(action, target, event); return; }
     if (EmployeesPanel.EXPLORER_PREFIXES.some((p) => action.startsWith(p))) { this.explorerFor(target)?.onAction(action, target, event); return; }
@@ -495,8 +518,12 @@ class EmployeesPanel {
   }
   explorerAction(action) { return typeof action === "string" && (EmployeesPanel.EXPLORER_PREFIXES.some((p) => action.startsWith(p)) || action.startsWith("fabric-s-")); }
   onInput(target, event) { if (this.explorerAction(target.dataset?.action)) this.explorerFor(target)?.onInput(target, event); }
-  onChange(target) { if (this.explorerAction(target.dataset?.action)) this.explorerFor(target)?.onChange(target); }
+  onChange(target) {
+    if (String(target?.dataset?.action || "").startsWith("emp-m-")) { if (this.accessAdmin) EmployeesPanel.manager().onChange(this, target); return; }
+    if (this.explorerAction(target.dataset?.action)) this.explorerFor(target)?.onChange(target);
+  }
   onSubmit(action, form) {
+    if (typeof action === "string" && action.startsWith("emp-m-")) { if (this.accessAdmin && this.explorer?.recordId) EmployeesPanel.manager().onSubmit(this, action, form); return; }
     if (action === "fabric-x-form") { this.explorerFor(form)?.onSubmit(); return; }
     if (this.explorerAction(action)) this.explorerFor(form)?.onSubmit(action, form);
   }

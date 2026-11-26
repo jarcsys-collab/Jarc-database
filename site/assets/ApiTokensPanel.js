@@ -15,6 +15,12 @@ class ApiTokensPanel {
   static FAILURES = new Set(["token.auth_failed", "token.use_refused", "token.rate_limited"]);
   // Only for the JARC API administrators (the server enforces it; this only hides what would be refused).
   static ADMIN_SECTIONS = new Set(["tokens", "explorer", "activity"]);
+  // Administration (P3): JARC administration pages launched from the Developer Center, each shown only to the people who may
+  // open it today (no new permission): System Health with SystemHealthPanel.visible (resource mode and a JARC administrator,
+  // auth.isSystemAdmin; the server's access.requireSystemAdmin decides), the People directory with /features employees.view
+  // (EmployeesPanel.visible; the server's employee lists decide). They are links to the existing pages, not sections of this
+  // window: choosing one closes it and opens the page (the People directory in its app-module layout, AppModules.js).
+  static ADMIN_LINKS = [["system-health", "System Health", "refresh", "Server, database and integration status, and the audit history."], ["employees", "People directory", "people", "The employee directory from Microsoft Entra ID, read-only."]];
   // The longest a token may last, in calendar years from its creation (services/api-token-service.js, the same rule).
   static MAX_YEARS = 5;
   static EVENTS = { "token.created": "Created", "token.rotated": "Rotated", "token.revoked": "Revoked", "token.auth_failed": "Wrong secret", "token.use_refused": "Request refused", "token.rate_limited": "Rate limited" };
@@ -40,8 +46,16 @@ class ApiTokensPanel {
   visible() { return Boolean(this.c.model.features?.apiTokens && this.adapter?.request); }
   // A JARC API administrator (the server says so in /features, for this signed-in person).
   admin() { return Boolean(this.visible() && this.c.model.features?.apiTokenAdmin); }
-  sections() { return ApiTokensPanel.SECTIONS.filter(([id]) => this.admin() || !ApiTokensPanel.ADMIN_SECTIONS.has(id)); }
-  allowed(section) { return this.sections().some(([id]) => id === section); }
+  // The API sections only when API tokens are on (visible), exactly as before; someone with only administration pages gets none.
+  sections() { return this.visible() ? ApiTokensPanel.SECTIONS.filter(([id]) => this.admin() || !ApiTokensPanel.ADMIN_SECTIONS.has(id)) : []; }
+  // The Administration entries this person may open (decided from the session and /features, which are known before anything
+  // is drawn: never shown first and removed later).
+  adminLinks() { return ApiTokensPanel.ADMIN_LINKS.filter(([id]) => (id === "system-health" ? Boolean(this.c.health?.visible) : Boolean(this.c.employees?.visible))); }
+  // The Developer entry (profile menu): anyone with an API section or an Administration entry; hidden for everyone else.
+  developerVisible() { return this.visible() || this.adminLinks().length > 0; }
+  // Where the window opens when no section was asked for: Overview with API access, else the Administration list.
+  homeTab() { return this.visible() ? "overview" : "admin"; }
+  allowed(section) { return section === "admin" ? !this.visible() && this.adminLinks().length > 0 : this.sections().some(([id]) => id === section); }
   esc(v) { return this.view.escape(v ?? ""); }
   api(method, path, body) { return this.adapter.request(method, `/me/api-tokens${path}`, body); }
   date(iso, fallback = "Never") { if (!iso) return fallback; const d = new Date(iso); return Number.isNaN(d.getTime()) ? "—" : this.esc(d.toLocaleDateString(undefined, { dateStyle: "medium" })); }
@@ -54,12 +68,16 @@ class ApiTokensPanel {
   // fresh: read tokens, workspaces and boards again (opening it from the app). Returning from one of its own dialogs keeps them.
   open(section = this.tab, { fresh = true } = {}) {
     if (fresh) { this.resetCatalog(); this.resetFilters(); this.items = null; this.events = null; this.error = ""; this.ex.data = null; this.ex.workspaceId = ""; this.ex.tokenId = ""; }
-    this.tab = this.allowed(section) ? section : "overview";
-    const nav = this.sections().map(([id, label, ic]) => `<button type="button" data-action="apitok-tab" data-tab="${id}" class="${id === this.tab ? "active" : ""}" ${id === this.tab ? 'aria-current="page"' : ""} title="${label}">${icon(ic)}<span>${label}</span></button>`).join("");
+    this.tab = this.allowed(section) ? section : this.homeTab();
+    const tab = ([id, label, ic]) => `<button type="button" data-action="apitok-tab" data-tab="${id}" class="${id === this.tab ? "active" : ""}" ${id === this.tab ? 'aria-current="page"' : ""} title="${label}">${icon(ic)}<span>${label}</span></button>`;
+    const admin = this.adminLinks(), screen = this.c.model?.screen;
+    // Without API access the Administration list is this window's only page: it is the first entry and opens selected.
+    const adminNav = admin.length ? `${this.visible() ? '<div class="apitok-nav-sep" role="separator"></div>' : tab(["admin", "Administration", "settings"])}<p class="apitok-nav-caption" aria-hidden="true">Administration</p>${admin.map(([id, label, ic]) => `<button type="button" class="apitok-nav-admin${screen === id ? " is-current" : ""}" data-action="apitok-admin" data-target="${id}" title="${label}" aria-label="${label} (opens the page)">${icon(ic)}<span>${label}</span></button>`).join("")}` : "";
+    const nav = this.sections().map(tab).join("") + adminNav;
     this.view.overlay(`<div class="settings-window developer-window" role="dialog" aria-modal="true" aria-labelledby="apitok-title"><nav class="settings-nav" aria-label="Developer sections"><div class="settings-brand"><span class="brand-mark">J</span><strong>Developer</strong></div>${nav}</nav><section class="settings-content"><div class="modal-head"><h2 id="apitok-title">${this.sectionTitle()}</h2>${this.view.closeButton()}</div><div class="settings-body"><div id="apitok-root" class="apitok">${this.body()}</div></div></section></div>`, "settings-overlay developer-overlay");
     this.c.markPanel?.("developer");
   }
-  sectionTitle() { return ApiTokensPanel.SECTIONS.find(([id]) => id === this.tab)?.[1] || "Developer"; }
+  sectionTitle() { return this.tab === "admin" ? "Administration" : ApiTokensPanel.SECTIONS.find(([id]) => id === this.tab)?.[1] || "Developer"; }
   redraw() {
     const root = document.querySelector("#apitok-root");
     if (!root) return;
@@ -68,7 +86,8 @@ class ApiTokensPanel {
     document.querySelectorAll('.developer-window .settings-nav [data-action="apitok-tab"]').forEach((b) => { const on = b.dataset.tab === this.tab; b.classList.toggle("active", on); if (on) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current"); });
   }
   body() {
-    if (!this.allowed(this.tab)) this.tab = "overview";
+    if (!this.allowed(this.tab)) this.tab = this.homeTab();
+    if (this.tab === "admin") return this.adminHtml();
     // The Explorer can use a key as its scope reference, so administrators load the key list there too.
     if (this.tab === "explorer") { if (this.admin() && !this.items && !this.loading && !this.error) setTimeout(() => this.load(), 0); return this.explorerHtml(); }
     if (this.tab === "directory") return this.directoryHtml();
@@ -97,6 +116,23 @@ class ApiTokensPanel {
 
   // ---- Overview
   // For everyone who isn't a JARC API administrator: what the API is, and where the IDs are. Tokens come from an administrator.
+  // Administration, for someone without API access: the pages they may open (nothing to load).
+  adminHtml() {
+    const items = this.adminLinks().map(([id, label, ic, text]) => `<li class="apitok-step apitok-admin-item"><span class="apitok-admin-icon" aria-hidden="true">${icon(ic)}</span><div><strong>${label}</strong><p>${text}</p><button type="button" class="button secondary" data-action="apitok-admin" data-target="${id}">Open ${label}</button></div></li>`).join("");
+    return `<div class="apitok-overview"><p class="apitok-lead">JARC administration pages you can open.</p><ul class="apitok-steps apitok-admin-list">${items}</ul></div>`;
+  }
+  // An Administration entry: the window closes, then the page opens as from the main navigation (the People directory as an app
+  // module, which remembers the workspace and board open now for "Back to …"). Developer is not reopened on the way back.
+  openAdmin(id) {
+    if (!this.adminLinks().some(([x]) => x === id)) return;
+    const c = this.c;
+    this.view.closeOverlay();
+    const mod = typeof AppModules === "function" ? AppModules.forScreen(id) : null;
+    if (mod && typeof c.enterModule === "function") c.enterModule(mod.id); else c.model.openScreen(id);
+    c.update();
+    // Focus goes to the page's heading (the opener was in the closed window).
+    requestAnimationFrame(() => { const h = document.querySelector(id === "employees" ? "#employees-title" : ".workspace .page-head h1"); if (!h) return; if (!h.hasAttribute("tabindex")) h.setAttribute("tabindex", "-1"); h.focus({ preventScroll: true }); });
+  }
   employeeOverviewHtml() {
     const step = (n, title, text, tab, button) => `<li class="apitok-step"><span class="apitok-step-n" aria-hidden="true">${n}</span><div><strong>${title}</strong><p>${text}</p><button type="button" class="button secondary" data-action="apitok-tab" data-tab="${tab}">${button}</button></div></li>`;
     return `<div class="apitok-overview"><p class="apitok-lead">Other systems such as Power BI, Power Automate and n8n can read JARC boards through a read-only REST API.</p>
@@ -604,6 +640,7 @@ class ApiTokensPanel {
   // ---- Events (data-action="apitok-…")
   onAction(action, target) {
     if (action === "apitok-tab") { this.tab = target.dataset.tab; this.redraw(); const pane = document.querySelector(".developer-window .settings-content"); if (pane) pane.scrollTop = 0; if (target.closest(".settings-nav")) document.querySelector(`.developer-window .settings-nav [data-action="apitok-tab"][data-tab="${CSS.escape(this.tab)}"]`)?.focus(); return; }
+    if (action === "apitok-admin") { this.openAdmin(target.dataset.target); return; }
     if (action === "apitok-refresh") { this.items = null; this.error = ""; this.redraw(); return; }
     if (action === "apitok-new") { this.showCreate(); return; }
     if (action.startsWith("apitok-wiz-") || action === "apitok-boards-retry" || action === "apitok-copy-all" || action === "apitok-conn-close") { this.onWizardAction(action, target); return; }

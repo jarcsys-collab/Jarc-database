@@ -93,18 +93,19 @@ describe("People directory: addresses", () => {
 });
 
 describe("People directory: gating (viewer, admin, not listed)", () => {
-  test("the nav item shows only with features.employees.view, after System Health", () => {
+  test("the entry shows only with features.employees.view, in Developer → Administration after System Health (not in the sidebar)", () => {
     const env = load();
-    const src = read("AppView.js");
-    assert.ok(src.indexOf('data-screen="employees"') > src.indexOf('data-screen="system-health"'), "after System Health");
+    const src = read("AppView.js"), dev = read("ApiTokensPanel.js");
+    assert.equal(src.includes('data-screen="employees"'), false, "not in the main sidebar");
+    assert.ok(dev.indexOf('["employees", "People directory"') > dev.indexOf('["system-health", "System Health"'), "after System Health");
     for (const employees of [null, { view: false, admin: true }]) {
       const { panel } = panelWith(env, { employees });
       assert.equal(panel.visible, false);
     }
     const { panel } = panelWith(env, { employees: VIEWER });
     assert.equal(panel.visible, true); assert.equal(panel.admin, false);
-    const nav = src.slice(src.indexOf("employeesPanel?.visible"), src.indexOf("employeesPanel?.visible") + 400);
-    assert.match(nav, /People directory/); assert.match(nav, /icon\("people"\)/);
+    assert.match(dev, /\["employees", "People directory", "people"/, "its label and icon");
+    assert.match(dev, /id === "system-health" \? Boolean\(this\.c\.health\?\.visible\) : Boolean\(this\.c\.employees\?\.visible\)/, "shown with employees.view only");
   });
   test("not listed: the no-access state, no request, no data; a direct address still shows only that", async () => {
     const env = load({ pathname: `/admin/employees/all/records/${ID1}` });

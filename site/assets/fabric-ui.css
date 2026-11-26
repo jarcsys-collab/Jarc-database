@@ -58,6 +58,16 @@ html:has(.app-shell[data-layout="module"]) body { height: 100%; overflow: hidden
   .app-shell[data-layout="module"] .global-search-button > span, .app-shell[data-layout="module"] .global-search-button > kbd { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
   .app-shell[data-layout="module"] .global-search-button .icon { width: 18px; height: 18px; }
 }
+/* The People directory as an app module (AppModules "employees"). employees.css draws it as a bounded box inside the JARC page;
+   in the module layout it fills the module body exactly like Fabric Data: no box border, no fixed height, only its regions
+   scroll, and the Directory drawer (≤1024 px) sits inside the split under the app bar, as Fabric's Objects drawer does. */
+.app-shell[data-layout="module"] .module-body > .fx-app.emp-app { flex: 1 1 auto; height: auto; min-height: 0; border: 0; border-radius: 0; }
+.app-shell[data-layout="module"] .module-body > .fx-app.emp-app .fx-app__split { min-height: 0; }
+.app-shell[data-layout="module"] .module-body > .fx-app.emp-app--closed .fx-app__body { overflow: auto; }
+@media (max-width: 1024px) {
+  .app-shell[data-layout="module"] .module-body > .fx-app.emp-app .fx-objects { position: absolute; z-index: 20; }
+  .app-shell[data-layout="module"] .module-body > .fx-app.emp-app .fx-objects__backdrop:not([hidden]) { position: absolute; z-index: 19; }
+}
 /* Very short screens: the module body may scroll as a whole rather than hide its content. */
 @media (max-height: 480px) { .module-body { overflow: auto; } }
 @media (prefers-reduced-motion: reduce) { .app-shell[data-layout="module"] .sidebar { transition: none !important; } }

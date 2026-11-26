@@ -216,7 +216,8 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
 
   describe("System Health (administrators)", () => {
     test("the page shows backend, database, timings, endpoints and jobs; tabs switch; Activity History lists and filters", async () => {
-      await b.evaluate("document.querySelector('[data-action=\"nav\"][data-screen=\"system-health\"]').click()");
+      // System Health opens from Developer → Administration (profile menu).
+      await b.evaluate("(async () => { const w = (f) => new Promise((r) => { const t = Date.now(), k = () => (f() || Date.now() - t > 5000 ? r() : setTimeout(k, 50)); k(); }); document.querySelector('.topbar [data-action=\"profile-menu\"]').click(); await w(() => document.querySelector('#overlay-root [data-action=\"developer\"]')); document.querySelector('#overlay-root [data-action=\"developer\"]').click(); await w(() => document.querySelector('.developer-window [data-target=\"system-health\"]')); document.querySelector('.developer-window [data-target=\"system-health\"]').click(); })()");
       assert.ok(await b.waitFor("!!document.querySelector('.health-tiles')", 15000), "tiles shown");
       const tiles = await b.evaluate("document.querySelector('.health-tiles').textContent");
       assert.match(tiles, /Healthy/); assert.match(tiles, /Connected/); assert.match(tiles, /p95/);
@@ -240,8 +241,7 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
     test("at phone width the page fits without sideways scrolling", async () => {
       await b.open(`${base}/`, { width: 390, height: 844 });
       await sleep(300);
-      await b.evaluate("document.querySelector('[data-action=\"toggle-nav\"]')?.click()"); await sleep(200);
-      await b.evaluate("document.querySelector('[data-action=\"nav\"][data-screen=\"system-health\"]')?.click()");
+      await b.evaluate("(async () => { const w = (f) => new Promise((r) => { const t = Date.now(), k = () => (f() || Date.now() - t > 5000 ? r() : setTimeout(k, 50)); k(); }); document.querySelector('.topbar [data-action=\"profile-menu\"]').click(); await w(() => document.querySelector('#overlay-root [data-action=\"developer\"]')); document.querySelector('#overlay-root [data-action=\"developer\"]').click(); await w(() => document.querySelector('.developer-window [data-target=\"system-health\"]')); document.querySelector('.developer-window [data-target=\"system-health\"]').click(); })()");
       assert.ok(await b.waitFor("!!document.querySelector('#health-root')", 15000));
       await b.evaluate("document.querySelector('[data-action=\"health-tab\"][data-tab=\"overview\"]').click()");
       assert.ok(await b.waitFor("!!document.querySelector('.health-tiles')", 15000));
@@ -310,7 +310,10 @@ describe("Quality upgrade (real app, headless browser)", { skip: BROWSER ? false
       assert.ok(await b.waitFor("!!document.querySelector('.files-popover')", 10000));
       assert.ok(await b.evaluate("(() => { const r = document.querySelector('.files-popover').getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth + 1; })()"), "files panel on screen");
       await press("document.activeElement || document.body", { key: "Escape" }); await sleep(200);
-      if (!(await clickSel('[data-action="nav"][data-screen="system-health"]'))) { await clickSel('[data-action="toggle-nav"]'); await sleep(200); assert.ok(await clickSel('[data-action="nav"][data-screen="system-health"]')); }
+      // System Health opens from Developer → Administration (profile menu), not from the sidebar.
+      assert.ok(await clickSel('.topbar [data-action="profile-menu"]')); assert.ok(await b.waitFor("!!document.querySelector('#overlay-root [data-action=\"developer\"]')", 5000));
+      assert.ok(await clickSel('#overlay-root [data-action="developer"]')); assert.ok(await b.waitFor("!!document.querySelector('.developer-window [data-target=\"system-health\"]')", 5000));
+      assert.ok(await clickSel('.developer-window [data-action="apitok-admin"][data-target="system-health"]'));
       assert.ok(await b.waitFor("!!document.querySelector('#health-root')", 15000));
       const ready = { overview: "!!document.querySelector('.health-tiles')", integrations: "!!document.querySelector('.health-card-head')", activity: "!!document.querySelector('.health-activity-list, .quiet-empty')" };
       for (const tab of Object.keys(ready)) {

@@ -63,6 +63,9 @@ const LAST_SIGN_IN_PRECISION_MINUTES = 15; // user-repository.js:9 PROFILE_REFRE
 const ROLE_LABEL = Object.freeze({ WORKSPACE_ADMIN: "Workspace admin", MEMBER: "Member", VIEWER: "Viewer" });
 const SOURCE_LABEL = Object.freeze({ system_admin: "JARC administrator", membership: "Membership", shared: "Shared access", membership_and_shared: "Membership and shared access" });
 const ADMIN_LABEL = Object.freeze({ yes: "Yes", no: "No", unknown: "Unknown (not signed in)" });
+// users.status → the shown status (P3 contract §5): any value not listed is "disabled" ("Disabled in JARC").
+const STATUS_OF = Object.freeze({ active: "active", suspended: "suspended", revoked: "revoked" });
+const STATUS_LABEL = Object.freeze({ active: "Active", suspended: "Suspended", revoked: "Revoked", disabled: "Disabled in JARC" });
 
 const lower = (v) => (typeof v === "string" ? v.toLowerCase() : null);
 const hex = (id) => (id === null || id === undefined ? null : typeof id.toHexString === "function" ? id.toHexString() : String(id));
@@ -88,8 +91,12 @@ class JarcAccessIndex {
     this.employeesConfig = employeesConfig;
     this.features = Object.freeze({ spreadsheetImports: features.spreadsheetImports !== false, mondayIntegration: features.mondayIntegration !== false });
     this.now = now; this.logger = logger; this.ttlMs = ttlMs;
-    this.state = null; this.inFlight = null; this.failure = null; this.attemptAt = null;
+    this.state = null; this.inFlight = null; this.failure = null; this.attemptAt = null; this.generation = 0;
   }
+
+  // P3 (Access Administration): after a write, the next current() rebuilds the index. A refresh already running when the write
+  // happened may have read the old data: its result is kept, but the one after it rebuilds again.
+  invalidate() { this.generation += 1; this.attemptAt = null; }
 
   // The current index: refreshed first when older than the TTL (single-flight). A failed refresh serves the last good one
   // (stale); with none, 503 EMPLOYEES_UNAVAILABLE.
@@ -104,6 +111,7 @@ class JarcAccessIndex {
   }
   async run() {
     this.attemptAt = this.now();
+    const generation = this.generation;
     try {
       const at = new Date(this.attemptAt);
       const [users, memberships, workspaces, boards, sessions] = await Promise.all([
@@ -112,6 +120,7 @@ class JarcAccessIndex {
       ]);
       this.state = this.build({ users, memberships, workspaces, boards, sessions, at });
       this.failure = null;
+      if (generation !== this.generation) this.attemptAt = null;
     } catch (error) {
       this.failure = "jarc_unavailable";
       this.logger.warn?.(`[employees] JARC access index refresh failed: ${describe(error)}${this.state ? "; serving the last good index" : ""}`);
@@ -175,6 +184,7 @@ class JarcAccessIndex {
     const blocked = Boolean(account && !account.legacy && account.status === "blocked");
     const pending = Boolean(enforced && account && !account.legacy && account.status === "pending");
     const usable = u.status === "active" && !blocked && !pending;
+    const provisioned = dateOf(u.provisionedAt) !== null && dateOf(u.lastLoginAt) === null;
     const live = usable ? (sessionsByUser.get(hex(u._id)) || []).filter((s) => dateOf(s.expiresAt) && s.expiresAt.getTime() > now && dateOf(s.idleExpiresAt) && s.idleExpiresAt.getTime() > now
       && s.tenantId === u.tenantId && lower(s.tenantId) === this.tenantId && s.objectId === u.entraObjectId) : [];
     // An unusable account (JARC-disabled, blocked, or pending when enforced) can't act as an administrator at all: "no".
@@ -218,8 +228,11 @@ class JarcAccessIndex {
     memberOf.sort((x, y) => byName({ name: x }, { name: y }));
     const personSource = sys ? "system_admin" : anyExplicit && shared ? "membership_and_shared" : anyExplicit ? "membership" : shared ? "shared" : null;
     return Object.freeze({
-      status: u.status === "active" ? "active" : "disabled", usable, blocked, pending, account, jarcAdmin, sys, shared,
-      registeredAt: dateOf(u.createdAt), lastSignInAt: dateOf(u.lastLoginAt), signedInNow: live.length > 0, lastSeenAt: lastSeen,
+      // P3: suspended and revoked (written by Access Administration) are shown as such; any other non-active value is "disabled".
+      // provisioned: created by an administrator (Grant or a revoke before registration) and never signed in, so there is no
+      // first sign-in yet (registeredAt null).
+      status: STATUS_OF[u.status] || "disabled", provisioned, usable, blocked, pending, account, jarcAdmin, sys, shared,
+      registeredAt: provisioned ? null : dateOf(u.createdAt), lastSignInAt: dateOf(u.lastLoginAt), signedInNow: live.length > 0, lastSeenAt: lastSeen,
       tenantId: u.tenantId, workspaces: Object.freeze(workspaces), membershipRole, memberships: memberOf.length, memberOf: Object.freeze(memberOf),
       personSource, hasAccess: anyAccess || sys
     });
@@ -250,7 +263,7 @@ class JarcAccessIndex {
   valuesOf(e, accountEnabled) {
     if (!e) return { jarcAccount: "Not registered", jarcStatus: null, jarcAdmin: null, jarcAccessSource: "None", jarcWorkspaceRole: null, jarcMemberships: null, jarcWorkspaces: null, jarcDisabledWithAccess: false, jarcSignedInNow: false, jarcRegistered: null, jarcLastSignIn: null };
     return {
-      jarcAccount: "Registered", jarcStatus: e.status === "active" ? "Active" : "Disabled in JARC", jarcAdmin: ADMIN_LABEL[e.jarcAdmin],
+      jarcAccount: e.provisioned ? "Provisioned (not signed in yet)" : "Registered", jarcStatus: STATUS_LABEL[e.status], jarcAdmin: ADMIN_LABEL[e.jarcAdmin],
       jarcAccessSource: e.personSource ? SOURCE_LABEL[e.personSource] : "None", jarcWorkspaceRole: e.membershipRole ? ROLE_LABEL[e.membershipRole] : null,
       jarcMemberships: e.memberships, jarcWorkspaces: e.memberOf.length ? e.memberOf : null,
       jarcDisabledWithAccess: this.disabledWithAccess(e, accountEnabled), jarcSignedInNow: e.signedInNow, jarcRegistered: e.registeredAt, jarcLastSignIn: e.lastSignInAt
@@ -258,6 +271,10 @@ class JarcAccessIndex {
   }
   // Disabled in Entra AND registered AND usable in JARC AND access to a workspace (or SYSTEM_ADMIN yes).
   disabledWithAccess(e, accountEnabled) { return Boolean(e && accountEnabled === false && e.usable && e.hasAccess); }
+
+  // P3 (server side only, never serialised as is): the evaluated entry for one directory record, or null (not registered or
+  // ambiguous). Its workspaces carry the internal workspace key.
+  entryOf(snap, state, record) { return state.byOid.get(snap.oidById.get(record.id)) || null; }
 
   // ---- The access endpoint body for one directory record (service.js checks the dataset, the ID and jarcAccess first).
   detail(snap, state, record) {
@@ -267,7 +284,7 @@ class JarcAccessIndex {
     const entraDisabledWithAccess = this.disabledWithAccess(e, accountEnabled);
     const notes = [];
     const account = {
-      registered: Boolean(e), status: e ? e.status : null, registeredAt: e ? isoOf(e.registeredAt) : null, lastSignInAt: e ? isoOf(e.lastSignInAt) : null,
+      registered: Boolean(e), status: e ? e.status : null, ...(e && e.provisioned ? { provisioned: true } : {}), registeredAt: e ? isoOf(e.registeredAt) : null, lastSignInAt: e ? isoOf(e.lastSignInAt) : null,
       lastSignInPrecisionMinutes: LAST_SIGN_IN_PRECISION_MINUTES, signedInNow: e ? e.signedInNow : false, lastSeenAt: e ? isoOf(e.lastSeenAt) : null,
       jarcAdmin: e ? e.jarcAdmin : null,
       accountRole: e && e.account ? { status: e.account.legacy ? "legacy" : e.account.status, role: e.account.role } : null,
@@ -288,7 +305,10 @@ class JarcAccessIndex {
       notes.push("This person has never signed in to JARC, so they have no JARC access. An enabled Microsoft account alone grants nothing.");
       if (state.policy.shared) notes.push("Shared access is on: if Microsoft lets this person sign in to JARC, their first sign-in immediately makes them a Workspace admin in every workspace.");
     } else {
-      if (e.status !== "active") notes.push("This JARC account is disabled, so it has no access at all.");
+      if (e.status === "suspended") notes.push("This JARC account is suspended, so it has no access at all until it is restored.");
+      else if (e.status === "revoked") notes.push("JARC access for this person has been revoked, so they have no access at all and can't sign in.");
+      else if (e.status !== "active") notes.push("This JARC account is disabled, so it has no access at all.");
+      if (e.provisioned) notes.push("This JARC account was created by an administrator and the person hasn't signed in yet.");
       if (e.blocked) notes.push("This JARC account is blocked in Account Management, so it has no access at all.");
       if (e.pending) notes.push("This JARC account is waiting for approval in Account Management, so it has no workspace access yet.");
       if (e.shared) notes.push("Shared access is on (development shared access or beta open editing): every signed-in employee is a Workspace admin in every workspace. It is granted at each check and never stored, so switching it off removes it at once.");

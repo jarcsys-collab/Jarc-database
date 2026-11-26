@@ -96,3 +96,107 @@
 @media print {
   .emp-p__bar, .emp-p__copy, .emp-p__section[aria-labelledby^="emp-p-contact-"] { display: none; }
 }
+
+/* P3: the Manage access tab (EmployeeManage.js; the employee administrator with the access-administration switch on).
+   Container-relative: the tab measures its own width (container query), so it fits the shell's content area and a full-height
+   module alike. Workspaces are a table; below 560 px of tab width each row becomes a card. Dialogs: fx-dialog in .fx-api-overlay. */
+.emp-manage { display: flex; flex-direction: column; gap: 10px; min-width: 0; container-type: inline-size; container-name: emp-manage; }
+.emp-manage[aria-busy="true"] { cursor: progress; }
+.emp-m__sections { align-items: start; }
+.emp-m__notice-slot:focus { outline: none; }
+.emp-m__notice-slot:empty { display: none; }
+.emp-m__notice, .emp-m__entra, .emp-m__server-warnings, .emp-m__state { margin: 0; }
+.emp-m__entra { border-width: 2px; }
+.emp-m__entra .fx-btn { white-space: normal; height: auto; min-height: var(--fx-h-btn, 26px); text-align: left; }
+.emp-m__warnings { margin: 4px 0 0; padding-left: 18px; }
+.emp-m__badge--warn { border-color: var(--fx-warn-bd, #e6c47a); background: var(--fx-warn-bg, #fff6e0); color: var(--fx-warn-fg, #6b4a00); }
+.emp-m__actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.emp-m__whys { margin: 6px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; font-size: var(--fx-text-sm, 12px); color: var(--fx-muted, #4b6178); }
+.emp-m__state-note { margin-top: 8px; }
+.emp-m__sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.emp-m__shared { margin: 0 0 8px; display: block; padding: 6px 8px; }
+.emp-m__shared-extra { display: block; margin-top: 2px; }
+.emp-m__inert { margin: 0 0 8px; }
+.emp-m__table-wrap { min-width: 0; overflow-x: auto; border: 1px solid var(--fx-border, #c9d6e3); border-radius: var(--fx-radius, 3px); }
+.emp-m__table { width: 100%; border-collapse: collapse; font-size: var(--fx-text, 13px); table-layout: fixed; }
+.emp-m__table thead th:nth-child(1) { width: 30%; }
+.emp-m__table thead th:nth-child(2) { width: 22%; }
+.emp-m__table thead th:nth-child(3), .emp-m__table thead th:nth-child(4) { width: 15%; }
+.emp-m__table thead th:nth-child(5) { width: 18%; }
+.emp-manage .emp-m__table th, .emp-manage .emp-m__table td { overflow-wrap: anywhere; white-space: normal; height: auto; max-width: none; }
+.emp-m__table th, .emp-m__table td { padding: 6px 8px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--fx-border-row, #e3eaf1); }
+.emp-m__table thead th { background: var(--fx-panel, #f4f7fa); color: var(--fx-label, #3b5068); font-size: var(--fx-text-sm, 12px); font-weight: 700; }
+.emp-m__table tbody tr:last-child > * { border-bottom: 0; }
+.emp-m__table tbody th { font-weight: 400; }
+.emp-m__ws-name { font-weight: 700; color: var(--fx-heading, #1f3d5c); }
+.emp-m__ws.is-last { background: color-mix(in srgb, var(--fx-warn-bg, #fff6e0) 55%, transparent); }
+.emp-m__last { margin: 4px 0 0; font-size: var(--fx-text-sm, 12px); color: var(--fx-warn-fg, #6b4a00); }
+.emp-m__mem .emp-m__select { width: 100%; }
+.emp-m__controls { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.emp-m__select, .emp-m__input { height: var(--fx-h-input, 26px); padding: 0 6px; border: 1px solid var(--fx-border-input, #7f95ac); border-radius: var(--fx-radius-sm, 2px); background: var(--fx-surface, #fff); color: var(--fx-text-c, #1d2b38); font: inherit; min-width: 0; max-width: 100%; }
+.emp-m__select:disabled { opacity: .6; }
+.emp-manage :is(select, input, button):focus-visible { outline: 2px solid var(--fx-focus, #1f6fb2); outline-offset: 1px; }
+.emp-m__add { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--fx-border-light, #d3dde7); }
+.emp-m__add-title { flex: 1 0 100%; margin: 0; font-size: var(--fx-text-sm, 12px); font-weight: 700; color: var(--fx-heading, #1f3d5c); }
+.emp-m__field { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-size: var(--fx-text-sm, 12px); color: var(--fx-label, #3b5068); }
+.emp-m__field .emp-m__select { min-width: 160px; }
+.emp-m__history { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; }
+.emp-m__hist { padding: 6px 0 6px 10px; border-bottom: 1px solid var(--fx-border-row, #e3eaf1); border-left: 3px solid var(--fx-ok, #2e7d32); min-width: 0; }
+.emp-m__hist:last-child { border-bottom: 0; }
+.emp-m__hist.is-rejected { border-left-color: var(--fx-err-fg, #8a1c1c); background: color-mix(in srgb, var(--fx-err-bg, #fdecec) 60%, transparent); }
+.emp-m__hist-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.emp-m__hist-action { font-weight: 700; color: var(--fx-heading, #1f3d5c); }
+.emp-m__hist-time { margin-left: auto; }
+.emp-m__hist-meta { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: var(--fx-text-sm, 12px); color: var(--fx-label, #3b5068); }
+.emp-m__hist-changes { margin: 2px 0 0; padding-left: 16px; font-size: var(--fx-text-sm, 12px); }
+.emp-m__hist-field { color: var(--fx-label, #3b5068); }
+.emp-m__hist-reason, .emp-m__hist-code, .emp-m__hist-lead { margin: 2px 0 0; font-size: var(--fx-text-sm, 12px); }
+.emp-m__hist-lead { margin: 0 0 4px; }
+.emp-m__hist-code { color: var(--fx-err-fg, #8a1c1c); }
+.emp-m__hist-error { margin: 6px 0 0; color: var(--fx-err-fg, #8a1c1c); font-size: var(--fx-text-sm, 12px); }
+.emp-m__more { margin-top: 8px; align-self: flex-start; }
+
+@container emp-manage (max-width: 560px) {
+  .emp-m__table-wrap { overflow: visible; border: 0; }
+  .emp-m__table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .emp-m__table, .emp-m__table tbody, .emp-m__table tr { display: block; width: 100%; }
+  .emp-m__table tr { margin-bottom: 8px; border: 1px solid var(--fx-border, #c9d6e3); border-radius: var(--fx-radius, 3px); background: var(--fx-surface, #fff); }
+  .emp-m__table tbody th, .emp-m__table tbody td { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; border-bottom: 1px solid var(--fx-border-row, #e3eaf1); }
+  .emp-m__table tbody th { display: block; }
+  .emp-m__table tbody td[data-label]::before { content: attr(data-label); flex: 0 0 104px; color: var(--fx-label, #3b5068); font-size: var(--fx-text-sm, 12px); font-weight: 600; }
+  .emp-m__mem .emp-m__select { flex: 1 1 140px; width: auto; }
+  .emp-m__ctl::before { display: none; }
+  .emp-m__controls { width: 100%; }
+  .emp-m__controls .fx-btn { flex: 1 1 auto; }
+  .emp-m__add .emp-m__field, .emp-m__add .fx-btn { flex: 1 1 100%; }
+  .emp-m__field .emp-m__select { min-width: 0; width: 100%; }
+  .emp-m__actions .fx-btn { flex: 1 1 auto; }
+  .emp-m__hist-time { margin-left: 0; flex-basis: 100%; }
+}
+
+/* The Manage access dialogs (in #overlay-root, outside the tab): wider than the default, full width on phones. */
+.emp-m-overlay .emp-m-dialog { width: 520px; }
+.emp-m-dialog .emp-m__dlead p { margin: 0 0 6px; }
+.emp-m-dialog .emp-m__dlead p:last-child { margin-bottom: 0; }
+.emp-m-dialog .emp-m__dfield { display: flex; flex-direction: column; gap: 3px; }
+.emp-m-dialog .emp-m__input { width: 100%; }
+.emp-m-dialog .emp-m__input[aria-invalid="true"] { border-color: var(--fx-err-fg, #8a1c1c); }
+.emp-m-dialog .fx-dialog__title:focus { outline: none; }
+/* The confirm button keeps white-on-red contrast in both themes (the dark --fx-err-fg is a light pink). */
+.emp-m-overlay .emp-m-dialog .fx-dialog__foot .fx-btn--danger { background: #b3261e; border-color: #b3261e; color: #fff; }
+.emp-m-overlay .emp-m-dialog .fx-dialog__foot .fx-btn--danger:hover:not(:disabled) { background: #9a1f18; }
+.emp-m-dialog .emp-m__dwarn { margin: 0; display: block; padding: 6px 8px; }
+.emp-m-dialog[aria-busy="true"] { cursor: progress; }
+@media (max-width: 480px) {
+  .emp-m-overlay { padding: 0; align-items: stretch; }
+  .emp-m-overlay .emp-m-dialog { width: 100%; max-width: 100%; max-height: 100dvh; height: 100%; border-radius: 0; }
+  .emp-m-dialog .fx-dialog__body { flex: 1 1 auto; }
+  .emp-m-dialog .fx-dialog__foot .fx-btn { flex: 1 1 0; height: 40px; }
+}
+@media (pointer: coarse) {
+  .emp-manage .fx-btn, .emp-m__select, .emp-m-dialog .emp-m__input { min-height: 34px; height: auto; }
+}
+@media (forced-colors: active) {
+  .emp-m__table-wrap, .emp-m__table tr, .emp-m__hist { border-color: CanvasText; }
+  .emp-m__hist.is-rejected { border-left-style: double; }
+}
