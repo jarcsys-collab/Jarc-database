@@ -245,6 +245,56 @@ describe("Column C1: Add Column picker, header menu, settings (real app, headles
     assert.deepEqual((await columns()).find((c) => c.key === "status").options, ["Queued", "Working", "Done"]);
   });
 
+  test("settings panel: a stored default is never cleared as a side effect (unreadable number input, untouched field)", async () => {
+    const openSettings = async () => {
+      await openMenu("qty");
+      await click('.column-menu-popover [data-action="column-settings"]');
+      assert.ok(await b.waitFor("!!document.querySelector('.column-settings-panel form[data-action=column-settings-form] [name=defaultValue]')", 4000));
+    };
+    const qty = async () => (await columns()).find((c) => c.key === "qty");
+    // Under load a save can start after saved() has looked: wait until the server has it (up to 8 s).
+    const storedWhen = async (ok) => { let c; for (let i = 0; i < 40; i += 1) { c = await qty(); if (ok(c)) return c; await sleep(200); } return c; };
+    await openBoard({ relations: "off" });
+    await openSettings();
+    await b.evaluate("(() => { const f = document.querySelector('[data-action=column-settings-form]'); f.defaultValue.value = '5'; f.requestSubmit(); })()");
+    await saved();
+    assert.equal(String((await storedWhen((c) => String(c.defaultValue) === "5")).defaultValue), "5");
+    assert.ok(await b.waitFor("!document.querySelector('.column-settings-panel')", 6000), "the panel closed after the save");
+    await sleep(200);
+    await openSettings();
+    await sleep(150);
+    // Type "-" into the number field: the browser can't read it (validity.badInput; its value reads as "").
+    await b.evaluate("(() => { const f = document.querySelector('[data-action=column-settings-form]'); f.description.value = 'Units on hand'; f.defaultValue.focus(); f.defaultValue.select(); })()");
+    await b.send("Input.insertText", { text: "-" });
+    assert.equal(await b.evaluate("document.querySelector('[data-action=column-settings-form] [name=defaultValue]').validity.badInput"), true);
+    // The browser's own validation stops the save; if a submit got through, the panel refuses it with a message.
+    await b.evaluate("document.querySelector('[data-action=column-settings-form]').requestSubmit()"); await sleep(300);
+    const blocked = await b.evaluate("(() => { const f = document.querySelector('[data-action=column-settings-form]'); return !!f && (!f.checkValidity() || /default value can't be read/.test(document.querySelector('#overlay-root').textContent)); })()");
+    assert.equal(blocked, true, "the panel is still open and the save was not sent");
+    await b.evaluate("document.querySelector('[data-action=column-settings-form]').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))"); await sleep(300);
+    assert.match(await b.evaluate("document.querySelector('#overlay-root').textContent"), /default value can't be read/, "a submit past the browser's check is refused too");
+    let stored = await qty();
+    assert.deepEqual([String(stored.defaultValue), stored.description || ""], ["5", ""], "nothing sent: the default is kept");
+    // The field left as it was: only the description is sent; the default stays.
+    await b.evaluate("(() => { const f = document.querySelector('[data-action=column-settings-form]'); f.defaultValue.value = '5'; f.requestSubmit(); })()");
+    await saved();
+    stored = await storedWhen((c) => c.description === "Units on hand");
+    assert.deepEqual([String(stored.defaultValue), stored.description], ["5", "Units on hand"]);
+  });
+
+  test("setup step Back returns to the picker still 'to the right' of its column", async () => {
+    await openBoard({ relations: "on" });
+    await openMenu("status");
+    await click('.column-menu-popover [data-action="add-column-right"]');
+    assert.ok(await b.waitFor("!!document.querySelector('.column-picker[data-insert-after=\"status\"] .column-picker-option[data-type=\"connect\"]')", 4000));
+    await click('.column-picker-option[data-type="connect"]');
+    assert.ok(await b.waitFor("!!document.querySelector('#overlay-root .column-name-step [data-action=add-column]')", 4000), "the Connect setup step");
+    await click('#overlay-root .column-name-step [data-action="add-column"]');
+    assert.ok(await b.waitFor("!!document.querySelector('.column-picker[data-insert-after=\"status\"]')", 4000), "back in the picker for the right of Status");
+    assert.match(await text(".column-picker-title small"), /After Status/);
+    await b.key("Escape");
+  });
+
   test("dark mode: the picker and menu use the dark surface and readable text", async () => {
     await openBoard({ theme: "dark", relations: "off" });
     await b.evaluate("document.documentElement.dataset.theme = 'dark'"); await sleep(100);

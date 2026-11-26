@@ -67,6 +67,10 @@ describe("Header menu: permissions follow the server's roles", () => {
     const { out } = menu(view, model({ role: "MEMBER" }), "amount");
     assert.ok(out[BOARD].includes("rename-column") && out[BOARD].includes("column-settings") && out[BOARD].includes("add-column-right"));
     assert.ok(!out[BOARD].includes("change-column-type") && !out[BOARD].includes("request-delete-column"));
+    // The Dropdown one/several switch goes through POST …/columns/:key/type (WORKSPACE_ADMIN): not offered to a member.
+    const tags = menu(view, model({ role: "MEMBER" }), "tags").out[BOARD];
+    assert.ok(tags.includes("edit-column-options") && !tags.includes("toggle-column-multiple"), tags.join(","));
+    assert.ok(menu(view, model(), "tags").out[BOARD].includes("toggle-column-multiple"), "an admin still has it");
   });
   test("viewer: view items only, a note, and no + header button", () => {
     const { view } = load();
@@ -191,6 +195,50 @@ describe("Settings panel", () => {
     assert.doesNotMatch(status, /name="defaultValue"/);
     assert.ok(view.columnSettings.html(model(), "status", { section: "labels" }).indexOf("option-editor") < view.columnSettings.html(model(), "status", { section: "labels" }).indexOf("column-settings-form"), "labels first when opened from Edit labels");
     assert.match(view.columnSettings.html(model(), "tags"), /data-action="toggle-column-multiple" data-key="tags">Allow one value only/);
+  });
+  test("a member: renames, adds and reorders labels, but no Remove buttons (said so) and no one/several switch; an admin has both", () => {
+    const { view } = load();
+    const member = view.columnSettings.html(model({ role: "MEMBER" }), "status", { section: "labels" });
+    assert.match(member, /data-action="column-options-form"/); assert.match(member, /class="option-name"/);
+    assert.match(member, /data-action="add-option-row"/); assert.match(member, /data-action="move-option-row"/);
+    assert.doesNotMatch(member, /data-action="remove-option-row"/);
+    assert.match(member, /Only workspace admins can remove labels\./);
+    assert.doesNotMatch(view.columnSettings.html(model({ role: "MEMBER" }), "tags"), /toggle-column-multiple|remove-option-row/);
+    assert.match(view.columnSettings.html(model({ role: "MEMBER" }), "tags"), /Only workspace admins can remove options\./);
+    const admin = view.columnSettings.html(model(), "status", { section: "labels" });
+    assert.match(admin, /data-action="remove-option-row"/); assert.doesNotMatch(admin, /Only workspace admins/);
+    assert.match(view.optionRow(), /remove-option-row/, "a new, unsaved row can still be taken out");
+  });
+  test("Connect and Mirror: no Required and no default value (the server refuses both)", () => {
+    const { view } = load();
+    const cols = [{ key: "serial", label: "Item", type: "text" }, { key: "site", label: "Site", type: "connect", link: { boardId: "b2" } }, { key: "region", label: "Region", type: "mirror", mirror: { via: "site", column: "r" } }, { key: "notes", label: "Notes", type: "text" }];
+    for (const key of ["site", "region"]) {
+      const html = view.columnSettings.html(model({ columns: cols }), key);
+      assert.match(html, /data-action="column-settings-form"/, key);
+      assert.doesNotMatch(html, /name="required"|name="defaultValue"/, key);
+    }
+    assert.match(view.columnSettings.html(model({ columns: cols }), "notes"), /name="required"/);
+  });
+  test("the default value is sent only when edited and readable: data-original, compared as that field shows it", () => {
+    const { context, view } = load();
+    const html = view.columnSettings.html(model({ columns: [{ key: "serial", label: "Item", type: "text" }, { key: "qty", label: "Qty", type: "number", defaultValue: "5" }] }), "qty");
+    assert.match(html, /name="defaultValue" type="number" step="any" value="5" data-original="5"/);
+    const edit = context.ColumnSettings.defaultEdit;
+    // A fake number field: setting a probe's value keeps numbers and shows any other text as "" (like <input type=number>).
+    const field = (value, original, { badInput = false } = {}) => ({ value, dataset: { original }, validity: { badInput }, cloneNode: () => { const p = { v: "" }; Object.defineProperty(p, "value", { get: () => p.v, set: (x) => { p.v = /^-?\d+(\.\d+)?$/.test(x) ? x : ""; } }); return p; } });
+    assert.deepEqual({ ...edit(field("5", "5")) }, { edited: false, invalid: false, value: "5" }, "untouched");
+    assert.deepEqual({ ...edit(field("7", "5")) }, { edited: true, invalid: false, value: "7" }, "changed");
+    assert.deepEqual({ ...edit(field("", "5")) }, { edited: true, invalid: false, value: "" }, "cleared on purpose");
+    assert.equal(edit(field("", "5", { badInput: true })).invalid, true, "unreadable input: nothing is sent");
+    assert.equal(edit(field("", "5", { badInput: true })).edited, false);
+    assert.equal(edit(field("", "about 5")).edited, false, "a stored default the field can't show is not cleared");
+    assert.equal(edit(null).edited, false); assert.equal(edit({ value: "x", dataset: {} }).edited, false, "no data-original: not this panel's field");
+  });
+  test("a11y: no live region on the picker hint; Back on the Change type page is a menuitem; Change type has no aria-haspopup", () => {
+    const { view } = load();
+    assert.doesNotMatch(view.columnPicker.html(model()), /aria-live/);
+    assert.match(view.columnMenu.typePage(model(), "amount"), /<button type="button" role="menuitem" class="icon-button column-menu-back"/);
+    assert.doesNotMatch(view.columnMenu.html(model(), "amount"), /aria-haspopup="menu"/);
   });
   test("a viewer sees no forms", () => {
     const { view } = load();

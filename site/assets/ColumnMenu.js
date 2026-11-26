@@ -74,9 +74,11 @@ class ColumnMenu {
       item("edit-column-description", "info", c.description ? "Edit description" : "Add description"),
       item("column-settings", "settings", "Settings…"),
       optionable ? item("edit-column-options", "list", "Edit labels") : "",
-      c.type === "dropdown" ? item("toggle-column-multiple", "list", c.multiple ? "Allow one value only" : "Allow several values") : "",
+      // One ↔ several values goes through POST …/columns/:key/type (WORKSPACE_ADMIN), so only admins are offered it.
+      perm.admin && c.type === "dropdown" ? item("toggle-column-multiple", "list", c.multiple ? "Allow one value only" : "Allow several values") : "",
       c.type === "group" ? `<button role="menuitem" data-action="manage-groups">${v.iconHtml("group")} <span class="menu-label">Manage groups</span></button>` : "",
-      targets.length ? item("change-column-type", "swap", "Change type", 'aria-haspopup="menu"') + "" : "",
+      // Its targets replace the menu's items in place (no second popup), so no aria-haspopup.
+      targets.length ? item("change-column-type", "swap", "Change type") : "",
       item("add-column-right", "plus", `Add column to the right${full ? reason("200 columns at most") : ""}`, full ? "disabled" : ""),
       primary || !this.can(c, "duplicate") ? "" : item("duplicate-column", "copy", "Duplicate column"),
       inView ? "" : arrange
@@ -102,7 +104,7 @@ class ColumnMenu {
     const v = this.view, c = model.board.columns.find((item) => item.key === key); if (!c) return "";
     const targets = this.conversionTargets(model, c);
     const option = (d) => `<button role="menuitem" class="column-type-target" data-action="choose-new-type" data-key="${v.attr(c.key)}" data-type="${v.attr(d.id)}">${typeof d.icon === "string" && d.icon.trim().startsWith("<svg") ? `<span class="column-picker-icon" aria-hidden="true">${d.icon}</span>` : v.columnTypeIcon(d.id)} <span class="menu-label">${v.escape(d.label || model.columnType(d.id)?.label || d.id)}</span></button>`;
-    return `<div class="popover-title column-menu-page-title"><button type="button" class="icon-button column-menu-back" data-action="column-menu-page" data-key="${v.attr(c.key)}" data-page="main" aria-label="Back to the column menu" title="Back">${v.iconHtml("left")}</button><strong>Change type</strong><small>${v.escape(model.columnType(c.type)?.label || c.type)} → …</small></div>${`<div class="menu-section-label column-scope is-board" role="presentation"><span>${ColumnMenu.BOARD_SCOPE}</span></div>`}${targets.map(option).join("") || '<p class="menu-note">This column can\'t be converted.</p>'}<p class="menu-note">Only types these values can move to are listed. JARC checks every record first; nothing changes until you confirm, and a change that would lose values is refused.</p>`;
+    return `<div class="popover-title column-menu-page-title"><button type="button" role="menuitem" class="icon-button column-menu-back" data-action="column-menu-page" data-key="${v.attr(c.key)}" data-page="main" aria-label="Back to the column menu" title="Back">${v.iconHtml("left")}</button><strong>Change type</strong><small>${v.escape(model.columnType(c.type)?.label || c.type)} → …</small></div>${`<div class="menu-section-label column-scope is-board" role="presentation"><span>${ColumnMenu.BOARD_SCOPE}</span></div>`}${targets.map(option).join("") || '<p class="menu-note">This column can\'t be converted.</p>'}<p class="menu-note">Only types these values can move to are listed. JARC checks every record first; nothing changes until you confirm, and a change that would lose values is refused.</p>`;
   }
 }
 window.ColumnMenu = ColumnMenu;

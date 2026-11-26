@@ -864,7 +864,8 @@ class AppController {
     if (action === "confirm-delete-group") { const name=target.dataset.payload, fallback=this.model.board.groups.find((group)=>group!==name); this.runBusy(target,()=>this.model.deleteGroup(name,fallback),()=>{this.view.closeOverlay();this.update();this.view.toast("Group deleted");}); }
     if (action === "manage-columns") this.togglePanel("columns",()=>this.view.showColumnManager(this.model));
     // Column System C1: the Add Column picker, its "to the right" form, the menu's pages and the settings panel.
-    if (action === "add-column") { this.openColumnPicker(target); return; }
+    // Back from a setup step (Connect / Mirror) returns to the picker it came from, still "to the right" of its column.
+    if (action === "add-column") { const after=target.dataset.insertAfter||""; if(after&&this.model.board?.columns.some((c)=>c.key===after)){this.view.closeOverlay();this.openColumnPicker(this.root.querySelector(`.editable-table thead th[data-column-key="${CSS.escape(after)}"]`),{insertAfter:after});return;} this.openColumnPicker(target); return; }
     if (action === "add-column-right") { const key=target.dataset.key; this.view.closeOverlay(); this.openColumnPicker(this.root.querySelector(`.editable-table thead th[data-column-key="${CSS.escape(key)}"]`),{insertAfter:key}); return; }
     if (action === "column-picker-choose") { this.createColumnFromPicker(target.dataset.type,target); return; }
     if (action === "column-menu-page" || action === "change-column-type") { if(this.view.columnMenu&&document.querySelector("#overlay-root .column-menu-popover"))this.view.showColumnMenuPage(this.model,target.dataset.key,action==="change-column-type"?"type":"main"); else this.view.showColumnChooser(this.model,{mode:"change",key:target.dataset.key}); return; }
@@ -1287,13 +1288,17 @@ class AppController {
       this.view.closeOverlay(); this.update(); return;
     }
     if (action === "create-column-form") { let column; this.runBusy(event.submitter,()=>{const [via,source]=String(data.mirrorPair||"").split("|");column=this.model.addColumn({label:data.label,type:data.type,options:data.options||"",multiple:data.multiple==="on",link:data.linkBoard?{boardId:data.linkBoard}:null,mirror:via&&source?{via,column:source,show:data.mirrorShow||"list"}:null});if(column&&data.insertAfter)this.placeNewColumn(column,data.insertAfter);return column?undefined:false;},()=>{this.view.closeOverlay();this.update();this.view.columnPicker?.remember(this.model,data.type);this.root.querySelector(`th[data-column-key="${CSS.escape(column.key)}"]`)?.scrollIntoView({block:"nearest",inline:"nearest"});this.view.toast(`${column.label} column added`,true);}); }
-    // The settings panel's details (ColumnSettings.js): only what changed is sent, in one request, and shown once the server has it.
+    // The settings panel's details (ColumnSettings.js): only what changed is sent (name and description in one save, the
+    // other details in a second; one Undo step for both), and shown once the server has it. The default value is sent only
+    // when the person edited that field and the browser could read it: a stored default is never cleared as a side effect.
     if (action === "column-settings-form") {
       const column=this.model.board.columns.find((c)=>c.key===data.key); if(!column)return;
       const label=String(data.label||"").trim(), description=String(data.description||"").trim().slice(0,500); if(!label){this.view.showDialogError("Give the column a name.");return;}
-      const patch={};
-      if("defaultValue" in data&&String(data.defaultValue??"")!==String(column.defaultValue??""))patch.defaultValue=String(data.defaultValue??"");
-      if(column.key!=="serial"&&(data.required==="on")!==Boolean(column.required))patch.required=data.required==="on";
+      const patch={}, relation=column.type==="connect"||column.type==="mirror";
+      const field=event.target.elements?.namedItem?.("defaultValue")||null, edit=field&&window.ColumnSettings?.defaultEdit?ColumnSettings.defaultEdit(field):{edited:false,invalid:false,value:""};
+      if(edit.invalid){this.view.showDialogError("The default value can't be read. Correct it or clear the field.");return;}
+      if(!relation&&edit.edited&&edit.value!==String(column.defaultValue??""))patch.defaultValue=edit.value;
+      if(column.key!=="serial"&&!relation&&(data.required==="on")!==Boolean(column.required))patch.required=data.required==="on";
       if(String(data.connection||"").trim()!==String(column.connection||""))patch.connection=String(data.connection||"").trim();
       const named=label!==column.label||description!==(column.description||"");
       if(!named&&!Object.keys(patch).length){this.view.closeOverlay();return;}
