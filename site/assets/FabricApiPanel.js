@@ -139,7 +139,8 @@ class FabricApiPanel {
       const [label, tone] = FabricApiPanel.STATUS[t.status] || [t.status || "Unknown", "muted"];
       const revoked = t.status === "revoked" && t.revokedBy?.name ? ` <small class="fx-api__sub">by ${this.esc(t.revokedBy.name)}</small>` : "";
       const requests = Number.isFinite(Number(t.requestCount)) ? Number(t.requestCount).toLocaleString() : "—";
-      const action = this.canRevoke(t) ? `<button type="button" class="fx-btn fx-btn--danger fx-btn--sm" data-action="fabric-api-revoke" data-id="${this.esc(t.id)}" data-focus-key="revoke-${this.esc(t.id)}" aria-label="Revoke ${this.esc(t.name)}">Revoke</button>` : "";
+      const details = `<button type="button" class="fx-btn fx-btn--sm" data-action="fabric-api-details" data-id="${this.esc(t.id)}" data-focus-key="details-${this.esc(t.id)}" aria-label="Connection details of ${this.esc(t.name)}">Connection details</button>`;
+      const action = `${details}${this.canRevoke(t) ? ` <button type="button" class="fx-btn fx-btn--danger fx-btn--sm" data-action="fabric-api-revoke" data-id="${this.esc(t.id)}" data-focus-key="revoke-${this.esc(t.id)}" aria-label="Revoke ${this.esc(t.name)}">Revoke</button>` : ""}`;
       return `<tr><th class="fx-grid__frozen" scope="row" data-label="Name"><strong>${this.esc(t.name)}</strong>${t.description ? `<small class="fx-api__sub" title="${this.esc(t.description)}">${this.esc(t.description)}</small>` : ""}</th><td data-label="Prefix" class="fx-api__mono"><code>${this.esc(t.prefix)}…</code></td><td data-label="Datasets">${this.scopeBadges(t.scopes)}</td><td data-label="Status"><span class="account-badge fx-api__status is-${tone}">${this.esc(label)}</span>${revoked}</td><td data-label="Owner">${this.ownerHtml(t)}</td><td data-label="Created">${this.date(t.createdAt)}</td><td data-label="Expires">${t.status === "revoked" ? "—" : this.date(t.expiresAt)}</td><td data-label="Last used">${this.dateTime(t.lastUsedAt)}</td><td data-label="Requests" class="fx-grid__num fabric-num">${requests}</td><td data-label="" class="fx-api__actions">${action}</td></tr>`;
     }).join("");
     // With only a few keys the grid still fills the pane; a short hint sits in its empty area instead of a blank page.
@@ -216,7 +217,8 @@ class FabricApiPanel {
     root.innerHTML = `<div class="overlay apitok-overlay fx-api-overlay" data-keep-open="1"><div class="fx-dialog fx-api-dialog apitok-modal" role="dialog" aria-modal="true" aria-labelledby="fabric-api-reveal-title">${this.dialogHead("fabric-api-reveal-title", "API key created", { close: false })}
       <div class="fx-dialog__body"><div class="fx-status fx-status--warn" role="status"><span class="fx-status__msg"><strong>Copy this key now. It is shown once: you won't see it again.</strong> Keep it in a secure backend or an approved secret store, never in public JavaScript, an address or a shared file. Closing this window forgets it.</span></div>
       <div class="fx-api__secret apitok-secret"><input id="fabric-api-secret" class="fx-field__value fx-field__value--key" type="text" readonly spellcheck="false" autocomplete="off" aria-label="Your Fabric API key" value="${this.esc(secret)}"><button type="button" class="fx-btn" data-action="fabric-api-copy">${icon("copy")}<span>Copy key</span></button></div>
-      <dl class="fx-api__review apikey-review"><div><dt>Name</dt><dd>${this.esc(t.name)}</dd></div><div><dt>Expires</dt><dd>${this.dateTime(t.expiresAt, "—")}</dd></div><div><dt>Datasets</dt><dd>Read-only · ${this.scopeBadges(t.scopes)}</dd></div><div><dt>Base URL</dt><dd><code>${this.esc(`${window.location.origin}/api/v1/external/fabric`)}</code></dd></div></dl></div>
+      <dl class="fx-api__review apikey-review"><div><dt>Name</dt><dd>${this.esc(t.name)}</dd></div><div><dt>Expires</dt><dd>${this.dateTime(t.expiresAt, "—")}</dd></div><div><dt>Datasets</dt><dd>Read-only · ${this.scopeBadges(t.scopes)}</dd></div></dl>
+      ${this.connectionHtml(t)}</div>
       <div class="fx-dialog__foot"><button type="button" class="fx-btn fx-btn--primary" data-action="fabric-api-done">I've saved it</button></div></div></div>`;
     const input = typeof document !== "undefined" ? document.querySelector("#fabric-api-secret") : null;
     input?.focus?.(); input?.select?.();
@@ -234,6 +236,75 @@ class FabricApiPanel {
     const input = typeof document !== "undefined" ? document.querySelector("#fabric-api-secret") : null;
     if (input) { input.value = ""; input.setAttribute?.("value", ""); }
     this.view.closeOverlay(); this.refresh();
+  }
+
+  // ---- Connection details: a new key's dialog and Connection details on an existing key. Addresses, rules and a placeholder for
+  // the key, never a secret (an existing key's secret isn't known here at all). The addresses use this server's own origin, as the
+  // Documentation and the board keys' details do (ApiTokensPanel.endpoint).
+  // The numbers are the server's: validation.js LIMITS (recordPageMax 200, recordPageDefault 100, maxDays 92, defaultDays 30),
+  // datasets.js (Sales always windowed; Inventory's window optional while it is small; sort=entryNo needs company, no dates),
+  // external-fabric.js FABRIC_RATE (60 a minute, FABRIC_API_RATE_PER_MINUTE), fabric/router.js (30 per 10 s, 3 at once).
+  static LIMITS = Object.freeze({ pageMax: 200, pageDefault: 100, maxDays: 92, defaultDays: 30, perMinute: 60, burst: 30, burstSeconds: 10, inFlight: 3 });
+  base() { return `${window.location.origin}/api/v1/external/fabric`; }
+  datasetsOf(t) { const scopes = Array.isArray(t?.scopes) ? t.scopes : []; return FabricApiPanel.DATASET_SCOPES.filter(([, scope]) => scopes.includes(scope)); }
+  urlsOf(ds) { return { schema: `${this.base()}/${ds}/schema`, records: `${this.base()}/${ds}/records` }; }
+  copyButton(value, label, text = "Copy") { return `<button type="button" class="fx-btn fx-btn--sm" data-action="fabric-api-copy-value" data-copy="${this.esc(value)}" data-label="${this.esc(label)}" aria-label="Copy ${this.esc(label)}">${icon("copy")}<span>${this.esc(text)}</span></button>`; }
+  // "GET <url>" with Copy (the address alone), like the board keys' endpoint rows.
+  endpointRow(label, url, copyLabel) { return `<div class="fx-api-conn__row"><dt>${this.esc(label)}</dt><dd><code><span class="fx-api-conn__verb">GET</span> ${this.esc(url)}</code>${this.copyButton(url, copyLabel)}</dd></div>`; }
+  // Plain text for "Copy connection details": datasets, full addresses and the rules. A placeholder stands for the key.
+  connectionText(t) {
+    const L = FabricApiPanel.LIMITS, base = this.base(), datasets = this.datasetsOf(t);
+    const sensitive = Array.isArray(t?.scopes) && t.scopes.includes(FabricApiPanel.SENSITIVE_SCOPE);
+    const lines = [`JARC Fabric API: ${t?.name || "API key"}${t?.prefix ? ` (${t.prefix}…)` : ""}, read-only`, "",
+      "Method: GET (read-only)",
+      "Header: Authorization: Bearer <your API key>",
+      "Never put the key in the URL: it is refused with 400 TOKEN_IN_QUERY. Keep it in a secret store or a secure property.", "",
+      "Base URL (a prefix, not callable by itself: add /{dataset}/schema or /{dataset}/records):", `  ${base}`, "",
+      "Authorized datasets:"];
+    for (const [ds, scope, label] of datasets) { const u = this.urlsOf(ds); lines.push(`  ${label} (dataset ID: ${ds}, scope ${scope})`, `    Schema:  GET ${u.schema}`, `    Records: GET ${u.records}`); }
+    if (!datasets.length) lines.push("  None: this key has no dataset scope.");
+    lines.push(`  Sensitive fields: ${sensitive ? "included (fabric.sensitive.read), while the key's owner may still see them" : "not included"}`,
+      `  Status of the key's datasets: GET ${base}/status`, "",
+      "Paging:",
+      `  limit: 1 to ${L.pageMax} rows per page (${L.pageDefault} by default). Use limit=${L.pageMax}.`,
+      "  Leave cursor out of the first request. While pagination.hasMore is true, repeat the same request with cursor=<pagination.nextCursor>.",
+      "  A refused cursor (400 VALIDATION_ERROR, for example after a server restart): start again from the first page.", "",
+      "Dates:",
+      `  dateFrom and dateTo: YYYY-MM-DD, UTC days, both inclusive, at most ${L.maxDays} days per request. Read longer periods in slices.`,
+      `  Sales is always windowed: without dates the server uses the ${L.defaultDays} days ending at the newest data (see the response's window).`,
+      "  Inventory: the same, except that while GET /status reports it as small, leaving the dates out returns every row.",
+      "  Inventory sort=entryNo needs company (company=~ for none) and refuses dateFrom and dateTo.", "",
+      "Other parameters: q, sort, dir (asc or desc), fields (a comma list from the schema) and the schema's filters. Anything else answers 400 VALIDATION_ERROR.",
+      "Response: { dataset, mode, fields, items: [{ id, values }], pagination: { limit, hasMore, nextCursor }, window, sort }", "",
+      "Rate limits (per key):",
+      `  ${L.perMinute} requests per minute unless an administrator set another limit (X-RateLimit-Limit, X-RateLimit-Remaining and X-RateLimit-Reset say), at most ${L.burst} requests in ${L.burstSeconds} seconds, and ${L.inFlight} requests at the same time.`,
+      "  On 429 RATE_LIMITED or 503 FABRIC_BUSY, wait the Retry-After seconds, then retry. Fetch pages one after another.");
+    return lines.join("\n");
+  }
+  connectionHtml(t) {
+    const L = FabricApiPanel.LIMITS, base = this.base(), datasets = this.datasetsOf(t), c = (x) => `<code>${this.esc(x)}</code>`;
+    const cards = datasets.map(([ds, scope, label]) => { const u = this.urlsOf(ds); return `<li class="fx-api-conn__ds"><div class="fx-api-conn__name"><strong>${this.esc(label)}</strong><span>Dataset ID ${c(ds)}${this.copyButton(ds, `${label} dataset ID`, "Copy ID")}</span></div><dl class="fx-api-conn__list">${this.endpointRow("Schema endpoint", u.schema, `${label} schema endpoint`)}${this.endpointRow("Records endpoint", u.records, `${label} records endpoint`)}</dl></li>`; }).join("");
+    return `<section class="fx-api-conn" aria-labelledby="fabric-api-conn-title"><div class="fx-api-conn__head"><h3 id="fabric-api-conn-title">Authorized datasets and endpoints</h3><button type="button" class="fx-btn fx-btn--sm" data-action="fabric-api-copy-conn" data-copy="${this.esc(this.connectionText(t))}">${icon("copy")}<span>Copy connection details</span></button></div>
+      <dl class="fx-api-conn__list"><div class="fx-api-conn__row"><dt>Base URL <small>(prefix)</small></dt><dd><code>${this.esc(base)}</code>${this.copyButton(base, "Base URL")}</dd></div><div class="fx-api-conn__row"><dt>Header</dt><dd><code>Authorization: Bearer &lt;your API key&gt;</code>${this.copyButton("Authorization: Bearer <your API key>", "Header")}</dd></div></dl>
+      <p class="fx-api-conn__prefix" role="note">The base URL is a prefix, not callable by itself (it answers 404): add ${c("/{dataset}/records")} or ${c("/{dataset}/schema")}, as in the endpoints below.</p>
+      ${cards ? `<ul class="fx-api-conn__datasets">${cards}</ul>` : `<p class="fx-api-conn__prefix">This key has no dataset scope.</p>`}
+      <ul class="fx-api-conn__rules"><li>${c("GET")} only, with the key in the ${c("Authorization")} header. A key in the URL is refused (${c("400 TOKEN_IN_QUERY")}).</li><li>Up to ${L.pageMax} rows per page (${c(`limit=${L.pageMax}`)}). While ${c("pagination.hasMore")} is true, send ${c("pagination.nextCursor")} back as ${c("cursor")}.</li><li>${c("dateFrom")} and ${c("dateTo")}: ${c("YYYY-MM-DD")}, UTC days, at most ${L.maxDays} days. Sales is always windowed (the ${L.defaultDays} days up to the newest data by default).</li><li>${L.perMinute} requests per minute per key by default, ${L.burst} in ${L.burstSeconds} seconds, ${L.inFlight} at once. On ${c("429")} or ${c("503")}, wait the ${c("Retry-After")} seconds.</li></ul></section>`;
+  }
+  // An existing key: what it can read and where, never its secret.
+  showDetails(t) {
+    const [label, tone] = FabricApiPanel.STATUS[t.status] || [t.status || "Unknown", "muted"];
+    const ended = t.status !== "active" ? `<div class="fx-status fx-status--warn" role="note"><span class="fx-status__msg"><strong>This key no longer works (${this.esc(label)}).</strong> Requests with it are refused. Create a new key to connect again.</span></div>` : "";
+    this.view.overlay(`<div class="fx-dialog fx-api-dialog fx-api-dialog--wide" role="dialog" aria-modal="true" aria-labelledby="fabric-api-details-title">${this.dialogHead("fabric-api-details-title", t.name || "API key")}
+      <div class="fx-dialog__body"><dl class="fx-api__review apikey-review"><div><dt>Key</dt><dd><code>${this.esc(t.prefix)}…</code> <span class="account-badge fx-api__status is-${tone}">${this.esc(label)}</span></dd></div><div><dt>Owner</dt><dd>${this.ownerHtml(t)}</dd></div><div><dt>Expires</dt><dd>${t.status === "revoked" ? "Revoked" : this.dateTime(t.expiresAt, "—")}</dd></div><div><dt>Datasets</dt><dd>Read-only · ${this.scopeBadges(t.scopes)}</dd></div></dl>
+      ${ended}<div class="fx-status fx-status--info fx-api-conn__secret" role="note"><span class="fx-status__msg"><strong>The secret isn't shown again.</strong> It was shown once, when the key was created: use the copy stored then. If it's lost, create a new key and revoke this one.</span></div>
+      ${this.connectionHtml(t)}</div>
+      <div class="fx-dialog__foot"><button type="button" class="fx-btn fx-btn--primary" data-action="close-overlay">Done</button></div></div>`, "apitok-overlay fx-api-overlay");
+    this.focus('.fx-api-overlay .fx-dialog__foot [data-action="close-overlay"]');
+  }
+  async copyText(text, label) {
+    if (!text) return;
+    try { await navigator.clipboard.writeText(text); this.view.toast(`${label} copied`); }
+    catch { this.view.toast(`Select the ${label.toLowerCase()} and copy it`); }
   }
 
   // ---- Revoke (confirm first; focus starts on Cancel)
@@ -260,6 +331,9 @@ class FabricApiPanel {
     if (action === "fabric-api-activity-refresh") { this.refreshActivity(); return; }
     if (action === "fabric-api-new") { this.showCreate(); return; }
     if (action === "fabric-api-revoke") { const t = (this.items || []).find((x) => x.id === target.dataset.id); if (t && this.canRevoke(t)) this.showRevoke(t); return; }
+    if (action === "fabric-api-details") { const t = (this.items || []).find((x) => x.id === target.dataset.id); if (t) this.showDetails(t); return; }
+    if (action === "fabric-api-copy-value") { this.copyText(target.dataset.copy, target.dataset.label || "Value"); return; }
+    if (action === "fabric-api-copy-conn") { this.copyText(target.dataset.copy, "Connection details"); return; }
     if (action === "fabric-api-copy") { this.copySecret(target); return; }
     if (action === "fabric-api-done") { this.done(); return; }
     if (action === "fabric-api-copy-example") { const el = document.querySelector(`#fabric-api-example-${CSS.escape(target.dataset.example || "")}`); if (el) navigator.clipboard?.writeText(el.textContent).then(() => this.view.toast("Example copied"), () => this.view.toast("Select the example and copy it")); }

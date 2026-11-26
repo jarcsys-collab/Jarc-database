@@ -411,6 +411,110 @@ describe("Fabric API Management: documentation", () => {
   });
 });
 
+describe("Fabric API Management: connection details (per-dataset endpoints, Copy connection details)", () => {
+  const BASE = "https://jarc.example.test/api/v1/external/fabric";
+  const copyOf = (html) => unescape(html.match(/data-action="fabric-api-copy-conn" data-copy="([^"]*)"/)[1]);
+  const endpointsIn = (html) => [...html.matchAll(/data-action="fabric-api-copy-value" data-copy="([^"]*)"/g)].map((m) => unescape(m[1]));
+
+  test("a new key: the one-time secret unchanged, then each authorized dataset's ID, schema and records URLs with Copy; the base URL is a prefix", async () => {
+    const env = load();
+    const s = await loaded(env, { answers: { "POST /fabric/api-tokens": { token: { name: "BI", prefix: "jarc_ab", scopes: ["fabric.sales.read", "fabric.inventory.read"], expiresAt: "2027-01-01T00:00:00Z" }, secret: SECRET } } });
+    await s.panel.submitCreate({ elements: { name: { value: "BI" }, description: { value: "" }, expires: { value: s.panel.dateInput(30) }, "ds-sales": { checked: true }, "ds-inventory": { checked: true } }, querySelector: () => null });
+    const html = env.root.innerHTML;
+    assert.equal((html.match(new RegExp(SECRET, "g")) || []).length, 1, "the secret is still only the input's value");
+    assert.match(html, /class="fx-dialog fx-api-dialog apitok-modal" role="dialog"/);
+    assert.match(html, /Base URL <small>\(prefix\)<\/small>/);
+    assert.match(html, /not callable by itself/);
+    const urls = endpointsIn(html);
+    for (const u of [BASE, "sales", "inventory", `${BASE}/sales/schema`, `${BASE}/sales/records`, `${BASE}/inventory/schema`, `${BASE}/inventory/records`, "Authorization: Bearer <your API key>"]) assert.ok(urls.includes(u), u);
+    assert.match(html, /<span class="fx-api-conn__verb">GET<\/span> https:\/\/jarc\.example\.test\/api\/v1\/external\/fabric\/sales\/records<\/code>/);
+    s.panel.onAction("fabric-api-copy-value", { dataset: { copy: `${BASE}/inventory/records`, label: "Inventory records endpoint" } });
+    await settle();
+    assert.deepEqual(env.copied, [`${BASE}/inventory/records`]);
+    assert.ok(s.toasts.includes("Inventory records endpoint copied"));
+    s.panel.onAction("fabric-api-copy-conn", { dataset: { copy: copyOf(html) } });
+    await settle();
+    const text = env.copied[1];
+    assert.ok(!text.includes(SECRET) && !/jarc_[A-Za-z0-9]{20,}/.test(text), "never the secret");
+    for (const part of [`Base URL (a prefix, not callable by itself`, `  ${BASE}`, "Method: GET", "Authorization: Bearer <your API key>", "400 TOKEN_IN_QUERY",
+      `Schema:  GET ${BASE}/sales/schema`, `Records: GET ${BASE}/sales/records`, `Schema:  GET ${BASE}/inventory/schema`, `Records: GET ${BASE}/inventory/records`,
+      "dataset ID: sales", "dataset ID: inventory", "pagination.hasMore", "cursor=<pagination.nextCursor>", "1 to 200 rows per page (100 by default)", "limit=200",
+      "dateFrom and dateTo: YYYY-MM-DD, UTC days, both inclusive, at most 92 days", "Sales is always windowed", "30 days", "60 requests per minute",
+      "30 requests in 10 seconds", "3 requests at the same time", "429 RATE_LIMITED", "503 FABRIC_BUSY", "Retry-After"]) assert.ok(text.includes(part), part);
+    assert.ok(s.toasts.includes("Connection details copied"));
+    s.panel.onAction("fabric-api-done", {});
+    assert.equal(env.root.innerHTML, "");
+  });
+
+  test("the copied numbers are the server's (validation.js LIMITS, datasets.js windows, the token rate and the per-caller limits)", () => {
+    const env = load();
+    const { LIMITS } = require("../src/fabric/validation");
+    const { FABRIC_RATE } = require("../src/routes/external-fabric");
+    const { datasetNamed } = require("../src/fabric/datasets");
+    const L = env.FabricApiPanel.LIMITS;
+    assert.equal(L.pageMax, LIMITS.recordPageMax); assert.equal(L.pageDefault, LIMITS.recordPageDefault);
+    assert.equal(L.maxDays, LIMITS.maxDays); assert.equal(L.defaultDays, LIMITS.defaultDays);
+    assert.equal(L.perMinute, FABRIC_RATE.perWindow); assert.equal(FABRIC_RATE.windowMs, 60000);
+    assert.equal(datasetNamed("sales").windowOptionalWhenSmall, false, "Sales is always windowed");
+    assert.equal(datasetNamed("inventory").windowOptionalWhenSmall, true);
+    assert.equal(datasetNamed("inventory").sorts.entryNo.requiresCompany, true);
+    const router = fs.readFileSync(path.join(SRC, "fabric/router.js"), "utf8");
+    assert.match(router, new RegExp(`const PER_WINDOW = ${L.burst}, WINDOW_MS = ${L.burstSeconds} \\* 1000;`));
+    assert.match(router, new RegExp(`const PER_CALLER_IN_FLIGHT = ${L.inFlight};`));
+  });
+
+  test("an existing key: Connection details on every row opens its datasets' endpoints, never a secret; a revoked key says it no longer works", async () => {
+    const env = load();
+    const s = await loaded(env);
+    const html = s.panel.html();
+    assert.deepEqual([...html.matchAll(/data-action="fabric-api-details" data-id="(\w+)"/g)].map((m) => m[1]), ["t1", "t2"], "on active and ended keys");
+    s.panel.onAction("fabric-api-details", { dataset: { id: "nope" } });
+    assert.equal(env.root.innerHTML, "", "an unknown id opens nothing");
+    s.panel.onAction("fabric-api-details", { dataset: { id: "t1" } });
+    let dialog = env.root.innerHTML;
+    assert.match(dialog, /role="dialog" aria-modal="true" aria-labelledby="fabric-api-details-title"/);
+    assert.doesNotMatch(dialog, /<img/, "escaped");
+    assert.match(dialog, /The secret isn't shown again/);
+    assert.doesNotMatch(dialog, /id="fabric-api-secret"/);
+    const urls = endpointsIn(dialog);
+    assert.ok(urls.includes(`${BASE}/sales/schema`) && urls.includes(`${BASE}/sales/records`));
+    assert.ok(!urls.some((u) => u.includes("/inventory/")), "only the key's datasets (t1: Sales + sensitive)");
+    assert.ok(!urls.some((u) => u.includes("sensitive")), "the sensitive scope is not a dataset");
+    const text = copyOf(dialog);
+    assert.match(text, /Sensitive fields: included \(fabric\.sensitive\.read\)/);
+    assert.doesNotMatch(text, /inventory\/records/);
+    assert.match(dialog, /data-action="close-overlay">Done<\/button>/);
+    s.panel.onAction("fabric-api-details", { dataset: { id: "t2" } });
+    dialog = env.root.innerHTML;
+    assert.match(dialog, /This key no longer works \(Revoked\)/);
+    assert.ok(endpointsIn(dialog).includes(`${BASE}/inventory/records`));
+    assert.ok(!endpointsIn(dialog).some((u) => u.includes("/sales/")));
+    assert.equal(s.calls.filter(([m]) => m !== "GET").length, 0, "details never call the server");
+    for (const [k, v] of Object.entries(s.panel)) assert.ok(!JSON.stringify(v === s.panel.f ? null : v ?? null).includes(SECRET), k);
+  });
+
+  test("documentation: the base URL is a prefix; the Google Apps Script example keeps the key in Script Properties, pages with limit=200 and retries 429/503", () => {
+    const env = load();
+    const html = env.FabricApiDocs.html((v) => viewEscape(v ?? ""), "https://jarc.example.test");
+    assert.match(html, /<dt>Base URL \(prefix\)<\/dt><dd><code>https:\/\/jarc\.example\.test\/api\/v1\/external\/fabric<\/code>: not callable by itself/);
+    const apps = unescape(html.match(/id="fabric-api-example-apps" tabindex="0"><code>([\s\S]*?)<\/code>/)[1]);
+    assert.doesNotThrow(() => new Function(apps), "valid JavaScript");
+    assert.match(apps, /PropertiesService\.getScriptProperties\(\)/);
+    assert.match(apps, /getProperty\("FABRIC_API_KEY"\)/); assert.match(apps, /getProperty\("FABRIC_BASE_URL"\)/);
+    assert.match(apps, /FABRIC_BASE_URL = https:\/\/jarc\.example\.test\/api\/v1\/external\/fabric/);
+    assert.match(apps, /headers: \{ Authorization: "Bearer " \+ key \}/);
+    assert.match(apps, /fabricGet_\("\/sales\/schema"\)/);
+    assert.match(apps, /dateFrom: "2026-06-01", dateTo: "2026-06-30", limit: "200"/);
+    assert.match(apps, /params\.cursor = page\.pagination\.nextCursor/); assert.match(apps, /while \(page\.pagination\.hasMore\)/);
+    assert.match(apps, /status === 429 \|\| status === 503/); assert.match(apps, /Retry-After/);
+    assert.match(apps, /muteHttpExceptions: true/);
+    // The key never goes into the query: only the dataset parameters are encoded into it.
+    const queryParts = apps.match(/const query = [\s\S]*?;\n/)[0];
+    assert.doesNotMatch(queryParts, /key\b(?!s)/);
+    for (const name of ["token", "api_key", "apikey", "access_token"]) assert.doesNotMatch(apps, new RegExp(`[?&]${name}=`));
+  });
+});
+
 describe("Fabric API Management: stylesheet and page", () => {
   test("fabric-api.css is scoped (.fx-app / the API overlay) and uses --fx- tokens; index.html links it after jarc-theme.css", () => {
     const css = read("fabric-api.css").replace(/\/\*[\s\S]*?\*\//g, "");
