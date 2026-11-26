@@ -11,6 +11,8 @@
 //              browser reconnects and is authorized again from scratch) instead of keeping the old scope; only the error class
 //              is logged. A change of the session's JARC.Admin claim, the users.status or the account (status, role,
 //              version) since the stream opened also ends it the same way ("refresh").
+//   recheck    (P4-0 O5) router.recheckUser(userId) runs that check at once for every open stream of one person on this instance
+//              (Employee Management End sessions): their deleted sessions end the streams with "session-ended" now.
 //   resume     ?lastEventId=<activity ID> (or the Last-Event-ID header) replays what was missed; when that isn't
 //              possible (too old, too many) a "resync" event tells the browser to reload its data. A first connection
 //              may send ?since=<ISO time its data load began> (at most 10 minutes ago) to get changes saved meanwhile.
@@ -38,6 +40,7 @@ function eventRoutes({ stream, access, repos, sessionCheck = null, timings = {},
   const router = express.Router();
   const t = { heartbeat: HEARTBEAT_MS, access: ACCESS_REFRESH_MS, session: SESSION_CHECK_MS, ...timings };
   const openByUser = new Map();
+  const checksByUser = new Map(); // user ID (hex) → the session checks of that person's open streams (O5 End sessions)
 
   router.get("/events", async (req, res) => {
     allowOnly(req.query, ["lastEventId", "since"], "the query");
@@ -58,7 +61,7 @@ function eventRoutes({ stream, access, repos, sessionCheck = null, timings = {},
     res.flushHeaders?.();
     openByUser.set(userKey, (openByUser.get(userKey) || 0) + 1);
 
-    let closed = false, unsubscribe = null;
+    let closed = false, unsubscribe = null, checkNow = null;
     const write = (text) => { if (!closed) res.write(text); };
     const send = (event, data, id) => write(`${id ? `id: ${id}\n` : ""}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     const timers = [];
@@ -67,6 +70,7 @@ function eventRoutes({ stream, access, repos, sessionCheck = null, timings = {},
       if (reason === "session") send("session-ended", { reason: "Your session has ended. Sign in again." });
       closed = true;
       timers.forEach(clearInterval);
+      if (checkNow) { const set = checksByUser.get(userKey); set?.delete(checkNow); if (set && !set.size) checksByUser.delete(userKey); }
       unsubscribe?.();
       openByUser.set(userKey, Math.max(0, (openByUser.get(userKey) || 1) - 1));
       if (!openByUser.get(userKey)) openByUser.delete(userKey);
@@ -121,13 +125,27 @@ function eventRoutes({ stream, access, repos, sessionCheck = null, timings = {},
     // "refresh": the person's account role or status changed — the stream ends without "session-ended" and the browser
     // reconnects, with the new permissions.
     // P4-0 (D-H6): a check that throws ends the stream too (fail closed), logging the error class only.
-    if (sessionCheck) timers.push(setInterval(async () => {
-      let ok;
-      try { ok = await sessionCheck(req); } catch (error) { logger?.error?.(`[events] session check failed; live stream closed: ${error?.name || "Error"}`); close("refresh"); return; }
-      if (!ok) close("session"); else if (ok === "refresh") close("refresh");
-    }, t.session));
+    if (sessionCheck) {
+      checkNow = async () => {
+        if (closed) return;
+        let ok;
+        try { ok = await sessionCheck(req); } catch (error) { logger?.error?.(`[events] session check failed; live stream closed: ${error?.name || "Error"}`); close("refresh"); return; }
+        if (!ok) close("session"); else if (ok === "refresh") close("refresh");
+      };
+      if (!checksByUser.has(userKey)) checksByUser.set(userKey, new Set());
+      checksByUser.get(userKey).add(checkNow);
+      timers.push(setInterval(checkNow, t.session));
+    }
     timers.forEach((timer) => timer.unref?.());
   });
+  // O5 End sessions: run the session check of every open stream of this person now (this instance), instead of at the next
+  // interval. The same fail-closed check: a deleted session ends the stream with "session-ended". Returns how many were checked.
+  router.recheckUser = async (userId) => {
+    const key = userId && typeof userId.toHexString === "function" ? userId.toHexString() : String(userId ?? "");
+    const checks = [...(checksByUser.get(key) || [])];
+    await Promise.all(checks.map((check) => check()));
+    return checks.length;
+  };
   return router;
 }
 

@@ -6,8 +6,9 @@ const { COLLECTIONS } = require("../../db/bootstrap");
 
 const ACCOUNT_ACTIONS = ["account.created", "account.signed_in", "account.approved", "account.role_changed", "account.blocked", "account.reactivated", "account.workspace_assigned", "account.workspace_role_changed", "account.workspace_removed", "account.super_admin_bootstrapped"];
 // Employee Management P3 (Access Administration, employees/access-admin.js): the owner's account and membership actions, and
-// every refused P3 write (employee.access.rejected).
-const EMPLOYEE_ACTIONS = Object.freeze(["employee.access.granted", "employee.access.provisioned", "employee.access.suspended", "employee.access.restored", "employee.access.revoked", "employee.membership.added", "employee.membership.role_changed", "employee.membership.removed", "employee.access.rejected"]);
+// every refused P3 write (employee.access.rejected). P4-0 O5: employee.sessions.ended (End sessions: the count in changes, no
+// session IDs or tokens).
+const EMPLOYEE_ACTIONS = Object.freeze(["employee.access.granted", "employee.access.provisioned", "employee.access.suspended", "employee.access.restored", "employee.access.revoked", "employee.membership.added", "employee.membership.role_changed", "employee.membership.removed", "employee.access.rejected", "employee.sessions.ended"]);
 const ACTIONS = Object.freeze([...ACCOUNT_ACTIONS, ...EMPLOYEE_ACTIONS]);
 // The P3 fields, each checked here (allow-listed values only), so no request body can reach the collection:
 //   result     "ok" | "rejected"
@@ -15,8 +16,9 @@ const ACTIONS = Object.freeze([...ACCOUNT_ACTIONS, ...EMPLOYEE_ACTIONS]);
 //   code       a rejection code (A–Z and "_")
 //   source     "employee_management"
 //   targetRef  the opaque directory profile ID (employees/ids.js), for someone who may not have a users document yet
-//   attempted  the action that was refused (grant | suspend | restore | revoke | membership_add | membership_role | membership_remove)
-const ATTEMPTS = Object.freeze(["grant", "suspend", "restore", "revoke", "membership_add", "membership_role", "membership_remove"]);
+//   attempted  the action that was refused (grant | suspend | restore | revoke | membership_add | membership_role | membership_remove
+//              | end_sessions)
+const ATTEMPTS = Object.freeze(["grant", "suspend", "restore", "revoke", "membership_add", "membership_role", "membership_remove", "end_sessions"]);
 const P3_FIELDS = Object.freeze({
   result: (v) => v === "ok" || v === "rejected",
   reason: (v) => typeof v === "string" && v.length >= 1 && v.length <= 500 && !/[\u0000-\u001f\u007f]/.test(v),

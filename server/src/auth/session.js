@@ -42,7 +42,7 @@ const blocked = (account) => Boolean(account && !account.legacy && account.statu
 //   /accounts/…                         Account Management changes and the Super Admin bootstrap (they read the claim itself:
 //                                       granting SUPER_ADMIN and the bootstrap need JARC.Admin), in every ACCOUNT_MANAGEMENT mode
 //   /integrations/monday/…              connect, disconnect, test, imports, sync, retries (the public webhook / callback excluded)
-//   /admin/employees/:ds/records/:id/access | memberships[/:ref]   Employee Management P3 writes
+//   /admin/employees/:ds/records/:id/access | end-sessions | memberships[/:ref]   Employee Management P3 writes (and O5)
 //   /workspaces/:id/members[/:memberId]  workspace member changes (see the note at the pattern)
 //   /imports                            the legacy state / browser-backup import (exactly this path)
 // All but /accounts only while ACCOUNT_MANAGEMENT isn't enforced: enforced, SYSTEM_ADMIN is the Super Admin account, read on every
@@ -52,7 +52,7 @@ const API_PREFIX = String.raw`^(?:/api/v\d+)?`;
 const ACCOUNT_WRITES = new RegExp(`${API_PREFIX}/accounts(?:/|$)`, "i");
 const SENSITIVE_ADMIN_WRITES = Object.freeze([
   new RegExp(`${API_PREFIX}/integrations/monday/(?!webhook(?:/|$)|callback(?:/|$))`, "i"),
-  new RegExp(`${API_PREFIX}/admin/employees/[^/]+/records/[^/]+/(?:access|memberships(?:/[^/]+)?)/?$`, "i"),
+  new RegExp(`${API_PREFIX}/admin/employees/[^/]+/records/[^/]+/(?:access|end-sessions|memberships(?:/[^/]+)?)/?$`, "i"),
   // Workspace member changes (routes/members.js): a JARC.Admin claim may manage any workspace's members. Known, accepted side
   // effect: a session that carries the claim is gated here even when it acts through a real WORKSPACE_ADMIN membership; it signs
   // in again. Sessions without the claim are never gated.

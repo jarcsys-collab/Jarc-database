@@ -177,7 +177,7 @@ describe("P3 Access Administration (real app)", () => {
       const self = (await manage("owner")).body;
       assert.equal(self.account.isSelf, true);
       assert.equal(self.account.isEmployeeAdmin, true);
-      assert.deepEqual(self.actions.filter((a) => !a.allowed).map((a) => [a.action, a.code]), [["grant", "INVALID_TRANSITION"], ["suspend", "SELF_LOCKOUT"], ["restore", "INVALID_TRANSITION"], ["revoke", "SELF_LOCKOUT"]]);
+      assert.deepEqual(self.actions.filter((a) => !a.allowed).map((a) => [a.action, a.code]), [["grant", "INVALID_TRANSITION"], ["suspend", "SELF_LOCKOUT"], ["restore", "INVALID_TRANSITION"], ["revoke", "SELF_LOCKOUT"], ["end_sessions", "SELF_END_SESSIONS"]]);
       assert.equal(self.workspaces.find((w) => w.name === "Alpha WS").lastAdmin, true);
     });
 

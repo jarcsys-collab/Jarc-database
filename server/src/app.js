@@ -72,7 +72,7 @@ const FABRIC_INVOICE_LINK_PATH = /^\/fabric\/invoices(\/[^/]{1,400}\/[^/]{1,400}
 // is the profile's JARC access tab (P2; the page shows it only to Employee Management admins).
 const EMPLOYEES_LINK_PATH = /^\/admin\/employees(?:\/(?:active|all|disabled|guests)(?:\/records\/[A-Za-z0-9_-]{22}(?:\/access|\/manage)?)?|\/groups\/(?:department|jobTitle|officeLocation|emailDomain))?\/?$/;
 // Case-insensitive like Express routing, so /RECORDS/…/ACCESS can't reach the P3 handlers past this parser.
-const EMPLOYEE_P3_WRITE_PATH = /^\/[^/]+\/records\/[^/]+\/(?:access|memberships(?:\/[^/]+)?)\/?$/i;
+const EMPLOYEE_P3_WRITE_PATH = /^\/[^/]+\/records\/[^/]+\/(?:access|end-sessions|memberships(?:\/[^/]+)?)\/?$/i;
 const rootRelative = (html) => html.replace(/(\s(?:href|src))="assets\//g, '$1="/assets/');
 
 // An optional feature not stated is off in production and on elsewhere.
@@ -227,7 +227,11 @@ function createApp({ securityHeadersOptions = {}, employees: employeesOption = n
     const jarcAccess = employees && auth ? new JarcAccessIndex({ repos: dataLayer.repos, access, tenantId: auth.entra.tenantId, apiAdminObjectIds: tokenService ? apiTokens.adminObjectIds || [] : null, employeesConfig: employees.config, features: { spreadsheetImports: Boolean(enabled.spreadsheetImports && dataLayer.services?.importJobs), mondayIntegration: Boolean(dataLayer.services?.integration) }, logger }) : null;
     // P3 (Access Administration, JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN=true): account and membership changes for EMPLOYEE_ADMIN_OIDS,
     // through JARC's own users, memberships (MembershipService), sessions, API tokens and accountAudit. Off: its paths answer 404.
-    const accessAdmin = jarcAccess && employees.config.accessAdmin === true && dataLayer.services?.members ? new AccessAdminService({ employees, jarcAccess, repos: dataLayer.repos, connection: dataLayer.connection, members: dataLayer.services.members, access, tenantId: auth.entra.tenantId, superAdmin: accounts?.superAdmin || null, logger }) : null;
+    // O5 End sessions: after the commit, that person's open live streams on this instance are re-checked at once (the events
+    // router is mounted below; the signal is a no-op until then).
+    let liveEvents = null;
+    const onSessionsEnded = (userId) => liveEvents?.recheckUser?.(userId);
+    const accessAdmin = jarcAccess && employees.config.accessAdmin === true && dataLayer.services?.members ? new AccessAdminService({ employees, jarcAccess, repos: dataLayer.repos, connection: dataLayer.connection, members: dataLayer.services.members, access, tenantId: auth.entra.tenantId, superAdmin: accounts?.superAdmin || null, logger, onSessionsEnded }) : null;
     if (employees) api.use("/admin/employees", identify, employeeRoutes({ employees, savedFilterRepo: dataLayer.repos.employeeSavedFilters || null, jarcAccess, accessAdmin, logger, ...(employeeWriteLimiter ? { writeLimiter: employeeWriteLimiter } : {}) }));
     // employees.jarcAccess only when true (an admin, with the index wired): viewers and outsiders never see the key.
     // employees.accessAdmin (P3) only for that admin with the switch on.
@@ -257,7 +261,8 @@ function createApp({ securityHeadersOptions = {}, employees: employeesOption = n
     api.use(identify, systemHealthRoutes({ dataLayer, access, environment, version, monitor, enabled, canManageDrive: googleDrive ? (actor) => actorCanManageDrive(actor, googleDrive.config, auth.entra.tenantId) : () => false, viewerObjectIds: healthViewers, tenantId: auth?.entra?.tenantId || null, fabricHealth, canSeeFabricDetail }));
     const stream = new ActivityStream({ activities: dataLayer.repos.activities, logger, ...(live.pollMs ? { pollMs: live.pollMs } : {}), ...(live.overlapMs ? { overlapMs: live.overlapMs } : {}) });
     app.locals.realtime = stream;
-    api.use(identify, eventRoutes({ stream, access, repos: dataLayer.repos, sessionCheck: auth ? entraSessionCheck({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users }) : null, timings: live.timings, logger }));
+    liveEvents = eventRoutes({ stream, access, repos: dataLayer.repos, sessionCheck: auth ? entraSessionCheck({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users }) : null, timings: live.timings, logger });
+    api.use(identify, liveEvents);
   }
   api.use(apiNotFound);
   app.use("/api/v1", api);

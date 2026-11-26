@@ -7,7 +7,7 @@
 //   GET|POST /saved-filters/:ds, PUT|DELETE /saved-filters/:ds/:id          (routes/employee-saved-filters.js)
 //   P3 (Access Administration, access-admin.js; JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN=true and EMPLOYEE_ADMIN_OIDS only):
 //   GET /:ds/records/:id/manage-access | /:ds/records/:id/access-history
-//   POST /:ds/records/:id/access | /:ds/records/:id/memberships
+//   POST /:ds/records/:id/access | /:ds/records/:id/memberships | /:ds/records/:id/end-sessions (P4-0 O5, its own rate limit)
 //   PATCH|DELETE /:ds/records/:id/memberships/:workspaceRef
 //   Switched off: 404 for every method for a listed viewer or administrator; everyone else gets the router's usual answer first
 //   (signed out or a bearer token 401, not listed 403). On: anyone but an administrator 403 EMPLOYEES_FORBIDDEN. Writes: CSRF (the
@@ -26,9 +26,11 @@ const invalidQuery = () => invalid("Unknown parameter.", "query", "unknownParame
 
 const READS_PER_WINDOW = 60, WINDOW_MS = 10 * 1000, PER_CALLER_IN_FLIGHT = 4;
 const WRITES_PER_MINUTE = 20, WRITES_IN_FLIGHT = 2;
+// O5 End sessions: its own limit per administrator, on top of the P3 write limit (one person per request; no bulk path).
+const END_SESSIONS_PER_WINDOW = 10, END_SESSIONS_WINDOW_MS = 10 * 60 * 1000;
 // The P3 paths (any method): answered here, never by the GET-only data routes below.
 // Case-insensitive, as Express routes are (app.js's 8 KB parser path matches the same way).
-const P3_PATH = /^\/[^/]+\/records\/[^/]+\/(?:manage-access|access|access-history|memberships(?:\/[^/]+)?)\/?$/i;
+const P3_PATH = /^\/[^/]+\/records\/[^/]+\/(?:manage-access|access|access-history|end-sessions|memberships(?:\/[^/]+)?)\/?$/i;
 
 // employees: createEmployees(...) result ({ service, accessFor }). savedFilterRepo: dataLayer.repos.employeeSavedFilters (or
 // null: no saved filter paths). limiter: (userKey) → boolean for the data routes. savedFilters: { readLimiter, writeLimiter,
@@ -36,8 +38,9 @@ const P3_PATH = /^\/[^/]+\/records\/[^/]+\/(?:manage-access|access|access-histor
 // jarcAccess (P2): the JARC access index (jarc-access.js JarcAccessIndex), or null. Without it (P1 mounts, tests) nobody gets
 // jarcAccess: the JARC fields and GET /:ds/records/:id/jarc-access don't exist for anyone (403 EMPLOYEES_FORBIDDEN on that path).
 // accessAdmin (P3): an AccessAdminService (access-admin.js), or null while JARC_FEATURE_EMPLOYEE_ACCESS_ADMIN is off. writeLimiter:
-// (adminKey) → boolean for the P3 writes (tests).
-function employeeRoutes({ employees, savedFilterRepo = null, jarcAccess = null, accessAdmin = null, limiter = searchLimiter({ perWindow: READS_PER_WINDOW, windowMs: WINDOW_MS }), writeLimiter = searchLimiter({ perWindow: WRITES_PER_MINUTE, windowMs: 60 * 1000 }), savedFilters = {}, logger = console, perCallerInFlight = PER_CALLER_IN_FLIGHT, writesInFlight = WRITES_IN_FLIGHT }) {
+// (adminKey) → boolean for the P3 writes (tests). endSessionsLimiter: (adminKey) → boolean for O5 End sessions (default
+// END_SESSIONS_PER_WINDOW per END_SESSIONS_WINDOW_MS per administrator).
+function employeeRoutes({ employees, savedFilterRepo = null, jarcAccess = null, accessAdmin = null, limiter = searchLimiter({ perWindow: READS_PER_WINDOW, windowMs: WINDOW_MS }), writeLimiter = searchLimiter({ perWindow: WRITES_PER_MINUTE, windowMs: 60 * 1000 }), endSessionsLimiter = searchLimiter({ perWindow: END_SESSIONS_PER_WINDOW, windowMs: END_SESSIONS_WINDOW_MS }), savedFilters = {}, logger = console, perCallerInFlight = PER_CALLER_IN_FLIGHT, writesInFlight = WRITES_IN_FLIGHT }) {
   if (!employees?.service || typeof employees.accessFor !== "function") throw new Error("employeeRoutes needs createEmployees(...).");
   if (jarcAccess && typeof jarcAccess.current !== "function") throw new Error("employeeRoutes jarcAccess must be a JarcAccessIndex.");
   const { service } = employees;
@@ -93,6 +96,11 @@ function employeeRoutes({ employees, savedFilterRepo = null, jarcAccess = null, 
     router.get(`${p}/manage-access`, adminOnly, readGate, async (req, res) => { noQuery(req); send(res, await accessAdmin.manageAccess(req.params.ds, req.params.id, req.employeeAccess, req.actor)); });
     router.get(`${p}/access-history`, adminOnly, readGate, async (req, res) => send(res, await accessAdmin.history(req.params.ds, req.params.id, req.query, req.employeeAccess)));
     router.post(`${p}/access`, adminOnly, writeGate, async (req, res) => { noQuery(req); send(res, await accessAdmin.changeAccess(req.params.ds, req.params.id, req.body, req.employeeAccess, req.actor)); });
+    const endSessionsGate = (req, res, next) => {
+      if (endSessionsLimiter && !endSessionsLimiter(req.employeeAccess.who)) { res.set("Retry-After", String(Math.ceil(END_SESSIONS_WINDOW_MS / 1000))); return sendError(res, 429, "RATE_LIMITED", MESSAGES.RATE_LIMITED); }
+      return next();
+    };
+    router.post(`${p}/end-sessions`, adminOnly, endSessionsGate, writeGate, async (req, res) => { noQuery(req); send(res, await accessAdmin.endSessions(req.params.ds, req.params.id, req.body, req.employeeAccess, req.actor)); });
     router.post(`${p}/memberships`, adminOnly, writeGate, async (req, res) => { noQuery(req); res.status(201).set("Cache-Control", "no-store").json(await accessAdmin.addMembership(req.params.ds, req.params.id, req.body, req.employeeAccess, req.actor)); });
     router.patch(`${p}/memberships/:workspaceRef`, adminOnly, writeGate, async (req, res) => { noQuery(req); send(res, await accessAdmin.changeMembership(req.params.ds, req.params.id, req.params.workspaceRef, req.body, req.employeeAccess, req.actor)); });
     router.delete(`${p}/memberships/:workspaceRef`, adminOnly, writeGate, async (req, res) => { noQuery(req); send(res, await accessAdmin.removeMembership(req.params.ds, req.params.id, req.params.workspaceRef, req.body, req.employeeAccess, req.actor)); });

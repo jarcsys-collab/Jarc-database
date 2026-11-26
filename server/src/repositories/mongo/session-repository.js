@@ -59,8 +59,15 @@ class SessionRepository {
 
   async removeBySecret(sessionSecret) { await this.sessions.deleteOne({ _id: hash(sessionSecret) }); }
 
-  // Ends every session of one person (an account was blocked). Returns how many ended.
-  async removeForUser(userId) { const { deletedCount } = await this.sessions.deleteMany({ userId }); return deletedCount; }
+  // P4-0 (O5 End sessions): the live sessions that carried JARC.Admin at their sign-in (whose user, and the identity each is bound
+  // to), inside the caller's transaction when given. _id (the secret's hash) is never read. At most 500.
+  listLiveAdminSessions(now, { session } = {}) {
+    return this.sessions.find({ isSystemAdmin: true, expiresAt: { $gt: now }, idleExpiresAt: { $gt: now } }, { session, limit: 500, projection: { _id: 0, userId: 1, tenantId: 1, objectId: 1 } }).toArray();
+  }
+
+  // Ends every session of one person (an account was blocked, or O5 End sessions; inside the caller's transaction when given).
+  // Returns how many ended.
+  async removeForUser(userId, { session } = {}) { const { deletedCount } = await this.sessions.deleteMany({ userId }, session ? { session } : undefined); return deletedCount; }
 }
 
 module.exports = { SessionRepository, hashSecret: hash };

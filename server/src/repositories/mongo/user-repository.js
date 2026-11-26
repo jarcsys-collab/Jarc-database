@@ -123,6 +123,16 @@ class UserRepository {
   }
   // Active Super Admin accounts whose users.status is also active (a P3-suspended or revoked Super Admin can't sign in, so it
   // doesn't count, D-H1), other than one user, inside the caller's transaction.
+  // P4-0 (O5 End sessions): active users other than one who MAY be recognised JARC administrators (auth/accounts.js
+  // jarcAdminStatus decides): the JARC.Admin role recorded at a sign-in, an active Super Admin account, the configured
+  // JARC_SUPER_ADMIN_* identity, or one of `userIds` (users with a live JARC.Admin session). Inside the caller's transaction. At
+  // most 500; only the fields the decision reads.
+  listJarcAdminCandidates({ exceptId, superAdmin = null, userIds = [], session } = {}) {
+    const or = [{ adminRoleSeenAt: { $exists: true } }, { "account.status": "active", "account.role": "SUPER_ADMIN" }];
+    if (superAdmin?.objectId) or.push({ tenantId: superAdmin.tenantId, entraObjectId: superAdmin.objectId });
+    if (userIds.length) or.push({ _id: { $in: userIds } });
+    return this.collection.find({ status: "active", ...(exceptId ? { _id: { $ne: exceptId } } : {}), $or: or }, { session, limit: 500, projection: { _id: 1, tenantId: 1, entraObjectId: 1, status: 1, account: 1, adminRoleSeenAt: 1, adminRoleClearedAt: 1 } }).toArray();
+  }
   countUsableSuperAdmins({ exceptId = null, session } = {}) { return this.collection.countDocuments({ "account.status": "active", "account.role": "SUPER_ADMIN", status: "active", ...(exceptId ? { _id: { $ne: exceptId } } : {}) }, { session }); }
 
   countIdentity(tenantId, entraObjectId) { return this.collection.countDocuments({ tenantId, entraObjectId }); }

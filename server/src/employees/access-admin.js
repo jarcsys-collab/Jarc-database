@@ -40,12 +40,22 @@
 //                      no adminRoleClearedAt) and no live session, so JARC can't tell whether the person is a JARC administrator.
 //                      The person signs in to JARC once (their role is then recorded), or IT disables them in Microsoft Entra ID.
 //
+// P4-0 O5 End sessions (POST /:ds/records/:id/end-sessions { reason }): deletes every JARC session of ONE person and closes their
+// live streams; users.status, memberships and API tokens are not changed (the person can sign in again while Microsoft lets them).
+// One transaction: the administrator is re-read (still active), the target is read by identity, self is refused
+// (SELF_END_SESSIONS), a RECOGNISED JARC administrator only while at least one OTHER usable recognised administrator remains
+// (LAST_USABLE_JARC_ADMIN; usable: users.status active, account not blocked; enforced: an active Super Admin only). The target's
+// and that other administrator's users documents are touched (accessActionAt), so two concurrent End sessions that each rely on
+// the other conflict (one is retried, then decided again). An UNKNOWN status is allowed (reversible, never escalating). The
+// sessions are deleted and employee.sessions.ended is appended in the same transaction; after the commit onSessionsEnded(userId)
+// re-checks that person's open live streams at once (routes/events.js; every other instance closes them at its next 30 s check).
+//
 // No raw IDs leave the server: the person is the opaque profile ID, a workspace is workspaceRef (HMAC of its _id with the profile
 // ID key), history cursors are encrypted. Logs carry error classes only.
 const crypto = require("crypto");
 const { ObjectId } = require("mongodb");
 const { ApiError } = require("../middleware/errors");
-const { accountOf, usableWorkspaceAdmin, jarcAdminStatus, jarcAdminMessage, jarcAdminRefusal, JARC_ADMIN_MESSAGES, WORKSPACE_CAP, WORKSPACE_RANK } = require("../auth/accounts");
+const { accountOf, usableWorkspaceAdmin, jarcAdminStatus, jarcAdminMessage, jarcAdminRefusal, JARC_ADMIN_MESSAGES, RECOGNISED_ADMIN, WORKSPACE_CAP, WORKSPACE_RANK } = require("../auth/accounts");
 const ADMIN_STATUS_UNKNOWN_MESSAGE = JARC_ADMIN_MESSAGES.unknown;
 const { ROLES } = require("../repositories/mongo/membership-repository");
 const { FABRIC_PRODUCT } = require("../repositories/mongo/api-token-repository");
@@ -88,9 +98,13 @@ const MESSAGES = Object.freeze({
   ROLE_NOT_ALLOWED: "That role isn't allowed for this person's JARC account.",
   LAST_USABLE_WORKSPACE_ADMIN: "This person is the only usable Workspace admin of a workspace. Make someone else an admin of it first.",
   TARGET_JARC_ADMIN: "This person is recognised as a JARC administrator, so their access can't be suspended or revoked here.",
-  ADMIN_STATUS_UNKNOWN: ADMIN_STATUS_UNKNOWN_MESSAGE
+  ADMIN_STATUS_UNKNOWN: ADMIN_STATUS_UNKNOWN_MESSAGE,
+  SELF_END_SESSIONS: "You can't end your own JARC sessions here. Use Sign out instead.",
+  LAST_USABLE_JARC_ADMIN: "This person is the only usable JARC administrator JARC recognises, so their sessions can't be ended here. Another JARC administrator must sign in to JARC first."
 });
-const STATUS = Object.freeze({ INVALID_TRANSITION: 409, CONFLICT: 409, SELF_LOCKOUT: 403, LAST_EMPLOYEE_ADMIN: 409, NOT_REGISTERED: 409, ACCOUNT_NOT_ACTIVE: 409, ALREADY_MEMBER: 409, NOT_MEMBER: 404, LAST_WORKSPACE_ADMIN: 409, WORKSPACE_ADMIN_REQUIRED: 403, WORKSPACE_NOT_FOUND: 404, ROLE_NOT_ALLOWED: 400, LAST_USABLE_WORKSPACE_ADMIN: 409, TARGET_JARC_ADMIN: 409, ADMIN_STATUS_UNKNOWN: 409 });
+const STATUS = Object.freeze({ INVALID_TRANSITION: 409, CONFLICT: 409, SELF_LOCKOUT: 403, LAST_EMPLOYEE_ADMIN: 409, NOT_REGISTERED: 409, ACCOUNT_NOT_ACTIVE: 409, ALREADY_MEMBER: 409, NOT_MEMBER: 404, LAST_WORKSPACE_ADMIN: 409, WORKSPACE_ADMIN_REQUIRED: 403, WORKSPACE_NOT_FOUND: 404, ROLE_NOT_ALLOWED: 400, LAST_USABLE_WORKSPACE_ADMIN: 409, TARGET_JARC_ADMIN: 409, ADMIN_STATUS_UNKNOWN: 409, SELF_END_SESSIONS: 403, LAST_USABLE_JARC_ADMIN: 409 });
+// O5: what the End sessions confirmation says (the UI shows the same words).
+const END_SESSIONS_NOTE = "This signs them out of JARC now. It does not suspend the account: if their Microsoft account is still active they can sign in again. API keys are separate: revoke them in Developer → API Keys and Fabric Data → API Management.";
 const soleAdminMessage = (names) => `This person is the only usable Workspace admin of: ${names.join(", ")}. Make someone else an admin of ${names.length === 1 ? "that workspace" : "those workspaces"} first.`;
 // TARGET_JARC_ADMIN / ADMIN_STATUS_UNKNOWN with the basis in words (auth/accounts.js jarcAdminMessage); details.basis is the kind.
 // account.jarcAdministratorLabel, per jarcAdminStatus kind: worded as what JARC saw, never as Microsoft Entra ID now.
@@ -135,7 +149,8 @@ class AccessAdminService {
   // services: dataLayer (users, memberships, workspaces, sessions, accountAudit, apiTokens; services.members); access: the app's
   // Access; tenantId: ENTRA_TENANT_ID; superAdmin (P4-0, optional): the configured JARC_SUPER_ADMIN_* identity { tenantId,
   // objectId } (config accounts.superAdmin), protected by TARGET_JARC_ADMIN.
-  constructor({ employees, jarcAccess, repos, connection, members, access, tenantId, superAdmin = null, idKey = employees?.snapshot?.idKey, logger = console, now = () => new Date() }) {
+  // onSessionsEnded (O5, optional): (userId) → void, called after End sessions commits (app.js: re-check that person's live streams).
+  constructor({ employees, jarcAccess, repos, connection, members, access, tenantId, superAdmin = null, idKey = employees?.snapshot?.idKey, logger = console, now = () => new Date(), onSessionsEnded = null }) {
     if (!employees?.service || !employees?.snapshot) throw new Error("AccessAdminService needs createEmployees(...).");
     if (!jarcAccess || typeof jarcAccess.invalidate !== "function") throw new Error("AccessAdminService needs the JARC access index.");
     for (const r of ["users", "memberships", "workspaces", "sessions", "accountAudit", "apiTokens"]) if (!repos?.[r]) throw new Error("AccessAdminService needs the JARC repositories.");
@@ -144,7 +159,7 @@ class AccessAdminService {
     if (!access || typeof access.shared !== "boolean") throw new Error("AccessAdminService needs the app's Access instance.");
     if (!tenantId) throw new Error("AccessAdminService needs the tenant ID.");
     if (!Buffer.isBuffer(idKey) || idKey.length < 16) throw new Error("AccessAdminService needs the profile ID key.");
-    Object.assign(this, { employees, jarcAccess, repos, connection, members, access, logger, now });
+    Object.assign(this, { employees, jarcAccess, repos, connection, members, access, logger, now, onSessionsEnded: typeof onSessionsEnded === "function" ? onSessionsEnded : null });
     this.tenantId = lower(tenantId);
     this.superAdmin = superAdmin && superAdmin.objectId ? Object.freeze({ tenantId: lower(superAdmin.tenantId), objectId: lower(superAdmin.objectId) }) : null;
     Object.defineProperty(this, "keys", { enumerable: false, value: Object.freeze({
@@ -220,6 +235,35 @@ class AccessAdminService {
   }
   othersActive(oid, session) { return this.repos.users.countActiveIdentities(this.tenantId, this.adminOids().filter((x) => x !== oid), session ? { session } : {}); }
 
+  // O5: the _id of one OTHER usable recognised JARC administrator (null: none). The same jarcAdminStatus as the guards, over the
+  // candidates (recorded role, active Super Admin, configured identity, a live JARC.Admin session bound to the user's identity).
+  // Usable: users.status active and the account not blocked; under ACCOUNT_MANAGEMENT=enforced only an active Super Admin acts as
+  // a JARC administrator, so only that kind counts. Reads in the transaction when given.
+  async otherUsableJarcAdmin(user, session) {
+    const opt = session ? { session } : {};
+    const live = await this.repos.sessions.listLiveAdminSessions(this.now(), opt);
+    const liveIds = [...new Map(live.map((s) => [hex(s.userId), s.userId])).values()];
+    const candidates = await this.repos.users.listJarcAdminCandidates({ exceptId: user._id, superAdmin: this.superAdmin, userIds: liveIds, ...opt });
+    const mode = this.access.accountMode;
+    for (const c of candidates) {
+      if (c.status !== "active") continue;
+      const account = accountOf(c);
+      if (mode !== "off" && !account.legacy && account.status === "blocked") continue;
+      const own = live.filter((s) => hex(s.userId) === hex(c._id) && s.tenantId === c.tenantId && s.objectId === c.entraObjectId).map(() => ({ isSystemAdmin: true }));
+      const kind = jarcAdminStatus({ user: c, superAdmin: this.superAdmin, liveSessions: own });
+      if (mode === "enforced" ? kind === "super_admin" : RECOGNISED_ADMIN.includes(kind)) return c._id;
+    }
+    return null;
+  }
+  // O5: null when End sessions is allowed for this person, else the refusal code (shared by the GET's actions list and the write).
+  async endSessionsRefusal(user, isSelf, kind, session) {
+    if (isSelf) return { code: "SELF_END_SESSIONS" };
+    if (!user) return { code: "NOT_REGISTERED" };
+    if (!RECOGNISED_ADMIN.includes(kind)) return null;
+    const other = await this.otherUsableJarcAdmin(user, session);
+    return other ? { other } : { code: "LAST_USABLE_JARC_ADMIN" };
+  }
+
   // ---- GET /:ds/records/:id/manage-access
   async manageAccess(dsName, id, access, actor) {
     const { snap, record, oid } = await this.target(dsName, id, access);
@@ -278,6 +322,11 @@ class AccessAdminService {
       const ending = action === "suspend" || action === "revoke";
       return code ? { action, allowed: false, code, reason: code === "LAST_USABLE_WORKSPACE_ADMIN" ? soleAdminMessage(soleAdminOf) : code === "TARGET_JARC_ADMIN" || code === "ADMIN_STATUS_UNKNOWN" ? jarcAdminMessage(jarcAdmin) : MESSAGES[code] } : { action, allowed: true, ...(ending ? { reasonRequired: true } : {}), ...(action === "revoke" ? { confirm: CONFIRM_REVOKE } : {}), ...(ending && soleAdminWarning ? { warnings: [soleAdminWarning] } : {}) };
     });
+    // O5 End sessions: for a registered person only (someone without a JARC account has no session). Unknown status: allowed.
+    if (user) {
+      const refused = await this.endSessionsRefusal(user, isSelf, jarcAdmin, null);
+      actions.push(refused?.code ? { action: "end_sessions", allowed: false, code: refused.code, reason: MESSAGES[refused.code] } : { action: "end_sessions", allowed: true, reasonRequired: true, note: END_SESSIONS_NOTE });
+    }
     const snapshot = this.employees.snapshot.meta();
     const warnings = [];
     if (soleAdminWarning) warnings.push(soleAdminWarning);
@@ -408,6 +457,42 @@ class AccessAdminService {
       }
       this.jarcAccess.invalidate();
       return { manageAccess: await this.manageAccess(dsName, id, access, actor), result: { action, from: done.from, to: done.to, sessionsEnded, tokensRevoked: done.tokens } };
+    });
+  }
+
+  // ---- POST /:ds/records/:id/end-sessions { reason } (O5): one person per request; see the header.
+  async endSessions(dsName, id, raw, access, actor) {
+    const ctx = { targetRef: typeof id === "string" && ID_PATTERN.test(id) ? id : null };
+    return this.guard("end_sessions", actor, ctx, async () => {
+      const b = body(raw, ["reason"]);
+      const reason = reasonOf(b.reason, true);
+      const { snap, record, oid } = await this.target(dsName, id, access);
+      // Live JARC.Admin sessions known to the access index (read before the transaction, as changeAccess does).
+      const { entry } = await this.indexEntry(snap, record);
+      const now = this.now();
+      const done = await this.connection.withTransaction(async (session) => {
+        const me = await this.repos.users.findByIdIn(actor.userId, { session });
+        if (!me || me.status !== "active") throw employeeError("EMPLOYEES_FORBIDDEN");
+        const user = await this.findUser(oid, session);
+        ctx.targetUserId = user?._id ?? null;
+        const isSelf = Boolean(user && user._id.equals(actor.userId)) || (lower(actor.entraObjectId) === oid && lower(actor.tenantId) === this.tenantId);
+        const kind = user ? await this.jarcAdminKind(user, entry, session) : "unknown";
+        const refused = await this.endSessionsRefusal(user, isSelf, kind, session);
+        if (refused?.code) throw p3Error(refused.code);
+        // Concurrency: the administrator this decision relied on, and the target, are written in this transaction, so a concurrent
+        // End sessions of that administrator (which relies on this target) or a sign-in recording their role conflicts with it.
+        if (refused?.other) await this.repos.users.touchAccessActor(refused.other, now, { session });
+        await this.repos.users.touchAccessActor(user._id, now, { session });
+        const ended = await this.repos.sessions.removeForUser(user._id, { session });
+        await this.repos.accountAudit.append({ action: "employee.sessions.ended", targetUserId: user._id, actorUserId: actor.userId, actorName: actor.displayName ?? null, changes: [{ field: "sessions", from: ended, to: 0 }], result: "ok", reason, source: SOURCE, targetRef: record.id, at: now }, { session });
+        return { userId: user._id, ended };
+      });
+      // After the commit: this person's open live streams are re-checked now (their session is gone, so each ends with
+      // "session-ended"); best-effort, the streams' own 30 s check closes them anyway.
+      const signalFailed = (error) => this.logger.error?.(`[employees] couldn't signal the live streams after ending sessions: ${describe(error)}`);
+      try { await Promise.resolve(this.onSessionsEnded?.(done.userId)).catch(signalFailed); } catch (error) { signalFailed(error); }
+      this.jarcAccess.invalidate();
+      return { manageAccess: await this.manageAccess(dsName, id, access, actor), result: { action: "end_sessions", sessionsEnded: done.ended } };
     });
   }
 
@@ -592,4 +677,4 @@ class AccessAdminService {
   }
 }
 
-module.exports = { AccessAdminService, TRANSITIONS, CONFIRM_REVOKE, ENTRA_DISABLED_REASON, MESSAGES };
+module.exports = { AccessAdminService, TRANSITIONS, CONFIRM_REVOKE, ENTRA_DISABLED_REASON, MESSAGES, END_SESSIONS_NOTE };

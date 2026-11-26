@@ -9,6 +9,7 @@
 // API (contract P3 §5, under /api/v1/admin/employees, through the app's adapter, which adds X-CSRF-Token to writes):
 //   GET    /:ds/records/:id/manage-access                     the tab's body ({ id, version, account, actions, tokens, workspaces, sharedAccess, warnings })
 //   POST   /:ds/records/:id/access                            { action: grant|suspend|restore|revoke, expectedVersion, reason?, confirm? }
+//   POST   /:ds/records/:id/end-sessions                      { reason } (P4-0 O5: signs the person out of JARC; no status change)
 //   POST   /:ds/records/:id/memberships                       { workspaceRef, role }
 //   PATCH  /:ds/records/:id/memberships/:workspaceRef         { role }
 //   DELETE /:ds/records/:id/memberships/:workspaceRef
@@ -26,8 +27,10 @@ class EmployeeManage {
   static ALL_ROLES = { SYSTEM_ADMIN: "JARC administrator", WORKSPACE_ADMIN: "Workspace admin", MEMBER: "Member", VIEWER: "Viewer" };
   // "disabled": a users.status written outside P3 (shown "Disabled in JARC"); the server allows Restore or Revoke only.
   static STATES = { not_registered: ["Not registered", "no"], active: ["Active", "on"], suspended: ["Suspended", "warn"], revoked: ["Revoked", "off"], disabled: ["Disabled in JARC", "off"] };
-  static ACTIONS = ["grant", "restore", "suspend", "revoke"];
-  static ACTION_LABELS = { grant: "Grant access", restore: "Restore", suspend: "Suspend", revoke: "Revoke" };
+  static ACTIONS = ["grant", "restore", "suspend", "revoke", "end_sessions"];
+  static ACTION_LABELS = { grant: "Grant access", restore: "Restore", suspend: "Suspend", revoke: "Revoke", end_sessions: "End sessions" };
+  // P4-0 O5: the End sessions confirmation, word for word (the server sends the same note).
+  static END_SESSIONS_LEAD = ["This signs them out of JARC now.", "It does not suspend the account: if their Microsoft account is still active they can sign in again.", "API keys are separate: revoke them in Developer → API Keys and Fabric Data → API Management."];
   static MEMBERSHIP_STATUS = { active: "Active", invited: "Invited", removed: "Removed" };
   static ENTRA_REASON = "Disabled in Microsoft Entra ID";
   static SHARED_NOTE = "Shared access still gives Workspace admin in every workspace; removing this membership only removes member management and comment moderation.";
@@ -53,6 +56,8 @@ class EmployeeManage {
     TARGET_JARC_ADMIN: "JARC recognises this person as a JARC administrator (a Super Admin, or the JARC administrator role seen at their last sign-in), so their access can't be suspended or revoked here.",
     ADMIN_STATUS_UNKNOWN: "JARC doesn't know whether this person is a JARC administrator: it hasn't recorded a sign-in from them since this check was introduced. They need to sign in to JARC once, or IT can disable them in Microsoft Entra ID (which blocks new sign-ins).",
     REAUTH_REQUIRED: "For security, sign in again to continue this administrator action.",
+    SELF_END_SESSIONS: "You can't end your own JARC sessions here. Use Sign out instead.",
+    LAST_USABLE_JARC_ADMIN: "This person is the only usable JARC administrator JARC recognises, so their sessions can't be ended here. Another JARC administrator must sign in to JARC first.",
     INVALID_TRANSITION: "Not possible from the current account state.",
     NOT_REGISTERED: "This person has no JARC account yet.",
     ALREADY_ACTIVE: "The account is already active.",
@@ -69,10 +74,10 @@ class EmployeeManage {
     "employee.access.granted": "Access granted", "employee.access.provisioned": "Account pre-provisioned",
     "employee.access.suspended": "Account suspended", "employee.access.restored": "Account restored", "employee.access.revoked": "Access revoked",
     "employee.membership.added": "Membership added", "employee.membership.role_changed": "Membership role changed", "employee.membership.removed": "Membership removed",
-    "employee.access.rejected": "Change refused"
+    "employee.access.rejected": "Change refused", "employee.sessions.ended": "Sessions ended"
   };
-  static ATTEMPTS = { grant: "Grant access", suspend: "Suspend", restore: "Restore", revoke: "Revoke", add: "Add membership", membership_add: "Add membership", role: "Change membership role", membership_role: "Change membership role", remove: "Remove membership", membership_remove: "Remove membership" };
-  static FIELDS = { status: "JARC account", role: "Membership role", membership: "Membership", accessVersion: "Version", provisioned: "Provisioned" };
+  static ATTEMPTS = { grant: "Grant access", suspend: "Suspend", restore: "Restore", revoke: "Revoke", add: "Add membership", membership_add: "Add membership", role: "Change membership role", membership_role: "Change membership role", remove: "Remove membership", membership_remove: "Remove membership", end_sessions: "End sessions" };
+  static FIELDS = { status: "JARC account", role: "Membership role", membership: "Membership", accessVersion: "Version", provisioned: "Provisioned", sessions: "JARC sessions" };
   static LOOKS_LIKE_ID = /\b[0-9a-f]{24}\b|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b|\b(?=[A-Za-z_-]{0,21}\d)[A-Za-z0-9_-]{22}\b/i;
 
   // ---- Helpers
@@ -340,7 +345,7 @@ class EmployeeManage {
         : code === "ALREADY_MEMBER" || /DUPLICATE|EXISTS/.test(code) ? "This person already has a membership in this workspace."
         : code === "NOT_REGISTERED" ? "This person has no JARC account yet: grant access first."
         : code === "ACCOUNT_NOT_ACTIVE" ? "The JARC account isn't active, so its memberships can't be changed now."
-        : code === "LAST_USABLE_WORKSPACE_ADMIN" || code === "TARGET_JARC_ADMIN" || code === "ADMIN_STATUS_UNKNOWN" ? EmployeeManage.CODES[code]
+        : code === "LAST_USABLE_WORKSPACE_ADMIN" || code === "TARGET_JARC_ADMIN" || code === "ADMIN_STATUS_UNKNOWN" || code === "LAST_USABLE_JARC_ADMIN" ? EmployeeManage.CODES[code]
         : "Changed by someone else.";
       return { ...base, kind: "conflict", message: `${msg} Reloaded: check the current state, then try again.` };
     }
@@ -404,6 +409,8 @@ class EmployeeManage {
     const name = EmployeeManage.str(p.explorer?.record?.data?.values?.displayName, 200) || "this person";
     const tok = (n) => (n === null ? "" : ` (${EmployeeManage.plural(n, "active token", "active tokens")})`);
     if (d.kind === "account") {
+      // P4-0 O5: sessions only; the account, memberships and API keys stay as they are.
+      if (d.act === "end_sessions") return { title: `End ${name}'s JARC sessions?`, lead: [...EmployeeManage.END_SESSIONS_LEAD], reason: "required", submit: "End sessions", danger: true };
       if (d.act === "suspend") return { title: `Suspend ${name}?`, lead: ["Their JARC sessions end now, and JARC sign-in is refused until the account is restored.", `Their JARC API${tok(m.tokens.jarc)} and Fabric API${tok(m.tokens.fabric)} tokens are refused while suspended. They aren't revoked: Restore makes them usable again.`, "Memberships are kept."], reason: "required", submit: "Suspend account", danger: true };
       if (d.act === "restore" && m.state === "disabled") return { title: `Restore ${name}?`, lead: ["The JARC account was disabled outside Employee Management. Restore makes it active: the person can sign in to JARC again.", `Their existing API tokens become usable again: JARC API${tok(m.tokens.jarc)} and Fabric API${tok(m.tokens.fabric)}.`], reason: "optional", submit: "Restore account" };
       if (d.act === "restore") return { title: `Restore ${name}?`, lead: ["The person can sign in to JARC again.", `Their existing API tokens become usable again: JARC API${tok(m.tokens.jarc)} and Fabric API${tok(m.tokens.fabric)}.`, ...(shared ? ["With shared access on, they are Workspace admin in every workspace again."] : [])], reason: "optional", submit: "Restore account" };
@@ -487,6 +494,7 @@ class EmployeeManage {
     }
     if (t.confirm && confirm !== EmployeeManage.CONFIRM_WORD) { d.invalid = "confirm"; d.error = `Type ${EmployeeManage.CONFIRM_WORD} in capital letters to confirm.`; return null; }
     const x = p.explorer, base = EmployeeManage.base(x), m = EmployeeManage.model(s.data);
+    if (d.kind === "account" && d.act === "end_sessions") return { method: "POST", path: `${base}/end-sessions`, body: { reason } };
     if (d.kind === "account") {
       // expectedState and expectedVersion come from the last GET: a change by someone else meanwhile is a 409 (then reloaded).
       const body = { action: d.act, expectedVersion: m.version ?? 0, ...(m.state ? { expectedState: m.state } : {}) };
@@ -501,7 +509,7 @@ class EmployeeManage {
     return null;
   }
   static DONE = {
-    grant: "Access granted", restore: "Account restored", suspend: "Account suspended", revoke: "Access revoked",
+    grant: "Access granted", restore: "Account restored", suspend: "Account suspended", revoke: "Access revoked", end_sessions: "Sessions ended",
     add: "Membership added", role: "Membership role changed", remove: "Membership removed"
   };
   static async submit(p, form) {
@@ -534,7 +542,8 @@ class EmployeeManage {
     const fresh = EmployeeManage.obj(res?.manageAccess) || (EmployeeManage.obj(res) && Array.isArray(res.actions) ? res : null);
     const op = d.kind === "account" ? d.act : d.kind, done = EmployeeManage.DONE[op] || "Changed";
     const warnings = EmployeeManage.list(res?.warnings).map((w) => EmployeeManage.explain(w, "")).filter(Boolean).slice(0, 10);
-    const tokenText = op === "revoke" ? EmployeeManage.revokedTokens(res) : "";
+    const ended = op === "end_sessions" ? EmployeeManage.int(EmployeeManage.obj(res?.result)?.sessionsEnded) : null;
+    const tokenText = op === "revoke" ? EmployeeManage.revokedTokens(res) : ended !== null ? `${EmployeeManage.plural(ended, "JARC session", "JARC sessions")} ended.` : "";
     s.notice = { tone: warnings.length ? "warn" : "ok", title: done, text: [EmployeeManage.noticeText(op, EmployeeManage.model(fresh || s.data).shared.on), tokenText].filter(Boolean).join(" "), items: warnings };
     s.drafts = {};
     if (fresh) { s.data = fresh; s.error = null; }
@@ -551,6 +560,7 @@ class EmployeeManage {
       restore: "They can sign in to JARC again, and their existing API tokens work again.",
       suspend: "Their sessions were ended; JARC sign-in and their API tokens are refused until restored.",
       revoke: "Their sessions were ended and JARC sign-in is refused. Memberships are kept but give nothing; Grant is needed to come back.",
+      end_sessions: "They are signed out of JARC. The account isn't suspended: if their Microsoft account is still active they can sign in again. API keys aren't changed.",
       add: "The membership was added.", role: "The membership role was changed.",
       remove: shared ? "The membership was removed. Shared access is on, so they still have Workspace admin through shared access." : "The membership was removed."
     }[op] || "";
