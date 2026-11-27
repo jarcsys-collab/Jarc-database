@@ -1291,6 +1291,8 @@ class AppController {
       const value=op==="in"?new FormData(form).getAll("value"):String(data.value??"").trim();
       if(op==="in"&&!value.length)this.model.columnFilter=null;
       else if(!noValue&&value===""){form.querySelector('[name="value"]')?.focus();this.view.toast("Enter a value to filter by");return;}
+      // Kept with a saved view as one setting, which the server limits in length.
+      else if(BoardModel.columnFilterText({key,op,value}).length>BoardModel.COLUMN_FILTER_MAX){this.view.toast("Too many values to keep with a view: choose fewer");return;}
       else this.model.columnFilter={key,op,value:noValue?"":value};
       this.view.closeOverlay(); this.update(); return;
     }

@@ -890,7 +890,7 @@ class BoardModel {
   // Opens a view: its type, filters, sorting, grouping and (if it has its own) visible columns. The board's columns —
   // order, widths, visibility in Main Table — are never changed by opening a view (older views that stored a column
   // order or widths simply use the board's).
-  applyView(id) { const view = this.board.savedViews.find((item) => String(item.id) === String(this.idOf(id))); if (!view) return; Object.assign(this, { status: view.status||"All", query: view.query||"", grouped: Boolean(view.grouped), groupBy: typeof view.groupBy==="string"?view.groupBy:"", personFilter: typeof view.personFilter==="string"?view.personFilter:"", sortDirection: view.sortDirection||"desc" }); this.currentView=["table","list","kanban","calendar"].includes(view.view)?view.view:"table"; this.viewHidden=this.hiddenFrom(view); this.viewOrder=Array.isArray(view.columnOrder)?[...view.columnOrder]:null; this.viewWidths=view.columnWidths&&typeof view.columnWidths==="object"?Object.fromEntries(Object.entries(view.columnWidths).filter(([,w])=>Number.isFinite(w)&&w>0)):null; this.sortKey=view.sortKey||"";this.quickFilter=view.quickFilter||"all";this.showArchived=false;this.columnFilter=null;this.manualSort=false; this.activeSavedViewId=view.id; this.viewFilter=view.filter||null; this.viewOrderBy=view.orderBy||null; this.selected?.clear?.(); this.save({op:"updateUserState",boardId:this.board.id}); }
+  applyView(id) { const view = this.board.savedViews.find((item) => String(item.id) === String(this.idOf(id))); if (!view) return; Object.assign(this, { status: view.status||"All", query: view.query||"", grouped: Boolean(view.grouped), groupBy: typeof view.groupBy==="string"?view.groupBy:"", personFilter: typeof view.personFilter==="string"?view.personFilter:"", sortDirection: view.sortDirection||"desc" }); this.currentView=["table","list","kanban","calendar"].includes(view.view)?view.view:"table"; this.viewHidden=this.hiddenFrom(view); this.viewOrder=Array.isArray(view.columnOrder)?[...view.columnOrder]:null; this.viewWidths=view.columnWidths&&typeof view.columnWidths==="object"?Object.fromEntries(Object.entries(view.columnWidths).filter(([,w])=>Number.isFinite(w)&&w>0)):null; this.sortKey=view.sortKey||"";this.quickFilter=view.quickFilter||"all";this.showArchived=false;this.columnFilter=BoardModel.columnFilterFrom(view.columnFilter);this.manualSort=false; this.activeSavedViewId=view.id; this.viewFilter=view.filter||null; this.viewOrderBy=view.orderBy||null; this.selected?.clear?.(); this.save({op:"updateUserState",boardId:this.board.id}); }
   resetMainView() { this.viewFilter=null; this.viewOrderBy=null; this.serverView=null; this.viewHidden=null; this.viewOrder=null; this.viewWidths=null; this.sortKey="";this.quickFilter="all";this.columnFilter=null;this.query=""; this.status="All"; this.grouped=false; this.groupBy=""; this.personFilter=""; this.sortDirection="desc"; this.activeSavedViewId=null; this.showArchived=false; this.manualSort=Boolean(this.board?.manualOrder); }
   // Deleting a view removes only the view (its settings); records are never touched.
   deleteView(id) { if(!this.canManageView(this.board.savedViews.find((view)=>view.id===this.idOf(id))))return false; this.board.savedViews =this.board.savedViews.filter((view) => view.id !== this.idOf(id)); if(this.activeSavedViewId===this.idOf(id))this.resetMainView(); this.save({op:"updateViews",boardId:this.board.id}); }
@@ -922,14 +922,14 @@ class BoardModel {
   }
   viewSnapshot(){
     const keys=new Set(this.board.columns.map((c)=>c.key));
-    return {status:this.status||"All",query:this.query||"",grouped:Boolean(this.grouped),groupBy:this.groupBy||"",personFilter:this.personFilter||"",sortDirection:this.sortDirection||"desc",sortKey:this.sortKey||"",quickFilter:this.quickFilter||"all",view:this.currentView||"table",...(this.viewFilter?{filter:this.viewFilter}:{}),...(this.viewOrderBy?{orderBy:this.viewOrderBy}:{}),
+    return {status:this.status||"All",query:this.query||"",grouped:Boolean(this.grouped),groupBy:this.groupBy||"",personFilter:this.personFilter||"",sortDirection:this.sortDirection||"desc",sortKey:this.sortKey||"",quickFilter:this.quickFilter||"all",view:this.currentView||"table",...(this.viewFilter?{filter:this.viewFilter}:{}),...this.columnFilterSetting(this.columnFilter),...(this.viewOrderBy?{orderBy:this.viewOrderBy}:{}),
       hiddenColumns:[...new Set(this.viewHidden||[])].filter((k)=>keys.has(k)).sort(),
       ...(Array.isArray(this.viewOrder)?{columnOrder:this.viewOrder.filter((k)=>keys.has(k))}:{}),
       ...(this.viewWidths&&Object.keys(this.viewWidths).length?{columnWidths:Object.fromEntries(Object.entries(this.viewWidths).filter(([k,w])=>keys.has(k)&&Number.isFinite(w)).sort(([a],[b])=>a.localeCompare(b)))}:{})};
   }
   savedSnapshot(v){
     const keys=new Set(this.board.columns.map((c)=>c.key)), widths=v.columnWidths&&typeof v.columnWidths==="object"?Object.entries(v.columnWidths).filter(([k,w])=>keys.has(k)&&Number.isFinite(w)):[];
-    return {status:v.status||"All",query:v.query||"",grouped:Boolean(v.grouped),groupBy:typeof v.groupBy==="string"?v.groupBy:"",personFilter:typeof v.personFilter==="string"?v.personFilter:"",sortDirection:v.sortDirection||"desc",sortKey:v.sortKey||"",quickFilter:v.quickFilter||"all",view:v.view||"table",...(v.filter?{filter:v.filter}:{}),...(v.orderBy?{orderBy:v.orderBy}:{}),
+    return {status:v.status||"All",query:v.query||"",grouped:Boolean(v.grouped),groupBy:typeof v.groupBy==="string"?v.groupBy:"",personFilter:typeof v.personFilter==="string"?v.personFilter:"",sortDirection:v.sortDirection||"desc",sortKey:v.sortKey||"",quickFilter:v.quickFilter||"all",view:v.view||"table",...(v.filter?{filter:v.filter}:{}),...this.columnFilterSetting(BoardModel.columnFilterFrom(v.columnFilter)),...(v.orderBy?{orderBy:v.orderBy}:{}),
       hiddenColumns:[...new Set(this.hiddenFrom(v))].filter((k)=>keys.has(k)).sort(),
       ...(Array.isArray(v.columnOrder)?{columnOrder:v.columnOrder.filter((k)=>keys.has(k))}:{}),
       ...(widths.length?{columnWidths:Object.fromEntries(widths.sort(([a],[b])=>a.localeCompare(b)))}:{})};
@@ -965,7 +965,7 @@ class BoardModel {
   renameView(id,name){const v=this.board?.savedViews.find((x)=>String(x.id)===String(this.idOf(id)));const clean=String(name||"").trim().slice(0,60);if(!v||!clean||!this.canManageView(v))return false;if(v.name===clean)return true;v.name=clean;this.save({op:"updateViews",boardId:this.board.id});return true;}
   // Saves the open view's configuration into it (shared with the board: a versioned board update, so a colleague's
   // simultaneous change is never silently overwritten).
-  saveActiveView(){const v=this.activeView;if(!v||!this.canManageView(v))return false;const snap=this.viewSnapshot();for(const k of ["visibleColumns","columnOrder","columnWidths","density","showArchived"])delete v[k];Object.assign(v,snap);this.save({op:"updateViews",boardId:this.board.id});return true;}
+  saveActiveView(){const v=this.activeView;if(!v||!this.canManageView(v))return false;const snap=this.viewSnapshot();for(const k of ["visibleColumns","columnOrder","columnWidths","density","showArchived","columnFilter"])delete v[k];Object.assign(v,snap);this.save({op:"updateViews",boardId:this.board.id});return true;}
   // Show or hide every column (Item always stays) — in the open view, or in Main Table for everyone.
   setAllColumnsVisible(visible){
     if(this.activeView){this.viewHidden=visible?[]:this.board.columns.filter((c)=>c.key!=="serial").map((c)=>c.key);return true;}
@@ -1389,7 +1389,19 @@ class BoardModel {
     this.log(`Updated ${plan.column.label} options`);this.save({op:"updateColumns",boardId:this.board.id,columnKey:key,optionItems:items.map((i)=>({from:i.from??null,to:String(i.to||""),...(i.color!==undefined?{color:i.color}:{})})),affectsRecords:true});
     return {cleared:plan.affected};
   }
-  // Basic per-column filter: {key, op, value}. Session state only, like the status filter and search.
+  // Basic per-column filter: {key, op, value}. On Main Table it lasts for the session, like the status filter and search; a
+  // saved view keeps it as one text setting, columnFilter (JSON), because the server keeps a view's settings flat (no
+  // nested objects besides filter and orderBy). Releases before this one ignore that setting and leave it in the view.
+  static COLUMN_FILTER_OPS=Object.freeze(["in","checked","unchecked","contains","equals","eq","gt","lt","on","before","after","empty","not-empty"]);
+  static COLUMN_FILTER_MAX=1000; // the server's limit for one text setting of a view
+  static columnFilterText(f){return f?JSON.stringify({key:f.key,op:f.op,value:f.value}):"";}
+  static columnFilterFrom(text){
+    let f=null; try{f=typeof text==="string"&&text?JSON.parse(text):null;}catch{return null;}
+    const value=f?.value, ok=Boolean(f)&&typeof f.key==="string"&&f.key!==""&&BoardModel.COLUMN_FILTER_OPS.includes(f.op)&&(typeof value==="string"||(Array.isArray(value)&&value.every((v)=>typeof v==="string")));
+    return ok?{key:f.key,op:f.op,value:Array.isArray(value)?[...value]:value}:null;
+  }
+  // A column filter as a view setting, while its column is on the board (a deleted column's filter drops out).
+  columnFilterSetting(f){return f&&this.board?.columns.some((c)=>c.key===f.key)?{columnFilter:BoardModel.columnFilterText(f)}:{};}
   matchesColumnFilter(row){
     const filter=this.columnFilter, column=filter&&this.board?.columns.find((c)=>c.key===filter.key); if(!column)return true;
     const value=row[column.key], list=this.valueList(value), text=Array.isArray(value)?this.valueText(column,value):String(value??"").trim(), wanted=filter.value;
