@@ -342,4 +342,29 @@ describe("Add Column + and table minimum width across the board matrix (real app
       assert.equal(cols.ok, true, `${name}: viewer's Columns picker ${JSON.stringify(summary(cols))}`);
     }
   });
+
+  // S0-B on top of the Add Column fix: Connect and Mirror columns (with linked names, a mirrored sum and the S0-B partial/lock
+  // marks they may carry) count toward --columns-width like any column, and the + stays usable after them.
+  test("Connect / Mirror columns present: the + is still usable and the min-width includes them (1,025 / 1,440, light and dark)", async () => {
+    await freshBrowser("admin", true);
+    const narrow = boards["Manual narrow"];
+    const linked = (await api("GET", `/boards/${narrow.id}/records?limit=3`)).body.items.map((r) => r.id);
+    assert.equal(linked.length, 3, "three records to link");
+    const res = await api("POST", `/workspaces/${ws.id}/boards`, { name: "Connected wide", columns: [{ key: "serial", label: "Name", type: "text", required: true }, { key: "link", label: "Linked items", type: "connect", link: { boardId: narrow.id }, multiple: true }, { key: "qtysum", label: "Qty total", type: "mirror", mirror: { via: "link", column: "qty", show: "sum" } }, ...many(10, "w")] });
+    assert.equal(res.status, 201, JSON.stringify(res.body).slice(0, 200));
+    const board = res.body.board;
+    assert.equal((await api("POST", `/boards/${board.id}/records/batch`, { records: Array.from({ length: 6 }, (_, i) => ({ values: { serial: `Synthetic link ${i + 1}`, link: linked.slice(0, (i % 3) + 1) } })) })).status, 201);
+    for (const [width, theme] of [[1025, "light"], [1440, "light"], [1440, "dark"]]) {
+      const label = `Connected wide @${width} ${theme}`;
+      await openBoard("Connected wide", { width, theme });
+      assert.ok(await b.waitFor("(() => { const c = document.querySelector('tr[data-record-context] td[data-column-key=qtysum]'); return /\\d/.test(c?.textContent || ''); })()", 8000), `${label}: the mirrored sum is shown`);
+      await plusUsable(label);
+      const l = await layout();
+      expectExactMinWidth(l, label);
+      assert.ok(l.dataKeys.includes("link") && l.dataKeys.includes("qtysum"), `${label}: Connect and Mirror headers are rendered`);
+      assert.equal(l.varPx, 260 + 180 + 180 + 10 * 220, `${label}: --columns-width counts Name + Connect (180) + Mirror (180) + 10 text columns`);
+      assert.deepEqual(l.order.slice(-3), ["record-id", "add-column-col", "actions-col"], `${label}: + after the last column, before actions`);
+      assert.ok(l.pageOverflow <= 1, `${label}: no page-level sideways scroll (${l.pageOverflow})`);
+    }
+  });
 });
