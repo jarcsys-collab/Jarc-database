@@ -63,8 +63,8 @@ function apiTokenRoutes({ tokens, access, repos, limiter = searchLimiter({ perWi
     ]);
     if (recordId && (!record || !record.boardId.equals(board._id))) return sendError(res, 404, "NOT_FOUND", "This record isn't on this board, or doesn't exist.");
     // S0-B row 9: Connect cells whose linked board the API administrator can't open (their own session) are null + restricted,
-    // in all three shapes.
-    const restricted = await restrictedFor(authzFor(req, access), board);
+    // in all three shapes. Only Connect keys, exactly as the token API names them (a Mirror is always null there, never listed).
+    const restricted = new Set([...await restrictedFor(authzFor(req, access), board)].filter((key) => board.columns.find((c) => c.key === key)?.type === "connect"));
     const pagination = { limit: EXAMPLE_RECORDS, hasMore: page.hasMore };
     const single = selected.length === 1 && req.query.columns !== undefined ? selected[0] : null;
     send(res, 200, {

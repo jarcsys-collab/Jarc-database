@@ -585,7 +585,7 @@ class ApiTokensPanel {
     const preview = ex.preview ? `<figure class="apitok-code"><figcaption><span>${opId === "records" || opId === "values" ? `Example response, from your own access (first ${ex.data.example.pagination.limit} active records at most; options aren't applied)` : "Example response, from your own access"}</span></figcaption><pre tabindex="0" id="apitok-ex-example"><code>${this.esc(JSON.stringify(ex.preview, null, 2))}</code></pre></figure>` : ex.previewError ? `<p class="account-empty" role="alert">${this.esc(ex.previewError)}</p>` : "";
     return `${intro}${pickers}
       <dl class="apitok-copy-list">${this.copyRow("Board API ID", ex.boardId)}</dl>
-      ${recordField}<h3>Columns</h3><p class="account-note">${columnHelp}</p>${columns}
+      ${recordField}<h3>Columns</h3><p class="account-note">${columnHelp}</p>${ex.data.columns.some((c) => c.type === "mirror") ? `<p class="account-note" data-note="mirror-null">Mirror columns are worked out in JARC when they are shown and are not returned by the API: their value is always <code>null</code>.</p>` : ""}${columns}
       ${options}
       <h3>Endpoint</h3>${problems.length ? `<p class="apitok-error" role="alert">${this.esc(problems.join(" "))}</p>` : ""}<dl class="apitok-copy-list">${this.copyRow(`GET`, url, "Endpoint")}${related}</dl>
       <p class="account-note">Send your token in a header, never in the address: <code>Authorization: Bearer YOUR_JARC_API_TOKEN</code></p>
