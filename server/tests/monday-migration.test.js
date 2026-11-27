@@ -224,8 +224,8 @@ describe("HTML to plain text", () => {
 });
 
 describe("write planning (pure)", () => {
-  let r;
-  before(() => { r = dryRun(tmp(fixture())); });
+  let r, source;
+  before(() => { source = tmp(fixture()); r = dryRun(source); });
   test("production execution is disabled and an unverified target is refused before any call", async () => {
     assert.equal(executor.PRODUCTION_EXECUTION_ENABLED, false);
     const client = new Proxy({}, { get: () => assert.fail("the client must not be used") });
@@ -255,7 +255,7 @@ describe("write planning (pure)", () => {
   test("the CLI refuses a production-scope approval (exit 3, nothing written)", () => {
     const file = path.join(tmp(fs.mkdtempSync(path.join(os.tmpdir(), "jarc-mm-appr-"))), "approval.json");
     fs.writeFileSync(file, JSON.stringify({ kind: "monday-migration-approval", version: 2, scope: "production", planDigest: r.digest, targetDatabase: "jarc_database" }));
-    const res = spawnSync(process.execPath, [path.join(__dirname, "../scripts/monday-migrate.js"), "execute", "--approval", file], { encoding: "utf8", timeout: 120000 });
+    const res = spawnSync(process.execPath, [path.join(__dirname, "../scripts/monday-migrate.js"), "execute", "--approval", file, "--source", source], { encoding: "utf8", timeout: 120000 });
     assert.equal(res.status, 3, res.stdout + res.stderr); assert.match(res.stdout, /REFUSED|production execution is disabled/);
     const usage = spawnSync(process.execPath, [path.join(__dirname, "../scripts/monday-migrate.js"), "execute"], { encoding: "utf8" });
     assert.equal(usage.status, 2);
