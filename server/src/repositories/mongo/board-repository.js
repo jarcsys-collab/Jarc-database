@@ -14,6 +14,14 @@ class BoardRepository extends VersionedRepository {
   async insertMany(docs, options) { await this.assignPublicIds(docs); return super.insertMany(docs, options); }
   async assignPublicIds(docs) { for (const doc of docs) if (doc.publicId === undefined) doc.publicId = await allocateBoardPublicId(this.db); }
 
+  // Column display settings (G3 / D12): `columnSettings: null` in a board update removes the field ($unset), so a board
+  // without settings has no such field at all. Every other field is a plain $set, as before.
+  updateVersioned(id, expectedVersion, set, options = {}) {
+    if (!(Object.hasOwn(set, "columnSettings") && set.columnSettings === null)) return super.updateVersioned(id, expectedVersion, set, options);
+    const { columnSettings, ...rest } = set;
+    return this.collection.findOneAndUpdate({ _id: id, version: expectedVersion }, { $set: rest, $unset: { columnSettings: "" }, $inc: { version: 1 } }, { returnDocument: "before", session: options.session });
+  }
+
   // Global search: the non-archived boards of the given workspaces (null = all), only the fields search needs.
   // withNames (Command Center): also the name, icon and read-only source, to show and open board results.
   listForSearch(workspaceIds, { limit, withNames = false }) {

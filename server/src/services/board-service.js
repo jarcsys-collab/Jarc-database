@@ -41,7 +41,7 @@ class BoardService {
     const doc = {
       _id: id || new ObjectId(), ...(importJobId ? { importJobId } : {}), workspaceId, name: input.name, description: input.description, icon: input.icon, archived: input.archived,
       position: input.position ?? await this.repos.boards.nextPosition(workspaceId), manualOrder: input.manualOrder,
-      columns: input.columns ?? normalizeColumns(BLANK_BOARD_COLUMNS), groups: input.groups ?? normalizeGroups(LEGACY_DEFAULT_GROUPS.map((name) => ({ name }))),
+      columns: input.columns ?? normalizeColumns(BLANK_BOARD_COLUMNS), ...(input.columnSettings ? { columnSettings: input.columnSettings } : {}), groups: input.groups ?? normalizeGroups(LEGACY_DEFAULT_GROUPS.map((name) => ({ name }))),
       savedViews: input.savedViews ?? [], createdBy: actor.userId, createdAt: now, updatedAt: now, version: 1
     };
     await this.repos.boards.insert(doc);
@@ -90,7 +90,7 @@ class BoardService {
     const before = await this.repos.boards.updateVersioned(id, expectedVersion, { ...set, updatedAt: now });
     if (!before) throw await missingOrStale(this.repos.boards, id, "board");
     const after = { ...before, ...set, updatedAt: now, version: before.version + 1 };
-    const changed = fieldChanges(before, after, Object.keys(set)).map((c) => (["columns", "groups", "savedViews"].includes(c.field) ? { field: c.field } : c));
+    const changed = fieldChanges(before, after, Object.keys(set)).map((c) => (["columns", "columnSettings", "groups", "savedViews"].includes(c.field) ? { field: c.field } : c));
     await appendActivity(this.repos.activities, this.logger, activityEntry({ workspaceId: board.workspaceId, boardId: id, actorUserId: actor.userId, actorName: actor.displayName, action: "board.updated", entityType: "board", entityId: id, changes: changed, now }));
     // Search index: new columns can change what is searchable on every record of the board.
     if (set.columns && this.searchIndex?.enabled && planOf(before).sig !== planOf(after).sig) this.searchIndex.refreshBoard(id);

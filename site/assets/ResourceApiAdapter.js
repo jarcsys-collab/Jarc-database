@@ -201,6 +201,23 @@ class ResourceApiAdapter {
     try { return await this.http.request(method, path, body === undefined ? undefined : JSON.stringify(body)); }
     catch (error) { if (context && error && typeof error === "object") error.context = context; throw error; }
   }
+  // A write that may carry column display settings (G3). After a rollback to a release without them, a page loaded before
+  // still sends `settings`, which that release refuses (400, nothing written). Then /features is asked again: if the server
+  // no longer has the capability, the same write is sent once more without them (the stored settings stay on the server).
+  async columnsRequest(method, path, body, context = null) {
+    try { return await this.request(method, path, body, context); }
+    catch (error) {
+      if (this.columnSettings !== true || error?.code !== StorageError.CODES.VALIDATION_ERROR || !ResourceApiAdapter.carriesSettings(body)) throw error;
+      try { await this.features(); } catch { throw error; }
+      if (this.columnSettings === true) throw error;
+      return this.request(method, path, ResourceApiAdapter.withoutSettings(body), context);
+    }
+  }
+  static carriesSettings(body) { return Boolean(body && ((Array.isArray(body.columns) && body.columns.some((c) => c && Object.hasOwn(c, "settings"))) || (body.column && Object.hasOwn(body.column, "settings")))); }
+  static withoutSettings(body) {
+    const strip = (c) => { if (!c || typeof c !== "object") return c; const { settings, ...rest } = c; return rest; };
+    return { ...body, ...(Array.isArray(body.columns) ? { columns: body.columns.map(strip) } : {}), ...(body.column ? { column: strip(body.column) } : {}) };
+  }
   // The app's own refreshes (feed, people, live updates): authenticated as usual, but not counted as activity.
   background(path) { return this.http.request("GET", path, undefined, { background: true }); }
   noteBoardCount(boardId, count) { const board = this.boards.get(boardId); if (board) board.recordCount = count; }
@@ -793,7 +810,7 @@ class ResourceApiAdapter {
       groups: ResourceApiAdapter.groupNames(b.groups).map((name) => ({ name })),
       savedViews: (b.savedViews || []).map((v) => ResourceApiAdapter.viewPayload(v))
     };
-    const { board } = await this.request("POST", `/workspaces/${workspaceId}/boards`, body, { kind: "boards" });
+    const { board } = await this.columnsRequest("POST", `/workspaces/${workspaceId}/boards`, body, { kind: "boards" });
     this.boards.set(board.id, this.boardFrom(board, { load: { state: "full", cursor: null, activity: [], recordActivity: {} }, recordCount: 0 }));
     this.alias(b.id, board.id, reconcile);
     reconcile.replaceBoard(board.id, { publicId: board.publicId ?? null }); // its own number: a duplicate never keeps its source's
@@ -813,7 +830,7 @@ class ResourceApiAdapter {
   }
   async patchBoard(boardId, set) {
     const s = this.boards.get(boardId);
-    const { board } = await this.request("PATCH", `/boards/${boardId}`, { expectedVersion: s.version, ...set }, { kind: "board", id: boardId });
+    const { board } = await this.columnsRequest("PATCH", `/boards/${boardId}`, { expectedVersion: s.version, ...set }, { kind: "board", id: boardId });
     this.boards.set(boardId, this.boardFrom(board));
     return this.boards.get(boardId);
   }
@@ -859,7 +876,7 @@ class ResourceApiAdapter {
     const s = this.boards.get(boardId);
     const sep = path.includes("?") ? "&" : "?";
     const url = method === "DELETE" ? `/boards/${boardId}${path}${sep}expectedVersion=${s.version}` : `/boards/${boardId}${path}`;
-    const result = await this.request(method, url, method === "DELETE" ? undefined : { expectedVersion: s.version, ...body }, { kind: "board", id: boardId });
+    const result = await this.columnsRequest(method, url, method === "DELETE" ? undefined : { expectedVersion: s.version, ...body }, { kind: "board", id: boardId });
     this.boards.set(boardId, this.boardFrom(result.board));
     return result;
   }

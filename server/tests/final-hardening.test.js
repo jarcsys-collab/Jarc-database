@@ -139,9 +139,11 @@ describe("Feature switches: the API refuses a hidden feature, however it's asked
     assert.equal((await api(on.url, "GET", `/api/v1/imports/${job.import.id}`)).body.import.fileName, "a.csv");
   });
   test("GET /features tells the browser exactly what's on", async () => {
-    // columnSettings: a capability of this server version (G3), not a switch, so it is always there.
-    assert.deepEqual((await api(off.url, "GET", "/api/v1/features")).body, { features: { nativeForms: false, spreadsheetImports: false, personalViews: true, connectBoards: true, columnSettings: true } });
-    assert.deepEqual((await api(formsOnly.url, "GET", "/api/v1/features")).body, { features: { nativeForms: true, spreadsheetImports: false, personalViews: true, connectBoards: true, columnSettings: true } });
+    // columnSettings: a capability of this server version (G3), not a switch, so it is always there. systemHealth: the
+    // development user is a system administrator, so System Health (P3) is offered with every right (an exact key set).
+    const admin = { systemHealth: { view: true, admin: true, activity: true } };
+    assert.deepEqual((await api(off.url, "GET", "/api/v1/features")).body, { features: { nativeForms: false, spreadsheetImports: false, personalViews: true, connectBoards: true, columnSettings: true, ...admin } });
+    assert.deepEqual((await api(formsOnly.url, "GET", "/api/v1/features")).body, { features: { nativeForms: true, spreadsheetImports: false, personalViews: true, connectBoards: true, columnSettings: true, ...admin } });
   });
   test("existing features don't depend on either switch: records and the legacy import path still answer", async () => {
     assert.equal((await api(off.url, "GET", `/api/v1/boards/${board.id}/records?limit=1`)).status, 200);
@@ -191,7 +193,8 @@ describe("Feature switches: the screens (real app, headless browser)", { skip: B
     assert.equal((await call("POST", `/boards/${board.id}/forms`, { name: "X", fields: [{ key: "serial" }] })).status, 404);
     assert.equal((await call("GET", `/boards/${board.id}/imports`)).status, 404);
     assert.equal((await call("GET", `/workspaces/${ws.id}/imports`)).status, 404);
-    assert.deepEqual((await call("GET", "/features")).body, { features: { nativeForms: false, spreadsheetImports: false, personalViews: true, connectBoards: true, columnSettings: true } });
+    // The signed-in administrator also gets System Health (P3) with every right: still the exact key set.
+    assert.deepEqual((await call("GET", "/features")).body, { features: { nativeForms: false, spreadsheetImports: false, personalViews: true, connectBoards: true, columnSettings: true, systemHealth: { view: true, admin: true, activity: true } } });
   });
   test("no session: still 401, not a hint about what exists", async () => {
     const r = await fetch(`${base}/api/v1/boards/${board.id}/forms`);

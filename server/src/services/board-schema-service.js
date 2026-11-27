@@ -7,7 +7,7 @@
 // Non-destructive changes (labels, order, visibility, widths, adding groups, saved views) stay on PATCH /boards/:id.
 const validate = require("../validation/resources");
 const { versionParam, queryString } = require("../validation/common");
-const { normalizeColumn, normalizeColumns, groupColumnOf, hasValue, optionsPlan, sameValue, valueList, isMultiColumn, settingsForType, OPTION_TYPES, PRIMARY_KEY } = require("../domain/board-schema");
+const { normalizeColumn, normalizeColumns, groupColumnOf, hasValue, optionsPlan, sameValue, valueList, isMultiColumn, settingsForType, storedSettings, withColumnSettings, OPTION_TYPES, PRIMARY_KEY } = require("../domain/board-schema");
 const { SYNC_LIMITS, MESSAGES, conversionPlanner, convertCell, describeType } = require("../domain/column-conversion");
 const { ApiError } = require("../middleware/errors");
 const { notFound, conflict, activityEntry } = require("./shared");
@@ -41,14 +41,16 @@ function convertedColumn(column, to) {
   delete updated.multiple;
   if (to.multiple) updated.multiple = true;
   if (!OPTION_TYPES.includes(to.type)) delete updated.colors;
-  // Display settings follow the new type: keys it doesn't define are dropped (05 §4.2); nothing left → none.
-  const settings = settingsForType(to.type, column.settings);
-  if (settings) updated.settings = settings; else delete updated.settings;
+  delete updated.settings; // display settings live in board.columnSettings (writeConversion), never on a stored column
   // The default is configuration, not data: kept only if it stays exactly valid, otherwise none.
   const d = updated.defaultValue;
   if (Array.isArray(d) || (hasValue(d) && !(() => { const cell = convertCell(d, column, to, updated); return cell.ok && cell.next === undefined; })())) updated.defaultValue = "";
   return updated;
 }
+
+// Column display settings (G3 / D12) are stored in board.columnSettings, apart from the columns: the board fields to write
+// when they change (null = the field is removed, see the board repository), or none.
+const settingsSet = (board, next) => (JSON.stringify(next) === JSON.stringify(board.columnSettings ?? null) ? {} : { columnSettings: next });
 
 const typeLabel = (t, m) => (t === "dropdown" && m ? "dropdown (several values)" : t);
 
@@ -91,7 +93,7 @@ class BoardSchemaService {
   async addColumn(boardId, raw, actor) {
     const board = await this.repos.boards.findById(boardId);
     if (!board) throw notFound("board");
-    const { expectedVersion, column, index, copyFrom } = validate.columnAdd(raw, board);
+    const { expectedVersion, column, index, copyFrom, settings } = validate.columnAdd(raw, board);
     // A duplicate copies values verbatim, so it must keep the original's type and mode: otherwise it would be a type
     // change that skips the conversion checks (the app's duplicate always keeps them).
     if (copyFrom && (copyFrom.type !== column.type || Boolean(copyFrom.multiple) !== Boolean(column.multiple))) throw invalid("A duplicated column keeps the original column's type. Duplicate it first, then change the copy's type.");
@@ -116,7 +118,8 @@ class BoardSchemaService {
         };
         return {
           // A column restored by undo is no longer retired; its ID means the same column again.
-          boardSet: { columns: normalizeColumns(columns), ...(current.retiredColumns?.some((r) => r.key === column.key) ? { retiredColumns: current.retiredColumns.filter((r) => r.key !== column.key) } : {}) },
+          // Display settings: the new column's (a duplicate's are sent by the page); a stale entry under a restored key is dropped.
+          boardSet: { columns: normalizeColumns(columns), ...settingsSet(current, withColumnSettings(current, columns, column.key, settings)), ...(current.retiredColumns?.some((r) => r.key === column.key) ? { retiredColumns: current.retiredColumns.filter((r) => r.key !== column.key) } : {}) },
           changes: becomesPrimaryGroup ? [] : records.map((record) => ({ record, set: { [`values.${column.key}`]: valueFor(record) } })),
           affected: 0,
           summary: `${copyFrom ? "Duplicated" : "Added"} column ${column.label}`
@@ -141,7 +144,7 @@ class BoardSchemaService {
           : records.filter((r) => r.values[key] !== undefined).map((record) => ({ record, unset: { [`values.${key}`]: "" } }));
         return {
           // Its ID is retired, so no later column can take it (see validation/resources.js).
-          boardSet: { columns: board.columns.filter((c) => c.key !== key), retiredColumns: [...(board.retiredColumns || []).filter((r) => r.key !== key), { key, type: column.type, at: new Date() }].slice(-MAX_RETIRED_COLUMNS) },
+          boardSet: { columns: board.columns.filter((c) => c.key !== key), ...settingsSet(board, withColumnSettings(board, board.columns.filter((c) => c.key !== key), key, null)), retiredColumns: [...(board.retiredColumns || []).filter((r) => r.key !== key), { key, type: column.type, at: new Date() }].slice(-MAX_RETIRED_COLUMNS) },
           changes,
           affected: isPrimaryGroup ? changes.length : records.filter((r) => hasValue(r.values[key])).length,
           summary: `Deleted column ${column.label}`
@@ -208,7 +211,9 @@ class BoardSchemaService {
     // The converted column is validated like any column (option caps and lengths, D4); other columns are left as stored.
     const updated = normalizeColumn(plan.options ? { ...toColumn, options: plan.options } : toColumn, `Column "${key}"`);
     const columns = board.columns.map((c) => (c.key === key ? updated : c));
-    if (!await this.repos.boards.updateVersioned(board._id, expectedVersion, { columns, updatedAt: now }, { session })) throw conflict("board", board);
+    // Display settings follow the new type: keys it doesn't define are dropped (05 §4.2); nothing left → none.
+    const settings = settingsSet(board, withColumnSettings(board, columns, key, settingsForType(updated.type, storedSettings(board, column))));
+    if (!await this.repos.boards.updateVersioned(board._id, expectedVersion, { columns, ...settings, updatedAt: now }, { session })) throw conflict("board", board);
     const updates = plan.changes.map(({ id, next }) => ({
       filter: { _id: id, boardId: board._id },
       update: { $set: { [`values.${key}`]: next, updatedBy: actor.userId, updatedAt: now }, $inc: { version: 1 } }
@@ -216,7 +221,7 @@ class BoardSchemaService {
     if (updates.length) await this.repos.records.bulkUpdate(updates, { session });
     const summary = column.type === toColumn.type ? `Set ${column.label} to allow ${toColumn.multiple ? "several values" : "one value"}` : `Changed ${column.label} from ${typeLabel(column.type, column.multiple)} to ${typeLabel(toColumn.type, toColumn.multiple)}`;
     await this.repos.activities.append(activityEntry({ workspaceId: board.workspaceId, boardId: board._id, actorUserId: actor.userId, actorName: actor.displayName, action: "column.type_changed", entityType: "board", entityId: board._id, summary, changes: [{ field: `columns.${key}.type`, from: describeType(column.type, column.multiple), to: describeType(toColumn.type, toColumn.multiple) }], now }), { session });
-    return { board: { ...board, columns, updatedAt: now, version: board.version + 1 }, affected: 0, recordsChanged: updates.length };
+    return { board: { ...board, columns, ...settings, updatedAt: now, version: board.version + 1 }, affected: 0, recordsChanged: updates.length };
   }
 
   async editOptions(boardId, key, raw, query, actor) {

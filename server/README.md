@@ -222,15 +222,25 @@ registry shared with the browser (`site/assets/ColumnTypes.js` `cleanSettings`, 
 - date: `displayFormat` (`medium` "Mar 5, 2026" | `long` | `iso` | `dmy` | `mdy`), `weekday` (default `false`)
 - text: `wrap` (default `false`, up to 3 lines); link: `display` (`url` | `text`: the address without `https://` / `www.`)
 
-Values equal to the default are not stored, and a column with nothing left has no `settings` field (no migration; existing
-columns are unchanged). `PATCH /boards/:id` with `columns`: a column sent **without** `settings` keeps the stored ones (pages
-that don't know the field never erase it); `settings: null` clears them; an object replaces them. `POST …/columns` accepts
-them; a type change keeps only the keys the new type defines. The same permission as other column edits (MEMBER; not on
-read-only synced boards). The session API returns `settings` on the column (additive); the external Board API and the Fabric
-API don't expose it. `GET /api/v1/features` has `columnSettings: true` (a capability of this version, not a switch); the
-browser sends `settings` only when it is true. **Rollback floor:** once any column has `settings`, a release older than this
-one refuses every `PATCH` that includes them (`unknown setting "settings"`) and drops them on a `PATCH` from an older page;
-rolling back below it needs the settings removed first (a data change needing approval).
+**Storage:** never inside `columns`. They are kept in the board's optional top-level field `columnSettings`
+(`{ <column key>: <settings> }`, absent when no column has any), written in the same versioned update as the columns, and
+merged into `columns[].settings` when the session API returns a board. An entry is used only if it fits the column's current
+type, so an entry for a deleted column or for a column whose type changed is ignored (and dropped on the next column write).
+Values equal to the default are not stored (no migration; existing boards are unchanged). `PATCH /boards/:id` with `columns`:
+a column sent **without** `settings` keeps the stored ones (pages that don't know the field never erase it); `settings: null`
+clears them; an object replaces them. `POST …/columns` accepts them (a duplicate gets the ones the page sends); a type change
+keeps only the keys the new type defines; deleting a column removes its entry. The same permission as other column edits
+(MEMBER; not on read-only synced boards). The external Board API, CSV export and the Fabric API don't expose them.
+`GET /api/v1/features` has `columnSettings: true` (a capability of this version, not a switch); the browser sends `settings`
+only when it is true, and if a write is refused it asks `/features` again and, when the server no longer has the capability,
+sends the same write once more without them.
+
+**Rollback procedure (G3):** redeploy the previous release (`3f51351`, or any later one); there is no data step. Releases
+before G3 never read or write `columnSettings` and update boards field by field, so every board keeps working (edits, add /
+duplicate / delete column, type changes; tested in `tests/column-settings-g3-rollback.test.js` against `3f51351` on the same
+data), the settings simply aren't shown, and they show again when G3 is redeployed. Pages opened before the rollback stop
+sending settings by themselves (above); a reload is enough otherwise. Only if the owner ever wants the settings gone (a data
+change needing approval): `db.boards.updateMany({ columnSettings: { $exists: true } }, { $unset: { columnSettings: "" } })`.
 
 **Column type changes** (`src/domain/column-conversion.js`, `BoardSchemaService.changeType`). A change is made only when it
 is lossless on **every** record of the board (one column of every record is read; never loaded rows or a sample), and it is

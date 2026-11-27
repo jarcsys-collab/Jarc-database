@@ -5,7 +5,7 @@ const { ObjectId } = require("mongodb");
 const recordFilter = require("../domain/record-filter");
 const { iconValue } = require("./appearance");
 const { typedValue } = require("./record-values");
-const { normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, groupColumnOf, checkValue, hasValue, isMultiColumn, valueList, PRIMARY_KEY, LIMITS, COLUMN_TYPES } = require("../domain/board-schema");
+const { normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, groupColumnOf, checkValue, hasValue, isMultiColumn, valueList, incomingSettings, columnSettingsFor, PRIMARY_KEY, LIMITS, COLUMN_TYPES } = require("../domain/board-schema");
 
 const POSITION = { min: -1e15, max: 1e15 };
 
@@ -45,25 +45,15 @@ function boardCreate(raw, { actorId, now }) {
   const fields = pickFields(body, BOARD_SIMPLE_FIELDS);
   if (fields.name === undefined) fail("name is required.");
   const result = { description: "", icon: "D", archived: false, manualOrder: false, ...fields };
-  if (body.columns !== undefined) result.columns = normalizeColumns(body.columns);
+  if (body.columns !== undefined) {
+    result.columns = normalizeColumns(body.columns);
+    // Display settings (G3) sent on the columns (a duplicated board, a template) are stored apart, in columnSettings.
+    const settings = columnSettingsFor(body.columns, result.columns);
+    if (settings) result.columnSettings = settings;
+  }
   if (body.groups !== undefined) result.groups = normalizeGroups(body.groups);
   if (body.savedViews !== undefined) result.savedViews = normalizeSavedViews(body.savedViews, { actorId, now });
   return result;
-}
-
-// Column display settings (G3 / D12), preserve-when-absent: the incoming column list replaces the stored one, but a column
-// sent WITHOUT a `settings` field keeps the stored settings of the same key (and type), so a page that doesn't know about
-// settings (an older browser tab, a script) never erases them. `settings: null` clears them; an object is validated and
-// replaces them (board-schema normalizeColumn). The request body itself is not modified.
-function keepStoredSettings(columns, stored) {
-  if (!Array.isArray(columns)) return columns;
-  const byKey = new Map((stored || []).filter((c) => c && c.settings).map((c) => [c.key, c]));
-  if (!byKey.size) return columns;
-  return columns.map((c) => {
-    if (!isObject(c) || Object.hasOwn(c, "settings") || typeof c.key !== "string") return c;
-    const old = byKey.get(c.key);
-    return old && old.type === c.type ? { ...c, settings: old.settings } : c;
-  });
 }
 
 // Column changes through PATCH are limited to changes that never rewrite record values: add columns, rename labels,
@@ -76,7 +66,7 @@ function boardPatch(raw, board, { actorId, now, canEditShared = true }) {
   const set = pickFields(body, BOARD_SIMPLE_FIELDS);
   let removedGroupIds = [];
   if (body.columns !== undefined) {
-    const columns = normalizeColumns(keepStoredSettings(body.columns, board.columns));
+    const columns = normalizeColumns(body.columns);
     const next = new Map(columns.map((c) => [c.key, c]));
     for (const column of board.columns) {
       if (!next.has(column.key)) fail(`Column "${column.label || column.key}" can't be removed with a board update.`);
@@ -89,6 +79,11 @@ function boardPatch(raw, board, { actorId, now, canEditShared = true }) {
     for (const column of columns) assertNotRetired(board, column);
     if (groupColumnOf(columns)?.key !== groupColumnOf(board.columns)?.key) fail("The board's group column can't be changed with a board update.");
     set.columns = columns;
+    // Column display settings (G3 / D12) are written in the same versioned $set, apart from the columns (board-schema
+    // columnSettingsFor): a column sent WITHOUT `settings` keeps its stored ones (an older tab or a script never erases
+    // them), `settings: null` clears them, an object replaces them. null here = remove the field (board repository).
+    const settings = columnSettingsFor(body.columns, columns, board);
+    if (JSON.stringify(settings) !== JSON.stringify(board.columnSettings ?? null)) set.columnSettings = settings;
   }
   if (body.groups !== undefined) {
     const groups = normalizeGroups(body.groups);
@@ -318,7 +313,8 @@ function columnAdd(raw, board) {
     copyFrom = board.columns.find((c) => c.key === body.copyFrom);
     if (!copyFrom) fail("copyFrom must be an existing column key.");
   }
-  return { expectedVersion, column, index, copyFrom };
+  // Display settings (G3): stored apart from the column (board.columnSettings); null / not sent = none.
+  return { expectedVersion, column, index, copyFrom, settings: incomingSettings(body.column, column.type) ?? null };
 }
 
 function columnType(raw) {

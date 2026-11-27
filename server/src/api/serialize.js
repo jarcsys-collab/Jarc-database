@@ -1,6 +1,7 @@
 // API representation of stored documents. One rule everywhere: responses carry `id` (a string), never `_id`;
 // references are ID strings; dates are ISO 8601 strings. Internal fields (importId, devKey) are not returned.
 const { unsafeValueKeys } = require("../validation/record-values");
+const { columnsWithSettings } = require("../domain/board-schema");
 const hex = (id) => (id ? id.toHexString() : null);
 const iso = (date) => (date instanceof Date ? date.toISOString() : null);
 const withLegacy = (doc, result) => (doc.legacyId === undefined ? result : { ...result, legacyId: doc.legacyId });
@@ -28,7 +29,9 @@ function boardToApi(doc, { personal = null } = {}) {
   return withLegacy(doc, {
     id: hex(doc._id), ...(doc.publicId === undefined ? {} : { publicId: doc.publicId }), workspaceId: hex(doc.workspaceId), name: doc.name, description: doc.description, icon: doc.icon,
     archived: doc.archived, position: doc.position, manualOrder: doc.manualOrder,
-    columns: doc.columns.map((c) => ({ ...c, options: [...c.options] })),
+    // Column display settings (G3) are stored apart (board.columnSettings) and returned on their column, as `settings`; only
+    // entries that apply to the column's current type (board-schema columnsWithSettings). No top-level columnSettings.
+    columns: columnsWithSettings(doc).map((c) => ({ ...c, options: [...c.options] })),
     groups: doc.groups.map(({ id, name, color, archived, position }) => ({ id, name, color, archived: Boolean(archived), position })),
     savedViews: savedViewsOut(doc, personal),
     ...(doc.nextItemNumber === undefined ? {} : { nextItemNumber: doc.nextItemNumber }),

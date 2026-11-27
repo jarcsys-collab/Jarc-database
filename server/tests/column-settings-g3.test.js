@@ -69,8 +69,12 @@ describe("Shared settings rules (ColumnTypes.cleanSettings)", () => {
     assert.deepEqual(T.cellLayout({ type: "number", settings: { align: "left" } }), { align: "left", wrap: false });
     assert.deepEqual(T.cellLayout({ type: "text", settings: { wrap: true } }), { align: null, wrap: true });
   });
-  test("board-schema normalizeColumn: accepts and canonicalises settings; refuses with a clear message; no settings → no field", () => {
-    assert.deepEqual(schema.normalizeColumn({ key: "q", label: "Q", type: "number", settings: { precision: 1, thousands: true } }).settings, { precision: 1 });
+  test("board-schema: normalizeColumn checks settings but never stores them on the column; columnSettingsFor canonicalises them", () => {
+    assert.equal("settings" in schema.normalizeColumn({ key: "q", label: "Q", type: "number", settings: { precision: 1, thousands: true } }), false, "stored columns never hold settings (rollback safety)");
+    assert.deepEqual(schema.incomingSettings({ key: "q", type: "number", settings: { precision: 1, thousands: true } }, "number"), { precision: 1 });
+    const raw = [{ key: "serial", label: "Item", type: "text" }, { key: "q", label: "Q", type: "number", settings: { precision: 1, thousands: true } }];
+    assert.deepEqual(schema.columnSettingsFor(raw, schema.normalizeColumns(raw)), { q: { precision: 1 } });
+    assert.equal(schema.columnSettingsFor(raw.slice(0, 1), schema.normalizeColumns(raw.slice(0, 1))), null);
     assert.equal("settings" in schema.normalizeColumn({ key: "q", label: "Q", type: "number" }), false);
     assert.equal("settings" in schema.normalizeColumn({ key: "q", label: "Q", type: "number", settings: null }), false);
     assert.equal("settings" in schema.normalizeColumn({ key: "q", label: "Q", type: "number", settings: { align: "right" } }), false);

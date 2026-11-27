@@ -16,8 +16,10 @@ const MIRROR_SHOWS = Object.freeze(["list", "count", "sum", "avg", "min", "max",
 const RECORD_REF = /^[0-9a-f]{24}$/;
 const PRIMARY_KEY = "serial"; // the required Item column; its key never changes (label may)
 // settings (G3 / D12): optional DISPLAY configuration (number, date, text and link formats), validated per type by the shared
-// registry (site/assets/ColumnTypes.js cleanSettings). It never changes a stored value. Absent or null = defaults; a PATCH
-// that leaves it out keeps the stored one (validation/resources.js boardPatch, preserve-when-absent).
+// registry (site/assets/ColumnTypes.js cleanSettings). It never changes a stored value. Accepted on an INCOMING column only:
+// it is stored apart, in the board's top-level `columnSettings` (see columnSettingsFor below), never inside `columns`, so a
+// release without settings (which refuses unknown column fields and re-checks the stored columns when it adds a column or
+// changes a type) keeps working after a rollback. normalizeColumn validates it but never returns it.
 const COLUMN_FIELDS = ["key", "label", "type", "required", "visible", "defaultValue", "options", "width", "connection", "colors", "multiple", "description", "link", "mirror", "settings"];
 // Columns whose cells may hold several values (stored as a list of strings): People always (several assignees), and a
 // Dropdown set to "multiple". People entries are "user:<user ID>" for signed-in employees, or (older data) plain text.
@@ -99,13 +101,60 @@ function normalizeColumn(column, where = "a column") {
     result.mirror = { via: m.via, column: m.column, show: m.show ?? "list" };
   } else if (result.type === "mirror") fail(`Mirror column "${column.key}" needs a Connect column and a column to show.`);
   if ((result.type === "connect" || result.type === "mirror") && (result.required || hasValue(result.defaultValue))) fail(`Column "${column.key}" can't be required or have a default value.`);
-  // Display settings: an allow-listed shape per type; defaults are not stored, so nothing left → no field.
-  if (column.settings !== undefined && column.settings !== null) {
-    const checked = cleanSettings(result.type, column.settings);
-    if (!checked.ok) fail(`The display settings of column "${column.key}" ${checked.message}.`);
-    if (checked.settings) result.settings = checked.settings;
-  }
+  // Display settings: checked here (same messages), stored apart (columnSettingsFor); never part of the stored column.
+  incomingSettings(column, result.type);
   return result;
+}
+
+// ---- Column display settings storage (G3 / D12): board.columnSettings = { <column key>: <settings> }, absent when empty.
+// A release older than G3 never reads, checks or writes this field: its $set updates of named fields leave it as it is, so
+// after a rollback the settings stay dormant and show again on the next G3 release. Entries are always read through
+// settingsForType(<the column's current type>): one for a column that no longer exists, or that a rollback release changed
+// to another type, is ignored.
+// An incoming column's settings: undefined = not sent (keep the stored ones), null = none (cleared, or only defaults),
+// otherwise the canonical object. Bad shapes are refused with the messages they always had.
+function incomingSettings(column, type) {
+  if (!isObject(column) || column.settings === undefined) return undefined;
+  if (column.settings === null) return null;
+  const checked = cleanSettings(type, column.settings);
+  if (!checked.ok) fail(`The display settings of column "${column.key}" ${checked.message}.`);
+  return checked.settings;
+}
+// The stored settings of one column that apply to its current type (null = none).
+function storedSettings(board, column) {
+  const all = board?.columnSettings;
+  return column && isObject(all) && Object.hasOwn(all, column.key) ? settingsForType(column.type, all[column.key]) : null;
+}
+// The board's next columnSettings (null = none: the field is removed) for a new column list.
+//   raw      the incoming columns, in the order normalizeColumns returned `columns` (null: nothing sent)
+//   columns  the validated columns that will be stored
+//   board    the stored board (its columns and columnSettings), or null for a new board
+// A column sent WITHOUT `settings` keeps the stored ones when its type is unchanged (a page that doesn't know the field, an
+// older tab or a script, never erases them); entries of columns no longer on the board are dropped.
+function columnSettingsFor(raw, columns, board = null) {
+  const before = new Map((board?.columns || []).map((c) => [c.key, c]));
+  const out = {};
+  columns.forEach((column, i) => {
+    const sent = raw ? incomingSettings(raw[i], column.type) : undefined;
+    const old = before.get(column.key);
+    const next = sent !== undefined ? sent : old && old.type === column.type ? storedSettings(board, old) : null;
+    if (next) out[column.key] = next;
+  });
+  return Object.keys(out).length ? out : null;
+}
+// The board's columnSettings after one column's entry is set (an object) or removed (null): `columns` is the board's
+// column list after the change; entries of other columns that no longer apply are dropped.
+function withColumnSettings(board, columns, key, settings) {
+  const out = {};
+  for (const column of columns) {
+    const s = column.key === key ? settings : storedSettings(board, column);
+    if (s) out[column.key] = s;
+  }
+  return Object.keys(out).length ? out : null;
+}
+// Read side (session API): the columns with their settings, the shape G3 browsers expect (`columns[].settings`).
+function columnsWithSettings(board) {
+  return (board.columns || []).map((c) => { const s = storedSettings(board, c); return s ? { ...c, settings: s } : c; });
 }
 
 // Each mirror follows a Connect column of the same board.
@@ -344,5 +393,6 @@ function optionsPlan(column, items) {
 module.exports = {
   COLUMN_TYPES, MIRROR_SHOWS, RECORD_REF, PRIMARY_KEY, LIMITS, GROUP_ID, VIEW_ID, LEGACY_DEFAULT_COLUMNS, LEGACY_DEFAULT_GROUPS, BLANK_BOARD_COLUMNS, OPTION_TYPES, USER_REF,
   newGroupId, newViewId, normalizeColumn, normalizeColumns, normalizeGroups, normalizeSavedViews, splitSavedViews, viewState, groupColumnOf, checkValue, hasValue,
-  valueList, sameValue, isMultiColumn, effectiveOptions, valueFits, convertValue, optionsPlan, settingsForType
+  valueList, sameValue, isMultiColumn, effectiveOptions, valueFits, convertValue, optionsPlan, settingsForType,
+  incomingSettings, storedSettings, columnSettingsFor, withColumnSettings, columnsWithSettings
 };
