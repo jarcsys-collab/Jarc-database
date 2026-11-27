@@ -139,7 +139,7 @@ describe("Substring correctness against the regular search (generated corpus)", 
     const ws1 = await w.s.workspaces.create({ name: "One" }, actor), ws2 = await w.s.workspaces.create({ name: "Two" }, actor);
     const boards = [await board(w, "A", ws1), await board(w, "B", ws1), await board(w, "C", ws2)];
     const random = rng(42), alphabet = "abcdeFGH 12-.(+*?[$", word = (n) => Array.from({ length: n }, () => alphabet[Math.floor(random() * alphabet.length)]).join("");
-    for (const b of boards) await add(w, b, Array.from({ length: 70 }, (_, i) => ({ serial: `${word(6)} ${i}`, notes: word(14), mail: random() < 0.5 ? `${word(4)}@x.example` : "", tags: random() < 0.3 ? ["Red", "Blue"] : ["Red"], status: random() < 0.5 ? "Open" : "Done", qty: i, ok: true })));
+    for (const b of boards) await add(w, b, Array.from({ length: 70 }, (_, i) => ({ serial: `${word(6)} ${i}`, notes: word(14), mail: random() < 0.5 ? `${word(4).replace(/[^a-z0-9+*$-]/gi, "_")}@x.example` : "", tags: random() < 0.3 ? ["Red", "Blue"] : ["Red"], status: random() < 0.5 ? "Open" : "Done", qty: i, ok: true })));
     await settle(w);
     const docs = await w.repos.records.collection.find({}).toArray(), r2 = rng(7);
     const terms = new Set(["abc", "ab", "fg", "1-", "(+", "*?", "[$", "zzz", "qq", "red", "lue", "ed\nbl".replace("\n", " ")]);
