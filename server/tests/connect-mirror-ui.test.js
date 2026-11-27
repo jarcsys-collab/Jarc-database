@@ -70,5 +70,51 @@ describe("Connect boards and Mirror columns (real app, headless browser)", { ski
     assert.equal(await mia.evaluate("[...document.querySelectorAll('.relation-locked')].some((e) => /\\d/.test(e.textContent))"), false, "S0-B: a lock only, no count");
     const text = await mia.evaluate("document.querySelector('.board-view-region')?.textContent || document.body.textContent");
     assert.ok(!/Acme|Initech|107/.test(text), "nothing from Clients on screen");
+    // The record drawer shows the same lock (never the stored IDs as choices).
+    await mia.evaluate(`[...document.querySelectorAll('tr[data-record-context]')].find((t) => t.textContent.includes('Alpha'))?.querySelector('[data-action=edit]')?.click()`);
+    assert.ok(await mia.waitFor("!!document.querySelector('.record-drawer .drawer-relation[data-column-key=client] .relation-locked')", 5000), "drawer: locked");
+    const drawer = await mia.evaluate("document.querySelector('.record-drawer').innerHTML");
+    for (const id of Object.values(ids)) assert.ok(!drawer.includes(id), "no linked record ID in the drawer");
+    await mia.evaluate("document.querySelector('.record-drawer [data-action=close-overlay]')?.click()");
+  });
+
+  test("record drawer (admin): linked names and the mirrored value, read-only, no IDs", async () => {
+    await openBoard(admin, "Projects");
+    assert.ok(await admin.waitFor(`/Acme/.test([...document.querySelectorAll('tr[data-record-context]')].find((x) => x.textContent.includes('Alpha'))?.querySelector('td[data-column-key=client]')?.textContent || '')`, 8000), "names loaded");
+    await admin.evaluate(`[...document.querySelectorAll('tr[data-record-context]')].find((t) => t.textContent.includes('Alpha'))?.querySelector('[data-action=edit]')?.click()`);
+    assert.ok(await admin.waitFor("/Acme/.test(document.querySelector('.record-drawer .drawer-relation[data-column-key=client]')?.textContent || '')", 5000), "drawer: names");
+    assert.ok(await admin.waitFor("/107/.test(document.querySelector('.record-drawer .drawer-relation[data-column-key=total]')?.textContent || '')", 5000), "drawer: mirrored sum");
+    assert.equal(await admin.evaluate("document.querySelectorAll('.record-drawer [data-column-key=client] input, .record-drawer [data-column-key=total] input').length"), 0, "read-only: no inputs that could send IDs back");
+    assert.equal(await admin.evaluate("document.querySelectorAll('.record-drawer .relation-partial').length"), 0, "complete: no partial mark");
+    await admin.evaluate("document.querySelector('.record-drawer [data-action=close-overlay]')?.click()");
+  });
+
+  test("a shared view filtering on the Connect column fails safely for the colleague who can't open Clients", async () => {
+    const b = (await api(admin, "GET", `/boards/${projects.id}`)).body.board;
+    const filter = { op: "and", rules: [{ key: "client", cmp: "notEmpty" }] };
+    const saved = await api(admin, "PATCH", `/boards/${projects.id}`, { expectedVersion: b.version, savedViews: [...(b.savedViews || []).filter((v) => !v.personal).map(({ id, name, state }) => ({ id, name, state })), { name: "Linked only", state: { view: "table", filter } }] });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    const viewId = saved.body.board.savedViews.find((v) => v.name === "Linked only").id;
+    // The admin (who can open Clients) sees the view's records.
+    await openBoard(admin, "Projects");
+    await admin.evaluate(`document.querySelector('[data-action=open-view][data-id="${viewId}"]')?.click()`);
+    assert.ok(await admin.waitFor("[...document.querySelectorAll('tr[data-record-context]')].some((t) => t.textContent.includes('Alpha'))", 8000), "admin: Alpha matches");
+    // Mia: the refusal, no rows, no count, nothing from Clients.
+    await openBoard(mia, "Projects");
+    await mia.evaluate(`document.querySelector('[data-action=open-view][data-id="${viewId}"]')?.click()`);
+    assert.ok(await mia.waitFor("!!document.querySelector('.view-refused')", 8000), "refusal shown");
+    const text = (await mia.evaluate("document.querySelector('.view-refused').textContent")).replace(/\s+/g, " ");
+    assert.match(text, /This view filters on “Clients”, which links to a board you can't open, so it can't be shown to you\./);
+    assert.equal(await mia.evaluate("document.querySelectorAll('tr[data-record-context]').length"), 0, "no records under the view's name");
+    const page = await mia.evaluate("document.querySelector('.board-view-region')?.textContent || document.body.textContent");
+    assert.ok(!/Acme|Globex|Initech|107|150/.test(page), "nothing from Clients");
+    // Choose another view: the views menu opens. Go to Main Table: the records come back.
+    await mia.evaluate("document.querySelector('.view-refused [data-action=views-menu]').click()");
+    assert.ok(await mia.waitFor("!!document.querySelector('.views-menu')", 3000), "views menu");
+    await mia.evaluate("document.querySelector('#overlay-root').innerHTML = ''");
+    await mia.evaluate("document.querySelector('.view-refused [data-action=main-table]').click()");
+    assert.ok(await mia.waitFor("[...document.querySelectorAll('tr[data-record-context]')].some((t) => t.textContent.includes('Alpha')) && !document.querySelector('.view-refused')", 8000), "Main Table shows the records");
+    // The view keeps its condition (nothing stripped by opening it).
+    assert.deepEqual((await api(admin, "GET", `/boards/${projects.id}`)).body.board.savedViews.find((v) => v.id === viewId).state.filter, filter);
   });
 });

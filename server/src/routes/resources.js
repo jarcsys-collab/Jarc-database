@@ -147,8 +147,11 @@ function resourceRoutes({ services, access, features = { personalViews: true, co
   // ---- Records (a board's records belong to the board's workspace; batches can only touch that board's records)
   router.get("/boards/:boardId/records", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "VIEWER");
-    const page = await services.records.list(board._id, req.query, { ...reading(req), restricted: await restrictedFor(ctxOf(req), board) });
-    send(res, 200, { items: await out(req, board, page.items), nextCursor: page.nextCursor, limit: page.limit });
+    const restricted = await restrictedFor(ctxOf(req), board);
+    const page = await services.records.list(board._id, req.query, { ...reading(req), restricted });
+    // S0-B: the board's Connect / Mirror columns this reader can't open (only when there are any), so the browser applies the same
+    // refusal to saved-view conditions on boards it filters itself. Column keys only: the board already lists those columns.
+    send(res, 200, { items: await out(req, board, page.items), nextCursor: page.nextCursor, limit: page.limit, ...(restricted.size ? { restrictedColumns: [...restricted] } : {}) });
   });
   router.get("/boards/:boardId/records/count", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "VIEWER");

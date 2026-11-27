@@ -288,6 +288,24 @@ class BoardModel {
     this.liveFilterCache={f,sig,out};
     return out;
   }
+  // S0-B (X2): a condition on a Connect / Mirror column this reader can't open is never evaluated, here or on the server (which
+  // refuses it). The view then shows a refusal instead of records: { state: "refused", scope: "view" | "filter", key, label },
+  // or { state: "checking" } while the server hasn't yet said which columns are restricted; null when nothing is in the way.
+  // The conditions themselves are kept as they are (never stripped), so saving the view keeps them too.
+  viewAccess(){
+    const board=this.board;if(!board)return null;
+    const rel=new Map((board.columns||[]).filter((c)=>c.type==="connect"||c.type==="mirror").map((c)=>[c.key,c]));if(!rel.size)return null;
+    const viewKeys=[],walk=(n)=>{for(const r of n?.rules||[])if(rel.has(r.key))viewKeys.push(r.key);(n?.groups||[]).forEach(walk);};
+    walk(this.liveViewFilter);
+    const filterKeys=this.columnFilter&&rel.has(this.columnFilter.key)?[this.columnFilter.key]:[];
+    if(!viewKeys.length&&!filterKeys.length)return null;
+    const id=String(board.id),known=this.storage?.restrictedColumns?.(board.id)??null,related=this.relatedState().access.get(id)?.restricted,refused=this.refusedFilterKeys?.get(id);
+    const restricted=new Set([...(known||[]),...(related||[]),...(refused||[])]);
+    const hit=(keys,scope)=>{const key=keys.find((k)=>restricted.has(k));return key?{state:"refused",scope,key,label:String(rel.get(key).label||key)}:null;};
+    return hit(viewKeys,"view")||hit(filterKeys,"filter")||(known===null&&!related?{state:"checking"}:null);
+  }
+  // The server refused a filter on this column for this reader (StorageError.filterDetails): remembered for the board.
+  noteRefusedFilter(boardId,key){const id=String(boardId),m=(this.refusedFilterKeys||=new Map());m.set(id,new Set([...(m.get(id)||[]),key]));}
   get liveOrderBy(){const keys=new Set([...(this.board?.columns||[]).map((c)=>c.key),"createdAt","updatedAt","position"]);const list=(this.viewOrderBy||[]).filter((s)=>keys.has(s.key));return list.length?list:null;}
   static filterTokens(text){return String(text).split(", ").map((t)=>t.trim());}
   matchesFilterRule(row,rule){
@@ -408,6 +426,7 @@ class BoardModel {
   syncServerQuery(){
     const boardId=this.board?.id;
     if(this.screen!=="board"||!boardId||!this.storage.canFilterOnServer||this.boardLoadState(boardId).state!=="partial"){this.serverView=null;return;}
+    if(this.viewAccess()){this.serverView=null;clearTimeout(this.serverViewTimer);this.pendingServerKey=null;return;} // S0-B: refused or still checking: nothing is asked for
     if(this.boardSearchAvailable!==true&&this.query.trim().length>=2)this.askBoardSearch().then(()=>{if(this.boardSearchAvailable===true){this.syncServerQuery();this.statusChanged?.();}});
     const query=this.serverQuery(), flat=this.serverViewFlat, key=JSON.stringify([boardId,query,flat,BoardModel.today()]); // a new day (Manila) asks again: "today", "this week"... have moved
     if(this.serverView?.key===key||this.pendingServerKey===key)return;
@@ -427,7 +446,12 @@ class BoardModel {
       if(token!==this.serverViewToken)return;
       this.serverView.total=count.total; this.serverView.groups=count.groups;
       if(flat)await this.loadServerPage(null);
-    }catch{ if(token===this.serverViewToken)this.serverView.error=true; }
+    }catch(error){
+      if(token!==this.serverViewToken)return;
+      const refused=error?.details?.reason==="restricted-filter"?error.details.field:null;
+      if(refused){this.noteRefusedFilter(boardId,refused);this.serverView=null;} // shown as the view's refusal (viewAccess), never as unfiltered records
+      else this.serverView.error=true;
+    }
     if(token===this.serverViewToken)this.statusChanged();
   }
   // The next page for one group (null: the flat list). Asked for by the scroll position; never more than one at a time per group.
@@ -611,6 +635,7 @@ class BoardModel {
   get recentBoardItems() { return this.recentBoards.map((recent) => { const space = this.workspaces.find((item) => item.id === recent.workspaceId); const board = space?.boards.find((item) => item.id === recent.boardId); return board && !board.archived && !space.archived ? { ...board, workspaceId: space.id, workspaceName: space.name, openedAt: recent.openedAt } : null; }).filter(Boolean).slice(0,5); }
 
   get visibleRows() {
+    if (this.viewAccess()) return []; // S0-B: a refused (or not yet checked) condition shows no records under the view's name
     const query = this.query.trim().toLowerCase();
     const place = new Map(this.rows.map((row, i) => [row, i])), server = this.serverView, serverOrder = server ? server.order : null, orderBy = this.liveOrderBy, viewMatch = this.viewFilterMatcher();
     return [...this.rows]
@@ -1255,6 +1280,8 @@ class BoardModel {
     return hit?.values;
   }
   linkedName(id){return this.relatedState().names.get(String(id))||null;}
+  // A row's mirror values already here (never asks the server: export reads many rows).
+  relatedCached(row){return this.relatedState().values.get(this.serverId(row.id))?.values;}
   // Why a row's Connect / Mirror value is incomplete (the server's partial reason), or null when it is complete.
   // cell-limit is reported per column; only the rows whose own Connect cell holds more than 100 links are cut.
   relatedPartial(row,key){

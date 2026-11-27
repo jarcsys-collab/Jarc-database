@@ -66,6 +66,9 @@ function boardSummary(board, recordCount) { return { id: hex(board._id), workspa
 // A cell exactly as stored, with its type. Never set: null. The board's main group column is kept on the record as groupId, so
 // its value is that group's name.
 function cellValue(doc, column, board) {
+  // A Mirror has no stored value (worked out in JARC on every read, Column System plan 17 §3): always null here, never a stored
+  // placeholder that could pass for an empty (or partial) result. Connect cells are returned whole (no bound applies).
+  if (column.type === "mirror") return null;
   if (column.key === groupColumnOf(board.columns)?.key) return board.groups.find((g) => g.id === doc.groupId)?.name ?? null;
   return Object.hasOwn(doc.values || {}, column.key) ? doc.values[column.key] ?? null : null;
 }

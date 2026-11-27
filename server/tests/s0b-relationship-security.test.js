@@ -107,6 +107,7 @@ describe("S0-B under role_based (the matrix)", () => {
         const r = await w.as(P.reader, "GET", url);
         assert.equal(r.status, 400, `${url}: ${JSON.stringify(r.body)}`); assert.equal(r.body.error.code, "VALIDATION_ERROR");
         assert.match(r.body.error.message, /"Client" can't be filtered: you can't open the board it links to/);
+        assert.deepEqual(r.body.error.details, { reason: "restricted-filter", field: "client" }, "the column key only (the browser names the column)");
         noTargetIds(w, r.body); assert.equal("total" in r.body, false); assert.equal("groups" in r.body, false);
       }
       // Same answer whether the record has links or not (the refusal doesn't depend on any data).
@@ -116,6 +117,27 @@ describe("S0-B under role_based (the matrix)", () => {
     }
     // Filters on other columns keep working for the host-only reader; a filter naming no restricted column is untouched.
     assert.equal((await w.as(P.reader, "GET", `${base}/count?filter=${enc({ op: "and", rules: [{ key: "serial", cmp: "notEmpty" }] })}`)).status, 200);
+  });
+
+  test("X2: record pages tell a host-only reader which columns are restricted (keys only); a shared view's restricted condition survives an edit by such an editor", async () => {
+    const P = w.people;
+    const base = `/api/v1/boards/${w.projects.id}/records`;
+    const page = await w.as(P.reader, "GET", base);
+    assert.deepEqual(page.body.restrictedColumns.sort(), ["client", "n", "total"]); noTargetIds(w, page.body);
+    assert.equal("restrictedColumns" in (await w.as(P.both, "GET", base)).body, false, "nothing restricted: the field is absent (response unchanged)");
+    // The owner saves a shared view filtering on the Connect column; the host-only editor renames it and saves it back.
+    const filter = { op: "and", rules: [{ key: "serial", cmp: "notEmpty" }, { key: "client", cmp: "notEmpty" }] };
+    let b = await w.board(P.owner, w.projects.id);
+    const views = (list) => list.filter((v) => !v.personal).map(({ id, name, state }) => ({ ...(id ? { id } : {}), name, state }));
+    b = (await w.as(P.owner, "PATCH", `/api/v1/boards/${w.projects.id}`, { expectedVersion: b.version, savedViews: [...views(b.savedViews || []), { name: "Linked only", state: { filter } }] })).body.board;
+    const seen = await w.board(P.editor, w.projects.id), view = seen.savedViews.find((v) => v.name === "Linked only");
+    assert.deepEqual(view.state.filter, filter, "the host-only editor receives the condition as saved (never stripped)");
+    const renamed = await w.as(P.editor, "PATCH", `/api/v1/boards/${w.projects.id}`, { expectedVersion: seen.version, savedViews: views(seen.savedViews).map((v) => (v.id === view.id ? { ...v, name: "Linked (renamed)" } : v)) });
+    assert.equal(renamed.status, 200, JSON.stringify(renamed.body));
+    assert.deepEqual((await w.board(P.owner, w.projects.id)).savedViews.find((v) => v.id === view.id).state.filter, filter, "kept after the editor's save");
+    // Opening it as the host-only reader: refused, never unfiltered records.
+    const r = await w.as(P.reader, "GET", `${base}?filter=${encodeURIComponent(JSON.stringify(filter))}`);
+    assert.equal(r.status, 400); assert.equal("items" in r.body, false);
   });
 
   test("row 6: a revoked reader is restricted on the very next call (no cache)", async () => {
@@ -258,6 +280,18 @@ describe("S0-B under role_based (the matrix)", () => {
     await w.app.db.collection("records").updateOne({ _id: new ObjectId(w.alpha.id) }, { $set: { "values.client": many } });
     const r = (await w.as(P.owner, "GET", `/api/v1/boards/${w.projects.id}/related?ids=${w.alpha.id}`)).body;
     assert.equal(r.partial.client, "cell-limit");
+    // Every other surface returns the stored cell WHOLE (no bound applies there, so nothing to flag): list, single record,
+    // a write response, and the token API's shape (whose Mirror is always null: never computed, never a stored placeholder).
+    const list = (await w.as(P.owner, "GET", `/api/v1/boards/${w.projects.id}/records`)).body.items.find((x) => x.id === w.alpha.id);
+    assert.deepEqual(list.values.client, many);
+    const one = (await w.as(P.owner, "GET", `/api/v1/records/${w.alpha.id}`)).body.record;
+    assert.deepEqual(one.values.client, many);
+    const wrote = await w.as(P.owner, "PATCH", `/api/v1/records/${w.alpha.id}`, { expectedVersion: one.version, values: { note: "partial check" } });
+    assert.equal(wrote.status, 200, JSON.stringify(wrote.body)); assert.deepEqual(wrote.body.record.values.client, many);
+    const { recordToExternal } = require("../src/routes/external-api");
+    const doc = await w.app.db.collection("records").findOne({ _id: new ObjectId(w.alpha.id) }), hostBoard = await w.app.db.collection("boards").findOne({ _id: new ObjectId(w.projects.id) });
+    const ext = recordToExternal(doc, hostBoard, hostBoard.columns);
+    assert.deepEqual(ext.values.client, many); assert.equal(ext.values.total, null); assert.equal(ext.values.n, null);
     // The Mirrors computed through it are incomplete too: flagged, never a truncated sum / count that looks complete.
     assert.equal(r.partial.total, "cell-limit"); assert.equal(r.partial.n, "cell-limit");
     assert.equal(r.linked.client[w.link.Acme].name, "Acme");

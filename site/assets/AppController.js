@@ -1466,7 +1466,17 @@ class AppController {
   csvCell(value,column=null){ let text=String(value??""); const plainNumber=column?.type==="number"&&/^-?\d+(\.\d+)?$/.test(text.trim()); if(!plainNumber&&/^[=+\-@\t\r\n＝＋－＠]/.test(text))text="'"+text; return `"${text.replaceAll('"','""')}"`; }
   // Exports are async-shaped so a future server-generated export can replace them without changing callers.
   csvHeader(){return this.model.board.columns.map((field)=>this.csvCell(field.label)).join(",");}
-  csvLine(row){return this.model.board.columns.map((field)=>this.csvCell(this.model.isMultiColumn(field)?this.model.valueText(field,row[field.key]):row[field.key],field)).join(",");}
+  // Connect / Mirror: the names / mirrored values already loaded, "[partial]" when the server stopped at one of its bounds, and
+  // "[restricted]" for a column whose linked board this person can't open (never IDs or a count).
+  csvLine(row){const m=this.model;return m.board.columns.map((field)=>{
+    if(field.type==="connect"||field.type==="mirror"){
+      if(m.relatedAccess?.(field.key)==="restricted")return this.csvCell("[restricted]");
+      let text=field.type==="connect"?m.valueText(field,row[field.key]):(()=>{const v=m.relatedCached?.(row)?.[field.key];return Array.isArray(v)?v.join(", "):v===null||v===undefined?"":String(v);})();
+      if(m.relatedPartial?.(row,field.key))text=`${text}${text?" ":""}[partial]`;
+      return this.csvCell(text);
+    }
+    return this.csvCell(m.isMultiColumn(field)?m.valueText(field,row[field.key]):row[field.key],field);
+  }).join(",");}
   csvFileName(){return `${this.model.board.name.toLowerCase().replace(/[^a-z0-9]+/g,"-")||"board"}.csv`;}
   async exportCsv(rows=this.model.visibleRows,label="Board exported") { const csv=[this.csvHeader(),...rows.map((row)=>this.csvLine(row))].join("\n"); if(this.download(new Blob([csv],{type:"text/csv"}),this.csvFileName()))this.view.toast(`${label} · ${rows.length.toLocaleString()} record${rows.length===1?"":"s"}`); }
   // Every record of the view, however many, built page by page. A failure downloads nothing, and the message says how many arrived.

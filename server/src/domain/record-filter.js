@@ -36,6 +36,7 @@
 // a request reaches MongoDB as an operator or a field name. The same rules run in the browser (BoardModel.matchesViewFilter).
 const { ObjectId } = require("mongodb");
 const { fail, isSafeKey, RECORD_ID_KEY, OBJECT_ID } = require("../validation/common");
+const { ApiError } = require("../middleware/errors");
 
 const CMPS = Object.freeze(["in", "notIn", "contains", "notContains", "empty", "notEmpty", "anyToken", "noToken", "equalsText", "gt", "lt", "before", "after", "onOrAfter", "dateRange",
   "startsWith", "endsWith", "notEqualsText", "eq", "ne", "gte", "lte", "between", "checked", "unchecked", "datePreset"]);
@@ -122,7 +123,8 @@ function refuseRestricted(filters, board, restricted) {
   const byKey = new Map((board.columns || []).map((c) => [c.key, c]));
   for (const f of filters) if (f) for (const r of rulesIn(f)) if (restricted.has(r.key)) {
     const c = byKey.get(r.key);
-    fail(`"${String(c?.label || r.key).slice(0, 40)}" can't be filtered: you can't open the board it links to. Remove that condition to see the records.`);
+    // details: which column (its key, as the reader's board already lists it) so the browser can say so; nothing about the linked board.
+    throw new ApiError(400, "VALIDATION_ERROR", `"${String(c?.label || r.key).slice(0, 40)}" can't be filtered: you can't open the board it links to. Remove that condition to see the records.`, { reason: "restricted-filter", field: r.key });
   }
 }
 // Which comparisons a column type takes. The comparisons from before stay as permissive as they were (saved views from

@@ -55,6 +55,9 @@ StorageError.valueDetails = (raw) => {
   if (!raw || typeof raw !== "object" || !StorageError.VALUE_REASONS.includes(raw.reason)) return null;
   return { field: typeof raw.field === "string" && /^[A-Za-z0-9_.-]{1,100}$/.test(raw.field) ? raw.field : null, reason: raw.reason };
 };
+// S0-B: a filter the server refused because it names a Connect / Mirror column this reader can't open: { reason, field } (the
+// column's key, a column the reader's board already lists), else null. The server's text is never kept.
+StorageError.filterDetails = (raw) => (raw && typeof raw === "object" && raw.reason === "restricted-filter" && typeof raw.field === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(raw.field) ? { reason: "restricted-filter", field: raw.field } : null);
 // The one place that turns an error code into user-facing text. Never includes raw exceptions, stacks or tokens.
 // retryable: a user-triggered Retry can help. offline: the connection to the data service is down.
 StorageError.describe = (codeOrError) => {
@@ -230,6 +233,9 @@ class ApiAdapter {
         if (serverCode === StorageError.CODES.CONVERSION_REFUSED && [400, 409, 422].includes(response.status)) {
           error = fail(StorageError.CODES.CONVERSION_REFUSED, null, { status: response.status, serverCode });
           error.details = StorageError.conversionDetails(serverDetails);
+        } else if (serverCode === StorageError.CODES.VALIDATION_ERROR && response.status === 400 && StorageError.filterDetails(serverDetails)) {
+          error = fail(StorageError.CODES.VALIDATION_ERROR, null, { status: response.status, serverCode });
+          error.details = StorageError.filterDetails(serverDetails);
         } else if (serverCode === StorageError.CODES.VALIDATION_ERROR && response.status === 400 && StorageError.valueDetails(serverDetails)) {
           // A refused link / email / phone value: which field and why (a known reason code), never the value or any text.
           error = fail(StorageError.CODES.VALIDATION_ERROR, null, { status: response.status, serverCode });
@@ -359,6 +365,9 @@ class StorageService {
   loadFiltered(boardId, options) { return this.adapter.loadFiltered(boardId, options); }
   countFiltered(boardId, options) { return this.adapter.countFiltered(boardId, options); }
   // Connect / Mirror: linked names and mirror values for some records (resource mode only).
+  // S0-B: the Connect / Mirror column keys of a board this reader can't open, as the server last said (a Set), or null while the
+  // server hasn't said yet. Storage without a server (local mode) restricts nothing.
+  restrictedColumns(boardId) { return typeof this.adapter.restrictedColumns === "function" ? this.adapter.restrictedColumns(boardId) : new Set(); }
   get related() { return typeof this.adapter.related === "function" ? (boardId, ids) => this.adapter.related(boardId, ids) : undefined; }
   linkable(boardId, text) { return this.adapter.linkable(boardId, text); }
   searchStatus() { return this.adapter.searchStatus?.() ?? Promise.resolve({ boardSearch: false }); }

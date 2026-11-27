@@ -320,6 +320,7 @@ class ResourceApiAdapter {
     do {
       const query = `?limit=${more ? ResourceApiAdapter.PAGE_SIZE : this.pageSize(board)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
       const page = await this.request("GET", `/boards/${boardId}/records${query}`);
+      this.noteRestricted(boardId, page);
       for (const r of page.items) { this.records.set(r.id, this.recordFrom(r)); ids.push(r.id); }
       cursor = page.nextCursor;
     } while (cursor && ids.length < (board.recordCount > ResourceApiAdapter.FULL_LOAD_LIMIT ? 1 : ResourceApiAdapter.FULL_LOAD_LIMIT)); // a large board: one page now, the rest as it's asked for
@@ -389,6 +390,7 @@ class ResourceApiAdapter {
     query.set("orderBy", JSON.stringify(orderBy?.length ? orderBy : [{ key: "position", dir: "asc" }]));
     if (cursor) query.set("cursor", cursor);
     const page = await this.background(`/boards/${board.id}/records?${query}`);
+    this.noteRestricted(board.id, page);
     for (const r of page.items) if (!this.records.has(r.id)) this.records.set(r.id, this.recordFrom(r));
     return { records: page.items.map((r) => this.modelRow(this.records.get(r.id), board)), ids: page.items.map((r) => r.id), nextCursor: page.nextCursor };
   }
@@ -417,8 +419,17 @@ class ResourceApiAdapter {
   async related(boardId, ids) {
     const board = this.boards.get(this.resolve(boardId));
     if (!board) throw new StorageError(StorageError.CODES.NOT_FOUND, "This board no longer exists. Reload to see the latest data.");
-    return this.background(`/boards/${board.id}/related?ids=${ids.slice(0, 200).map(encodeURIComponent).join(",")}`);
+    const out = await this.background(`/boards/${board.id}/related?ids=${ids.slice(0, 200).map(encodeURIComponent).join(",")}`);
+    if (out && out.status !== "unavailable") this.noteRestricted(board.id, { restrictedColumns: out.restricted });
+    return out;
   }
+  // S0-B: what the server last said about the board's restricted Connect / Mirror columns (records pages carry
+  // restrictedColumns only when there are some; /related lists them as restricted). null until the server has answered once.
+  noteRestricted(boardId, page) {
+    if (!page || typeof page !== "object") return;
+    (this.restrictedSeen ||= new Map()).set(String(boardId), new Set(Array.isArray(page.restrictedColumns) ? page.restrictedColumns.filter((k) => typeof k === "string") : []));
+  }
+  restrictedColumns(boardId) { return this.restrictedSeen?.get(String(this.resolve(boardId))) || null; }
   async searchStatus() { return this.background("/search/status"); }
   async features() { const out = await this.background("/features"); this.columnSettings = out?.features?.columnSettings === true; return out; }
   // Board search beyond what's loaded (a large board): the server finds matches among all the board's records, and those
@@ -514,6 +525,7 @@ class ResourceApiAdapter {
     let cursor = null;
     do {
       const page = await this.background(`/boards/${boardId}/records?limit=${this.pageSize(this.boards.get(boardId))}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+      if (!cursor) this.noteRestricted(boardId, page); // reloads and live refreshes see access changes too
       out.push(...page.items); cursor = page.nextCursor;
     } while (cursor && out.length < (this.boards.get(boardId)?.recordCount > ResourceApiAdapter.FULL_LOAD_LIMIT ? 1 : Math.max(wanted, ResourceApiAdapter.FULL_LOAD_LIMIT)));
     return { items: out, partial: Boolean(cursor) };
