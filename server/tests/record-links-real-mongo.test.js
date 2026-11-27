@@ -41,7 +41,7 @@ describe("recordLinks prototype on the local test MongoDB", { concurrency: false
   // Boards (plain objects: the service only reads _id and columns) and records stored directly.
   const world = async (db) => {
     const target = { _id: new ObjectId(), columns: [{ key: "serial", type: "text" }, { key: "back", type: "connect", link: { boardId: null } }] };
-    const host = { _id: new ObjectId(), columns: [{ key: "serial", type: "text" }, { key: "client", type: "connect", link: { boardId: target._id.toHexString() } }] };
+    const host = { _id: new ObjectId(), columns: [{ key: "serial", type: "text" }, { key: "client", type: "connect", multiple: true, link: { boardId: target._id.toHexString() } }] };
     target.columns[1].link.boardId = host._id.toHexString();
     const targets = Array.from({ length: 5 }, (_, i) => ({ _id: new ObjectId(), boardId: target._id, values: { serial: `T${i}`, back: [] }, version: 1 }));
     const hosts = Array.from({ length: 4 }, (_, i) => ({ _id: new ObjectId(), boardId: host._id, values: { serial: `H${i}`, client: targets.slice(0, i + 1).map((t) => t._id.toHexString()) }, version: 1 }));
@@ -119,7 +119,8 @@ describe("recordLinks prototype on the local test MongoDB", { concurrency: false
     await ensureRecordLinks(db);
     const { host, target, hosts, targets } = await world(db);
     const links = new RecordLinkService({ db, connection });
-    const pairId = await links.linkPair({ board: host, recordId: hosts[0]._id, columnKey: "client" }, { board: target, recordId: targets[4]._id, columnKey: "back" });
+    const authz = { canEditValues: () => true };
+    const pairId = await links.linkPair({ board: host, recordId: hosts[0]._id, columnKey: "client" }, { board: target, recordId: targets[4]._id, columnKey: "back" }, { authz });
     const rows = await db.collection(COLLECTION).find({ pairId }).toArray();
     assert.equal(rows.length, 2);
     assert.deepEqual(rows.map((r) => r.origin).sort(), ["cell", "reciprocal"]);
@@ -128,10 +129,10 @@ describe("recordLinks prototype on the local test MongoDB", { concurrency: false
     assert.ok((await db.collection("records").findOne({ _id: targets[4]._id })).values.back.includes(hosts[0]._id.toHexString()), "reciprocal cell");
     // The far record doesn't exist: nothing at all is written (never silently one-way).
     const before = await db.collection("records").findOne({ _id: hosts[1]._id });
-    await assert.rejects(() => links.linkPair({ board: host, recordId: hosts[1]._id, columnKey: "client" }, { board: target, recordId: new ObjectId(), columnKey: "back" }));
+    await assert.rejects(() => links.linkPair({ board: host, recordId: hosts[1]._id, columnKey: "client" }, { board: target, recordId: new ObjectId(), columnKey: "back" }, { authz }));
     assert.deepEqual(await db.collection("records").findOne({ _id: hosts[1]._id }), before);
     assert.equal(await db.collection(COLLECTION).countDocuments({ fromRecordId: hosts[1]._id }), 0);
-    assert.equal(await links.unpair(pairId), 2);
+    assert.equal(await links.unpair(pairId, { boardId: host._id, authz }), 2);
     assert.equal(await db.collection(COLLECTION).countDocuments({ pairId }), 0);
     assert.equal((await db.collection("records").findOne({ _id: targets[4]._id })).values.back.length, 0);
   });
@@ -150,23 +151,24 @@ describe("recordLinks prototype on the local test MongoDB", { concurrency: false
     broken.syncRecord = async () => { throw new Error("injected"); };
     await assert.rejects(() => broken.setLinks(host, hosts[0]._id, "client", [t[4]], 2), /injected/);
     assert.deepEqual((await db.collection("records").findOne({ _id: hosts[0]._id })).values.client, [t[1], t[2]], "transaction rolled the cell back");
-    // WITHOUT transactions (connection null): the cell is written, the rows aren't: reconcile finds and repairs it.
+    // WITHOUT transactions (connection null): every write fails closed (503) and writes nothing — the link guard needs one.
+    // A cell changed outside the writer (simulated) is found by the report and repaired by apply (which needs transactions).
     const plain = new RecordLinkService({ db, connection: null });
-    plain.syncRecord = async () => { throw new Error("injected"); };
-    await assert.rejects(() => plain.setLinks(host, hosts[0]._id, "client", [t[4]], 2), /injected/);
-    assert.deepEqual((await db.collection("records").findOne({ _id: hosts[0]._id })).values.client, [t[4]], "no transaction: the cell write stays");
-    const repair = new RecordLinkService({ db, connection: null });
-    const report = await repair.reconcile(host);
+    await assert.rejects(() => plain.setLinks(host, hosts[0]._id, "client", [t[4]], 2), (e) => e.status === 503 && e.code === "RELATIONS_UNAVAILABLE");
+    await assert.rejects(() => plain.reconcile(host, { apply: true }), (e) => e.status === 503);
+    assert.deepEqual((await db.collection("records").findOne({ _id: hosts[0]._id })).values.client, [t[1], t[2]], "no transaction: nothing written");
+    await db.collection("records").updateOne({ _id: hosts[0]._id }, { $set: { "values.client": [t[4]] }, $inc: { version: 1 } });
+    const report = await plain.reconcile(host);
     assert.ok(report.missing >= 1 && report.extra >= 2, JSON.stringify(report));
-    await repair.reconcile(host, { apply: true });
-    assert.deepEqual(await repair.reconcile(host), { scanned: 4, missing: 0, extra: 0, applied: false });
+    await links.reconcile(host, { apply: true });
+    assert.deepEqual(await plain.reconcile(host), { scanned: 4, missing: 0, extra: 0, applied: false });
   });
 
   test("rebuild from cells: an empty or damaged index is rebuilt by reconcile; random edits converge to diff 0", async () => {
-    const { db } = await fresh();
+    const { db, connection } = await fresh();
     await ensureRecordLinks(db);
     const { host, hosts, targets } = await world(db);
-    const links = new RecordLinkService({ db });
+    const links = new RecordLinkService({ db, connection });
     assert.deepEqual(await links.reconcile(host), { scanned: 4, missing: 10, extra: 0, applied: false }, "1+2+3+4 links, none indexed");
     await links.reconcile(host, { apply: true });
     assert.equal(await db.collection(COLLECTION).countDocuments({ fromBoardId: host._id, origin: "rebuild" }), 10);
@@ -185,10 +187,10 @@ describe("recordLinks prototype on the local test MongoDB", { concurrency: false
   });
 
   test("index usage (explain): every access path uses its index, never a collection scan", async () => {
-    const { db } = await fresh();
+    const { db, connection } = await fresh();
     await ensureRecordLinks(db);
     const { host, hosts } = await world(db);
-    const links = new RecordLinkService({ db });
+    const links = new RecordLinkService({ db, connection });
     await links.reconcile(host, { apply: true });
     const c = db.collection(COLLECTION);
     const plans = {
