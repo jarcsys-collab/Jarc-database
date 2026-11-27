@@ -1058,6 +1058,10 @@ body.nav-collapsed .sidebar:not(.open) .sidebar-settings span {
 /* Live updates: a colleague's change briefly highlights the cell; a cell being edited shows their value. */
 .remote-flash { animation: jarc-remote-flash 1.6s ease-out; }
 @keyframes jarc-remote-flash { 0% { background: color-mix(in srgb, var(--accent) 22%, transparent); } 100% { background: transparent; } }
+/* A change of this person's that the server refused: the cell, now showing its previous value, is marked for a few seconds. */
+.save-refused-flash { box-shadow: inset 0 0 0 2px var(--danger); animation: jarc-refused-flash 4s ease-out; }
+@keyframes jarc-refused-flash { 0% { background: color-mix(in srgb, var(--danger) 20%, transparent); } 100% { background: transparent; } }
+@media (prefers-reduced-motion: reduce) { .save-refused-flash { animation: none; } }
 .has-remote-change .cell-input { outline: 2px solid var(--warning); outline-offset: -2px; }
 .remote-note { display: block; margin: 2px 4px 0; font-size: var(--fs-xs); color: var(--warning); }
 .form-live-notice { margin: 0 0 14px; padding: 10px 12px; border-radius: var(--radius-md); font-size: var(--fs-sm); line-height: 1.45; background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }

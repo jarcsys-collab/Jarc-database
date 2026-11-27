@@ -152,13 +152,17 @@ class BoardModel {
     // The latest per-person values are kept so loadJarc can put them back over the state it reads (a theme picked meanwhile).
     if (this.shellOnly) { this.shellDirty = true; this.shellKeep = JSON.parse(JSON.stringify({ settings: this.settings, profile: this.profile, notifications: this.notifications, feedSeenAt: this.feedSeenAt })); return Promise.resolve(true); }
     if (change.op !== "updateUserState") this.scheduleViewCount();
-    const state = this.toStorageState(), text = JSON.stringify(state), history = this.history.slice();
+    const state = this.toStorageState(), text = JSON.stringify(state), history = this.history.slice(), loadsBefore = this.loadSeq || 0;
     this.pendingSaves += 1; this.saveState = "saving"; this.countDataSave(change);
     window.dispatchEvent(new CustomEvent("jarc-save", {detail:"saving"}));
     const done = this.storage.commit(change, state).then((result) => {
       this.pendingSaves -= 1;
       if (result.ok) {
-        this.persisted = { text, history };
+        // Records loaded while this save ran (a board's records, a page of a large board) were added to the last saved
+        // state then, but not to the state this save started from: add them again, or a later refused save would roll
+        // the board back to its rows before loading — every loaded row vanished until a reload.
+        this.persisted = this.withLoadsSince(loadsBefore, { text, history });
+        if (!this.pendingSaves) this.loadLog = [];
         this.applyReconcile(result.reconcile);
         // A newer successful save supersedes an earlier failure: the failed change stays rolled back (the user saw it
         // revert) and Retry is no longer offered, so it can never overwrite these newer, saved edits.
@@ -166,6 +170,7 @@ class BoardModel {
         if (!this.pendingSaves) window.dispatchEvent(new CustomEvent("jarc-save", {detail:this.saveState}));
         return true;
       }
+      if (!this.pendingSaves) this.loadLog = [];
       if (result.code !== StorageError.CODES.CANCELLED) this.rollback(change, result);
       return false;
     });
@@ -202,6 +207,8 @@ class BoardModel {
     const stale = [StorageError.CODES.CONFLICT, StorageError.CODES.NOT_FOUND].includes(result.code) && result.reconcile;
     if (stale) { this.failure = null; this.saveState = this.pendingSaves ? "saving" : "saved"; this.saveError = ""; }
     else { this.saveState = "error"; this.saveError = result.code; }
+    // Which record cells went back (AppController.onRollback marks them); null for changes that aren't one record's cells.
+    this.refusedChange = change.recordId != null && Array.isArray(change.fields) ? { boardId: change.boardId ?? null, recordId: change.recordId, fields: change.fields.slice() } : null;
     window.dispatchEvent(new CustomEvent("jarc-save", {detail:this.saveState}));
     window.dispatchEvent(new CustomEvent("jarc-rollback", {detail:{ code: result.code, op: change.op, refreshed: Boolean(stale), columnKey: change.columnKey || null, ...(result.details ? { details: result.details } : {}) }}));
   }
@@ -493,10 +500,21 @@ class BoardModel {
       if (activity) board.activity = JSON.parse(JSON.stringify(activity));
     };
     const fix = (text) => { const state = JSON.parse(text); merge(state.data.workspaces); return JSON.stringify(state); };
+    const fixed = new Map(); // the saved state's history shares its entries with the live history: each is fixed once
+    const fixHistory = (list) => list.map((entry) => { if (fixed.has(entry)) return fixed.get(entry); const workspaces = JSON.parse(entry.workspaces); merge(workspaces); const next = { ...entry, workspaces: JSON.stringify(workspaces) }; fixed.set(entry, next); fixed.set(next, next); return next; });
     const live = this.toStorageState(), manualSort = this.manualSort; merge(live.data.workspaces); this.adoptState(JSON.stringify(live)); this.manualSort = manualSort; // new rows don't change how the board is sorted
-    this.persisted = { ...this.persisted, text: fix(this.persisted.text) };
-    if (this.failure) this.failure = { ...this.failure, text: fix(this.failure.text) };
-    this.history = this.history.map((entry) => { const workspaces = JSON.parse(entry.workspaces); merge(workspaces); return { ...entry, workspaces: JSON.stringify(workspaces) }; });
+    // The undo history kept with the saved and failed states gets the rows too: a rollback restores that history.
+    this.persisted = { text: fix(this.persisted.text), history: fixHistory(this.persisted.history || []) };
+    if (this.failure) this.failure = { ...this.failure, text: fix(this.failure.text), history: fixHistory(this.failure.history || []) };
+    this.history = fixHistory(this.history);
+    // A save still running started before these rows arrived: when it succeeds they are added to what it saved (withLoadsSince).
+    this.loadSeq = (this.loadSeq || 0) + 1;
+    if (this.pendingSaves > 0) (this.loadLog ||= []).push({ seq: this.loadSeq, fix, fixHistory });
+  }
+  // The state a save stored, with every record load since it started (seq > since) added. The log is emptied once no save runs.
+  withLoadsSince(since, saved) {
+    const loads = (this.loadLog || []).filter((entry) => entry.seq > since);
+    return loads.reduce((acc, entry) => ({ text: entry.fix(acc.text), history: entry.fixHistory(acc.history) }), saved);
   }
   // User-triggered Retry: re-applies everything that failed to save (including later changes made before the failure
   // was reported) and saves once more. Without a pending failure it simply saves the current state.

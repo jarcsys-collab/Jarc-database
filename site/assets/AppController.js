@@ -1627,6 +1627,9 @@ class AppController {
       return;
     }
     this.update();
+    // The cell(s) of the refused record change: marked for a few seconds, so the person sees which value went back.
+    const refused=this.model.refusedChange;
+    if(refused&&(refused.boardId==null||String(refused.boardId)===String(this.model.board?.id)))for(const field of refused.fields.slice(0,20))this.flashCell(this.model.idOf(refused.recordId),field,"save-refused-flash",4000);
     // Resource mode already loaded the server's latest copy after a conflict, so the message says so.
     let info=detail?.refreshed?StorageError.describeRefreshed(detail.code):StorageError.describe(detail?.code);
     // A refused link / email / phone value from a cell just edited: say what the server expects for that type.
@@ -1924,18 +1927,19 @@ class AppController {
   }
   // A colleague's change highlights its cell for 1.6 s. The highlight is remembered, so a redraw of the table in that
   // time (e.g. other live changes arriving) keeps showing it instead of wiping it.
-  flashCell(id,field){
-    (this.flashes ||= new Map()).set(`${id}|${field}`,Date.now()+1600);
+  // cls: "remote-flash" (a colleague's change) or "save-refused-flash" (this person's change the server refused, reverted).
+  flashCell(id,field,cls="remote-flash",ms=1600){
+    (this.flashes ||= new Map()).set(`${id}|${field}`,{until:Date.now()+ms,cls});
     this.reapplyFlashes();
-    setTimeout(()=>this.reapplyFlashes(),1650);
+    setTimeout(()=>this.reapplyFlashes(),ms+50);
   }
   reapplyFlashes(){
     if(!this.flashes?.size)return;
     const now=Date.now();
-    for(const [key,until] of this.flashes){
+    for(const [key,{until,cls}] of this.flashes){
       const [id,field]=key.split("|"), td=this.root.querySelector(`tr[data-record-context="${CSS.escape(id)}"] td[data-column-key="${CSS.escape(field)}"]`);
-      if(until<=now){this.flashes.delete(key);td?.classList.remove("remote-flash");continue;}
-      td?.classList.add("remote-flash");
+      if(until<=now){this.flashes.delete(key);td?.classList.remove(cls);continue;}
+      td?.classList.add(cls);
     }
   }
   // ---- Phase 6: undo / redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y outside text fields), cell ranges, copy / paste / clear.
