@@ -189,11 +189,13 @@ describe("executor against the verified local test instance", { concurrency: fal
   });
 
   test("interruption inside a batch rolls that batch back; resume completes with no duplicates", async () => {
-    const { db, workspaceId, run } = await setup({ batchSize: 100 });
+    // 100 per batch on the real extraction; on the small fixture (14 records) 4, so batch 4 is still a records batch.
+    const batchSize = source === REAL ? 100 : 4;
+    const { db, workspaceId, run } = await setup({ batchSize });
     await assert.rejects(() => run({ faults: { failInsideBatch: 4 } }), (e) => e.code === "MIGRATION_SIMULATED_INTERRUPTION");
-    // Batches 0 (boards) to 3 committed: 300 records (or fewer on a small source); batch 4 left nothing behind.
+    // Batches 0 (boards) to 3 committed: 3 batches of records; batch 4 left nothing behind.
     const committed = await count(db, "records");
-    assert.equal(committed, Math.min(300, r.plan.records.length));
+    assert.equal(committed, Math.min(3 * batchSize, r.plan.records.length));
     const mapped = await count(db, "integrationMappings", { kind: { $in: ["item", "subitem"] } });
     assert.equal(mapped, committed);
     const orphanComments = await db.collection(COLLECTIONS.comments).aggregate([{ $lookup: { from: COLLECTIONS.records, localField: "recordId", foreignField: "_id", as: "r" } }, { $match: { r: { $size: 0 } } }, { $count: "n" }]).toArray();
