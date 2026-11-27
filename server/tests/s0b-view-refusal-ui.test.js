@@ -143,3 +143,57 @@ describe("partial in CSV export and after a live refresh (S0-B follow-up B)", ()
     for (const line of csvFor(m)) { assert.match(line, /^"(Big|Small)","\[restricted\]","\[restricted\]"$/); assert.ok(!line.includes(hex(1000))); }
   });
 });
+
+// T0 x S0-B: since T0 a saved view keeps its column-header filter as one text setting (columnFilter, JSON) and restores it when
+// the view opens. A saved columnFilter on a Connect column the reader can't open must be refused exactly like the toolbar filter
+// and the view's own conditions: never evaluated here, sent to the server only inside `also` (which the server refuses), and kept
+// as saved (never stripped) so 'Save to this view' doesn't lose it.
+describe("T0 saved column filter on a restricted Connect column (T0 x S0-B)", () => {
+  const ctx = load();
+  const { refuseRestricted } = require("../src/domain/record-filter");
+  const columns = [{ key: "serial", label: "Project", type: "text" }, { key: "client", label: "Clients", type: "connect", link: { boardId: hex(9) } }];
+  const rows = [{ id: hex(1), serial: "Alpha" }, { id: hex(2), serial: "Beta" }];
+  const saved = (key) => ({ id: "v2", name: "Linked", columnFilter: ctx.BoardModel.columnFilterText({ key, op: "not-empty", value: "" }) });
+  const open = (key, restricted = new Set(["client"])) => {
+    const m = Object.create(ctx.BoardModel.prototype);
+    const board = { id: hex(7), name: "Projects", columns, groups: ["G"], savedViews: [saved(key)] };
+    Object.defineProperties(m, { board: { value: board }, rows: { value: rows }, storage: { value: { restrictedColumns: () => restricted, canFilterOnServer: false } } });
+    Object.assign(m, { viewFilter: null, columnFilter: null, activeSavedViewId: null, query: "", status: "All", quickFilter: "all", personFilter: "", screen: "board", currentView: "table", sortDirection: "desc", sortKey: "", grouped: false, groupBy: "", showArchived: false });
+    m.save = () => {}; m.idAliases = new Map();
+    m.matchesFilterRule = () => { throw new Error("a restricted condition must never be evaluated in the browser"); };
+    m.matchesColumnFilter = () => { throw new Error("a restricted column filter must never be evaluated in the browser"); };
+    m.boardLoadState = () => ({ state: "full", loaded: rows.length, total: rows.length });
+    m.applyView("v2");
+    return m;
+  };
+  const view = new ctx.AppView({ innerHTML: "" });
+
+  test("opening the view restores the filter and refuses it (scope filter): no rows, no count, nothing evaluated", () => {
+    const m = open("client");
+    assert.deepEqual({ ...m.columnFilter }, { key: "client", op: "not-empty", value: "" });
+    assert.deepEqual({ ...m.viewAccess() }, { state: "refused", scope: "filter", key: "client", label: "Clients" });
+    assert.deepEqual([...m.visibleRows], []);
+    const html = view.boardView(m);
+    assert.match(html, /You can't filter by “Clients”: it links to a board you can't open\./);
+    assert.doesNotMatch(html, /Alpha|Beta|record-row|<table/);
+  });
+
+  test("kept as saved: the view snapshot still holds the columnFilter text", () => {
+    const m = open("client");
+    assert.deepEqual({ ...ctx.BoardModel.columnFilterFrom(m.viewSnapshot().columnFilter) }, { key: "client", op: "not-empty", value: "" });
+  });
+
+  test("server path: the filter travels in `also`, which the server refuses with restricted-filter (no oracle)", () => {
+    const q = open("client").serverQuery();
+    const also = JSON.parse(JSON.stringify(q.also));
+    assert.deepEqual(also, { op: "and", rules: [{ key: "client", cmp: "notEmpty" }] });
+    assert.throws(() => refuseRestricted([q.filter, also], { columns }, new Set(["client"])), (e) => e.details?.reason === "restricted-filter" && e.details.field === "client");
+  });
+
+  test("a saved column filter on a column the reader can open is not held back", () => {
+    const m = open("serial");
+    m.matchesColumnFilter = () => true;
+    assert.equal(m.viewAccess(), null);
+    assert.equal(open("client", new Set()).viewAccess(), null);
+  });
+});
