@@ -1366,6 +1366,12 @@ tr.row-exit > td { animation: jarc-row-exit var(--dur-base) var(--ease-in) forwa
   .editable-table { table-layout: fixed; width: 100%; }
   .editable-table th.check-col { width: 72px; min-width: 72px; }
   .editable-table th.add-column-col { width: auto; min-width: 56px; }
+  /* A fixed table gives an auto column only the width left over, and min-width doesn't apply to its cells: on a board
+     wider than the screen the "+" cell got none and its button sat under the pinned record-actions column. The table is
+     therefore at least its columns (--columns-width, set by AppView.table) + check (72) + "+" (56) + actions (78) wide,
+     and + Record ID (236) when shown; narrow boards still give the spare width to the "+" cell. */
+  .editable-table { min-width: calc(var(--columns-width, 0px) + 206px); }
+  .editable-table:has(> thead th.record-id-col) { min-width: calc(var(--columns-width, 0px) + 442px); }
   .editable-table td { overflow: hidden; }
   .column-info-button { display: none; }
   th:hover .column-info-button, th:focus-within .column-info-button { display: inline-grid; }

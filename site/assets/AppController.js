@@ -1592,7 +1592,8 @@ class AppController {
   startResize(event){
     const handle=event.target.closest('[data-action="resize-column"]');if(!handle)return;event.preventDefault();
     const key=handle.dataset.key,th=handle.closest('th'),start=event.clientX,width=th.getBoundingClientRect().width;
-    const move=e=>{const next=Math.max(100,Math.min(600,width+e.clientX-start));th.style.width=th.style.minWidth=next+"px";};
+    const table=th.closest("table"),columnsWidth=parseFloat(table?.style.getPropertyValue("--columns-width"))||0;
+    const move=e=>{const next=Math.max(100,Math.min(600,width+e.clientX-start));th.style.width=th.style.minWidth=next+"px";if(columnsWidth)table.style.setProperty("--columns-width",`${columnsWidth-width+next}px`);};
     const up=e=>{document.removeEventListener("pointermove",move);document.removeEventListener("pointerup",up);this.model.resizeColumn(key,width+e.clientX-start);};
     document.addEventListener("pointermove",move);document.addEventListener("pointerup",up,{once:true});
   }
