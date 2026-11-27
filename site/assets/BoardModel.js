@@ -1030,11 +1030,24 @@ class BoardModel {
     const used=this.board.columns.filter((c)=>c.key!=="serial"&&c.type!=="files"&&rows.some((r)=>this.hasValue(r[c.key])));
     const files=this.boardFileCount?this.boardFileCount(this.board,{recordIds:[...set]}):0;
     return this.workspaces.filter((w)=>!w.archived).flatMap((w)=>w.boards.filter((b)=>b!==this.board&&!b.archived).map((b)=>{
-      const missing=used.filter((c)=>!(b.columns||[]).some((t)=>t.key===c.key&&t.type===c.type&&Boolean(t.multiple)===Boolean(c.multiple)));
+      const missing=used.filter((c)=>!(b.columns||[]).some((t)=>t.key===c.key&&t.type===c.type&&Boolean(t.multiple)===Boolean(c.multiple)&&(c.type!=="connect"||String(t.link?.boardId)===String(c.link?.boardId))));
       const discussed=[...set].some((id)=>this.commentCount(id)>0);
-      const reason=files?"Records with files can't move between boards yet.":discussed?"Records with updates can't move between boards yet.":missing.length?`Needs matching column${missing.length===1?"":"s"}: ${missing.map((c)=>c.label).join(", ")}`:"";
+      const blocked=this.relationMoveReason(b);
+      const reason=files?"Records with files can't move between boards yet.":discussed?"Records with updates can't move between boards yet.":blocked||(missing.length?`Needs matching column${missing.length===1?"":"s"}: ${missing.map((c)=>c.label).join(", ")}`:"");
       return {board:b,workspace:w,reason};
     }));
+  }
+  // Connect / Mirror and moves (doc 25 finding 6). A move is a copy on the target board + a delete here, so: (1) a record whose
+  // Connect column this person can't open (restricted: the server left its links out) would lose those links unseen — refused;
+  // (2) a Connect column of the same key on the target must link the SAME board (IDs of one board never land in a column of
+  // another); a Mirror of the same key must follow the same Connect column and show the same thing. The server checks every
+  // linked ID again on the copy (existence, archived, the mover's access) and refuses new Connect / Mirror columns it shouldn't add.
+  relationMoveReason(target){
+    const rel=(this.board.columns||[]).filter((c)=>c.type==="connect"||c.type==="mirror");
+    if(!rel.length)return "";
+    if(rel.some((c)=>this.relatedAccess?.(c.key)==="restricted")||(this.storage?.restrictedColumns?.(this.board.id)||[]).length)return "Records with links you can't open can't move between boards.";
+    const clash=rel.find((c)=>{const t=(target.columns||[]).find((x)=>x.key===c.key);if(!t)return false;if(t.type!==c.type)return true;return c.type==="connect"?String(t.link?.boardId)!==String(c.link?.boardId):JSON.stringify(t.mirror||null)!==JSON.stringify(c.mirror||null);});
+    return clash?`"${clash.label||clash.key}" links a different board there.`:"";
   }
   bulkMove(ids,boardId){
     const target=this.moveTargets(ids).find((t)=>String(t.board.id)===String(boardId));
@@ -1140,7 +1153,7 @@ class BoardModel {
   }
   isDueSoon(row,key="dueDate"){const value=row[key];if(!value)return false;const days=(new Date(value+"T00:00:00")-new Date(new Date().toDateString()))/86400000;return days>=0&&days<=7&&!row.archived&&!row.boardArchived&&!row.workspaceArchived;}
   archiveWorkspace(id,archived=true){const w=this.workspaces.find(w=>w.id===id);if(!w)return; if(archived&&this.workspaces.filter(w=>!w.archived).length<2)throw Error("Keep at least one active workspace.");this.snapshot("Workspace archive undone");w.archived=archived;if(archived&&this.currentWorkspaceId===id)this.switchWorkspace(this.workspaces.find(w=>!w.archived).id);this.save({op:"updateWorkspace",workspaceId:id,fields:["archived"]});}
-  moveRecordToBoard(id,boardId){const row=this.rows.find(r=>r.id===this.idOf(id));const target=this.workspaces.flatMap(w=>w.boards).find(b=>b.id===boardId);if(!row||!target||target===this.board)return false;this.snapshot("Record move undone");this.board.columns.forEach(c=>{if(!target.columns.some(t=>t.key===c.key))target.columns.push(JSON.parse(JSON.stringify(c)));});if(target.records.some(r=>r.id===row.id))row.id=this.nextRecordId();target.records.push(row);this.board.records=this.rows.filter(r=>r!==row);this.recordActivity(row,"Moved to "+target.name);this.log("Moved record to "+target.name);this.save({op:"moveRecord",boardId:this.board.id,targetBoardId:boardId,recordId:row.id});return true;}
+  moveRecordToBoard(id,boardId){const row=this.rows.find(r=>r.id===this.idOf(id));const target=this.workspaces.flatMap(w=>w.boards).find(b=>b.id===boardId);if(!row||!target||target===this.board)return false;const blocked=this.relationMoveReason(target);if(blocked)return blocked;this.snapshot("Record move undone");this.board.columns.forEach(c=>{if(!target.columns.some(t=>t.key===c.key))target.columns.push(JSON.parse(JSON.stringify(c)));});if(target.records.some(r=>r.id===row.id))row.id=this.nextRecordId();target.records.push(row);this.board.records=this.rows.filter(r=>r!==row);this.recordActivity(row,"Moved to "+target.name);this.log("Moved record to "+target.name);this.save({op:"moveRecord",boardId:this.board.id,targetBoardId:boardId,recordId:row.id});return true;}
   rememberRecord(row){this.recentRecords=[{id:row.id,boardId:this.board.id,workspaceId:this.workspace.id},...this.recentRecords.filter(r=>r.id!==row.id||r.boardId!==this.board.id)].slice(0,8);this.save({op:"updateUserState"});}
   rememberCommand(command){this.recentCommands=[command,...this.recentCommands.filter(c=>c!==command)].slice(0,5);this.save({op:"updateUserState"});}
   resizeColumn(key,width){if(this.activeView){if(this.board.columns.some((c)=>c.key===key))this.viewWidths={...(this.viewWidths||{}),[key]:Math.max(100,Math.min(600,width))};return;}const column=this.board.columns.find(c=>c.key===key);if(column){column.width=Math.max(100,Math.min(600,width));this.save({op:"updateColumns",boardId:this.board.id,columnKey:key});}}
