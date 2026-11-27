@@ -48,7 +48,10 @@ describe("Desktop workspace (real app, headless browser, role_based)", { skip: B
     assert.ok(await b.waitFor("!!document.querySelector('form[data-action=create-view-form]')", 2000));
     await b.evaluate(`document.querySelector('form[data-action=create-view-form] input[name=name]').value = ${JSON.stringify(name)}`);
     await click(b, 'form[data-action="create-view-form"] .button.primary');
-    await sleep(400);
+    // Wait for the view's tab and the save to finish (not a fixed delay: under load the save can take longer than 400 ms).
+    assert.ok(await b.waitFor(`[...document.querySelectorAll('.view-tabs [role=tab]')].some((t) => t.textContent.includes(${JSON.stringify(name)}))`, 5000), `the ${name} tab appears`);
+    assert.ok(await b.waitFor("document.querySelector('.save-state')?.dataset.state !== 'saving'", 5000), "the view is saved");
+    await sleep(150);
   };
   const tabs = (b) => b.evaluate("[...document.querySelectorAll('.view-tabs [role=tab]')].map((t) => t.textContent.replace(/\\s+/g, ' ').trim())");
   const savedViews = async () => (await api(mia, "GET", `/boards/${jobs.id}`)).body.board.savedViews;
