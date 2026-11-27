@@ -56,12 +56,17 @@ const mask = (v, k = "") => {
 // INTENDED differences (S0-B), applied to the older release's answers before comparing, and asserted on their own below:
 //  I1  token API and API Explorer: a Mirror cell is always null (the older release returned the stored placeholder, e.g. "").
 //  I2  /related: two new keys, unavailableReasons {} and partial {} (additive; restricted [] and unavailable [] unchanged).
+//  I3  session API: a Mirror cell is left out of a record's values (the stored placeholder is never presented as a worked-out
+//      value and is never changed; JARC's screens take Mirror values from /related).
 //  (Only when something IS restricted or dropped, which this suite never has: restrictedColumns on record pages, droppedLinks on
 //  writes, restricted lists on records / cells, connectStatus on /features. Asserted absent here.)
 const MIRRORS = ["total"];
 const isTokenOrExplorer = (name) => name.startsWith("token ") || name.includes("explorer");
 function intendedOld(name, r) {
-  if (!isTokenOrExplorer(name)) return r;
+  if (!isTokenOrExplorer(name)) return JSON.parse(JSON.stringify(r), function (k, x) {
+    if (k === "values" && x && typeof x === "object" && !Array.isArray(x)) { const v = { ...x }; for (const m of MIRRORS) delete v[m]; return v; }
+    return x;
+  });
   return JSON.parse(JSON.stringify(r), function (k, x) {
     if (k === "values" && x && typeof x === "object" && !Array.isArray(x)) { const v = { ...x }; for (const m of MIRRORS) if (m in v) v[m] = null; return v; }
     if (x && typeof x === "object" && MIRRORS.includes(x.columnId) && "value" in x) return { ...x, value: null };
@@ -221,7 +226,15 @@ describe(`S0-B keeps the non-restricted contracts of ${PARITY_REF} (same databas
     for (const word of ["restrictedColumns", "droppedLinks", "\"restricted\":[\"", "\"restricted\":true", "connectStatus"]) assert.equal(text.includes(word), false, word);
   });
 
-  test("I1: Mirror cells are null in the token API and the API Explorer (never a stored placeholder); the session API is unchanged", () => {
+  test("I3: the session API leaves Mirror cells out of records (the older release returned the stored placeholder); /related has them", () => {
+    const sessionRecords = (snap) => Object.entries(snap).filter(([n]) => !isTokenOrExplorer(n) && !/related/.test(n)).flatMap(([, r]) => [r.body?.record, ...(r.body?.items || [])]).filter((x) => x && x.values);
+    for (const snap of [snaps.newReads, snaps.newWrites]) for (const rec of sessionRecords(snap)) assert.equal("total" in rec.values, false, JSON.stringify(rec.values));
+    const projectsWas = sessionRecords(snaps.oldReads).filter((x) => x.boardId === W.projects.id);
+    assert.ok(projectsWas.length >= 3 && projectsWas.some((x) => "total" in x.values), "the older release returned the placeholder");
+    const rel = snaps.newWrites["related projects"].body;
+    assert.ok(Object.values(rel.values).some((v) => "total" in v), JSON.stringify(rel.values));
+  });
+  test("I1: Mirror cells are null in the token API and the API Explorer (never a stored placeholder)", () => {
     const mirrorValues = (snap) => Object.entries(snap).filter(([n]) => isTokenOrExplorer(n)).flatMap(([, r]) => JSON.stringify(r.body).match(/"total":("[^"]*"|null|\d+)/g) || []);
     const now = mirrorValues(snaps.newReads), was = mirrorValues(snaps.oldReads);
     assert.ok(now.length >= 6, `mirror cells seen: ${now.length}`);

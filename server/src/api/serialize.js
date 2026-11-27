@@ -46,11 +46,14 @@ function boardToApi(doc, { personal = null } = {}) {
 //               listed in `unsafeValues` (keys only). Their values are returned unchanged and are never rewritten.
 //   restricted  a Set of Connect column keys whose linked board the reader can't view (connectRestrictions): those cells are
 //               left out of `values` and listed in `restricted`, with no IDs and no count.
+//   mirrors     a Set of the board's Mirror column keys: their stored placeholders (usually "") are left out of `values` (never
+//               presented as a worked-out value; the stored cells are untouched). The values come from GET /boards/:id/related.
 function recordToApi(doc, options) {
-  const { board = null, restricted = null } = options !== null && typeof options === "object" ? options : {};
+  const { board = null, restricted = null, mirrors = null } = options !== null && typeof options === "object" ? options : {};
   const values = { ...doc.values };
   const hidden = restricted?.size ? Object.keys(values).filter((k) => restricted.has(k)) : [];
   for (const key of hidden) delete values[key];
+  if (mirrors?.size) for (const key of mirrors) delete values[key];
   const unsafe = board ? unsafeValueKeys(board, values) : [];
   return withLegacy(doc, {
     id: hex(doc._id), workspaceId: hex(doc.workspaceId), boardId: hex(doc.boardId), values, groupId: doc.groupId ?? null,

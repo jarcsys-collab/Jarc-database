@@ -55,11 +55,13 @@ async function restrictedFor(ctx, board) {
 }
 
 // A record as the API returns it: with its board's workspace (the stored copy can lag a board move; P4-0) and with the cells of
-// restricted Connect columns left out.
+// restricted Connect columns left out. Mirror cells are left out for everyone (plan 17 §3): what is stored there is a placeholder,
+// never the worked-out value, which the screens take from /related (restricted, partial and unavailable marks included).
 async function recordsOut(ctx, board, docs) {
   const restricted = await restrictedFor(ctx, board);
+  const mirrors = new Set((board?.columns || []).filter((c) => c?.type === "mirror").map((c) => c.key));
   const ws = board.workspaceId;
-  return docs.map((doc) => recordToApi(!ws || doc.workspaceId?.equals?.(ws) ? doc : { ...doc, workspaceId: ws }, { restricted }));
+  return docs.map((doc) => recordToApi(!ws || doc.workspaceId?.equals?.(ws) ? doc : { ...doc, workspaceId: ws }, { restricted, mirrors }));
 }
 
 // Activity entries (plan 17 §1.2 row 7). Stored Connect changes keep their IDs (audit); on read, a change of a Connect column whose

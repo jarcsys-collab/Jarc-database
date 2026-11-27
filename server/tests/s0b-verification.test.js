@@ -181,3 +181,18 @@ test("A6: Mirror is documented as always null in the API documentation, the API 
   assert.match(fs.readFileSync(path.join(root, "site", "assets", "ApiTokensPanel.js"), "utf8"), /data-note="mirror-null">Mirror columns are worked out in JARC[^<]*<code>null<\/code>/);
   assert.match(fs.readFileSync(path.join(root, "server", "README.md"), "utf8"), /A \*\*Mirror\*\* cell is worked out in JARC when it is shown and is never returned by the token API or the API Explorer: its value is always `null`/);
 });
+
+test("session API: a stored Mirror placeholder is left out of values (stored record untouched); restricted keys are still listed", async () => {
+  const { ObjectId } = require("mongodb");
+  const { recordsOut } = require("../src/services/relation-guard");
+  const id = new ObjectId(), target = new ObjectId();
+  const board = { _id: new ObjectId(), workspaceId: new ObjectId(), columns: [{ key: "serial", type: "text" }, { key: "client", type: "connect", link: { boardId: target.toHexString() } }, { key: "total", type: "mirror", mirror: { via: "client", column: "v", show: "sum" } }] };
+  const doc = { _id: id, boardId: board._id, workspaceId: board.workspaceId, values: { serial: "A", client: [], total: "" }, version: 1 };
+  const before = JSON.stringify(doc.values);
+  const ctx = (visible) => ({ visibility: async () => {}, boards: async () => new Map(visible ? [[target.toHexString(), { _id: target }]] : []), can: () => visible });
+  const [open] = await recordsOut(ctx(true), board, [doc]);
+  assert.deepEqual(open.values, { serial: "A", client: [] }); assert.equal("restricted" in open, false);
+  const [locked] = await recordsOut(ctx(false), board, [doc]);
+  assert.deepEqual(locked.values, { serial: "A" }); assert.deepEqual(locked.restricted, ["client", "total"]);
+  assert.equal(JSON.stringify(doc.values), before, "the stored document is not changed");
+});
