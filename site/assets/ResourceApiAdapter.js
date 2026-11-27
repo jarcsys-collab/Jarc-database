@@ -1074,14 +1074,24 @@ class ResourceApiAdapter {
     if (updates.length) await this.updateRecords(b.id, updates);
     deletions.push(...gone.map((r) => ({ boardId: b.id, id: r.id, expectedVersion: r.version })));
   }
+  // A write response's droppedLinks ({ connectKey: n }): stored links to records that no longer exist (deleted or moved) were
+  // removed by the server. Reported once per response through onDroppedLinks(total) (AppController shows a notice).
+  noteDropped(response) {
+    const dropped = response && typeof response === "object" ? response.droppedLinks : null;
+    if (!dropped || typeof dropped !== "object") return;
+    const total = Object.values(dropped).reduce((n, v) => n + (Number.isInteger(v) && v > 0 ? v : 0), 0);
+    if (total > 0) { try { this.onDroppedLinks?.(total); } catch { /* a notice never fails a save */ } }
+  }
   async createRecords(boardId, items, reconcile) {
     const board = this.boards.get(boardId);
     for (let i = 0; i < items.length; i += ResourceApiAdapter.BATCH_LIMIT) {
       const chunk = items.slice(i, i + ResourceApiAdapter.BATCH_LIMIT);
       const body = chunk.map(({ values, groupId, archived, pinned, position }) => ({ values, ...(groupId !== undefined ? { groupId } : {}), archived, pinned, position }));
-      const created = chunk.length === 1
-        ? [(await this.request("POST", `/boards/${boardId}/records`, body[0], { kind: "boards" })).record]
-        : (await this.request("POST", `/boards/${boardId}/records/batch`, { records: body }, { kind: "boards" })).items;
+      const response = chunk.length === 1
+        ? await this.request("POST", `/boards/${boardId}/records`, body[0], { kind: "boards" })
+        : await this.request("POST", `/boards/${boardId}/records/batch`, { records: body }, { kind: "boards" });
+      this.noteDropped(response);
+      const created = chunk.length === 1 ? [response.record] : response.items;
       created.forEach((record, n) => { this.records.set(record.id, this.recordFrom(record)); this.alias(chunk[n].row.id, record.id, reconcile); this.syncCreated?.push({ boardId, id: record.id, expectedVersion: record.version, from: chunk[n].row.id }); });
       board.recordCount += created.filter((r) => !r.archived).length;
     }
@@ -1089,12 +1099,16 @@ class ResourceApiAdapter {
   async updateRecords(boardId, updates) {
     if (updates.length === 1) {
       const { id, ...body } = updates[0];
-      const { record } = await this.request("PATCH", `/records/${id}`, body, { kind: "record", id, boardId });
+      const response = await this.request("PATCH", `/records/${id}`, body, { kind: "record", id, boardId });
+      this.noteDropped(response);
+      const { record } = response;
       this.records.set(record.id, this.recordFrom(record));
       return;
     }
     for (let i = 0; i < updates.length; i += ResourceApiAdapter.BATCH_LIMIT) {
-      const { items } = await this.request("PATCH", `/boards/${boardId}/records`, { items: updates.slice(i, i + ResourceApiAdapter.BATCH_LIMIT) }, { kind: "records", boardId });
+      const response = await this.request("PATCH", `/boards/${boardId}/records`, { items: updates.slice(i, i + ResourceApiAdapter.BATCH_LIMIT) }, { kind: "records", boardId });
+      this.noteDropped(response);
+      const { items } = response;
       for (const record of items) this.records.set(record.id, this.recordFrom(record));
     }
   }

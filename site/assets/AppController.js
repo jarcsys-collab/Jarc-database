@@ -93,6 +93,8 @@ class AppController {
     this.ready = false; this.view.preAuth = true; this.view.appearanceOwner = null; this.view.applyNeutralAppearance?.(); this.view.renderLoading();
     // Resource mode with Microsoft Entra ID (server AUTH_MODE=entra): a JARC server session (Microsoft sign-in) FIRST; no
     // protected data is requested before that. Other modes keep the temporary sign-in (AuthModel).
+    // Connect: the server removed stored links to records that no longer exist (droppedLinks): say so, never silently.
+    if (this.model.storage.adapter.mode === "resource") this.model.storage.adapter.onDroppedLinks = (n) => this.view.toast(`${n} link${n === 1 ? "" : "s"} to deleted records ${n === 1 ? "was" : "were"} removed`);
     if (this.model.storage.adapter.mode === "resource" && typeof EntraAuth !== "undefined") {
       let signIn;
       try { signIn = await EntraAuth.prepare(this.model.storage.adapter); }
