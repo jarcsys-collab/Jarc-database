@@ -248,7 +248,11 @@ function createApp({ securityHeadersOptions = {}, employees: employeesOption = n
     // Live updates (Server-Sent Events) from the activity log; live: { pollMs, overlapMs, timings } for tests.
     // System Health, Integration Reliability and Activity History: JARC administrators only (checked in each route).
     // SYSTEM_HEALTH_VIEWER_OIDS (Entra sign-in only): a redacted System Health view, never Activity History.
-    api.use(identify, systemHealthRoutes({ dataLayer, access, environment, version, monitor, enabled, canManageDrive: googleDrive ? (actor) => actorCanManageDrive(actor, googleDrive.config, auth.entra.tenantId) : () => false, viewerObjectIds: healthViewers, tenantId: auth?.entra?.tenantId || null }));
+    // Fabric index health (only while Fabric Data is on): the detail only for Fabric readers (FABRIC_DATA_READER_OIDS; Fabric API
+    // administrators are readers too); everyone else who may see System Health gets the overall status only.
+    const fabricHealth = fabric?.health || null;
+    const canSeeFabricDetail = fabric ? (actor) => canReadFabric(actor, fabric.config, auth.entra.tenantId) || canManageFabricApi(actor, fabric.config, auth.entra.tenantId) : () => false;
+    api.use(identify, systemHealthRoutes({ dataLayer, access, environment, version, monitor, enabled, canManageDrive: googleDrive ? (actor) => actorCanManageDrive(actor, googleDrive.config, auth.entra.tenantId) : () => false, viewerObjectIds: healthViewers, tenantId: auth?.entra?.tenantId || null, fabricHealth, canSeeFabricDetail }));
     const stream = new ActivityStream({ activities: dataLayer.repos.activities, logger, ...(live.pollMs ? { pollMs: live.pollMs } : {}), ...(live.overlapMs ? { overlapMs: live.overlapMs } : {}) });
     app.locals.realtime = stream;
     api.use(identify, eventRoutes({ stream, access, repos: dataLayer.repos, sessionCheck: auth ? entraSessionCheck({ sessions: dataLayer.repos.sessions, users: dataLayer.repos.users }) : null, timings: live.timings }));

@@ -16,6 +16,8 @@ const { allowOnly, queryString, fail, OBJECT_ID } = require("../validation/commo
 const { monitor: defaultMonitor } = require("../monitoring/monitor");
 const { redact } = require("../db/connection");
 const { hex, iso } = require("../api/serialize");
+// Pure view builders only (no driver, no connection): safe to load whether Fabric Data is on or off.
+const { detailedView, generalView } = require("../fabric/health");
 
 const ACTION = /^[a-z][a-z_]*(\.[a-z_]+)*\.?$/; // "record.updated", or a prefix ending in "." ("record.")
 const SENSITIVE_FIELD = /pass(word)?|secret|token|api[-_]?key|credential|authori[sz]ation|cookie|session/i;
@@ -142,13 +144,17 @@ function viewerView(full) {
       imports: partView(full.jobs.imports, (j) => ({ active: num(j.active), failed: num(j.failed) })),
       searchIndex: full.jobs.searchIndex ? { mode: oneOf(full.jobs.searchIndex.mode, SEARCH_MODES), ready: Boolean(full.jobs.searchIndex.ready) } : null,
       recentFailures: { count: (full.jobs.recentFailures || []).length, byKind: countBy(full.jobs.recentFailures, (f) => (/^[a-z0-9._-]{1,60}$/i.test(f.kind || "") ? f.kind : null)) }
-    }
+    },
+    // Fabric index health (only while Fabric Data is on): rebuilt again through the same allow-lists; never the admin extras.
+    ...(full.fabric ? { fabric: full.fabric.detail === true ? detailedView(full.fabric, { admin: false }) : generalView(full.fabric) } : {})
   };
 }
 
 // viewerObjectIds: SYSTEM_HEALTH_VIEWER_OIDS; tenantId: ENTRA_TENANT_ID. A JARC administrator gets the full view (unchanged,
 // plus scope: "admin"); a listed viewer gets viewerView (scope: "viewer"); Activity History stays JARC administrators only.
-function systemHealthRoutes({ dataLayer, access, environment, version, monitor = defaultMonitor, canManageDrive = () => false, enabled = {}, viewerObjectIds = [], tenantId = null }) {
+// fabricHealth: FabricIndexHealth (src/fabric/health.js) while Fabric Data is on, else null (no "fabric" part).
+// canSeeFabricDetail(actor): a Fabric reader (detailedView); anyone else gets generalView (healthy | degraded | unavailable).
+function systemHealthRoutes({ dataLayer, access, environment, version, monitor = defaultMonitor, canManageDrive = () => false, enabled = {}, viewerObjectIds = [], tenantId = null, fabricHealth = null, canSeeFabricDetail = () => false }) {
   const router = express.Router();
   const send = (res, body) => res.status(200).set("Cache-Control", "no-store").json(body);
   const admin = (req) => access.requireSystemAdmin(req.actor);
@@ -160,14 +166,17 @@ function systemHealthRoutes({ dataLayer, access, environment, version, monitor =
     allowOnly(req.query, [], "the query");
     const db = connection.db;
     const memory = process.memoryUsage();
-    const [pingMs, monday, drive, mid, imports, integrationJobs] = await Promise.all([
+    const [pingMs, monday, drive, mid, imports, integrationJobs, fabricRaw] = await Promise.all([
       connection.pingMs(),
       part(async () => (services.integration ? summariseMonday(await services.integration.status(req.actor)) : null)),
       part(async () => (services.googleDrive ? summariseDrive(await services.googleDrive.status({ canManage: viewer ? false : canManageDrive(req.actor) })) : null)),
       part(async () => (!viewer && services.midAttachments && canManageDrive(req.actor) ? midRuns(db) : null)),
       part(async () => (enabled.spreadsheetImports ? importSummary(db) : null)),
-      part(async () => jobSummary(repos.integrations))
+      part(async () => jobSummary(repos.integrations)),
+      part(async () => (fabricHealth ? fabricHealth.snapshot() : null))
     ]);
+    let fabric = null;
+    if (fabricHealth) { let detail = false; try { detail = canSeeFabricDetail(req.actor) === true; } catch { detail = false; } fabric = detail ? detailedView(fabricRaw, { admin: !viewer }) : generalView(fabricRaw); }
     const snap = monitor.snapshot();
     const search = dataLayer.searchIndex;
     const full = {
@@ -180,7 +189,8 @@ function systemHealthRoutes({ dataLayer, access, environment, version, monitor =
         monday: { ...(monday || { enabled: false }), activity: snap.integrations.monday || null },
         googleDrive: { ...(drive || { enabled: false }), activity: snap.integrations["google-drive"] || null }
       },
-      jobs: { integration: integrationJobs, imports, midAttachments: mid, searchIndex: search ? { mode: search.mode, ready: Boolean(search.ready) } : null, recentFailures: snap.jobFailures }
+      jobs: { integration: integrationJobs, imports, midAttachments: mid, searchIndex: search ? { mode: search.mode, ready: Boolean(search.ready) } : null, recentFailures: snap.jobFailures },
+      fabric
     };
     send(res, viewer ? viewerView(full) : full);
   });

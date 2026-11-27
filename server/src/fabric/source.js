@@ -30,10 +30,12 @@ class DatasetSource {
     if (this.cached && this.now() - this.cached.at < this.cacheMs) return this.cached.value;
     this.loading ??= (async () => {
       const collection = this.dataset.collection;
-      const { hints, missingIndexes } = detectSorts(this.dataset, await this.repository.listIndexes(collection));
+      const list = await this.repository.listIndexes(collection);
+      const { hints, missingIndexes } = detectSorts(this.dataset, list);
       const estimate = await this.repository.estimate(collection);
       const value = { estimate, hints, missingIndexes, small: Number.isInteger(estimate) && estimate <= this.scanMax };
-      this.cached = { at: this.now(), value };
+      // The index names seen (internal, for index health only: kept beside the value, so /status never sees them).
+      this.cached = { at: this.now(), value, names: (Array.isArray(list) ? list : []).map((i) => i?.name).filter((n) => typeof n === "string") };
       return value;
     })().finally(() => { this.loading = null; });
     return this.loading;
@@ -97,6 +99,10 @@ class DatasetSource {
     })().finally(() => { this.boundsLoading = null; });
     return this.boundsLoading;
   }
+
+  // Index health (health.js), read-only, never a query: when info() last succeeded (ms, or null) and the index names it saw.
+  get cachedAt() { return this.cached ? this.cached.at : null; }
+  get indexNames() { return this.cached ? [...this.cached.names] : null; }
 
   // After a query on a dropped collection (MongoDB answers it with nothing, not an error) or a vanished index.
   invalidate({ bounds = false } = {}) { this.cached = null; if (bounds) this.boundsCache = null; }

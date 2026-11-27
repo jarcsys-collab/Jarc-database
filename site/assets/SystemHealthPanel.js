@@ -76,7 +76,8 @@ class SystemHealthPanel {
       api ? this.tile("API requests", this.num(api.requests), this.has(api.serverErrors) ? `${api.serverErrors} server error${api.serverErrors === 1 ? "" : "s"}${this.has(api.errorRate) ? ` · ${api.errorRate}%` : ""}` : "", api.errorRate >= 5 ? "bad" : api.errorRate > 0 ? "warn" : "") : "",
       api && this.has(api.avgMs) ? this.tile("Average", this.ms(api.avgMs), this.has(api.p50Ms) ? `p50 ${this.ms(api.p50Ms)}` : "") : "",
       api && this.has(api.p95Ms) ? this.tile("p95", this.ms(api.p95Ms), this.has(api.p99Ms) ? `p99 ${this.ms(api.p99Ms)}` : "", api.p95Ms >= 2000 ? "warn" : "") : "",
-      db && this.has(db.slow) ? this.tile("Slow database commands", this.num(db.slow), [this.has(db.slowThresholdMs) ? `≥ ${db.slowThresholdMs} ms` : "", this.has(db.failed) ? `${db.failed} failed` : ""].filter(Boolean).join(" · "), db.slow ? "warn" : "") : ""
+      db && this.has(db.slow) ? this.tile("Slow database commands", this.num(db.slow), [this.has(db.slowThresholdMs) ? `≥ ${db.slowThresholdMs} ms` : "", this.has(db.failed) ? `${db.failed} failed` : ""].filter(Boolean).join(" · "), db.slow ? "warn" : "") : "",
+      this.fabricTile()
     ].join("");
     const endpoint = (e) => `<tr><td><code>${this.esc(e.route)}</code></td><td data-label="Requests">${this.num(e.count)}</td><td data-label="Average">${this.ms(e.avgMs)}</td><td data-label="p95">${this.ms(e.p95Ms)}</td><td data-label="p99">${this.ms(e.p99Ms)}</td><td data-label="Errors">${e.serverErrors ? `<span class="health-bad">${e.serverErrors} (${e.errorRate}%)</span>` : "0"}</td></tr>`;
     const table = (rows, empty) => rows.length ? `<table class="account-table health-table"><thead><tr><th>Endpoint</th><th>Requests</th><th>Average</th><th>p95</th><th>p99</th><th>Server errors</th></tr></thead><tbody>${rows.map(endpoint).join("")}</tbody></table>` : `<p class="integration-note">${empty}</p>`;
@@ -140,9 +141,61 @@ class SystemHealthPanel {
     const next = (state) => state === "needs_reconnect" ? "Reconnect it on the Integrations page." : state === "unavailable" ? "Check the connection on the Integrations page (Test connection)." : "";
     const goto = `<div class="integration-actions"><button class="button secondary" data-action="nav" data-screen="integrations">${icon("link")} Open Integrations</button></div>`;
     const tip = (s) => { const n = next(s.state); return n ? `<p class="integration-alert" role="alert">${n}</p>` : ""; };
-    const cards = (m ? card("monday.com", m, m.activity, mondayDetails + tip(m), goto) : "") + (d ? card("Google Drive", d, d.activity, driveDetails + tip(d), goto) : "");
+    const cards = (m ? card("monday.com", m, m.activity, mondayDetails + tip(m), goto) : "") + (d ? card("Google Drive", d, d.activity, driveDetails + tip(d), goto) : "") + this.fabricHtml();
     return (cards || `<p class="integration-note">No integrations are reported on this server.</p>`)
       + `<p class="integration-note">Requests are retried automatically with increasing waits only when that is safe (reads, and uploads that can resume); changes are never repeated blindly. Counts cover the time since the server started.</p>`;
+  }
+
+  // ---- Fabric index health (only while Fabric Data is on: health.fabric). Fabric readers get the detail (detail: true);
+  // everyone else only healthy / degraded / unavailable. Everything shown is escaped; missing values are "—".
+  get fabric() { const f = this.health?.fabric; return f && typeof f === "object" ? f : null; }
+  fabricStatus(s) { return { healthy: ["All OK", "good"], degraded: ["Needs attention", "bad"], unavailable: ["Unavailable", "bad"] }[s] || ["Unknown", "warn"]; }
+  fabricTile() {
+    const f = this.fabric;
+    if (!f) return "";
+    const [label, tone] = this.fabricStatus(f.status);
+    let note = f.detail ? "" : "Details are for Fabric Data readers";
+    if (f.detail && f.datasets) {
+      const bad = Object.values(f.datasets).filter((d) => d && d.state !== "ok" && d.state !== "small_mode");
+      const small = Object.values(f.datasets).filter((d) => d && d.state === "small_mode");
+      note = bad.length ? bad.map((d) => `${this.esc(d.label)}: ${this.fabricStateLabel(d.state)}`).join(" · ") : small.map((d) => `${this.esc(d.label)}: small mode ${this.num(d.estimate)} / ${this.num(d.scanMax)}`).join(" · ");
+    }
+    return this.tile("Fabric indexes", label, note, tone);
+  }
+  fabricStateLabel(s) { return { ok: "Working", small_mode: "Working (small mode)", index_missing: "Waiting for an index", source_missing: "Being refreshed upstream", unavailable: "Can't reach Fabric", unsafe: "Off: the login is not read-only" }[s] || "Unknown"; }
+  fabricHtml() {
+    const f = this.fabric;
+    if (!f) return "";
+    const [label, tone] = this.fabricStatus(f.status);
+    const head = (extra = "") => `<div class="health-card-head"><h2>Fabric index health</h2><span class="health-pill is-${tone}" data-fabric-status="${this.esc(f.status)}">${label}</span></div>${extra}`;
+    if (!f.detail) return `<section class="integration-card health-section health-fabric">${head()}<p class="integration-note">${f.checkedAt ? `Checked ${this.when(f.checkedAt)}. ` : ""}Index names, sizes and dates are shown only to Fabric Data readers.</p></section>`;
+    if (f.unavailable || !f.datasets) return `<section class="integration-card health-section health-fabric">${head()}<p class="integration-alert" role="alert">Fabric index health couldn't be read.</p></section>`;
+    const keys = (k) => `{ ${Object.entries(k || {}).map(([n, d]) => `${this.esc(n)}: ${Number(d) === -1 ? -1 : 1}`).join(", ")} }`;
+    const date = (v) => (v ? this.esc(this.view.time ? this.view.time(v) : v) : "—");
+    const rows = Object.entries(f.datasets).map(([name, d]) => {
+      const tone2 = d.state === "ok" ? "good" : d.state === "small_mode" ? (d.estimate >= 0.8 * (d.scanMax || 20000) ? "warn" : "") : "bad";
+      const idx = (d.requiredIndexes || []).map((r) => `<tr><td><code>${this.esc(r.name)}</code></td><td data-label="Keys"><code>${keys(r.keys)}</code></td><td data-label="Status">${r.present === true ? "Present" : r.present === null ? "Unknown (Fabric couldn't be asked)" : r.nameTaken ? `<span class="health-bad">Exists but doesn't match</span>` : d.state === "small_mode" ? "Not created (not needed yet)" : `<span class="health-bad">Missing</span>`}${r.servedBy ? ` · served by <code>${this.esc(r.servedBy)}</code>` : ""}</td></tr>`).join("");
+      const facts = [["Mode", this.esc(d.mode || "—")], ["Documents", d.mode === "small" ? `~${this.num(d.estimate)} of ${this.num(d.scanMax)} before indexes are needed` : `~${this.num(d.estimate)}`], ["Last verified", this.when(d.lastVerifiedAt)], ["Latest date", d.latestDate ? date(d.latestDate) : d.mode === "indexed" ? "—" : "— (read only through the index)"]];
+      const reload = d.reload ? `<p class="integration-note">Data reloaded upstream ${this.when(d.reload.detectedAt)} (${d.reload.basis === "id" ? "all records replaced" : "the collection came back"}); this usually removes indexes.</p>` : "";
+      const fix = (d.requiredIndexes || []).some((r) => r.present === false) ? this.fabricFixHtml(d) : "";
+      return `<div class="health-fabric-dataset" data-dataset="${this.esc(name)}"><div class="health-card-head"><h3>${this.esc(d.label)}</h3><span class="health-pill ${tone2 ? `is-${tone2}` : ""}">${this.fabricStateLabel(d.state)}</span></div><dl class="integration-facts health-facts">${facts.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>${idx ? `<table class="account-table health-table"><thead><tr><th>Index</th><th>Keys</th><th>Status</th></tr></thead><tbody>${idx}</tbody></table>` : ""}${reload}${fix}</div>`;
+    }).join("");
+    const b = f.background;
+    const foot = [f.checkedAt ? `Checked ${this.when(f.checkedAt)}` : "", f.connection ? `connection: ${this.esc(f.connection)}` : "", b ? (b.running ? `background check every ${this.num(b.everyMinutes)} min, last OK ${this.when(b.lastOkAt)}` : "background check off") : ""].filter(Boolean).join(" · ");
+    return `<section class="integration-card health-section health-fabric">${head()}${rows}${foot ? `<p class="integration-note">${foot}.</p>` : ""}</section>`;
+  }
+  // "How to fix" for administrators: static text; only the index names and keys come from the report (escaped).
+  fabricFixHtml(d) {
+    const missing = (d.requiredIndexes || []).filter((r) => r.present === false);
+    const coll = d.label === "Sales" ? "FactSales" : d.label === "Inventory" ? "FactInventory" : "the collection";
+    const keysJson = (k) => this.esc(JSON.stringify(k || {}).replace(/,/g, ", ").replace(/:/g, ": "));
+    const cmds = missing.map((r) => `<code>db.${coll}.createIndex(${keysJson(r.keys)}, { name: "${this.esc(r.name)}" })</code>`).join("<br>");
+    return `<details class="health-history health-fabric-fix"><summary>How to fix</summary><ol>
+      <li><strong>Why:</strong> the data team's refresh replaced the collection, and a replaced collection loses its indexes. JARC's login is read-only and can't create them. <strong>Ask the data team to recreate these indexes after each refresh</strong> (best: as part of their refresh job).</li>
+      <li><strong>Atlas UI</strong> (a role that may create indexes, e.g. Project Data Access Admin or Owner): Atlas → the Fabric Data project → Clusters → the Fabric cluster → Browse Collections → the Fabric database → <code>${coll}</code> → Indexes → Create Index → Fields: the keys above → Options: <code>{ "name": "&lt;index name&gt;" }</code> → Review → Confirm. Wait until the build finishes.</li>
+      <li><strong>Shell</strong> (mongosh on the Fabric database with an index-builder login):<br>${cmds}</li>
+      <li><strong>Check:</strong> within 5 minutes (or Refresh, at most a minute) this card shows Present. "Exists but doesn't match": drop that index and create it again with exactly these keys and no other options (not partial, sparse or collated).</li>
+    </ol></details>`;
   }
 
   // ---- Activity History

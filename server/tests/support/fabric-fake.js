@@ -354,7 +354,8 @@ function inventoryRows(n = 400, { days = 120, seed = 7 } = {}) {
 }
 
 // The JARC app with Microsoft Entra sign-in (on JARC's own fake MongoDB) and an optional Fabric Data stack.
-async function startFabricApp({ issuer, fabricData = null, accessPolicy, betaOpenEditing = false, apiTokens = null, siteDir } = {}) {
+// systemHealth: { viewerObjectIds } (SYSTEM_HEALTH_VIEWER_OIDS), optional.
+async function startFabricApp({ issuer, fabricData = null, accessPolicy, betaOpenEditing = false, apiTokens = null, siteDir, systemHealth = null } = {}) {
   const { createEntraVerifier } = require("../../src/auth/entra-token");
   const fake = new FakeMongoClient();
   const connection = new MongoConnection({ uri: "mongodb://fake.invalid", dbName: "jarc_database", createClient: () => fake });
@@ -363,7 +364,7 @@ async function startFabricApp({ issuer, fabricData = null, accessPolicy, betaOpe
   const logger = { errors: [], warnings: [], error(...args) { this.errors.push(args.map(String).join(" ")); }, warn(...args) { this.warnings.push(args.map(String).join(" ")); } };
   const dataLayer = createDataLayer({ connection, logger, fileStore: new MemoryFileStore(), environment: "test" });
   const verify = createEntraVerifier({ ...issuer.config, keySet: issuer.keySet });
-  const app = createApp({ repository: new MemoryStateRepository(), environment: "test", logger, dataLayer, auth: { mode: "entra", entra: issuer.config, verify }, fabricData, betaOpenEditing, ...(accessPolicy ? { accessPolicy } : {}), ...(apiTokens ? { apiTokens } : {}), ...(siteDir ? { siteDir } : {}) });
+  const app = createApp({ repository: new MemoryStateRepository(), environment: "test", logger, dataLayer, auth: { mode: "entra", entra: issuer.config, verify }, fabricData, betaOpenEditing, ...(accessPolicy ? { accessPolicy } : {}), ...(apiTokens ? { apiTokens } : {}), ...(siteDir ? { siteDir } : {}), ...(systemHealth ? { systemHealth } : {}) });
   const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
   server.keepAliveTimeout = 30000; server.headersTimeout = 31000;
   const url = `http://127.0.0.1:${server.address().port}`;

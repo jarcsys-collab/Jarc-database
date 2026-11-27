@@ -6,6 +6,7 @@ const { FabricIndexes } = require("./indexes");
 const { FabricRepository } = require("./repository");
 const { FabricService } = require("./service");
 const { DatasetSource } = require("./source");
+const { FabricIndexHealth } = require("./health");
 const { DATASETS, DATASET_NAMES, datasetNamed } = require("./datasets");
 const { fabricDataRouter, fabricLimiter } = require("./router");
 const { canReadFabric, canReadFabricCost, canReadFabricSensitive, canManageFabricApi, canOverseeFabricApi, fabricIdentityAccess, requireFabricDataRead } = require("./access");
@@ -35,7 +36,9 @@ function createFabricData({ config, logger = console, createClient, now } = {}) 
     const opts = { repository, sources, config, ...(now ? { now } : {}) };
     values = FabricValues.prototype ? new FabricValues(opts) : FabricValues(opts);
   }
-  return { config, connection, repository, indexes, sources, service, values, close: () => connection.close() };
+  // Index health for System Health (health.js). Its 5-minute background check runs only after start() (server.js).
+  const health = new FabricIndexHealth({ sources, indexes, repository, connection, config, logger, ...(now ? { now: () => Number(now()) } : {}) }); // now(): a Date (as the service takes it)
+  return { config, connection, repository, indexes, sources, service, values, health, close: () => { health.stop(); return connection.close(); } };
 }
 
 module.exports = { createFabricData, FabricConnection, FabricIndexes, FabricRepository, FabricService, DatasetSource, DATASETS, DATASET_NAMES, datasetNamed, fabricDataRouter, fabricLimiter, canReadFabric, canReadFabricCost, canReadFabricSensitive, canManageFabricApi, canOverseeFabricApi, fabricIdentityAccess, requireFabricDataRead };

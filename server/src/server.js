@@ -36,6 +36,9 @@ async function main() {
   // Fabric Data: its own client for the separate Fabric database, created only while the switch is on and connected lazily on the
   // first Fabric request (never at startup, never part of /health/ready), so JARC serves normally whether Fabric is up or not.
   const fabricData = config.fabricData.enabled ? require("./fabric").createFabricData({ config: config.fabricData }) : null;
+  // Fabric index health: a metadata-only check every 5 minutes (listIndexes + estimatedDocumentCount), the first one 5 minutes
+  // after start; unref'd, stopped by fabricData.close(). Only while Fabric Data is on.
+  fabricData?.health?.start();
   // Employee Management: created only while its switch is on; connects lazily on the first directory request.
   const employees = config.employees.enabled ? require("./employees").createEmployees({ config: config.employees }) : null;
   const app = createApp({ features: config.features, employees, fabricData, apiTokens: config.apiTokens.enabled ? { key: config.apiTokens.key, perMinute: config.apiTokens.perMinute, adminObjectIds: config.apiTokens.adminObjectIds } : null, slowRequestMs: config.slowRequestMs, repository, environment: config.nodeEnv, enableDevStateApi: config.enableDevStateApi, dataLayer, devActor, auth, enableDevResourceApi: config.enableDevResourceApi, accessPolicy: config.accessPolicy, betaOpenEditing: config.betaOpenEditing, accounts: config.accounts, systemHealth: config.systemHealth });
