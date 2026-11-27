@@ -132,8 +132,12 @@ function orderByForBoard(raw, board) {
     if (META_SORTS[key] && !byKey.has(key)) return { key, dir, path: META_SORTS[key] };
     const c = byKey.get(key);
     if (!c || c.type === "group") fail(`orderBy names a column this board doesn't have (${key.slice(0, 40)}).`);
-    return { key, dir, path: `values.${key}` };
-  });
+    return { key, dir, path: `values.${key}`, type: c.type };
+  // S0-B / C3.0 (plan 17 §2, corrected rather than refused so saved views keep loading): a Connect cell holds record IDs and a
+  // Mirror has no stored value, so the server never sorts by them (that would order by hex IDs, or by an always-missing field).
+  // The browser sorts the loaded rows by linked name instead. A bounded server sort is M3.4.
+  }).filter((s) => s.type !== "connect" && s.type !== "mirror").map(({ type, ...s }) => s);
+  if (!out.length) return [{ key: "position", dir: "asc", path: "position" }];
   // Record IDs are unique: anything sorted after one can't change the order, and _id must stay the last key.
   const id = out.findIndex((s) => s.path === "_id");
   return id === -1 ? out : out.slice(0, id + 1);

@@ -200,7 +200,7 @@ describe("Board loading and saved copies (real app)", { skip: BROWSER ? false : 
 
   test("a malformed saved copy is ignored and replaced; the board loads from the server", async () => {
     const good = await t.snapshot(boards.other.id);
-    await b.evaluate(`new Promise((resolve) => { const req = indexedDB.open("jarc-board-cache"); req.onsuccess = () => { const db = req.result, tx = db.transaction("snapshots", "readwrite"); tx.objectStore("snapshots").put({ ...${JSON.stringify({ key: good.key, schema: 1, scope: good.scope, boardId: good.boardId, boardVersion: good.boardVersion, savedAt: Date.now() })}, records: [{ id: "not-an-id", values: "<script>alert(1)</script>" }] }); tx.oncomplete = () => { db.close(); resolve(true); }; }; })`);
+    await b.evaluate(`new Promise((resolve) => { const req = indexedDB.open("jarc-board-cache"); req.onsuccess = () => { const db = req.result, tx = db.transaction("snapshots", "readwrite"); tx.objectStore("snapshots").put({ ...${JSON.stringify({ key: good.key, schema: 2, scope: good.scope, boardId: good.boardId, boardVersion: good.boardVersion, savedAt: Date.now() })}, records: [{ id: "not-an-id", values: "<script>alert(1)</script>" }] }); tx.oncomplete = () => { db.close(); resolve(true); }; }; })`);
     await t.open(`/boards/${boards.other.id}`);
     assert.ok(await t.loaded("Other")); assert.ok(await t.current());
     assert.equal(await b.evaluate("window.__sawCopy"), false);

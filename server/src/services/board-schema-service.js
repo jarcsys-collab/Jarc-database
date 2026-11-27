@@ -137,6 +137,9 @@ class BoardSchemaService {
       build: (board, records) => {
         const column = this.column(board, key);
         if (key === PRIMARY_KEY) throw invalid("The Item column can't be deleted.");
+        // Plan 17 §2 (D-REL-1): a Connect column that Mirrors follow can't be deleted (no orphaned Mirror, nothing removed silently).
+        const followers = column.type === "connect" ? board.columns.filter((c) => c.type === "mirror" && c.mirror?.via === key) : [];
+        if (followers.length) throw invalid(`Delete the Mirror columns that follow it first: ${followers.map((c) => String(c.label || c.key).slice(0, 60)).join(", ")}.`);
         const primary = groupColumnOf(board.columns);
         const isPrimaryGroup = primary?.key === key;
         if (isPrimaryGroup && board.columns.filter((c) => c.type === "group").length > 1) throw invalid("Delete the other group columns first; the board's main group column can't be removed while another exists.");

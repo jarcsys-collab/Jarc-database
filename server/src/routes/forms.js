@@ -8,7 +8,7 @@
 //   POST   /forms/:formId/submissions/:submissionKey/complete   the server verifies the uploaded documents
 const express = require("express");
 const { parseId, versionParam, allowOnly } = require("../validation/common");
-const { recordToApi } = require("../api/serialize");
+const { authzFor, recordsOut } = require("../services/relation-guard");
 const { sendError, ApiError } = require("../middleware/errors");
 
 const WINDOW_MS = 60000, PER_WINDOW = 60;
@@ -66,7 +66,9 @@ function formRoutes({ services, access, limiter = submitLimiter() }) {
     allowOnly(req.query, [], "the query");
     if (!limiter(req.actor.userId.toHexString())) return sendError(res, 429, "RATE_LIMITED", "Too many submissions. Wait a moment and try again.");
     const { record, confirmation, repeated, submission } = await services.forms.submit(form, board, req.body, req.actor, peopleRule(req));
-    return send(res, repeated ? 200 : 201, { record: recordToApi(record), confirmation, repeated, submission });
+    // S0-B row 4: a repeated submission returns the existing record, which may have been linked since: restricted cells left out.
+    const [out] = await recordsOut(authzFor(req, access), board, [record]);
+    return send(res, repeated ? 200 : 201, { record: out, confirmation, repeated, submission });
   });
   // After a submission's documents were uploaded (through the usual file route): the server checks what is really
   // attached and marks the submission done or incomplete. Same rights as submitting; only the submitter's own submission.

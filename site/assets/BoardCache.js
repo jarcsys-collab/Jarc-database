@@ -14,7 +14,8 @@
 class BoardCache {
   static DB_NAME = "jarc-board-cache";
   static DB_VERSION = 1;
-  static SCHEMA = 1;
+  // 2 (S0-B, D-S0B-5): copies saved before S0-B may hold Connect IDs the reader can no longer see; they are discarded.
+  static SCHEMA = 2;
   static TTL_MS = 72 * 60 * 60 * 1000;          // 3 days
   static MAX_BYTES = 40 * 1024 * 1024;          // all boards together (measured: about 1 KB per record of 20 columns)
   static MAX_BOARD_BYTES = 8 * 1024 * 1024;     // one board

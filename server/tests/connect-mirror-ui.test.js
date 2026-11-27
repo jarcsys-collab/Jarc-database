@@ -66,6 +66,7 @@ describe("Connect boards and Mirror columns (real app, headless browser)", { ski
   test("a colleague who can't open the linked board sees a lock: no names, no values", async () => {
     await openBoard(mia, "Projects");
     assert.ok(await mia.waitFor("!!document.querySelector('td[data-column-key=client] .relation-locked')", 8000), "locked");
+    assert.equal(await mia.evaluate("[...document.querySelectorAll('.relation-locked')].some((e) => /\\d/.test(e.textContent))"), false, "S0-B: a lock only, no count");
     const text = await mia.evaluate("document.querySelector('.board-view-region')?.textContent || document.body.textContent");
     assert.ok(!/Acme|Initech|107/.test(text), "nothing from Clients on screen");
   });

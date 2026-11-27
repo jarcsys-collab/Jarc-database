@@ -89,7 +89,7 @@ const resolveFeatures = (features = {}, environment = "development") => { const 
 // apiTokens: { key, perMinute? } turns on API tokens for other systems (config/index.js); Entra sign-in only. Without it their paths don't exist.
 // fabricData: { config, service, limiter? } (config.fabricData with the switch on, and a FabricService from src/fabric) turns on Fabric Data;
 // Entra sign-in only. Without it (or with the switch off) its paths don't exist and /features doesn't mention it.
-function createApp({ securityHeadersOptions = {}, employees: employeesOption = null, fabricData = null, apiTokens = null, features = {}, repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, employeeWriteLimiter = null, systemHealth = null, siteDir = DEFAULT_SITE_DIR, logger = console, slowRequestMs = 0, monitor = defaultMonitor } = {}) {
+function createApp({ securityHeadersOptions = {}, employees: employeesOption = null, fabricData = null, apiTokens = null, features = {}, repository, environment = "development", enableDevStateApi = true, dataLayer = null, devActor = null, auth = null, enableDevResourceApi = Boolean(dataLayer) && !auth, accessPolicy = "role_based", betaOpenEditing = false, accounts = null, live = {}, searchLimiter = null, employeeWriteLimiter = null, systemHealth = null, siteDir = DEFAULT_SITE_DIR, logger = console, slowRequestMs = 0, monitor = defaultMonitor, relations = null } = {}) {
   if (environment === "production" && (enableDevStateApi || enableDevResourceApi)) {
     throw new Error("Development (pre-auth) APIs can't be enabled in production.");
   }
@@ -206,7 +206,7 @@ function createApp({ securityHeadersOptions = {}, employees: employeesOption = n
     // advanced (this session mount only): filter= / orderBy= / searchField=, schema capabilities and GET /:dataset/values.
     if (fabric) api.use("/fabric", identify, requireFabricDataRead({ config: fabric.config, tenantId: auth.entra.tenantId }), fabricDataRouter({ service: fabric.service, logger, invoiceViews: fabric.config.invoiceViews === true, advanced: true, values: fabric.values || null, ...(fabric.limiter ? { limiter: fabric.limiter } : {}) }), apiNotFound);
     if (accountService) api.use(identify, accountRoutes({ services: dataLayer.services, repos: dataLayer.repos }));
-    api.use(identify, meRoutes({ repos: dataLayer.repos, mode: auth ? "entra" : "dev", access }), memberRoutes({ services: dataLayer.services, access, repos: dataLayer.repos }), resourceRoutes({ services: dataLayer.services, access, features: enabled }));
+    api.use(identify, meRoutes({ repos: dataLayer.repos, mode: auth ? "entra" : "dev", access }), memberRoutes({ services: dataLayer.services, access, repos: dataLayer.repos }), resourceRoutes({ services: dataLayer.services, access, features: enabled, relations: enabled.connectBoards ? relations : null }));
     // Files columns (attachments in GridFS).
     if (dataLayer.services?.files) api.use(identify, fileRoutes({ services: dataLayer.services, access }));
     // Global search across the boards the caller may see.
@@ -244,7 +244,9 @@ function createApp({ securityHeadersOptions = {}, employees: employeesOption = n
       const fabricFlags = { ...(fabricAccessFor ? { fabricData: { ...fabricAccessFor(req.actor), apiTokens: Boolean(tokenService) } } : {}), ...(employees ? { employees: employeeFlags(req.actor) } : {}), ...(health ? { systemHealth: health } : {}) };
       // columnSettings: a capability of this server version, not a switch (no variable): it accepts, validates and keeps
       // column display `settings` (G3 / D12). Browsers write them only when it is true, so an older server never sees them.
-      res.status(200).set("Cache-Control", "no-store").json({ features: tokenService ? { ...enabled, columnSettings: true, apiTokens: true, apiTokenAdmin: tokenService.isAdmin(req.actor), ...fabricFlags } : { ...enabled, columnSettings: true, ...fabricFlags } });
+      // connectStatus (record link index check, relations/record-links.js): "unavailable" while Connect / Mirror fail closed.
+      const linkFlags = enabled.connectBoards && relations?.status?.().ok === false ? { connectStatus: "unavailable" } : {};
+      res.status(200).set("Cache-Control", "no-store").json({ features: tokenService ? { ...enabled, columnSettings: true, apiTokens: true, apiTokenAdmin: tokenService.isAdmin(req.actor), ...fabricFlags, ...linkFlags } : { ...enabled, columnSettings: true, ...fabricFlags, ...linkFlags } });
     });
     api.use(identify, preferenceRoutes({ repos: dataLayer.repos }));
     if (dataLayer.services?.integration) api.use(identify, integrationRoutes({ integration: dataLayer.services.integration, access }));

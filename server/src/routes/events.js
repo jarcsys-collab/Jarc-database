@@ -30,7 +30,9 @@ const HEARTBEAT_MS = 20000;
 const ACCESS_REFRESH_MS = 15000;
 const SESSION_CHECK_MS = 30000;
 const MAX_STREAMS_PER_USER = 10;
-const ACCESS_ACTIONS = /^(member\.|workspace\.(created|deleted)|board\.moved)/;
+// S0-B (plan 17 §1.2 row 8): column changes (a Connect column re-pointed or added) and board updates also re-read access, so the
+// stream's scope follows them at once. Events stay IDs only.
+const ACCESS_ACTIONS = /^(member\.|workspace\.(created|deleted)|board\.moved|board\.updated|column\.)/;
 // Notices that end someone's access. They are still sent for a workspace the person could see until moments ago
 // (access is re-read on its own schedule and may already exclude it); they carry IDs only.
 const ENDING_ACTIONS = /^(member\.removed|member\.role_changed|workspace\.deleted|board\.moved)$/;
@@ -168,4 +170,4 @@ function entraSessionCheck({ sessions, users }) {
   };
 }
 
-module.exports = { eventRoutes, entraSessionCheck };
+module.exports = { eventRoutes, entraSessionCheck, ACCESS_ACTIONS };

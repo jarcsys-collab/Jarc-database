@@ -10,6 +10,7 @@ const { createApp } = require("./app");
 const { MemoryStateRepository } = require("./repositories/memory-state-repository");
 const { MongoConnection, redact } = require("./db/connection");
 const { ensureDatabase } = require("./db/bootstrap");
+const { checkRecordLinks, RecordLinkStatus } = require("./relations/record-links");
 const { createDataLayer } = require("./data-layer");
 const { ensureDevelopmentActor } = require("./context/dev-actor");
 const { createEntraVerifier } = require("./auth/entra-token");
@@ -19,7 +20,7 @@ async function main() {
   const config = loadConfig();
   monitor.slowCommandMs = config.slowCommandMs;
   const repository = config.enableDevStateApi ? new MemoryStateRepository() : null;
-  let connection = null, dataLayer = null, devActor = null;
+  let connection = null, dataLayer = null, devActor = null, relations = null;
 
   if (config.dataStore === "mongodb") {
     connection = new MongoConnection({ uri: config.mongo.uri, dbName: config.mongo.dbName });
@@ -27,6 +28,14 @@ async function main() {
     const { createdCollections } = await ensureDatabase(connection.db, { features: { ...config.features, apiTokens: config.apiTokens.enabled } });
     dataLayer = createDataLayer({ connection, maxFileStorageBytes: config.maxFileStorageBytes, attachments: config.attachments, monday: config.monday, googleDrive: config.googleDrive, midAttachments: config.midAttachments, environment: config.nodeEnv, recordSearch: config.recordSearch, recordSearchEngine: config.recordSearchEngine });
     if (config.enableDevResourceApi) devActor = await ensureDevelopmentActor(dataLayer.repos.users, { environment: config.nodeEnv });
+    // Record link index (prototype, Column System plan 17 §4): only while Connect / Mirror are switched on. Missing or inconsistent →
+    // Connect / Mirror fail CLOSED (read-only, unresolved) and the rest of JARC serves normally; startup never stops for it.
+    if (config.features.connectBoards) {
+      const check = await checkRecordLinks(connection.db);
+      relations = new RecordLinkStatus(check);
+      if (check.ok) console.log(`Record link index ready${check.created.length ? ` (created: ${check.created.join(", ")})` : ""}.`);
+      else console.warn(`Record link index NOT ready (${check.reason}): Connect and Mirror columns are read-only until it is fixed and the server restarts.`);
+    }
     console.log(`MongoDB connected (database ${config.mongo.dbName}).${createdCollections.length ? ` Created collections: ${createdCollections.join(", ")}.` : ""}`);
   }
 
@@ -41,7 +50,7 @@ async function main() {
   fabricData?.health?.start();
   // Employee Management: created only while its switch is on; connects lazily on the first directory request.
   const employees = config.employees.enabled ? require("./employees").createEmployees({ config: config.employees }) : null;
-  const app = createApp({ features: config.features, employees, fabricData, apiTokens: config.apiTokens.enabled ? { key: config.apiTokens.key, perMinute: config.apiTokens.perMinute, adminObjectIds: config.apiTokens.adminObjectIds } : null, slowRequestMs: config.slowRequestMs, repository, environment: config.nodeEnv, enableDevStateApi: config.enableDevStateApi, dataLayer, devActor, auth, enableDevResourceApi: config.enableDevResourceApi, accessPolicy: config.accessPolicy, betaOpenEditing: config.betaOpenEditing, accounts: config.accounts, systemHealth: config.systemHealth });
+  const app = createApp({ features: config.features, relations, employees, fabricData, apiTokens: config.apiTokens.enabled ? { key: config.apiTokens.key, perMinute: config.apiTokens.perMinute, adminObjectIds: config.apiTokens.adminObjectIds } : null, slowRequestMs: config.slowRequestMs, repository, environment: config.nodeEnv, enableDevStateApi: config.enableDevStateApi, dataLayer, devActor, auth, enableDevResourceApi: config.enableDevResourceApi, accessPolicy: config.accessPolicy, betaOpenEditing: config.betaOpenEditing, accounts: config.accounts, systemHealth: config.systemHealth });
   const server = app.listen(config.port, config.host, () => {
     const { port } = server.address();
     console.log(`JARC Database server (${config.nodeEnv}) on http://${config.host === "0.0.0.0" ? "localhost" : config.host}:${port}/`);

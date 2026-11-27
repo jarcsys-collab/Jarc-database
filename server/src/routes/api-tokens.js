@@ -16,6 +16,7 @@ const express = require("express");
 const { allowOnly, parseId } = require("../validation/common");
 const { sendError } = require("../middleware/errors");
 const { searchLimiter } = require("./search");
+const { authzFor, restrictedFor } = require("../services/relation-guard");
 const { columnsOf, groupsOf, boardSummary, cellToExternal, parseColumns, projectionFor, recordToExternal, QUERY_TIME_MS } = require("./external-api");
 
 const EXAMPLE_RECORDS = 3;
@@ -61,13 +62,16 @@ function apiTokenRoutes({ tokens, access, repos, limiter = searchLimiter({ perWi
       recordId ? repos.records.findById(recordId) : null
     ]);
     if (recordId && (!record || !record.boardId.equals(board._id))) return sendError(res, 404, "NOT_FOUND", "This record isn't on this board, or doesn't exist.");
+    // S0-B row 9: Connect cells whose linked board the API administrator can't open (their own session) are null + restricted,
+    // in all three shapes.
+    const restricted = await restrictedFor(authzFor(req, access), board);
     const pagination = { limit: EXAMPLE_RECORDS, hasMore: page.hasMore };
     const single = selected.length === 1 && req.query.columns !== undefined ? selected[0] : null;
     send(res, 200, {
       board: { ...boardSummary(board, recordCount), columns: columnsOf(board), groups: groupsOf(board) }, columns: columnsOf(board),
-      example: { items: page.items.map((r) => recordToExternal(r, board, selected)), pagination },
-      ...(single ? { values: { items: page.items.map((r) => cellToExternal(r, single, board)), pagination } } : {}),
-      ...(record ? { record: recordToExternal(record, board, board.columns) } : {})
+      example: { items: page.items.map((r) => recordToExternal(r, board, selected, restricted)), pagination },
+      ...(single ? { values: { items: page.items.map((r) => cellToExternal(r, single, board, restricted)), pagination } } : {}),
+      ...(record ? { record: recordToExternal(record, board, board.columns, restricted) } : {})
     });
   });
   return router;

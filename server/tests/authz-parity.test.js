@@ -329,7 +329,8 @@ describe("route-minimum inventory (a new access.board/record call needs a row he
     "routes/members.js": { "workspace VIEWER": 1, "workspace WORKSPACE_ADMIN": 3 },
     "routes/imports.js": { "workspace MEMBER": 5 },
     "routes/api-tokens.js": { "board VIEWER": 1 },
-    "services/related-service.js": { "board VIEWER": 1 },
+    // services/related-service.js: since S0-B the linked boards are decided through the request's context (ctx.boards + ctx.can,
+    // BOARD_VIEW), no longer through access.board (tests/s0b-relationship-security.test.js).
     "employees/access-admin.js": { "workspace WORKSPACE_ADMIN": 1 }
   };
   test("the call sites and their minimums are exactly the inventoried ones", () => {

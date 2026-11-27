@@ -606,7 +606,8 @@ class AppView {
   // Connect cell: the linked records' names (asked for in the background); Mirror cell: the linked board's values.
   relationDisplay(row,column,model){
     const access=model.relatedAccess(column.key);
-    if(access==="restricted")return `<span class="cell-empty relation-locked" title="You can't open the linked board">${icon("lock")}${column.type==="connect"&&model.valueList(row[column.key]).length?` ${model.valueList(row[column.key]).length} linked`:""}</span>`;
+    // S0-B (X2): a lock only, never a count (a count of links is a disclosure too).
+    if(access==="restricted")return `<span class="cell-empty relation-locked" title="You can't open the linked board">${icon("lock")}</span>`;
     if(access==="unavailable")return `<span class="cell-empty" title="This mirror can't be shown (it points at a linked or mirrored column, or one that was removed)">—</span>`;
     if(column.type==="connect"){
       const ids=model.valueList(row[column.key]);if(!ids.length)return `<span class="cell-empty" data-hint="Link">${icon("link")}</span>`;
@@ -620,7 +621,7 @@ class AppView {
   }
   // Pick linked records: search the linked board by name; chosen records listed first. Saving replaces the cell's links.
   showConnectPicker(model,draft){
-    const chosen=draft.ids.map((id)=>`<label class="relation-option is-chosen"><input type="checkbox" data-action="connect-toggle" data-link="${this.attr(id)}" checked> ${this.escape(draft.names.get(id)||model.linkedName(id)?.name||id)}</label>`).join("");
+    const chosen=draft.ids.map((id)=>`<label class="relation-option is-chosen"><input type="checkbox" data-action="connect-toggle" data-link="${this.attr(id)}" checked> ${this.escape(draft.names.get(id)||model.linkedName(id)?.name||"Unavailable record")}</label>`).join("");
     const results=(draft.results||[]).filter((r)=>!draft.ids.includes(r.id)).map((r)=>`<label class="relation-option"><input type="checkbox" data-action="connect-toggle" data-link="${this.attr(r.id)}"> ${this.escape(r.name||"Untitled")}</label>`).join("");
     this.overlay(`<form class="modal connect-picker" data-action="connect-picker-form"><div class="modal-head"><div><div class="eyebrow">${this.escape(draft.label)}</div><h2>Linked records</h2></div>${this.closeButton()}</div>
       <label class="chooser-search">${icon("search")}<input data-action="connect-search" value="${this.attr(draft.query||"")}" placeholder="Search ${this.attr(draft.boardName||"the linked board")} by name" aria-label="Search linked board" autocomplete="off" autofocus></label>

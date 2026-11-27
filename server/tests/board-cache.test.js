@@ -186,9 +186,9 @@ describe("BoardCache and sign-out (no IndexedDB needed)", () => {
   test("a saved copy is only accepted whole and well-formed, for this person, this board, this schema", () => {
     const { window } = { window: {} }; load("BoardCache.js", window);
     const C = window.BoardCache, id = "0123456789abcdef01234567", rec = { id: "abcdefabcdefabcdefabcdef", boardId: id, values: { serial: "x" }, version: 1 };
-    const good = { schema: 1, scope: "u1", boardId: id, savedAt: Date.now(), boardVersion: 3, records: [rec] };
+    const good = { schema: 2, scope: "u1", boardId: id, savedAt: Date.now(), boardVersion: 3, records: [rec] }; // 2 since S0-B
     assert.equal(C.valid(good, "u1", id), true);
-    for (const [label, bad] of [["other person", { ...good, scope: "u2" }], ["other board", { ...good, boardId: "f".repeat(24) }], ["schema", { ...good, schema: 2 }], ["records not a list", { ...good, records: {} }], ["bad id", { ...good, records: [{ ...rec, id: "x" }] }], ["values text", { ...good, records: [{ ...rec, values: "<b>" }] }], ["values list", { ...good, records: [{ ...rec, values: [] }] }], ["other board's record", { ...good, records: [{ ...rec, boardId: "e".repeat(24) }] }], ["no version", { ...good, records: [{ ...rec, version: "1" }] }], ["too many", { ...good, records: Array(2001).fill(rec) }], ["no time", { ...good, savedAt: "x" }], ["null", null]]) assert.equal(C.valid(bad, "u1", id), false, label);
+    for (const [label, bad] of [["other person", { ...good, scope: "u2" }], ["other board", { ...good, boardId: "f".repeat(24) }], ["schema", { ...good, schema: 1 }], ["future schema", { ...good, schema: 3 }], ["records not a list", { ...good, records: {} }], ["bad id", { ...good, records: [{ ...rec, id: "x" }] }], ["values text", { ...good, records: [{ ...rec, values: "<b>" }] }], ["values list", { ...good, records: [{ ...rec, values: [] }] }], ["other board's record", { ...good, records: [{ ...rec, boardId: "e".repeat(24) }] }], ["no version", { ...good, records: [{ ...rec, version: "1" }] }], ["too many", { ...good, records: Array(2001).fill(rec) }], ["no time", { ...good, savedAt: "x" }], ["null", null]]) assert.equal(C.valid(bad, "u1", id), false, label);
     assert.equal(C.forScope(null), null, "no person: no cache");
   });
   test("signing out deletes the saved copies first, then signs out of Microsoft", async () => {

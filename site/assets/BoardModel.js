@@ -1260,13 +1260,17 @@ class BoardModel {
   relatedAccess(key){const a=this.relatedState().access.get(String(this.board?.id));return a?.restricted.has(key)?"restricted":a?.unavailable.has(key)?"unavailable":null;}
   async flushRelated(){
     const s=this.relatedState(),board=this.board;s.timer=null;
-    const ids=[...s.wanted].filter((id)=>!s.pending.has(id)).slice(0,200);s.wanted.clear();
+    // At most 200 per request; the overflow is re-queued (S0-B: never dropped until the next redraw).
+    const all=[...s.wanted].filter((id)=>!s.pending.has(id)),ids=all.slice(0,200);s.wanted=new Set(all.slice(200));
+    if(s.wanted.size)s.timer=setTimeout(()=>this.flushRelated(),80);
     if(!board||!ids.length||!board.columns.some((c)=>c.type==="connect"))return;
     ids.forEach((id)=>s.pending.add(id));
     try{
       const r=await this.storage.related(board.id,ids),at=Date.now();
       for(const map of Object.values(r.linked||{}))for(const [id,v] of Object.entries(map))s.names.set(id,v);
       s.access.set(String(board.id),{restricted:new Set(r.restricted||[]),unavailable:new Set(r.unavailable||[])});
+      // S0-B: names learned earlier for a column that is restricted now (access revoked) are forgotten.
+      for(const key of r.restricted||[])for(const row of this.rows||[])for(const id of (Array.isArray(row?.[key])?row[key]:[]))s.names.delete(String(id));
       for(const id of ids)s.values.set(id,{at,values:r.values?.[id]||{}});
     }catch{const at=Date.now();for(const id of ids)s.values.set(id,{at,values:{},error:true});}
     // Only the Connect/Mirror cells on screen are redrawn (AppController.patchRelationCells), not the whole board.
