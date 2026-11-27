@@ -10,7 +10,8 @@ const crypto = require("crypto"), fs = require("fs"), net = require("net"), path
 const { MongoClient, ObjectId } = require("mongodb");
 const { MongoConnection } = require("../src/db/connection");
 const { ensureDatabase } = require("../src/db/bootstrap");
-const { checkRecordLinks, RecordLinkService, COLLECTION, INDEXES } = require("../src/relations/record-links");
+const { checkRecordLinks, ensureRecordLinks, RecordLinkService, COLLECTION, INDEXES } = require("../src/relations/record-links");
+const script = require("../scripts/record-links-collection");
 
 const ENV_FILE = path.resolve(__dirname, "..", "..", ".env.migration-test");
 function localUri() {
@@ -48,10 +49,20 @@ describe("recordLinks prototype on the local test MongoDB", { concurrency: false
     return { host, target, hosts, targets };
   };
 
-  test("startup check: creates the collection with the validator and the 4 indexes, then is idempotent", async () => {
+  test("startup check is CHECK ONLY: a missing collection fails closed and nothing is created", async () => {
     const { db } = await fresh();
-    const first = await checkRecordLinks(db);
+    assert.deepEqual(await checkRecordLinks(db), { ok: false, reason: "missing", created: [] });
+    assert.deepEqual(await checkRecordLinks(db, { create: true }), { ok: false, reason: "missing", created: [] }, "no option makes the startup check create");
+    assert.deepEqual(await db.listCollections({ name: COLLECTION }).toArray(), [], "startup created nothing");
+    const server = fs.readFileSync(path.join(__dirname, "../src/server.js"), "utf8");
+    assert.match(server, /checkRecordLinks\(connection\.db\)/); assert.doesNotMatch(server, /ensureRecordLinks|create:\s*true/, "server.js never creates recordLinks");
+  });
+
+  test("explicit script (ensureRecordLinks): creates the collection with the validator and the 4 indexes, then is idempotent", async () => {
+    const { db } = await fresh();
+    const first = await ensureRecordLinks(db);
     assert.deepEqual(first, { ok: true, reason: null, created: [COLLECTION, ...INDEXES.map((i) => i.name)] });
+    assert.deepEqual(await ensureRecordLinks(db), { ok: true, reason: null, created: [] });
     assert.deepEqual(await checkRecordLinks(db), { ok: true, reason: null, created: [] });
     const names = (await db.collection(COLLECTION).listIndexes().toArray()).map((i) => i.name).sort();
     assert.deepEqual(names, ["_id_", "from_board_column", "to_board", "to_record", "uniq_link"]);
@@ -59,7 +70,7 @@ describe("recordLinks prototype on the local test MongoDB", { concurrency: false
 
   test("validator: a well-formed link (v as int32) passes; extra fields, other versions, self-links and unsafe keys are refused", async () => {
     const { db } = await fresh();
-    await checkRecordLinks(db);
+    await ensureRecordLinks(db);
     const ok = { v: 1, fromBoardId: new ObjectId(), fromRecordId: new ObjectId(), columnKey: "client_link", toBoardId: new ObjectId(), toRecordId: new ObjectId(), origin: "cell", createdAt: new Date() };
     await db.collection(COLLECTION).insertOne({ ...ok });
     for (const [label, bad] of [["extra field", { ...ok, workspaceId: new ObjectId() }], ["v 2", { ...ok, v: 2 }], ["self link", { ...ok, toRecordId: ok.fromRecordId }], ["unsafe key", { ...ok, columnKey: "a.b" }], ["no origin", (({ origin, ...r }) => r)(ok)], ["string id", { ...ok, toRecordId: "x" }], ["bad origin", { ...ok, origin: "other" }]])
@@ -69,24 +80,43 @@ describe("recordLinks prototype on the local test MongoDB", { concurrency: false
 
   test("fails closed on drift and never changes what exists; recovery once fixed", async () => {
     const { db } = await fresh();
-    assert.equal((await checkRecordLinks(db, { create: false })).reason, "missing");
-    assert.deepEqual(await db.listCollections({ name: COLLECTION }).toArray(), [], "create:false creates nothing");
+    assert.equal((await checkRecordLinks(db)).reason, "missing");
     await db.createCollection(COLLECTION); // no validator
     assert.deepEqual(await checkRecordLinks(db), { ok: false, reason: "validator-differs", created: [] });
+    assert.deepEqual(await ensureRecordLinks(db), { ok: false, reason: "validator-differs", created: [] }, "the script never collMods either");
     assert.equal((await db.listCollections({ name: COLLECTION }).toArray())[0].options.validator, undefined, "not collMod-ed");
     const { db: db2 } = await fresh();
-    await checkRecordLinks(db2);
+    await ensureRecordLinks(db2);
     await db2.collection(COLLECTION).dropIndex("to_board");
     await db2.collection(COLLECTION).createIndex({ toBoardId: 1 }, { name: "to_board" });
     assert.equal((await checkRecordLinks(db2)).reason, "index-differs:to_board");
+    assert.deepEqual((await script.apply(db2)).before.conflicts, ["index-differs:to_board"], "script refuses a differing index");
     await db2.collection(COLLECTION).dropIndex("to_board");
-    assert.equal((await checkRecordLinks(db2, { create: false })).reason, "index-missing:to_board", "a dropped index: fail closed");
-    assert.deepEqual(await checkRecordLinks(db2), { ok: true, reason: null, created: ["to_board"] }, "recovery: recreated at the next start");
+    assert.equal((await checkRecordLinks(db2)).reason, "index-missing:to_board", "a dropped index: fail closed");
+    assert.equal((await checkRecordLinks(db2)).reason, "index-missing:to_board", "startup never recreates it");
+    assert.deepEqual(await ensureRecordLinks(db2), { ok: true, reason: null, created: ["to_board"] }, "recovery: only through the explicit script");
+  });
+
+  test("record-links-collection.js: --dry-run plans, --apply creates and verifies (idempotent), --verify is read-only", async () => {
+    const { db } = await fresh();
+    const name = db.databaseName, lines = [], out = (s) => lines.push(s), env = { RL_TEST_URI: uri };
+    assert.throws(() => script.parseArgs(["--apply"]), /needs --local or --uri-env/);
+    assert.throws(() => script.connectionString({ uriEnv: "X", db: "d", remoteConfirm: null }, { X: "mongodb://u:p@db.example.net/" }), /not a local database/);
+    assert.equal(await script.main(["--verify", "--uri-env", "RL_TEST_URI", "--db", name], out, env), 1, "verify: missing → exit 1");
+    assert.equal(await script.main(["--dry-run", "--uri-env", "RL_TEST_URI", "--db", name], out, env), 0);
+    assert.deepEqual(JSON.parse(lines.at(-1)).plan, { createCollection: true, createIndexes: INDEXES.map((i) => i.name), conflicts: [], present: [] });
+    assert.deepEqual(await db.listCollections({ name: COLLECTION }).toArray(), [], "dry-run and verify created nothing");
+    assert.equal(await script.main(["--apply", "--uri-env", "RL_TEST_URI", "--db", name], out, env), 0);
+    assert.deepEqual(JSON.parse(lines.at(-1)).created, [COLLECTION, ...INDEXES.map((i) => i.name)]);
+    assert.equal(await script.main(["--apply", "--uri-env", "RL_TEST_URI", "--db", name], out, env), 0);
+    assert.deepEqual(JSON.parse(lines.at(-1)).created, [], "idempotent");
+    assert.equal(await script.main(["--verify", "--uri-env", "RL_TEST_URI", "--db", name], out, env), 0);
+    assert.ok(lines.every((l) => !l.includes("mongodb://")), "the connection string is never printed");
   });
 
   test("two-document pairs and two-way updates: one transaction; any failure writes nothing", async () => {
     const { db, connection } = await fresh();
-    await checkRecordLinks(db);
+    await ensureRecordLinks(db);
     const { host, target, hosts, targets } = await world(db);
     const links = new RecordLinkService({ db, connection });
     const pairId = await links.linkPair({ board: host, recordId: hosts[0]._id, columnKey: "client" }, { board: target, recordId: targets[4]._id, columnKey: "back" });
@@ -108,7 +138,7 @@ describe("recordLinks prototype on the local test MongoDB", { concurrency: false
 
   test("single writer: cell + rows in one transaction; a stale version or a failure after the cell write leaves both unchanged", async () => {
     const { db, connection } = await fresh();
-    await checkRecordLinks(db);
+    await ensureRecordLinks(db);
     const { host, hosts, targets } = await world(db);
     const links = new RecordLinkService({ db, connection });
     const t = targets.map((x) => x._id.toHexString());
@@ -134,7 +164,7 @@ describe("recordLinks prototype on the local test MongoDB", { concurrency: false
 
   test("rebuild from cells: an empty or damaged index is rebuilt by reconcile; random edits converge to diff 0", async () => {
     const { db } = await fresh();
-    await checkRecordLinks(db);
+    await ensureRecordLinks(db);
     const { host, hosts, targets } = await world(db);
     const links = new RecordLinkService({ db });
     assert.deepEqual(await links.reconcile(host), { scanned: 4, missing: 10, extra: 0, applied: false }, "1+2+3+4 links, none indexed");
@@ -156,7 +186,7 @@ describe("recordLinks prototype on the local test MongoDB", { concurrency: false
 
   test("index usage (explain): every access path uses its index, never a collection scan", async () => {
     const { db } = await fresh();
-    await checkRecordLinks(db);
+    await ensureRecordLinks(db);
     const { host, hosts } = await world(db);
     const links = new RecordLinkService({ db });
     await links.reconcile(host, { apply: true });
@@ -177,7 +207,7 @@ describe("recordLinks prototype on the local test MongoDB", { concurrency: false
 
   test("deletions: source record, target record (cascade pulls the ID from cells), board (paced sweep), column", async () => {
     const { db, connection } = await fresh();
-    await checkRecordLinks(db);
+    await ensureRecordLinks(db);
     const { host, target, hosts, targets } = await world(db);
     const links = new RecordLinkService({ db, connection });
     await links.reconcile(host, { apply: true });
@@ -204,7 +234,7 @@ describe("recordLinks prototype on the local test MongoDB", { concurrency: false
 
   test("storage per link (measured) and rollback: the rest of JARC never creates or touches recordLinks", async (t) => {
     const { db } = await fresh();
-    await checkRecordLinks(db);
+    await ensureRecordLinks(db);
     const n = 1000, fromBoardId = new ObjectId(), toBoardId = new ObjectId();
     const docs = Array.from({ length: n }, () => ({ v: 1, fromBoardId, fromRecordId: new ObjectId(), columnKey: "client_link", toBoardId, toRecordId: new ObjectId(), origin: "cell", createdAt: new Date() }));
     await db.collection(COLLECTION).insertMany(docs);

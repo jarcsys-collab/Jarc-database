@@ -162,19 +162,23 @@ class RelatedService {
       plan.set(t, entry);
     }
     // Linked IDs per visible target board, deduplicated across its Connect columns, bounded per cell and in all.
+    // A bound hit on a Connect column is also reported on every Mirror computed through it (its count / sum / list is incomplete).
+    const mirrorsOf = new Map();
+    for (const [, entry] of plan) for (const { c, sources } of entry.columns) mirrorsOf.set(c.key, [...sources.keys()]);
+    const flag = (c, reason) => { out.partial[c.key] = reason; for (const k of mirrorsOf.get(c.key) || []) out.partial[k] = reason; };
     let budget = LIMITS.linked;
     const targets = [...plan].slice(0, LIMITS.targetBoards);
-    for (const [, entry] of [...plan].slice(LIMITS.targetBoards)) for (const { c, sources } of entry.columns) { out.partial[c.key] = "target-boards"; for (const k of sources.keys()) out.partial[k] = "target-boards"; }
+    for (const [, entry] of [...plan].slice(LIMITS.targetBoards)) for (const { c } of entry.columns) flag(c, "target-boards");
     const cellIds = (r, c) => {
       const v = Array.isArray(r.values?.[c.key]) ? r.values[c.key].filter((id) => typeof id === "string" && HEX.test(id)) : [];
-      if (v.length > LIMITS.perCell) { out.partial[c.key] = "cell-limit"; return v.slice(0, LIMITS.perCell); }
+      if (v.length > LIMITS.perCell) { flag(c, "cell-limit"); return v.slice(0, LIMITS.perCell); }
       return v;
     };
     const work = targets.map(([t, entry]) => {
       const wanted = new Set();
       for (const { c } of entry.columns) for (const r of records) for (const id of cellIds(r, c)) {
         if (wanted.has(id)) continue;
-        if (budget <= 0) { out.partial[c.key] = "linked-limit"; continue; }
+        if (budget <= 0) { flag(c, "linked-limit"); continue; }
         wanted.add(id); budget -= 1;
       }
       const fields = { archived: 1, groupId: 1, "values.serial": 1 };
@@ -184,7 +188,7 @@ class RelatedService {
     const docsByTarget = new Map();
     for (let i = 0; i < work.length; i += LIMITS.parallel) {
       const slice = work.slice(i, i + LIMITS.parallel);
-      if (Date.now() - started > LIMITS.budgetMS) { for (const w of slice) for (const { c, sources } of w.entry.columns) { out.partial[c.key] = "time-budget"; for (const k of sources.keys()) out.partial[k] = "time-budget"; } continue; }
+      if (Date.now() - started > LIMITS.budgetMS) { for (const w of slice) for (const { c } of w.entry.columns) flag(c, "time-budget"); continue; }
       await Promise.all(slice.map(async (w) => {
         const docs = w.wanted.size ? await this.repos.records.findByIds(w.entry.board._id, [...w.wanted].map((id) => new ObjectId(id)), { projection: w.fields, maxTimeMS: LIMITS.timeMS }) : [];
         docsByTarget.set(w.t, new Map(docs.map((d) => [d._id.toHexString(), d])));

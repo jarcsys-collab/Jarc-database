@@ -16,7 +16,7 @@ const { Access, forbidden } = require("../auth/access");
 const { workspaceToApi, boardToApi } = require("../api/serialize");
 const { ApiError } = require("../middleware/errors");
 const { RelatedService } = require("../services/related-service");
-const { authzFor, recordsOut, activityOut, connectsOf } = require("../services/relation-guard");
+const { authzFor, recordsOut, activityOut, connectsOf, restrictedFor } = require("../services/relation-guard");
 
 // Boards synchronized from monday.com are read-only here: their records and schema change only through the sync.
 const readOnly = () => new ApiError(403, "READ_ONLY_BOARD", "This board is synchronized from monday.com and is read-only in JARC.");
@@ -147,12 +147,12 @@ function resourceRoutes({ services, access, features = { personalViews: true, co
   // ---- Records (a board's records belong to the board's workspace; batches can only touch that board's records)
   router.get("/boards/:boardId/records", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "VIEWER");
-    const page = await services.records.list(board._id, req.query, reading(req));
+    const page = await services.records.list(board._id, req.query, { ...reading(req), restricted: await restrictedFor(ctxOf(req), board) });
     send(res, 200, { items: await out(req, board, page.items), nextCursor: page.nextCursor, limit: page.limit });
   });
   router.get("/boards/:boardId/records/count", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "VIEWER");
-    send(res, 200, await services.records.count(board._id, req.query, reading(req)));
+    send(res, 200, await services.records.count(board._id, req.query, { ...reading(req), restricted: await restrictedFor(ctxOf(req), board) }));
   });
   router.post("/boards/:boardId/records", async (req, res) => {
     const { board } = await access.board(req.actor, boardId(req), "MEMBER");

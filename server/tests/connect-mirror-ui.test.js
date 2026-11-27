@@ -48,6 +48,7 @@ describe("Connect boards and Mirror columns (real app, headless browser)", { ski
     await openBoard(admin, "Projects");
     assert.ok(await admin.waitFor(`(() => { const t = [...document.querySelectorAll('tr[data-record-context]')].find((x) => x.textContent.includes('Alpha')); return /150/.test(t?.querySelector('td[data-column-key=total]')?.textContent || ''); })()`, 8000), `mirror: ${await cellText(admin, "total")}`);
     assert.match(await cellText(admin, "client"), /Acme.*Globex/);
+    assert.equal(await admin.evaluate("document.querySelectorAll('.relation-partial').length"), 0, "S0-B: complete cells carry no partial mark");
   });
 
   test("the picker searches the linked board, links and unlinks; the mirror follows; nothing is copied", async () => {

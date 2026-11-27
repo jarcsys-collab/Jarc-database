@@ -97,6 +97,27 @@ describe("S0-B under role_based (the matrix)", () => {
     assert.deepEqual(b.body.partial, {}); assert.deepEqual(b.body.unavailable, []);
   });
 
+  test("X2: a host-only reader can't filter or count by a Connect column they can't open (no empty / not empty oracle)", async () => {
+    const P = w.people;
+    const enc = (f) => encodeURIComponent(JSON.stringify(f));
+    const base = `/api/v1/boards/${w.projects.id}/records`;
+    for (const cmp of ["empty", "notEmpty"]) {
+      const f = enc({ op: "and", rules: [{ key: "client", cmp }] });
+      for (const url of [`${base}?filter=${f}`, `${base}?also=${f}`, `${base}/count?filter=${f}`, `${base}/count?also=${f}`, `${base}/count?filter=${enc({ op: "or", rules: [{ key: "note", cmp: "notEmpty" }, { key: "client", cmp }] })}`]) {
+        const r = await w.as(P.reader, "GET", url);
+        assert.equal(r.status, 400, `${url}: ${JSON.stringify(r.body)}`); assert.equal(r.body.error.code, "VALIDATION_ERROR");
+        assert.match(r.body.error.message, /"Client" can't be filtered: you can't open the board it links to/);
+        noTargetIds(w, r.body); assert.equal("total" in r.body, false); assert.equal("groups" in r.body, false);
+      }
+      // Same answer whether the record has links or not (the refusal doesn't depend on any data).
+      const ok = await w.as(P.both, "GET", `${base}/count?filter=${f}`);
+      assert.equal(ok.status, 200, JSON.stringify(ok.body)); assert.equal(typeof ok.body.total, "number");
+      assert.equal((await w.as(P.both, "GET", `${base}?filter=${f}`)).status, 200);
+    }
+    // Filters on other columns keep working for the host-only reader; a filter naming no restricted column is untouched.
+    assert.equal((await w.as(P.reader, "GET", `${base}/count?filter=${enc({ op: "and", rules: [{ key: "serial", cmp: "notEmpty" }] })}`)).status, 200);
+  });
+
   test("row 6: a revoked reader is restricted on the very next call (no cache)", async () => {
     const P = w.people;
     const members = (await w.as(P.owner, "GET", `/api/v1/workspaces/${w.wsB.id}/members`)).body.items;
@@ -237,6 +258,8 @@ describe("S0-B under role_based (the matrix)", () => {
     await w.app.db.collection("records").updateOne({ _id: new ObjectId(w.alpha.id) }, { $set: { "values.client": many } });
     const r = (await w.as(P.owner, "GET", `/api/v1/boards/${w.projects.id}/related?ids=${w.alpha.id}`)).body;
     assert.equal(r.partial.client, "cell-limit");
+    // The Mirrors computed through it are incomplete too: flagged, never a truncated sum / count that looks complete.
+    assert.equal(r.partial.total, "cell-limit"); assert.equal(r.partial.n, "cell-limit");
     assert.equal(r.linked.client[w.link.Acme].name, "Acme");
   });
 
@@ -286,6 +309,23 @@ describe("Connect / Mirror fail CLOSED when the record link index isn't ready", 
     assert.equal((await w.addColumn(P.owner, w.projects, { key: "txt", label: "Txt", type: "text" })).status, 201);
     assert.equal((await w.as(P.owner, "GET", `/api/v1/boards/${w.projects.id}/records`)).status, 200);
     assert.equal((await w.as(P.owner, "GET", `/api/v1/boards/${w.clients.id}/records`)).status, 200);
+  });
+});
+
+describe("partial flags reach the Mirrors that follow a truncated Connect column", () => {
+  test("linked-limit: more than 10,000 linked IDs in one request flags the Connect column AND its Mirrors", async () => {
+    const W1 = new ObjectId(), USER = new ObjectId();
+    const t1 = { _id: new ObjectId(), workspaceId: W1, columns: [{ key: "serial", type: "text" }, { key: "v", type: "number" }], groups: [] };
+    const host = { _id: new ObjectId(), workspaceId: W1, columns: [{ key: "a", type: "connect", link: { boardId: t1._id.toHexString() } }, { key: "m", type: "mirror", mirror: { via: "a", column: "v", show: "count" } }, { key: "s", type: "mirror", mirror: { via: "a", column: "v", show: "sum" } }] };
+    const rows = Array.from({ length: LIMITS.records }, () => ({ _id: new ObjectId(), values: { a: Array.from({ length: LIMITS.perCell }, () => new ObjectId().toHexString()) } }));
+    const repos = {
+      memberships: { listForUser: async () => [{ workspaceId: W1, role: "VIEWER" }] },
+      boards: { findManyByIds: async (ids) => [t1].filter((b) => ids.some((i) => i.equals(b._id))).map((b) => ({ ...b })) },
+      records: { findByIds: async (boardId, ids) => (boardId.equals(host._id) ? rows.filter((d) => ids.some((i) => i.equals(d._id))) : ids.map((i) => ({ _id: i, values: { serial: "x", v: 1 } }))) }
+    };
+    const access = new Access(repos, { policy: "role_based" });
+    const out = await new RelatedService({ repos, access }).resolve(access.context({ userId: USER, kind: "entra", isSystemAdmin: false }), host, rows.map((r) => r._id.toHexString()));
+    assert.deepEqual(out.partial, { a: "linked-limit", m: "linked-limit", s: "linked-limit" });
   });
 });
 

@@ -221,3 +221,18 @@ describe("On real MongoDB (local test instance)", () => {
     }
   });
 });
+
+describe("refuseRestricted (S0-B X2: no filter on a Connect / Mirror column the reader can't open)", () => {
+  const board = { columns: [{ key: "serial", label: "Name", type: "text" }, { key: "client", label: "Client", type: "connect", link: { boardId: "a".repeat(24) } }] };
+  const f = (rules, groups) => F.filterForBoard({ op: "and", rules, ...(groups ? { groups } : {}) }, board);
+  test("refused wherever the rule sits (top level, nested group, filter or also); the message names only the column", () => {
+    const restricted = new Set(["client"]);
+    for (const filters of [[f([{ key: "client", cmp: "empty" }]), null], [null, f([{ key: "client", cmp: "notEmpty" }])], [f([{ key: "serial", cmp: "notEmpty" }], [{ op: "or", rules: [{ key: "client", cmp: "empty" }] }]), null]])
+      assert.throws(() => F.refuseRestricted(filters, board, restricted), (e) => e.status === 400 && /"Client" can't be filtered: you can't open the board it links to/.test(e.message));
+  });
+  test("nothing restricted, or a filter on other columns: unchanged", () => {
+    assert.doesNotThrow(() => F.refuseRestricted([f([{ key: "client", cmp: "empty" }])], board, new Set()));
+    assert.doesNotThrow(() => F.refuseRestricted([f([{ key: "client", cmp: "empty" }])], board, undefined));
+    assert.doesNotThrow(() => F.refuseRestricted([f([{ key: "serial", cmp: "notEmpty" }]), null], board, new Set(["client"])));
+  });
+});

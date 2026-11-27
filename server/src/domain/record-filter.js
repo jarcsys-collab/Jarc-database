@@ -113,6 +113,18 @@ function filterForBoard(raw, board) {
     if (META_FILTERS.has(r.key) && !byKey.has(r.key)) { if (r.cmp !== "onOrAfter" || Number.isNaN(Date.parse(r.values?.[0]))) fail("updatedAt can only be filtered from a date."); continue; } const c = byKey.get(r.key); if (!c) fail(`The filter names a column this board doesn't have (${r.key.slice(0, 40)}).`); checkRuleType(r, c); }
   return filter;
 }
+// S0-B (plan 17 §1, X2 "lock only, no count"): a reader who can't open a Connect column's linked board may not filter by it (nor by
+// the Mirrors that follow it). Even empty / not empty would tell them which records have links, through the rows or a count. The
+// whole request is refused before any query, with a message that names only the column (which is already shown as locked).
+// restricted: Set of the keys restrictedFor() returns for this reader. Applies to filter AND also (saved-view conditions).
+function refuseRestricted(filters, board, restricted) {
+  if (!restricted || !restricted.size) return;
+  const byKey = new Map((board.columns || []).map((c) => [c.key, c]));
+  for (const f of filters) if (f) for (const r of rulesIn(f)) if (restricted.has(r.key)) {
+    const c = byKey.get(r.key);
+    fail(`"${String(c?.label || r.key).slice(0, 40)}" can't be filtered: you can't open the board it links to. Remove that condition to see the records.`);
+  }
+}
 // Which comparisons a column type takes. The comparisons from before stay as permissive as they were (saved views from
 // the monday.com migration use them on text columns); the newer ones are checked against the column's type.
 function checkRuleType(r, c) {
@@ -326,4 +338,4 @@ function decodeCursor(text, orderBy) {
 // Sorting by a column: numbers kept as text order numerically, as people expect, and comparisons stay case-sensitive.
 const COLLATION = Object.freeze({ locale: "en", numericOrdering: true });
 
-module.exports = { TIME_ZONE, ME, PRESETS, dayIn, addDays, presetRange, resolveFilter, RECORD_ID_KEY, columnSortStages, SORT_FIELD, cleanFilter, cleanOrderBy, filterForBoard, orderByForBoard, filterQuery, afterQuery, encodeCursor, decodeCursor, rulesIn, escapeRegex, COLLATION, CMPS, MAX };
+module.exports = { TIME_ZONE, ME, PRESETS, dayIn, addDays, presetRange, resolveFilter, RECORD_ID_KEY, columnSortStages, SORT_FIELD, cleanFilter, cleanOrderBy, filterForBoard, refuseRestricted, orderByForBoard, filterQuery, afterQuery, encodeCursor, decodeCursor, rulesIn, escapeRegex, COLLATION, CMPS, MAX };

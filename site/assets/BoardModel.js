@@ -1255,6 +1255,17 @@ class BoardModel {
     return hit?.values;
   }
   linkedName(id){return this.relatedState().names.get(String(id))||null;}
+  // Why a row's Connect / Mirror value is incomplete (the server's partial reason), or null when it is complete.
+  // cell-limit is reported per column; only the rows whose own Connect cell holds more than 100 links are cut.
+  relatedPartial(row,key){
+    const hit=this.relatedState().values.get(this.serverId(row.id));if(!hit)return null;
+    if(hit.cut)return "rows";
+    const p=hit.partial||{};if(!Object.hasOwn(p,key))return null;
+    const why=String(p[key]);if(why!=="cell-limit")return why;
+    const column=(this.board?.columns||[]).find((c)=>c.key===key),via=column?.type==="mirror"?column.mirror?.via:key;
+    return (Array.isArray(row?.[via])?row[via].length:0)>BoardModel.RELATED_PER_CELL?why:null;
+  }
+  static RELATED_PER_CELL=100;
   // This board's columns the server didn't fill in for this person: restricted (no access to the linked board) or
   // unavailable (a mirror of a Connect/Mirror column, or of a column that no longer exists).
   relatedAccess(key){const a=this.relatedState().access.get(String(this.board?.id));return a?.restricted.has(key)?"restricted":a?.unavailable.has(key)?"unavailable":null;}
@@ -1271,7 +1282,10 @@ class BoardModel {
       s.access.set(String(board.id),{restricted:new Set(r.restricted||[]),unavailable:new Set(r.unavailable||[])});
       // S0-B: names learned earlier for a column that is restricted now (access revoked) are forgotten.
       for(const key of r.restricted||[])for(const row of this.rows||[])for(const id of (Array.isArray(row?.[key])?row[key]:[]))s.names.delete(String(id));
-      for(const id of ids)s.values.set(id,{at,values:r.values?.[id]||{}});
+      // S0-B: a bound the server hit (cell-limit, linked-limit, target-boards, time-budget, mirror-limit, rows) is kept with the
+      // rows of that request, so their Connect / Mirror cells say "partial" instead of looking complete.
+      const partial=r.partial&&typeof r.partial==="object"?r.partial:{},rowsCut=Object.hasOwn(partial,"_rows");
+      for(const id of ids)s.values.set(id,{at,values:r.values?.[id]||{},partial,cut:rowsCut&&!Object.hasOwn(r.values||{},id)});
     }catch{const at=Date.now();for(const id of ids)s.values.set(id,{at,values:{},error:true});}
     // Only the Connect/Mirror cells on screen are redrawn (AppController.patchRelationCells), not the whole board.
     finally{ids.forEach((id)=>s.pending.delete(id));if(this.board===board)window.dispatchEvent(new CustomEvent("jarc-related",{detail:{boardId:board.id}}));}

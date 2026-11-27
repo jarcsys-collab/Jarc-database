@@ -42,7 +42,7 @@ class RecordService {
     return board;
   }
 
-  // reading: { me } — the reader as "user:<id>", from the authenticated session (routes/resources.js), for "@me" conditions.
+  // reading: { me, restricted } — restricted: the Connect / Mirror keys this reader can't open (filters on them are refused); me: the reader as "user:<id>", from the authenticated session (routes/resources.js), for "@me" conditions.
   async list(boardId, query, reading = {}) {
     const board = await this.board(boardId);
     const parsed = validate.recordListQuery(query, board);
@@ -55,6 +55,8 @@ class RecordService {
 
   // The conditions as query parts. Text search uses the search index when it is active; otherwise it reads the cells.
   async filterParts(board, { filter, also, q, archived }, reading = {}) {
+    // reading.restricted: Connect / Mirror keys this reader can't open (routes/resources.js, restrictedFor). Refused before any query.
+    recordFilter.refuseRestricted([filter, also], board, reading.restricted);
     const parts = [{ archived }], ctx = { me: reading.me || null }; // today: decided once per request, in recordFilter.TIME_ZONE
     if (filter) parts.push(recordFilter.filterQuery(filter, board, ctx));
     if (also) parts.push(recordFilter.filterQuery(also, board, ctx));

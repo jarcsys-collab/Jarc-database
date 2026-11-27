@@ -603,21 +603,25 @@ class AppView {
     const boards=new Map(model.linkableBoards.map((b)=>[b.id,b])),pairs=model.board.columns.filter((c)=>c.type==="connect").flatMap((c)=>(boards.get(c.link?.boardId)?.columns||[]).filter((s)=>!["connect","mirror","files"].includes(s.type)).map((s)=>[`${c.key}|${s.key}`,`${c.label} → ${s.label}`]));
     return `<label class="full">Show<select name="mirrorPair" required>${pairs.map(([v,t])=>`<option value="${this.attr(v)}">${this.escape(t)}</option>`).join("")}</select><small>A linked board's column, through one of this board's Connect columns. Read-only here; edit it on its own board.</small></label><label class="full">With several linked records<select name="mirrorShow">${AppView.MIRROR_SHOWS.map(([v,t])=>`<option value="${v}">${t}</option>`).join("")}</select></label>`;
   }
+  // Why a Connect / Mirror value is incomplete (the server's partial reasons, services/related-service.js LIMITS).
+  static PARTIAL_REASONS={"cell-limit":"Only the first 100 linked records are included","linked-limit":"Too many linked records on screen: some are not included","target-boards":"Links to more than 10 boards: some are not included","time-budget":"This took too long: some linked records are not included","mirror-limit":"Too many Mirror columns: this one isn't worked out","rows":"Too many rows at once: scroll to load the rest",other:"Some linked records are not included"};
   // Connect cell: the linked records' names (asked for in the background); Mirror cell: the linked board's values.
   relationDisplay(row,column,model){
     const access=model.relatedAccess(column.key);
     // S0-B (X2): a lock only, never a count (a count of links is a disclosure too).
     if(access==="restricted")return `<span class="cell-empty relation-locked" title="You can't open the linked board">${icon("lock")}</span>`;
     if(access==="unavailable")return `<span class="cell-empty" title="This mirror can't be shown (it points at a linked or mirrored column, or one that was removed)">—</span>`;
+    // S0-B: the server stopped at one of its bounds for this cell: say so, never show a cut list / count / sum as complete.
+    const partial=()=>{const why=model.relatedPartial?.(row,column.key);return why?`<span class="relation-partial" title="${this.attr(AppView.PARTIAL_REASONS[why]||AppView.PARTIAL_REASONS.other)}" aria-label="Partial: ${this.attr(AppView.PARTIAL_REASONS[why]||AppView.PARTIAL_REASONS.other)}">partial</span>`:"";};
     if(column.type==="connect"){
       const ids=model.valueList(row[column.key]);if(!ids.length)return `<span class="cell-empty" data-hint="Link">${icon("link")}</span>`;
       model.relatedFor(row);const names=ids.map((id)=>model.linkedName(id)?.name||"…");
-      return `<span class="chip-list relation-chips" title="${this.attr(names.join(", "))}">${names.slice(0,3).map((n)=>this.pill(n)).join("")}${ids.length>3?`<span class="chip-more">+${ids.length-3}</span>`:""}</span>`;
+      return `<span class="chip-list relation-chips" title="${this.attr(names.join(", "))}">${names.slice(0,3).map((n)=>this.pill(n)).join("")}${ids.length>3?`<span class="chip-more">+${ids.length-3}</span>`:""}</span>${partial()}`;
     }
     const values=model.relatedFor(row);if(values===undefined)return `<span class="cell-empty relation-loading" aria-label="Loading">…</span>`;
-    const v=values[column.key];if(v===null||v===undefined||(Array.isArray(v)&&!v.length))return `<span class="cell-empty"></span>`;
-    if(Array.isArray(v)){const shown=v.map((x)=>model.isUserRef?.(x)?model.personName(x):x);return `<span class="cell-text relation-mirror" title="${this.attr(shown.join(", "))}">${this.escape(shown.join(", "))}</span>`;}
-    return `<span class="cell-number relation-mirror">${this.escape(typeof v==="number"?this.number(String(Math.round(v*100)/100)):String(v))}</span>`;
+    const v=values[column.key];if(v===null||v===undefined||(Array.isArray(v)&&!v.length))return `<span class="cell-empty"></span>${partial()}`;
+    if(Array.isArray(v)){const shown=v.map((x)=>model.isUserRef?.(x)?model.personName(x):x);return `<span class="cell-text relation-mirror" title="${this.attr(shown.join(", "))}">${this.escape(shown.join(", "))}</span>${partial()}`;}
+    return `<span class="cell-number relation-mirror">${this.escape(typeof v==="number"?this.number(String(Math.round(v*100)/100)):String(v))}</span>${partial()}`;
   }
   // Pick linked records: search the linked board by name; chosen records listed first. Saving replaces the cell's links.
   showConnectPicker(model,draft){

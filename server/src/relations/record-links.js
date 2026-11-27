@@ -4,9 +4,11 @@
 //
 // Gate: only while JARC_FEATURE_CONNECT_BOARDS is on (server.js runs the startup check then). With the switch off the collection
 // is never created, never read, never written: code rollback below this prototype leaves an unused, harmless collection.
-// Startup check (checkRecordLinks): the collection must exist with exactly VALIDATOR and the four INDEXES (created when missing,
-// NEVER changed when they differ). Missing or inconsistent → status { ok: false } and Connect / Mirror fail CLOSED (writes 503
+// Startup check (checkRecordLinks): CHECK ONLY, it never creates or changes anything. The collection must exist with exactly
+// VALIDATOR and the four INDEXES. Missing or inconsistent → status { ok: false } and Connect / Mirror fail CLOSED (writes 503
 // RELATIONS_UNAVAILABLE, /related unresolved with reason relations-unavailable); every other board function keeps working.
+// Creating the collection is a separate, explicit, approved step: scripts/record-links-collection.js (ensureRecordLinks: creates
+// what is missing, never changes what differs).
 //
 // Security (plan 17 §4.6): no route returns a link document; a row is never evidence of access.
 const { ObjectId } = require("mongodb");
@@ -49,7 +51,7 @@ const canon = (v) => (Array.isArray(v) ? v.map(canon) : v && typeof v === "objec
 const same = (a, b) => JSON.stringify(canon(a)) === JSON.stringify(canon(b));
 
 // → { ok, reason, created: [names] }. create false: only verify (never creates anything).
-async function checkRecordLinks(db, { create = true } = {}) {
+async function inspect(db, { create }) {
   const created = [];
   try {
     let [info] = await db.listCollections({ name: COLLECTION }).toArray();
@@ -83,6 +85,11 @@ async function checkRecordLinks(db, { create = true } = {}) {
     return { ok: false, reason: `error:${error?.codeName || error?.name || "Error"}`, created }; // class only, never a message
   }
 }
+
+// Startup: verify only (created is always []).
+async function checkRecordLinks(db) { return inspect(db, { create: false }); }
+// The explicit script only: creates the collection / missing indexes (never changes a differing validator or index), then verifies.
+async function ensureRecordLinks(db) { return inspect(db, { create: true }); }
 
 // The status handed to the routes: status() → { ok, reason } (frozen copy). set() after a re-check.
 class RecordLinkStatus {
@@ -236,4 +243,4 @@ class RecordLinkService {
   }
 }
 
-module.exports = { COLLECTION, VALIDATOR, VALIDATION, INDEXES, BOUNDS, checkRecordLinks, RecordLinkStatus, RecordLinkService };
+module.exports = { COLLECTION, VALIDATOR, VALIDATION, INDEXES, BOUNDS, sameDefinition: same, checkRecordLinks, ensureRecordLinks, RecordLinkStatus, RecordLinkService };

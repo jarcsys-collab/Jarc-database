@@ -30,11 +30,12 @@ async function main() {
     if (config.enableDevResourceApi) devActor = await ensureDevelopmentActor(dataLayer.repos.users, { environment: config.nodeEnv });
     // Record link index (prototype, Column System plan 17 §4): only while Connect / Mirror are switched on. Missing or inconsistent →
     // Connect / Mirror fail CLOSED (read-only, unresolved) and the rest of JARC serves normally; startup never stops for it.
+    // CHECK ONLY: startup never creates the collection or its indexes (that is scripts/record-links-collection.js, run on approval).
     if (config.features.connectBoards) {
       const check = await checkRecordLinks(connection.db);
       relations = new RecordLinkStatus(check);
-      if (check.ok) console.log(`Record link index ready${check.created.length ? ` (created: ${check.created.join(", ")})` : ""}.`);
-      else console.warn(`Record link index NOT ready (${check.reason}): Connect and Mirror columns are read-only until it is fixed and the server restarts.`);
+      if (check.ok) console.log("Record link index ready (checked, nothing created).");
+      else console.warn(`Record link index NOT ready (${check.reason}): Connect and Mirror columns are read-only. Startup creates nothing; run scripts/record-links-collection.js --apply (approval required), then restart.`);
     }
     console.log(`MongoDB connected (database ${config.mongo.dbName}).${createdCollections.length ? ` Created collections: ${createdCollections.join(", ")}.` : ""}`);
   }
